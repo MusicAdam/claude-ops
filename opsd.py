@@ -6,10 +6,10 @@
   opsd.py add -p NAME "text..."        queue a task through the running daemon
 
 Per project (paths come from ~/.claude-ops/projects/<name>.toml):
-  <repo>                 your checkout of the main branch. The queue only fast-forwards it, on Promote.
+  <repo>                 your checkout of the main branch. The queue only fast-forwards it, when a release passes.
   <worktrees>/dev        integration worktree on the dev branch. Finished tasks merge here.
-  <worktrees>/main       build of main, the golden version (detached). Changes only on Promote.
-  <worktrees>/t<id>      one worktree per task, branch task/<id>-<slug>.
+  <worktrees>/main       build of main, the golden version (detached). Changes only when a release passes.
+  <worktrees>/t<id>      one worktree per task, branch task/<id>-<slug> (a release: detached at its dev snapshot).
 """
 import json, os, re, shutil, signal, sqlite3, subprocess, sys, threading, time, tomllib
 import xml.etree.ElementTree as ET
@@ -34,7 +34,6 @@ ACTIVE = ("running", "gating", "merging")
 DBL = threading.RLock()
 PROCS = {}  # task id -> current Popen (claude or a gate step), for cancel
 THREADS = {}  # task id -> pipeline thread
-PROMOTING = {}  # project -> {"state", "msg"}
 
 
 # ---------------------------------------------------------------- projects
@@ -209,13 +208,19 @@ def init_db():
         state TEXT DEFAULT 'queued', phase TEXT DEFAULT '', created REAL, started REAL,
         finished REAL, branch TEXT, worktree TEXT, session_id TEXT, cost REAL DEFAULT 0,
         rounds INTEGER DEFAULT 0, summary TEXT, question TEXT, error TEXT,
-        next_prompt TEXT, merged TEXT, start_at TEXT DEFAULT 'claude', pid INTEGER)""")
+        next_prompt TEXT, merged TEXT, start_at TEXT DEFAULT 'claude', pid INTEGER,
+        kind TEXT DEFAULT 'task', base TEXT)""")
+    cols = {r["name"] for r in q("PRAGMA table_info(tasks)")}
+    for col, decl in (("kind", "TEXT DEFAULT 'task'"), ("base", "TEXT")):  # databases from before releases
+        if col not in cols:
+            q(f"ALTER TABLE tasks ADD COLUMN {col} {decl}")
     q("CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY, task_id INTEGER, ts REAL, text TEXT)")
     q("""CREATE TABLE IF NOT EXISTS designs (id INTEGER PRIMARY KEY, project TEXT, title TEXT, session_id TEXT,
         state TEXT DEFAULT 'idle', created REAL, updated REAL, cost REAL DEFAULT 0)""")
     q("""CREATE TABLE IF NOT EXISTS design_msgs (id INTEGER PRIMARY KEY, design_id INTEGER, role TEXT,
         text TEXT, ts REAL, task_ids TEXT, note TEXT)""")
     q("UPDATE designs SET state='idle' WHERE state='thinking'")  # a reply cut off by a restart
+    q("CREATE TABLE IF NOT EXISTS task_msgs (id INTEGER PRIMARY KEY, task_id INTEGER, role TEXT, text TEXT, ts REAL)")
     q("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)")
     for k, v in {"max_parallel": "3", "paused": "0", "model": ""}.items():
         q("INSERT OR IGNORE INTO settings VALUES (?,?)", (k, v))
@@ -243,13 +248,13 @@ def ev(tid, text):
     print(f"[#{tid}] {text}", flush=True)
 
 
-def add_task(project, body, title="", priority=0, hold=0, depends_on=None, parent=None):
+def add_task(project, body, title="", priority=0, hold=0, depends_on=None, parent=None, kind="task"):
     proj(project)
     body = body.strip()
     title = (title or body.splitlines()[0] if body else title or "untitled").strip()[:120]
-    tid = q("INSERT INTO tasks (project, title, body, priority, hold, depends_on, parent, created) "
-            "VALUES (?,?,?,?,?,?,?,?)",
-            (project, title, body, int(priority), int(bool(hold)), depends_on or None, parent, time.time()))
+    tid = q("INSERT INTO tasks (project, title, body, priority, hold, depends_on, parent, created, kind) "
+            "VALUES (?,?,?,?,?,?,?,?,?)",
+            (project, title, body, int(priority), int(bool(hold)), depends_on or None, parent, time.time(), kind))
     ev(tid, "queued" + (f" after #{depends_on}" if depends_on else ""))
     return tid
 
@@ -447,7 +452,8 @@ def ensure_worktree(p, tid):
 
 def pipeline(tid):
     try:
-        _pipeline(proj(task(tid)["project"]), tid)
+        t = task(tid)
+        (release_pipeline if t["kind"] == "release" else _pipeline)(proj(t["project"]), tid)
     except Exception as e:  # keep the daemon alive; surface the error on the task
         if not cancelled(tid):
             upd(tid, state="failed", phase="", error=f"orchestrator error: {e}", finished=time.time())
@@ -566,15 +572,123 @@ def finish(p, tid, merged, note):
     notify(f"{p.title}: task done", f"#{tid}: {t['title']}")
 
 
-def split(p, tid, res):
-    t = task(tid)
+def add_subtasks(p, tid, items, priority=0, hold=0):
+    """Queue a worker's task list ({title, body, after}) with tid as parent. Returns the new ids."""
     ids = []
-    for sub in res.get("tasks") or []:
+    for sub in items or []:
         after = sub.get("after")
         dep = ids[after] if isinstance(after, int) and 0 <= after < len(ids) else None
         ids.append(add_task(p.name, sub.get("body") or sub.get("title", ""), sub.get("title", ""),
-                            priority=t["priority"], hold=t["hold"], depends_on=dep, parent=tid))
+                            priority=priority, hold=hold, depends_on=dep, parent=tid))
+    return ids
+
+
+def split(p, tid, res):
+    t = task(tid)
+    ids = add_subtasks(p, tid, res.get("tasks"), t["priority"], t["hold"])
     finish(p, tid, merged=None, note="split into " + ", ".join(f"#{i}" for i in ids))
+
+
+# ---------------------------------------------------------------- release (dev -> main)
+
+def queue_release(p):
+    """The Promote button: queue a release check of dev, ahead of ordinary tasks."""
+    open_ = q("SELECT id FROM tasks WHERE project=? AND kind='release' AND state NOT IN ('done','failed','cancelled')",
+              (p.name,), one=True)
+    if open_:
+        raise ValueError(f"Release #{open_['id']} is already in the queue.")
+    why = promote_blocker(p)
+    if why:
+        raise ValueError(why)
+    body = (f"Check the latest {p.dev} as a whole: the merge check, then a build that a release checker runs "
+            f"and plays like a player. If it passes, build it into {p.main} and fast-forward {p.main} to it.")
+    return add_task(p.name, body, f"Release {p.dev} → {p.main}", priority=100, kind="release")
+
+
+def release_prompt(p, t):
+    log = p.git("log", "--first-parent", "--format=%H %h %s", f"{p.main}..{t['base']}").splitlines()
+    changes = "\n".join(f"- {l.split(' ', 1)[1]}" for l in log[:60]) or f"- (nothing: this only rebuilds {p.main})"
+    shas = [l.split(" ", 1)[0] for l in log]
+    done = q(f"SELECT id,title,summary FROM tasks WHERE project=? AND merged IN ({','.join('?' * len(shas))})",
+             (p.name, *shas)) if shas else []
+    summaries = "\n\n".join(f"#{d['id']} {d['title']}\n{(d['summary'] or '(no summary)')[:1500]}" for d in done)
+    checks = ", ".join(f"`{g['run']}`" for g in p.gate) or "(none configured)"
+    notes = f"## Notes for {p.title}\n\n{p.worker_notes}\n" if p.worker_notes else ""
+    return (CODE / "release_prompt.md").read_text().format(
+        id=t["id"], project=p.title, dev=p.dev, main=p.main, base=t["base"], base_short=t["base"][:8],
+        checks=checks, changes=changes, summaries=summaries or "(none recorded)", worktree=t["worktree"],
+        repo=p.repo, port=p.port_for(t["id"]), build=f" (`{p.build}`)" if p.build else "",
+        notes=notes, result=result_path(t))
+
+
+def release_pipeline(p, tid):
+    """Snapshot dev, gate it, have Claude play it, then promote exactly that commit."""
+    t = task(tid)
+    start_at, resume = t["start_at"], t["next_prompt"]
+    upd(tid, started=t["started"] or time.time(), error=None, next_prompt=None, start_at="claude")
+    if not t["base"]:
+        with p.lock:
+            err = merge_main_into_dev(p)
+            if err:
+                return fail(p, tid, err)
+            upd(tid, base=p.rev(p.dev))
+        ev(tid, f"checking {p.dev} at {task(tid)['base'][:8]}")
+    t = task(tid)
+    if t["base"] == p.rev(p.main):
+        start_at = "promote"  # nothing new to check: this only rebuilds main
+        ev(tid, f"nothing new on {p.dev}; rebuilding {p.main}")
+    if not (t["worktree"] and Path(t["worktree"]).exists()):
+        path = p.wt / f"t{tid}"
+        p.git("worktree", "add", "--detach", str(path), t["base"])
+        prepare_worktree(p, path)
+        upd(tid, worktree=str(path))
+        ev(tid, f"worktree {path} at {t['base'][:8]}")
+        t = task(tid)
+
+    if start_at != "promote":
+        if resume and t["session_id"]:  # an answer, a retry or a restart resumes the checker
+            prompt = resume
+        else:
+            upd(tid, state="gating")
+            ok, detail = gate(p, tid, t["worktree"])
+            if cancelled(tid):
+                return
+            if not ok:
+                return fail(p, tid, "gate failed, so the release stops here:\n" + detail)
+            ev(tid, "gate passed" + (": " + ", ".join(g["name"] for g in p.gate) if p.gate else " (no gate steps)"))
+            prompt = release_prompt(p, t)
+        upd(tid, state="running")
+        res = run_claude(p, tid, prompt)
+        if cancelled(tid):
+            return
+        if res is None:
+            err = (RUNS / str(tid) / "claude.err").read_text(errors="replace")[-1500:]
+            return fail(p, tid, "release checker stopped without writing a result.\n" + err)
+        upd(tid, summary=res.get("summary") or task(tid)["summary"])
+        ids = add_subtasks(p, tid, res.get("tasks"))
+        if ids:
+            ev(tid, "queued follow-ups " + ", ".join(f"#{i}" for i in ids))
+        status = res.get("status")
+        if status == "needs_input":
+            upd(tid, state="needs_input", phase="", question=res.get("question") or res.get("summary"))
+            ev(tid, "needs your input")
+            notify(f"{p.title}: release needs input", f"#{tid}: {res.get('question', '')}")
+            return
+        if status != "done":
+            return fail(p, tid, "release blocked: " + (res.get("summary") or f"checker reported {status}"))
+        ev(tid, "release check passed")
+
+    upd(tid, start_at="promote", state="merging")  # a retry or a restart resumes here
+    why = promote_blocker(p)
+    if why:
+        return fail(p, tid, why + " Then click Retry: it promotes without checking again.")
+    err = promote(p, tid, task(tid)["base"])
+    if cancelled(tid):
+        return
+    if err:
+        return fail(p, tid, err)
+    upd(tid, start_at="claude")
+    finish(p, tid, merged=t["base"], note=f"{p.main} is now {t['base'][:8]}")
 
 
 # ---------------------------------------------------------------- scheduler
@@ -630,69 +744,68 @@ def main_info(p):
     built = setting(f"main_built:{p.name}")
     main, dev = p.rev(p.main), p.rev(p.dev)
     ahead = p.git("log", "--first-parent", "--format=%h %s", f"{p.main}..{p.dev}").splitlines()[:30]
-    return {**PROMOTING.get(p.name, {"state": "idle", "msg": ""}),
-            "name": p.name, "title": p.title, "main_branch": p.main, "dev_branch": p.dev,
+    rel = q("SELECT id,state,phase,error FROM tasks WHERE project=? AND kind='release' ORDER BY id DESC LIMIT 1",
+            (p.name,), one=True)
+    return {"name": p.name, "title": p.title, "main_branch": p.main, "dev_branch": p.dev,
             "main": main[:8], "built": built[:8], "dev": dev[:8], "ahead": ahead,
             "has_app": bool(p.build), "can_launch": bool(p.launch),
             "stale": bool(p.build) and built != main, "running": app_running(p, p.main_wt),
             "has_build": bool(p.build) and (not p.artifact or (p.main_wt / p.artifact).exists()),
-            "paused": setting(f"paused:{p.name}") == "1", "gate": [g["name"] for g in p.gate]}
+            "paused": setting(f"paused:{p.name}") == "1", "gate": [g["name"] for g in p.gate], "release": rel}
 
 
 def promote_blocker(p):
-    """Why main cannot move to dev right now, or None. Checked before anything changes."""
-    if PROMOTING.get(p.name, {}).get("state") == "building":
-        return "A promote is already running."
+    """Why main cannot move right now, or None. Checked when Promote is clicked and again before promoting."""
     if app_running(p, p.main_wt):
-        return f"Quit the {p.main} build first, then promote again."
+        return f"Quit the {p.main} build first."
     if p.git("branch", "--show-current", check=False) != p.main:
-        return f"Your checkout {p.repo} is not on {p.main}. Switch it back, then promote."
+        return f"Your checkout {p.repo} is not on {p.main}. Switch it back."
     if p.git("status", "--porcelain", "-uno", check=False):
-        return f"Your checkout {p.repo} has uncommitted changes. Commit or stash them, then promote."
+        return f"Your checkout {p.repo} has uncommitted changes. Commit or stash them."
     return None
 
 
-def promote(p):
-    st = PROMOTING.setdefault(p.name, {"state": "idle", "msg": ""})
-    try:
-        with p.lock:
-            # Commits made straight to main (outside the queue) come along into dev first.
-            if subprocess.run(["git", "merge-base", "--is-ancestor", p.main, p.dev], cwd=p.repo).returncode:
-                r = subprocess.run(["git", "merge", "--no-ff", "-m", f"Merge {p.main} into {p.dev}", p.main],
-                                   cwd=p.dev_wt, capture_output=True, text=True)
-                if r.returncode:
-                    subprocess.run(["git", "merge", "--abort"], cwd=p.dev_wt, capture_output=True)
-                    return st.update(state="failed", msg=f"{p.main} has commits that conflict with {p.dev}:\n"
-                                     + r.stdout[-1500:] + r.stderr[-1500:])
-            commit = p.rev(p.dev)
-        if p.build:
-            st.update(msg=f"building {commit[:8]}")
-            art = p.main_wt / p.artifact if p.artifact else None
-            prev = art.with_name(art.name + ".previous") if art else None
-            if prev:
-                shutil.rmtree(prev, ignore_errors=True)
-                if art.exists():
-                    subprocess.run(["cp", "-cR", str(art), str(prev)], capture_output=True)
-            old = p.git("rev-parse", "HEAD", cwd=p.main_wt)
-            p.git("checkout", "--detach", commit, cwd=p.main_wt)
-            rc, tail = run_step(f"main-{p.name}", "build", p.build, p.main_wt, "build.log")
-            if rc or (art and not art.exists()):
-                p.git("checkout", "--detach", old, cwd=p.main_wt, check=False)
-                if prev and prev.exists():
-                    shutil.rmtree(art, ignore_errors=True)
-                    prev.rename(art)
-                return st.update(state="failed", msg=f"Build failed; {p.main} and its build are unchanged.\n"
-                                 + tail[-2000:])
-            if prev:
-                shutil.rmtree(prev, ignore_errors=True)
-        r = subprocess.run(["git", "merge", "--ff-only", commit], cwd=p.repo, capture_output=True, text=True)
-        if r.returncode:
-            return st.update(state="failed", msg=f"{p.main} could not fast-forward:\n" + r.stderr[-1000:])
-        set_setting(f"main_built:{p.name}", commit)
-        st.update(state="idle", msg=f"{p.main} is now {commit[:8]}")
-        notify(f"{p.title}: {p.main} updated", f"{p.main} is now {commit[:8]}")
-    except Exception as e:
-        st.update(state="failed", msg=str(e))
+def merge_main_into_dev(p):
+    """Commits made straight to main (outside the queue) come along into dev. Returns an error or None.
+    Call with p.lock held."""
+    if subprocess.run(["git", "merge-base", "--is-ancestor", p.main, p.dev], cwd=p.repo).returncode == 0:
+        return None
+    r = subprocess.run(["git", "merge", "--no-ff", "-m", f"Merge {p.main} into {p.dev}", p.main],
+                       cwd=p.dev_wt, capture_output=True, text=True)
+    if r.returncode:
+        subprocess.run(["git", "merge", "--abort"], cwd=p.dev_wt, capture_output=True)
+        return f"{p.main} has commits that conflict with {p.dev}:\n" + r.stdout[-1500:] + r.stderr[-1500:]
+    return None
+
+
+def promote(p, tid, commit):
+    """Build commit in <worktrees>/main, then fast-forward main to it. Returns an error or None;
+    on an error main and its build are unchanged."""
+    if p.build:
+        art = p.main_wt / p.artifact if p.artifact else None
+        prev = art.with_name(art.name + ".previous") if art else None
+        if prev:
+            shutil.rmtree(prev, ignore_errors=True)
+            if art.exists():
+                subprocess.run(["cp", "-cR", str(art), str(prev)], capture_output=True)
+        old = p.git("rev-parse", "HEAD", cwd=p.main_wt)
+        p.git("checkout", "--detach", commit, cwd=p.main_wt)
+        rc, tail = run_step(tid, f"building {p.main} at {commit[:8]}", p.build, p.main_wt, "build.log")
+        if rc or (art and not art.exists()):
+            p.git("checkout", "--detach", old, cwd=p.main_wt, check=False)
+            if prev and prev.exists():
+                shutil.rmtree(art, ignore_errors=True)
+                prev.rename(art)
+            return f"Build failed; {p.main} and its build are unchanged.\n" + tail[-2000:]
+        if prev:
+            shutil.rmtree(prev, ignore_errors=True)
+    upd(tid, phase=f"fast-forwarding {p.main}")
+    r = subprocess.run(["git", "merge", "--ff-only", commit], cwd=p.repo, capture_output=True, text=True)
+    if r.returncode:
+        return f"{p.main} could not fast-forward:\n" + r.stderr[-1000:]
+    set_setting(f"main_built:{p.name}", commit)
+    notify(f"{p.title}: {p.main} updated", f"{p.main} is now {commit[:8]}")
+    return None
 
 
 # ---------------------------------------------------------------- design chats
@@ -734,6 +847,41 @@ def design_system_prompt(p):
     return (CODE / "design_prompt.md").read_text().format(project=p.title, dev_wt=p.dev_wt, dev=p.dev, notes=notes)
 
 
+def stream_claude(cmd, cwd, log_dir, live, procs, key, on_session):
+    """Run one chat turn of claude -p, tool lines into live. Returns (reply text, cost)."""
+    texts, cost = [], 0.0
+    log_dir.mkdir(parents=True, exist_ok=True)
+    with open(log_dir / "claude.jsonl", "a") as log, open(log_dir / "claude.err", "a+") as err:
+        proc = subprocess.Popen(cmd, cwd=cwd, stdout=subprocess.PIPE, stderr=err, text=True,
+                                start_new_session=True)
+        procs[key] = proc
+        for line in proc.stdout:
+            log.write(line)
+            log.flush()
+            try:
+                e = json.loads(line)
+            except ValueError:
+                continue
+            if e.get("session_id"):
+                on_session(e["session_id"])
+            if e.get("type") == "assistant" and not e.get("parent_tool_use_id"):
+                for c in e.get("message", {}).get("content", []):
+                    if c.get("type") == "text" and c.get("text", "").strip():
+                        texts.append(c["text"].strip())
+                    elif c.get("type") == "tool_use":
+                        texts.clear()  # text before a tool call is narration; the reply comes after
+                        live.append(tool_line(c.get("name"), c.get("input") or {}))
+            elif e.get("type") == "result":
+                cost += e.get("total_cost_usd") or 0
+        proc.wait()
+        err.seek(0)
+        err_tail = err.read()[-1200:]
+    reply = "\n\n".join(texts)
+    if not reply:
+        reply = f"(no reply; claude exited {proc.returncode})\n{err_tail.strip()}".strip()
+    return reply, cost
+
+
 def design_turn(did, text):
     d = design(did)
     p = proj(d["project"])
@@ -746,38 +894,15 @@ def design_turn(did, text):
         cmd += ["--resume", d["session_id"]]
     if setting("model"):
         cmd += ["--model", setting("model")]
-    log_dir = RUNS / f"design-{did}"
-    log_dir.mkdir(parents=True, exist_ok=True)
-    texts, cost = [], 0.0
+
+    def on_session(sid):
+        if sid != design(did)["session_id"]:
+            q("UPDATE designs SET session_id=? WHERE id=?", (sid, did))
+
+    cost = 0.0
     try:
-        with open(log_dir / "claude.jsonl", "a") as log, open(log_dir / "claude.err", "a+") as err:
-            proc = subprocess.Popen(cmd, cwd=p.dev_wt, stdout=subprocess.PIPE, stderr=err, text=True,
-                                    start_new_session=True)
-            DESIGN_PROCS[did] = proc
-            for line in proc.stdout:
-                log.write(line)
-                log.flush()
-                try:
-                    e = json.loads(line)
-                except ValueError:
-                    continue
-                if e.get("session_id") and e["session_id"] != design(did)["session_id"]:
-                    q("UPDATE designs SET session_id=? WHERE id=?", (e["session_id"], did))
-                if e.get("type") == "assistant" and not e.get("parent_tool_use_id"):
-                    for c in e.get("message", {}).get("content", []):
-                        if c.get("type") == "text" and c.get("text", "").strip():
-                            texts.append(c["text"].strip())
-                        elif c.get("type") == "tool_use":
-                            texts.clear()  # text before a tool call is narration; the reply comes after
-                            DESIGN_LIVE[did].append(tool_line(c.get("name"), c.get("input") or {}))
-                elif e.get("type") == "result":
-                    cost += e.get("total_cost_usd") or 0
-            proc.wait()
-            err.seek(0)
-            err_tail = err.read()[-1200:]
-        reply = "\n\n".join(texts)
-        if not reply:
-            reply = f"(no reply; claude exited {proc.returncode})\n{err_tail.strip()}".strip()
+        reply, cost = stream_claude(cmd, p.dev_wt, RUNS / f"design-{did}", DESIGN_LIVE[did], DESIGN_PROCS, did,
+                                    on_session)
         reply, ids, note = queue_from_reply(p, reply, did)
         q("INSERT INTO design_msgs (design_id, role, text, ts, task_ids, note) VALUES (?,?,?,?,?,?)",
           (did, "assistant", reply, time.time(), json.dumps(ids), note))
@@ -817,6 +942,71 @@ def queue_from_reply(p, reply, did):
 
 
 # ---------------------------------------------------------------- activity feed
+
+# ---------------------------------------------------------------- task chat (questions to a worker)
+
+TASK_CHAT_PROCS = {}  # task id -> Popen
+TASK_CHAT_LIVE = {}  # task id -> tool lines of the reply in progress; a key here means a reply is running
+CHAT_STATES = ("review", "needs_input", "failed", "done", "cancelled")  # the worker is not running
+
+
+def task_ask(tid, text):
+    """Ask the task's worker a question: resume its Claude session, read-only, in the background."""
+    t = task(tid)
+    if not text:
+        raise ValueError("ask something")
+    if t["state"] not in CHAT_STATES:
+        raise ValueError("the worker is busy; ask when it stops")
+    if not t["session_id"]:
+        raise ValueError("this task has no worker session to ask")
+    if tid in TASK_CHAT_LIVE:
+        raise ValueError("wait for the reply first")
+    TASK_CHAT_LIVE[tid] = []
+    q("INSERT INTO task_msgs (task_id, role, text, ts) VALUES (?,?,?,?)", (tid, "user", text, time.time()))
+    threading.Thread(target=task_chat_turn, args=(tid, text), daemon=True).start()
+
+
+def task_chat_turn(tid, text):
+    t = task(tid)
+    p = proj(t["project"])
+    cwd = Path(t["worktree"] or p.wt / f"t{tid}")
+    made = not cwd.exists()  # the worktree goes after a merge, but the session lives under its path
+    note = (f"[ops: the user is asking about this task on the dashboard; its state is {t['state']}. Answer them. "
+            "This turn is read-only: do not change files and do not write $OPS_RESULT. If they want a change, "
+            "tell them which button does it (Send back with feedback, Send answer, Retry, or a new task); "
+            "you will carry this conversation into that work."
+            + (f" Your worktree was removed after the task finished; the merged code is in {p.dev_wt}."
+               if made else "") + "]\n\n")
+    cmd = [CLAUDE, "-p", note + text, "--output-format", "stream-json", "--verbose",
+           "--permission-mode", "dontAsk", "--permission-prompts", "none", "--allowedTools", DESIGN_TOOLS,
+           "--strict-mcp-config", "--resume", t["session_id"]]
+    if made:
+        cmd += ["--add-dir", str(p.dev_wt)]
+    if setting("model"):
+        cmd += ["--model", setting("model")]
+
+    def on_session(sid):
+        if sid != task(tid)["session_id"]:
+            upd(tid, session_id=sid)
+
+    try:
+        if made:
+            cwd.mkdir(parents=True)
+        reply, cost = stream_claude(cmd, cwd, RUNS / str(tid) / "chat", TASK_CHAT_LIVE[tid], TASK_CHAT_PROCS,
+                                    tid, on_session)
+        upd(tid, cost=(task(tid)["cost"] or 0) + cost)
+    except Exception as e:
+        reply = f"(chat error: {e})"
+    finally:
+        TASK_CHAT_PROCS.pop(tid, None)
+        if made:
+            try:
+                cwd.rmdir()
+            except OSError:
+                pass
+    q("INSERT INTO task_msgs (task_id, role, text, ts) VALUES (?,?,?,?)", (tid, "assistant", reply, time.time()))
+    TASK_CHAT_LIVE.pop(tid, None)
+
 
 def activity(tid, limit=120):
     f = RUNS / str(tid) / "claude.jsonl"
@@ -869,7 +1059,7 @@ class H(BaseHTTPRequestHandler):
             return self.send(200, (CODE / "dashboard.html").read_bytes(), "text/html; charset=utf-8")
         if path == "/api/state":
             tasks = q("SELECT id,project,title,state,phase,priority,hold,depends_on,parent,created,started,"
-                      "finished,cost,rounds,summary,question,error,merged,branch FROM tasks "
+                      "finished,cost,rounds,summary,question,error,merged,branch,kind FROM tasks "
                       "ORDER BY id DESC LIMIT 500")
             projects = []
             for p in PROJECTS.values():
@@ -896,6 +1086,9 @@ class H(BaseHTTPRequestHandler):
                 base = f"{t['merged']}^1" if t["merged"] else p.dev
                 t["diffstat"] = p.git("diff", "--stat", f"{base}...{t['branch']}", check=False)[-3000:]
             t["can_play"] = bool(p and p.launch and t["state"] == "review")
+            t["chat"] = q("SELECT role,text,ts FROM task_msgs WHERE task_id=? ORDER BY id", (tid,))
+            t["chat_live"] = TASK_CHAT_LIVE.get(tid)
+            t["can_chat"] = bool(t["session_id"]) and t["state"] in CHAT_STATES
             return self.send(200, t)
         if path == "/api/designs":
             return self.send(200, q("SELECT id,project,title,state,updated,cost FROM designs ORDER BY updated DESC"))
@@ -953,11 +1146,7 @@ class H(BaseHTTPRequestHandler):
         if m:
             p, act = proj(m.group(1)), m.group(2)
             if act == "promote":
-                why = promote_blocker(p)
-                if why:
-                    raise ValueError(why)
-                PROMOTING[p.name] = {"state": "building", "msg": "starting"}
-                threading.Thread(target=promote, args=(p,), daemon=True).start()
+                return {"id": queue_release(p)}
             elif act == "play":
                 launch_app(p, p.main_wt)
             else:
@@ -995,6 +1184,15 @@ class H(BaseHTTPRequestHandler):
             raise ValueError("no such task")
         p = PROJECTS.get(t["project"])
         st = t["state"]
+        if action in ("retry", "answer", "approve", "reject") and tid in TASK_CHAT_LIVE:
+            raise ValueError("wait for the worker's reply to your question first")
+        if action == "ask":
+            return task_ask(tid, (b.get("text") or "").strip())
+        if action == "stopask":
+            proc = TASK_CHAT_PROCS.get(tid)
+            if proc:
+                killgroup(proc.pid)
+            return
         if action == "cancel":
             if st in ("done", "cancelled"):
                 raise ValueError(f"task is {st}")
@@ -1046,7 +1244,7 @@ class H(BaseHTTPRequestHandler):
 
 
 def on_term(*_):
-    for proc in list(PROCS.values()) + list(DESIGN_PROCS.values()):
+    for proc in list(PROCS.values()) + list(DESIGN_PROCS.values()) + list(TASK_CHAT_PROCS.values()):
         killgroup(proc.pid)
     os._exit(0)
 

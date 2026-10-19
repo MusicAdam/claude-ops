@@ -35,16 +35,25 @@ projects and writes a starter config. Read it, adjust it, then click **Reload pr
                             merge --no-ff into dev   (<worktrees>/dev)
                                   │
                  you click Promote ▼
-        build dev in <worktrees>/main ─▶ fast-forward main in your checkout
+   release task: snapshot dev ─▶ gate ─▶ Claude builds and plays it (blocks, or passes)
+                                  ▼ pass
+        build the snapshot in <worktrees>/main ─▶ fast-forward main in your checkout
 ```
 
 ## main is the golden version
 
 - **dev** gets every task that passes the gate. It is the newest version.
-- **main** moves only on **Promote**, and its build (`<worktrees>/main`) always matches it.
-- Promote checks first and changes nothing if it can't finish. It refuses while the main build is
-  running, or while your checkout is off main or has uncommitted changes.
-- Commits made straight to main are merged into dev on the next Promote (no gate).
+- **main** moves only when a **release** passes, and its build (`<worktrees>/main`) always matches it.
+- **Promote** queues a release task ahead of other work. It takes a snapshot of dev, runs the gate,
+  then a Claude release checker (`release_prompt.md`) builds the app and plays it the way a player
+  would. If the checker passes it, main moves to exactly that snapshot; anything merged into dev
+  meanwhile waits for the next release. The checker never changes code: problems it finds are queued
+  as ordinary tasks, and a blocked release leaves main as it was.
+- Promote refuses while a release is already open, while the main build is running, or while your
+  checkout is off main or has uncommitted changes. It checks again before moving main. If something
+  blocks it then, fix it and click **Retry**: that promotes without checking again.
+- With nothing new on dev, Promote only rebuilds main (no gate, no checker).
+- Commits made straight to main are merged into dev when the release takes its snapshot (no gate).
 - If the build fails, main and its build stay as they were.
 - Nothing is ever pushed. Push main yourself when you want to.
 
@@ -96,6 +105,9 @@ notes = """Project-specific guidance for design chats."""
   big tasks into subtasks (with "after" ordering) and use subagents inside a task.
 - **Questions.** A worker that needs a decision stops with a question. Answer it on the dashboard
   and the same Claude session resumes.
+- **Ask the worker.** Once a worker stops (review, needs you, failed, done), you can ask it questions
+  on the task page. Each question resumes its own Claude session, read-only, so it remembers the work.
+  It also remembers the questions: if you then send feedback or retry, it builds on what you discussed.
 - **Notifications.** macOS notifications when a task needs you, fails, or finishes.
 - **Workers** run `claude -p --permission-mode auto --permission-prompts none --strict-mcp-config`.
   Anything that would prompt is denied. They never push, and never touch your checkout, dev or main.
@@ -105,7 +117,7 @@ notes = """Project-specific guidance for design chats."""
 | Path | What |
 |---|---|
 | `opsd.py` | daemon: HTTP API + dashboard, scheduler, pipeline, promote, design chats |
-| `worker_prompt.md`, `design_prompt.md` | briefs for workers and design chats |
+| `worker_prompt.md`, `release_prompt.md`, `design_prompt.md` | briefs for workers, release checkers and design chats |
 | `dashboard.html` | the page |
 | `~/.claude-ops/projects/*.toml` | one config per project |
 | `~/.claude-ops/ops.db` | SQLite: tasks, events, settings, design chats |
