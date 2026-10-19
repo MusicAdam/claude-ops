@@ -147,6 +147,10 @@ notes = """Project-specific guidance for design chats."""
 - **Ask the worker.** Once a worker stops (review, needs you, failed, done), you can ask it questions
   on the task page. Each question resumes its own Claude session, read-only, so it remembers the work.
   It also remembers the questions: if you then send feedback or retry, it builds on what you discussed.
+- **Screenshots.** Drop or paste an image into any message box: Design, Chat, Ask the worker, an answer,
+  feedback, or a new task. It is saved in `~/.claude-ops/images/` and an `[image: <path>]` line goes in the
+  text. The message shows it, and Claude (started with `--add-dir` on that folder) is told to read it.
+  PNG, JPEG, GIF or WebP, up to 20 MB.
 - **Notifications.** macOS notifications when a task needs you, fails, or finishes.
 - **macOS permissions.** launchd starts the daemon through `~/.claude-ops/Claude Ops.app` (built from
   `launcher.c` by `opsctl start`), so privacy prompts (App Management, folder access) name **Claude Ops**,
@@ -167,6 +171,7 @@ notes = """Project-specific guidance for design chats."""
 | `~/.claude-ops/projects/*.toml` | one config per project |
 | `~/.claude-ops/ops.db` | SQLite: tasks, events, settings, design chats |
 | `~/.claude-ops/runs/<id>/` | `claude.jsonl` (full transcript), `claude.err`, `gate.log` |
+| `~/.claude-ops/images/` | screenshots attached to messages |
 | `~/.claude-ops/opsd.log` | daemon log |
 | `~/.claude-ops/opsd.pid` | the running daemon's pid |
 

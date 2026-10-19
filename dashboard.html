@@ -99,6 +99,8 @@ ul.ahead { margin: 6px 0 0; padding-left: 18px; max-height: 160px; overflow: aut
 .live { color: var(--muted); font: 12px var(--mono); margin: 0 0 14px; }
 .composer { position: sticky; bottom: 0; background: var(--bg); padding-top: 10px; }
 .composer textarea { min-height: 80px; }
+.att { display: block; max-width: 260px; max-height: 200px; margin: 6px 0; border-radius: 6px; border: 1px solid var(--line); }
+textarea.dropping { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent); }
 .chathead { color: var(--muted); font-size: 12px; margin: 0 0 12px; }
 .chathead code { font: 12px var(--mono); background: var(--panel); padding: 1px 4px; border-radius: 4px; user-select: all; }
 .ptag { font-size: 11px; padding: 1px 6px; border-radius: 4px; background: var(--chip); color: var(--muted); }
@@ -147,7 +149,7 @@ ul.ahead { margin: 6px 0 0; padding-left: 18px; max-height: 160px; overflow: aut
   <section id="right">
     <div class="card">
       <h2>New task</h2>
-      <textarea id="body" placeholder="Describe what you want. First line is the title."></textarea>
+      <textarea id="body" placeholder="Describe what you want. First line is the title. Drop or paste screenshots to attach them."></textarea>
       <div class="row">
         <label id="tprojwrap">Project <select id="tproj"></select></label>
         <label>Priority <select id="prio"><option value="0">normal</option><option value="1">high</option><option value="-1">low</option></select></label>
@@ -183,6 +185,9 @@ const inView = name => !pf || name === pf;
 const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 const ago = (t, now) => { if (!t) return ""; const s = Math.max(0, now - t);
   return s < 60 ? `${s|0}s` : s < 3600 ? `${(s/60)|0}m` : s < 86400 ? `${(s/3600).toFixed(1)}h` : `${(s/86400).toFixed(1)}d`; };
+// "[image: <path>]" in a message is a screenshot the user attached; show it. Takes escaped text.
+const pics = h => h.replace(/\[image: [^\]\n]*\/images\/([\w-]+\.(?:png|jpg|gif|webp))\]\n?/g,
+  (_, n) => `<a href="/api/images/${n}" target="_blank"><img class="att" src="/api/images/${n}" alt="${n}"></a>`);
 const LABEL = {queued:"queued", running:"working", gating:"checking", merging:"merging", needs_input:"needs you",
                review:"review", done:"done", failed:"failed", cancelled:"cancelled", paused:"paused"};
 
@@ -396,24 +401,24 @@ async function loadDetail(id, fresh) {
     <div style="font-weight:600;font-size:15px">${esc(t.title)}</div>
     <div class="muted mono" style="margin:4px 0">${esc(P(t.project).title)} · ${esc(t.branch || "")}${t.merged ? ` → ${esc(t.kind === "release" ? P(t.project).main_branch || "main" : P(t.project).dev_branch || "dev")} ${t.merged.slice(0, 8)}` : ""}${t.kind === "release" && t.base && !t.merged ? `checking ${t.base.slice(0, 8)}` : ""}${t.rounds ? ` · fix rounds: ${t.rounds}` : ""}</div>
     ${t.question ? `<div class="callout"><b>Question:</b> ${esc(t.question)}</div>
-      <textarea id="answer" placeholder="Your answer" style="min-height:70px"></textarea>
+      <textarea id="answer" placeholder="Your answer (drop or paste screenshots to attach them)" style="min-height:70px"></textarea>
       <div class="row">${btn("answer", "Send answer", "primary")}</div>` : ""}
-    ${t.state === "review" ? `<textarea id="feedback" placeholder="Not right? Say what to change" style="min-height:60px;margin-top:10px"></textarea>
+    ${t.state === "review" ? `<textarea id="feedback" placeholder="Not right? Say what to change (drop or paste screenshots to attach them)" style="min-height:60px;margin-top:10px"></textarea>
       <div class="row">${btn("reject", "Send back with feedback")}</div>` : ""}
     ${t.summary ? `<div class="callout ok">${esc(t.summary)}</div>` : ""}
     ${t.error ? `<div class="callout bad"><pre class="mono">${esc(t.error)}</pre></div>` : ""}
     <div class="row">${actions}</div>
     ${t.can_steer || t.can_chat || t.chat.length ? `<details open><summary>${t.can_steer ? "Talk to the worker" : "Ask the worker"}</summary>
       <div class="tchat">${t.chat.map(m => m.role === "assistant" ? `<div class="msg">${md(m.text)}</div>`
-          : `<div class="msg user">${esc(m.text)}${m.role === "steer" ? `<div class="note">${steerNote(t, m)}</div>` : ""}</div>`).join("")}
+          : `<div class="msg user">${pics(esc(m.text))}${m.role === "steer" ? `<div class="note">${steerNote(t, m)}</div>` : ""}</div>`).join("")}
         ${t.chat_live ? `<div class="live"><span class="pulse s-running">Claude is thinking</span>${t.chat_live.map(l => `<div>  ${esc(l)}</div>`).join("")}</div>` : ""}</div>
-      ${t.state === "paused" && t.can_chat ? `<textarea id="ask" placeholder="Ask about this work now (read-only), or send a message the worker gets when you resume the task. (⌘↩ asks)" style="min-height:60px"></textarea>
+      ${t.state === "paused" && t.can_chat ? `<textarea id="ask" placeholder="Ask about this work now (read-only), or send a message the worker gets when you resume the task. Drop or paste screenshots to attach them. (⌘↩ asks)" style="min-height:60px"></textarea>
         <div class="row">${t.chat_live ? btn("stopask", "Stop") : btn("ask", "Ask", "primary")}${btn("steer", "Send when it resumes")}</div>`
-      : t.can_steer ? `<textarea id="ask" placeholder="Steer the worker: change direction, add a requirement, or ask what it is doing. It reads your message after its current step. (⌘↩ sends)" style="min-height:60px"></textarea>
+      : t.can_steer ? `<textarea id="ask" placeholder="Steer the worker: change direction, add a requirement, or ask what it is doing. It reads your message after its current step. Drop or paste screenshots to attach them. (⌘↩ sends)" style="min-height:60px"></textarea>
         <div class="row">${btn("steer", "Send", "primary")}</div>`
-      : t.can_chat ? `<textarea id="ask" placeholder="Ask about this work: why it did something, how it works, what it tested. Claude can read the code but not change it. (⌘↩ sends)" style="min-height:60px"></textarea>
+      : t.can_chat ? `<textarea id="ask" placeholder="Ask about this work: why it did something, how it works, what it tested. Claude can read the code but not change it. Drop or paste screenshots to attach them. (⌘↩ sends)" style="min-height:60px"></textarea>
         <div class="row">${t.chat_live ? btn("stopask", "Stop") : btn("ask", "Ask", "primary")}</div>` : ""}</details>` : ""}
-    <details ${t.state === "queued" ? "open" : ""}><summary>Task description</summary><pre>${esc(t.body)}</pre></details>
+    <details ${t.state === "queued" ? "open" : ""}><summary>Task description</summary><pre>${pics(esc(t.body))}</pre></details>
     <details open><summary>Worker activity</summary>
       <div class="feed" id="feed">${t.activity.map(a => `<div class="${a.k}">${a.k === "tool" ? "  " : ""}${esc(a.t)}</div>`).join("") || '<span class="muted">nothing yet</span>'}</div></details>
     ${t.diffstat ? `<details><summary>Files changed</summary><pre class="mono">${esc(t.diffstat)}</pre></details>` : ""}
@@ -496,9 +501,9 @@ async function addProject(create) {
 const KIND = {design: "design", chat: "project"};
 const TABTEXT = {
   design: {button: "New design chat", none: "No design chats yet.",
-           say: "Talk through an idea. When you agree on the work, ask Claude to queue it.",
+           say: "Talk through an idea. When you agree on the work, ask Claude to queue it. Drop or paste screenshots to attach them.",
            intro: "Start a design chat: describe an idea, a problem, or a feature you want. Claude reads the project docs and code, asks questions, and queues tasks when you agree."},
-  chat: {button: "New chat", none: "No chats yet.", say: "Ask or tell Claude anything about this project.",
+  chat: {button: "New chat", none: "No chats yet.", say: "Ask or tell Claude anything about this project. Drop or paste screenshots to attach them.",
          intro: "Talk to Claude in the project folder, as if you ran claude there. It can read, edit and run commands in your checkout. Actions that would ask for permission are denied, since nobody can answer here."}};
 let tab = "queue", chatSel = null, chatData = null, chatKey = "", chatSels = {};
 try { tab = localStorage.getItem("ops-tab") || "queue"; chatSels = JSON.parse(localStorage.getItem("ops-chats") || "{}"); } catch {}
@@ -585,7 +590,7 @@ function renderChat() {
     + (d.session_id ? ` · continue in a terminal: <code>cd ${esc(d.cwd)} && claude --resume ${esc(d.session_id)}</code>` : "") : "";
   if (!d) { box.innerHTML = `<div class="muted" style="padding:20px 0">${TABTEXT[tab].intro}</div>`; return; }
   box.innerHTML = d.msgs.map(m => m.role === "user"
-      ? `<div class="msg user">${esc(m.text.replace(/^\[ops:[^\n]*\]\n\n/, ""))}</div>`
+      ? `<div class="msg user">${pics(esc(m.text.replace(/^\[ops:[^\n]*\]\n\n/, "")))}</div>`
       : `<div class="msg">${md(m.text)}${m.tasks.length ? `<div class="chips">${m.tasks.map(t => `<button class="chip" data-task="${t.id}">#${t.id} ${esc(t.title || "")} · ${LABEL[t.state] || t.state}</button>`).join("")}</div>` : ""}</div>`).join("")
     + (thinking ? `<div class="live"><span class="pulse s-running">Claude is thinking</span>${d.live.map(l => `<div>  ${esc(l)}</div>`).join("")}</div>` : "");
   box.querySelectorAll("[data-task]").forEach(b => b.onclick = () => { showTab("queue"); selectTask(+b.dataset.task); refresh(); });
@@ -610,6 +615,53 @@ $("#newchat").onclick = () => { selectChat(null); chatData = null; renderProject
 
 // The header wraps to two lines on narrow windows or when it gains buttons; keep #left just below it.
 new ResizeObserver(() => document.documentElement.style.setProperty("--hdr-h", $("header").offsetHeight + "px")).observe($("header"));
+
+// ---------------------------------------------------------------- screenshots: drop or paste into any message box
+// The image is uploaded and "[image: <path>]" goes into the text at the cursor; the daemon lets Claude read it.
+const imageFiles = dt => [...((dt && dt.files) || [])].filter(f => f.type.startsWith("image/"));
+function dropBox(el) {  // the textarea a drop on el goes to: el itself, or the message box of the panel it is in
+  if (!el || !el.closest) return null;
+  const ta = el.closest("textarea"); if (ta) return ta;
+  for (const zone of [el.closest("details"), el.closest("#chat, #detail, #right .card")])
+    if (zone && zone.querySelector("textarea")) return zone.querySelector("textarea");
+  return null;
+}
+let dropping = null;
+function markDrop(ta) { if (dropping !== ta) { dropping?.classList.remove("dropping"); ta?.classList.add("dropping"); dropping = ta; } }
+async function attachImages(ta, files) {
+  const id = ta.id, msg = $({say: "#chatmsg", body: "#formmsg"}[id] || "#actmsg");
+  typing = true;  // keep the task page from redrawing the box mid-upload
+  for (const f of files) {
+    try {
+      const data = await new Promise((ok, no) => { const r = new FileReader(); r.onload = () => ok(r.result); r.onerror = () => no(r.error); r.readAsDataURL(f); });
+      const img = await api("/api/images", {data});
+      if (!ta.isConnected) ta = document.getElementById(id); if (!ta) return;
+      const at = ta.selectionStart ?? ta.value.length, before = ta.value.slice(0, at);
+      const ins = (before && !before.endsWith("\n") ? "\n" : "") + `[image: ${img.path}]\n`;
+      ta.value = before + ins + ta.value.slice(ta.selectionEnd ?? at);
+      ta.selectionStart = ta.selectionEnd = at + ins.length;
+      if (msg) msg.textContent = "";
+    } catch (e) { if (msg) msg.textContent = `couldn't attach ${f.name}: ${e.message}`; }
+  }
+  ta?.focus();
+}
+document.addEventListener("dragover", e => {
+  if (![...e.dataTransfer.types].includes("Files")) return;
+  e.preventDefault();  // a drop anywhere must not navigate away to the file
+  const ta = dropBox(e.target); e.dataTransfer.dropEffect = ta ? "copy" : "none"; markDrop(ta);
+});
+document.addEventListener("dragleave", e => { if (!e.relatedTarget) markDrop(null); });
+document.addEventListener("drop", e => {
+  if (![...e.dataTransfer.types].includes("Files")) return;
+  e.preventDefault(); markDrop(null);
+  const ta = dropBox(e.target), files = imageFiles(e.dataTransfer);
+  if (ta && files.length) attachImages(ta, files);
+});
+document.addEventListener("paste", e => {
+  const ta = e.target.closest && e.target.closest("textarea"), files = imageFiles(e.clipboardData);
+  if (ta && files.length) { e.preventDefault(); attachImages(ta, files); }
+});
+
 showTab(tab);
 refresh(); setInterval(refresh, 3000);
 setInterval(() => { if (tab !== "queue") refreshDesign(); }, 1500);
