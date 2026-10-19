@@ -130,7 +130,8 @@ notes = """Project-specific guidance for design chats."""
   now and keeps its place. A worker's Claude session resumes where it was; a command it was running
   (a test run, a build) is stopped and it is told to check and carry on. A task paused during its gate
   runs the gate again from the start. A task that is merging can't be paused. Paused tasks stay paused
-  across restarts: click **▶ Resume** (or `./opsctl resume`) to queue them again. To restart without
+  across restarts: click **▶ Resume** on a task, or **▶ Resume all** in the header (`./opsctl resume`),
+  to queue them again. **Resume all** shows whenever a task is paused, even while others run. To restart without
   waiting: `./opsctl pause && ./opsctl restart && ./opsctl resume`. **Pause queue** is different: it
   holds tasks that haven't started and lets running ones finish.
 - **Questions.** A worker that needs a decision stops with a question. Answer it on the dashboard

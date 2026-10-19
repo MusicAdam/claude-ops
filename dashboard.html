@@ -127,7 +127,8 @@ ul.ahead { margin: 6px 0 0; padding-left: 18px; max-height: 160px; overflow: aut
     <option value="">default</option><option value="opus">opus</option>
     <option value="sonnet">sonnet</option><option value="fable">fable</option></select></label>
   <button id="pause" title="Hold queued tasks; running ones carry on"></button>
-  <button id="pauseall" class="hidden"></button>
+  <button id="pauseall" class="hidden" title="Stop every running task now; each resumes from where it was"></button>
+  <button id="resumeall" class="primary hidden" title="Put every paused task, in every project, back in the queue"></button>
 </header>
 <main id="queueview">
   <section id="left">
@@ -227,14 +228,14 @@ function renderHeader() {
   $("#model").value = s.model;
   $("#pause").textContent = s.paused === "1" ? "▶ Resume queue" : "❚❚ Pause queue";
   $("#pause").className = s.paused === "1" ? "primary" : "";
-  // Pause all running tasks (e.g. before a restart), or resume every paused one. Across all projects.
+  // Pause all running tasks (e.g. before a restart), and resume every paused one. Across all projects.
+  // Each shows whenever it has something to do, so you can resume while other tasks run.
   const running = state.tasks.filter(t => ["running", "gating"].includes(t.state)).length;
   const paused = state.tasks.filter(t => t.state === "paused").length;
-  const pa = $("#pauseall");
-  pa.className = running || paused ? (running ? "" : "primary") : "hidden";
-  pa.textContent = running ? `❚❚ Pause running (${running})` : `▶ Resume paused (${paused})`;
-  pa.title = running ? "Stop every running task now; each resumes from where it was" : "Put every paused task back in the queue";
-  pa.dataset.a = running ? "pause-all" : "resume-all";
+  $("#pauseall").classList.toggle("hidden", !running);
+  $("#pauseall").textContent = `❚❚ Pause running (${running})`;
+  $("#resumeall").classList.toggle("hidden", !paused);
+  $("#resumeall").textContent = `▶ Resume all (${paused})`;
 }
 
 const mainMsg = {};  // project -> error from a click, shown until the next success
@@ -423,7 +424,8 @@ async function submit() {
 $("#submit").onclick = submit;
 $("#body").onkeydown = e => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) submit(); };
 $("#pause").onclick = () => api("/api/settings", {paused: state.settings.paused === "1" ? "0" : "1"}).then(refresh);
-$("#pauseall").onclick = () => api(`/api/${$("#pauseall").dataset.a}`, {}).then(refresh);
+$("#pauseall").onclick = () => api("/api/pause-all", {}).then(refresh);
+$("#resumeall").onclick = () => api("/api/resume-all", {}).then(refresh);
 $("#par").onchange = () => api("/api/settings", {max_parallel: Math.max(1, +$("#par").value || 1)}).then(refresh);
 $("#model").onchange = () => api("/api/settings", {model: $("#model").value}).then(refresh);
 $("#proj").onchange = () => {
