@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
-# opsctl start|stop|restart [--now]|pause|resume|status|log|open  — manage the claude-ops background service (launchd)
-# restart waits until no task is running a command (a gate, a build, a worker's test run); --now doesn't
+# opsctl start|stop|restart|pause|resume|status|log|open  — manage the claude-ops background service (launchd)
+# stop and restart pause every running task first; the next daemon resumes them (tasks you paused stay paused)
 # pause stops every running task now (each resumes from where it was); resume puts them back in the queue
 set -euo pipefail
 OPS="$(cd "$(dirname "$0")" && pwd)"
 LABEL=com.claude-ops
 DATA="${OPS_DATA:-$HOME/.claude-ops}"; mkdir -p "$DATA"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
+SVC="gui/$(id -u)/$LABEL"
 APP="$DATA/Claude Ops.app"   # launchd starts the daemon through this, so macOS privacy prompts name "Claude Ops"
 BIN="$APP/Contents/MacOS/claude-ops"
 build_app() {  # only when missing or launcher.c changed: a rebuild changes the signature and macOS asks again
@@ -43,6 +44,7 @@ write_plist() {
     <key>HOME</key><string>$HOME</string></dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
+  <key>ExitTimeOut</key><integer>60</integer>
   <key>ProcessType</key><string>Background</string>
   <key>StandardOutPath</key><string>$DATA/opsd.log</string>
   <key>StandardErrorPath</key><string>$DATA/opsd.log</string>
@@ -61,13 +63,20 @@ case "${1:-status}" in  # start, stop and restart act on the one launchd service
     fi ;;
 esac
 case "${1:-status}" in
-  start)   build_app; write_plist; launchctl bootstrap "gui/$(id -u)" "$PLIST" 2>/dev/null || launchctl kickstart "gui/$(id -u)/$LABEL"
+  start)   build_app; write_plist
+           if launchctl print "$SVC" >/dev/null 2>&1; then launchctl kickstart "$SVC"
+           else  # bootstrap fails while a stopped job is still unloading; retry rather than leave it down
+             for i in $(seq 10); do launchctl bootstrap "gui/$(id -u)" "$PLIST" 2>/dev/null && break
+               [ "$i" = 10 ] && { echo "launchctl bootstrap failed; run: $0 start"; exit 1; }; sleep 1; done
+           fi
            sleep 1; echo "dashboard: http://127.0.0.1:8788" ;;
-  stop)    launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true; echo stopped ;;
-  restart) if [ "${2:-}" != "--now" ]; then OPS_DATA="$DATA" /opt/homebrew/bin/python3 "$OPS/opsd.py" wait-idle || exit 1; fi
-           "$0" stop; sleep 1; "$0" start ;;
+  stop)    launchctl bootout "$SVC" 2>/dev/null || true
+           # it pauses its tasks before it exits (opsd.py shutdown); launchd lists the job until it has
+           for _ in $(seq 70); do launchctl print "$SVC" >/dev/null 2>&1 || break; sleep 1; done
+           echo stopped ;;
+  restart) "$0" stop; "$0" start ;;
   pause|resume) OPS_DATA="$DATA" /opt/homebrew/bin/python3 "$OPS/opsd.py" "$1-all" ;;
-  status)  launchctl print "gui/$(id -u)/$LABEL" 2>/dev/null | grep -E '^\s*(state|pid|last exit code)' || echo "not running" ;;
+  status)  launchctl print "$SVC" 2>/dev/null | grep -E '^\s*(state|pid|last exit code)' || echo "not running" ;;
   log)     tail -n 100 -f "$DATA/opsd.log" ;;
   open)    open http://127.0.0.1:8788 ;;
   *)       sed -n 2p "$0"; exit 2 ;;

@@ -4,7 +4,6 @@
   opsd.py serve                        run the dashboard + scheduler (http://127.0.0.1:8788)
   opsd.py add-project PATH [NAME]      detect PATH and write ~/.claude-ops/projects/NAME.toml
   opsd.py add -p NAME "text..."        queue a task through the running daemon
-  opsd.py wait-idle                    hold new tasks, wait until no task is running a command (opsctl restart)
   opsd.py pause-all | resume-all       pause every running task (it stops now, resumable) / resume every paused one
   opsd.py guard --daemon PID [--root DIR]   PreToolUse hook: refuse Bash commands that stop processes the session did not start
 
@@ -43,6 +42,7 @@ ACTIVE = ("running", "gating", "merging")
 STOPPED = ("cancelled", "paused")  # set by you; the pipeline stops at its next step and never overrides them
 DBL = threading.RLock()
 PROCS = {}  # task id -> current Popen (claude or a gate step), for cancel
+STOPPING = threading.Event()  # this daemon is shutting down: start nothing new. Never stored, so it can't outlive us
 THREADS = {}  # task id -> pipeline thread
 PHASE_SINCE = {}  # task id -> when its phase last changed, so the dashboard can say how long a step has run
 
@@ -354,7 +354,7 @@ def init_db():
         kind TEXT DEFAULT 'task', base TEXT, pid_start TEXT)""")
     cols = {r["name"] for r in q("PRAGMA table_info(tasks)")}
     for col, decl in (("kind", "TEXT DEFAULT 'task'"), ("base", "TEXT"),  # databases from before releases
-                      ("pid_start", "TEXT")):
+                      ("pid_start", "TEXT"), ("paused_by", "TEXT")):
         if col not in cols:
             q(f"ALTER TABLE tasks ADD COLUMN {col} {decl}")
     q("CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY, task_id INTEGER, ts REAL, text TEXT)")
@@ -371,6 +371,7 @@ def init_db():
     q("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)")
     for k, v in {"max_parallel": "3", "paused": "0", "model": ""}.items():
         q("INSERT OR IGNORE INTO settings VALUES (?,?)", (k, v))
+    q("DELETE FROM settings WHERE key='draining'")  # the old restart's stored hold: a crash could leave it set
 
 
 def setting(k):
@@ -1198,9 +1199,10 @@ def release_pipeline(p, tid):
     if not t["base"]:
         with p.lock:
             err = merge_main_into_dev(p)
-            if err:
-                return fail(p, tid, err)
-            upd(tid, base=p.revs(p.dev))
+            if not err:
+                upd(tid, base=p.revs(p.dev))
+        if err and not resolve_main_into_dev(p, tid, err):
+            return
         ev(tid, f"checking {p.dev} at {p.show(task(tid)['base'])}")
     t = task(tid)
     if t["base"] == p.revs(p.main):
@@ -1216,6 +1218,10 @@ def release_pipeline(p, tid):
         upd(tid, worktree=str(path))
         ev(tid, f"worktree {path} at {p.show(t['base'])}")
         t = task(tid)
+    else:
+        for r, sha in p.pairs(t["base"]):
+            if r.git("rev-parse", "HEAD", cwd=r.at(t["worktree"])) != sha:  # left at the merge worker's commit
+                r.git("checkout", "--force", "--detach", sha, cwd=r.at(t["worktree"]))
 
     if start_at != "promote":
         if resume and t["session_id"]:  # an answer, a retry or a restart resumes the checker
@@ -1278,13 +1284,13 @@ def is_service():
 
 
 def restart_self(tid):
-    """main of claude-ops itself just moved: run `opsctl restart` to load the new code. It waits until no task
-    is running a command. It runs in a session of its own, so stopping this daemon's launchd job spares it."""
+    """main of claude-ops itself just moved: run `opsctl restart` to load the new code. Running tasks pause and
+    the new daemon resumes them. It runs in a session of its own, so stopping this daemon's launchd job spares it."""
     if not is_service():
         ev(tid, "not restarting claude-ops: this daemon is not the launchd service, and opsctl restart "
                 "would restart that one")
         return
-    ev(tid, "restarting claude-ops to load the new code, once no task is running a command")
+    ev(tid, "restarting claude-ops to load the new code; running tasks pause and resume")
     (RUNS / str(tid)).mkdir(parents=True, exist_ok=True)
     subprocess.Popen([str(CODE / "opsctl"), "restart"], cwd=CODE, env=dict(os.environ, OPS_DATA=str(DATA)),
                      start_new_session=True, stdin=subprocess.DEVNULL,
@@ -1303,7 +1309,7 @@ def scheduler():
 
 
 def schedule_once():
-    if setting("paused") == "1" or setting("draining") == "1":
+    if setting("paused") == "1" or STOPPING.is_set():
         return
     slots = int(setting("max_parallel") or 1) - len(THREADS)
     for t in q("SELECT * FROM tasks WHERE state='queued' ORDER BY priority DESC, id"):
@@ -1332,57 +1338,42 @@ def schedule_once():
         slots -= 1
 
 
-def busy_work():
-    """What a restart would interrupt now: a task's setup, gate or build step, or a command its worker
-    is running. Empty when only Claude itself is thinking, which a restart resumes cleanly."""
-    out = []
-    for t in q(f"SELECT id,phase,pid,pid_start FROM tasks WHERE state IN ({','.join('?' * len(ACTIVE))})", ACTIVE):
-        if t["phase"] != "claude working":
-            out.append(f"#{t['id']}: {t['phase'] or 'starting'}")
-            continue
-        pid = own_pid(t)
-        if pid and child_commands(pid):
-            out.append(f"#{t['id']}: worker running a command")
-    return out
-
-
-def wait_idle():
-    """Hold new tasks, then return once nothing is running a command (twice in a row, 3 s apart)."""
-    set_setting("draining", "1")  # the next daemon clears it on start
-    last, clear = None, 0
-    try:
-        while clear < 2:
-            busy = busy_work()
-            clear = 0 if busy else clear + 1
-            if busy and busy != last:
-                print("waiting for: " + "; ".join(busy), flush=True)
-            last = busy
-            if clear < 2:
-                time.sleep(3)
-    except KeyboardInterrupt:
-        set_setting("draining", "0")
-        print("\ncancelled; new tasks start again")
-        sys.exit(1)
-    print("nothing is running a command; restarting")
-
-
-def recover():
-    """Tasks that were mid-flight when the daemon stopped resume their Claude session."""
-    for t in q(f"SELECT * FROM tasks WHERE state IN ({','.join('?' * len(ACTIVE))})", ACTIVE):
-        killgroup(own_pid(t))  # a worker from the old daemon would otherwise run alongside its resume
-        upd(t["id"], state="queued", phase="", pid=None, pid_start=None,
-            next_prompt="The task queue restarted while you were working. Check `git status` and "
-                        "`git log` in this worktree, finish the task, and write $OPS_RESULT.")
-        ev(t["id"], "requeued after daemon restart")
-
-
+RESTART_NOTE = ("The task queue restarted while you were working. Any command you were running was stopped. "
+                "Check `git status` and `git log` in this worktree, finish the task, and write $OPS_RESULT.")
 PAUSE_NOTE = ("The user paused this task while you were working and has now resumed it. Any command you were "
               "running was stopped. Check `git status` and `git log` in this worktree, finish the task, and "
               "write $OPS_RESULT.")
 
 
-def pause_task(tid):
-    """Stop a task now and keep its place: a worker resumes its Claude session, a gate starts over."""
+def recover():
+    """On start: resume the tasks the last daemon paused as it stopped, and requeue any it left mid-flight
+    (it crashed or was killed) so they resume their Claude session. Tasks you paused stay paused."""
+    for t in q("SELECT id FROM tasks WHERE state='paused' AND paused_by='restart'"):
+        upd(t["id"], state="queued", paused_by=None)
+        ev(t["id"], "resumed after the restart")
+    for t in q(f"SELECT * FROM tasks WHERE state IN ({','.join('?' * len(ACTIVE))})", ACTIVE):
+        killgroup(own_pid(t))  # a worker from the old daemon would otherwise run alongside its resume
+        upd(t["id"], state="queued", phase="", pid=None, pid_start=None, next_prompt=RESTART_NOTE)
+        ev(t["id"], "requeued after daemon restart")
+
+
+def shutdown():
+    """The daemon is stopping (opsctl restart or stop, launchd, a kill): start nothing new, pause every running
+    task for the next daemon to resume, and give a merge, which can't be paused, a moment to finish."""
+    STOPPING.set()
+    for t in q(f"SELECT id FROM tasks WHERE state IN ({','.join('?' * len(ACTIVE))})", ACTIVE):
+        try:
+            pause_task(t["id"], by="restart")
+        except ValueError:
+            pass  # merging
+    deadline = time.time() + 45  # launchd's ExitTimeOut (opsctl) is 60
+    while q("SELECT id FROM tasks WHERE state='merging'") and time.time() < deadline:
+        time.sleep(0.5)
+
+
+def pause_task(tid, by=None):
+    """Stop a task now and keep its place: a worker resumes its Claude session, a gate starts over.
+    by='restart': the daemon is stopping, and the next one resumes the task."""
     t = task(tid)
     if t["state"] == "merging":
         raise ValueError("it is merging; that can't be paused, and it is nearly done")
@@ -1392,20 +1383,21 @@ def pause_task(tid):
     if t["state"] == "gating" and t["kind"] == "task":
         kw = {"start_at": "integrate"}  # Claude's work is done: rebase and run the gate again
     elif t["state"] == "running" and t["phase"] == "claude working" and t["session_id"]:
-        kw = {"start_at": "claude", "next_prompt": PAUSE_NOTE}
+        kw = {"start_at": "claude", "next_prompt": RESTART_NOTE if by else PAUSE_NOTE}
     # Otherwise Claude has not had its prompt yet, and run_claude keeps it for the resume.
     was = t["state"]
-    upd(tid, state="paused", phase="", **kw)
+    upd(tid, state="paused", phase="", paused_by=by, **kw)
     stop(PROCS.get(tid))
     if was != "queued" and t["worktree"]:
         kill_app(PROJECTS.get(t["project"]), t["worktree"])
-    ev(tid, "paused" + (f" while {t['phase']}" if was != "queued" and t["phase"] else ""))
+    ev(tid, ("paused for a restart" if by else "paused")
+        + (f" while {t['phase']}" if was != "queued" and t["phase"] else ""))
 
 
 def resume_task(tid):
     if task(tid)["state"] != "paused":
         raise ValueError(f"task is {task(tid)['state']}")
-    upd(tid, state="queued")
+    upd(tid, state="queued", paused_by=None)
     ev(tid, "resumed")
 
 
@@ -1470,6 +1462,95 @@ def merge_main_into_dev(p):
             return (f"{p.main}{f' of {part.sub}' if part.sub else ''} has commits that conflict with {p.dev}:\n"
                     + r.stdout[-1500:] + r.stderr[-1500:])
     return None
+
+
+def resolve_main_into_dev(p, tid, conflict):
+    """main conflicts with dev: a worker merges main in the release worktree, resolves the conflicts and runs the
+    checks, then dev moves to its merge and the release goes on from there. In a workspace each repo merges its
+    own main. A pause, a restart or a retry starts the merge over.
+    Returns True once dev contains main (the task's base is set); False if it failed or stopped."""
+    path = p.wt / f"t{tid}"
+    for _ in range(MAX_FIX_ROUNDS):  # dev can move while the worker merges; then it merges again
+        fresh = not all(r.at(path).exists() for r in p.parts)
+        copy_workspace_files(p, path)
+        for r in p.parts:
+            if r.at(path).exists():
+                for a in (("merge", "--abort"), ("reset", "--hard"), ("clean", "-fd")):
+                    subprocess.run(["git", *a], cwd=r.at(path), capture_output=True)
+                r.git("checkout", "--detach", p.dev, cwd=r.at(path))
+            else:
+                r.git("worktree", "add", "--detach", str(r.at(path)), p.dev)
+        if fresh:
+            prepare_worktree(p, path)
+        upd(tid, worktree=str(path), session_id=None)
+        conflicts = []
+        for r in p.parts:
+            m = subprocess.run(["git", "merge", "--no-ff", "-m", f"Merge {p.main} into {p.dev}", p.main],
+                               cwd=r.at(path), capture_output=True, text=True)
+            if m.returncode:
+                conflicts.append((f"In {r.sub}/:\n" if r.sub else "") + m.stdout[-2500:] + m.stderr[-1000:])
+        if conflicts:
+            ev(tid, f"{p.main} conflicts with {p.dev}; a worker is resolving it")
+            res = run_claude(p, tid, resolve_prompt(p, task(tid), "\n".join(conflicts)))
+            if stopped(tid):
+                return False
+            if res is None:
+                err = (RUNS / str(tid) / "claude.err").read_text(errors="replace")[-1500:]
+                fail(p, tid, f"the worker merging {p.main} into {p.dev} stopped without writing a result.\n" + err)
+                return False
+            if res.get("status") != "done":
+                fail(p, tid, f"the worker could not merge {p.main} into {p.dev}: "
+                             + (res.get("summary") or f"it reported {res.get('status')}") + "\n\n" + conflict)
+                return False
+        heads = " ".join(r.git("rev-parse", "HEAD", cwd=r.at(path)) for r in p.parts)
+        bad = [r.at(path) for r in p.parts
+               if r.git("diff", "--name-only", "--diff-filter=U", cwd=r.at(path))
+               or r.git("rev-parse", "-q", "--verify", "MERGE_HEAD", cwd=r.at(path), check=False)
+               or r.git("rev-list", "--count", f"HEAD..{p.main}", cwd=r.at(path)) != "0"]
+        if bad:
+            fail(p, tid, f"the worker said it merged {p.main} into {p.dev}, but the merge is not committed "
+                         f"in {', '.join(map(str, bad))}. Click Retry to have a worker merge it again from the start.")
+            return False
+        with p.lock:
+            moved = False
+            for r, head in p.pairs(heads):
+                dev = r.at(p.dev_wt)
+                r.git("merge", "--ff-only", head, cwd=dev, check=False)  # dev hasn't moved: it becomes the merge
+                if r.rev(p.dev) != head and subprocess.run(
+                        ["git", "merge", "--no-ff", "-m", f"Merge {p.main} into {p.dev}", head],
+                        cwd=dev, capture_output=True).returncode:
+                    subprocess.run(["git", "merge", "--abort"], cwd=dev, capture_output=True)
+                    moved = True
+            if moved:
+                ev(tid, f"{p.dev} moved while the worker merged, and conflicts again; merging again")
+                continue
+            upd(tid, base=p.revs(p.dev), session_id=None)  # the release checker starts its own session
+        ev(tid, f"merged {p.main} into {p.dev} at {p.show(heads)}")
+        return True
+    fail(p, tid, f"{p.dev} kept moving while a worker merged {p.main} into it. Click Retry.")
+    return False
+
+
+def resolve_prompt(p, t, conflict):
+    checks = ", ".join(f"`{g['run']}`" for g in p.gate) or "(none configured: run whatever tests the repo has)"
+    notes = f"## Notes for {p.title}\n\n{p.worker_notes}\n\n" if p.worker_notes else ""
+    where = (" in each of its repos (" + ", ".join(f"{r.sub}/" for r in p.parts) + "), and each repo merges its "
+             "own branches") if p.repos else ""
+    return (f"You are an unattended worker on the {p.title} project, started by the claude-ops task queue. "
+            f"Nobody watches this session.\n\n"
+            f"Commits were made straight to `{p.main}`, and they conflict with `{p.dev}`. Before release #{t['id']} "
+            f"can check `{p.dev}`, `{p.main}` has to be merged into it. This worktree ({t['worktree']}) is "
+            f"detached at `{p.dev}`{where}, with `git merge {p.main}` stopped on the conflicts:\n\n{conflict}\n\n"
+            f"Resolve every conflict so both sides' changes survive. The `{p.dev}` side came through the queue; "
+            f"the `{p.main}` side is the user's own work. Read each side's commits "
+            f"(`git log --oneline {p.dev}...{p.main}`, `git show`) to understand what each meant. Then run the "
+            f"checks ({checks}), fix anything the merge broke, and conclude the merge with `git commit --no-edit` "
+            f"(fixes go in that commit or after it). Don't abort the merge, rebase or reset, and don't touch "
+            f"other branches, worktrees or {p.repo}.\n\n{notes}"
+            f"As your last action, write JSON to $OPS_RESULT ({result_path(t)}): "
+            f'{{"status": "done", "summary": "..."}} once the merge is committed, or '
+            f'{{"status": "failed", "summary": "why"}} if the two sides can\'t be reconciled without the user. '
+            f"The user reads the summary: say in plain words how you combined the two sides.")
 
 
 def promote(p, tid, commit):
@@ -1783,7 +1864,7 @@ STATE_WORDS = {"running": "working", "gating": "checking", "needs_input": "needs
 
 def wait_reasons(tasks):
     """Why each queued task has not started yet, in the scheduler's own order of checks."""
-    if setting("draining") == "1":
+    if STOPPING.is_set():
         return {t["id"]: "waiting for claude-ops to restart" for t in tasks if t["state"] == "queued"}
     if setting("paused") == "1":
         return {t["id"]: "the queue is paused" for t in tasks if t["state"] == "queued"}
@@ -1912,7 +1993,7 @@ class H(BaseHTTPRequestHandler):
                     projects.append({"name": p.name, "title": p.title, "error": str(e)})
             return self.send(200, {
                 "tasks": tasks, "now": time.time(), "projects": projects,
-                "settings": {k: setting(k) for k in ("max_parallel", "paused", "model", "draining")},
+                "settings": {k: setting(k) for k in ("max_parallel", "paused", "model")},
                 "active": len(THREADS), "data_dir": str(DATA),
                 "design_cost": (q("SELECT SUM(cost) AS c FROM designs", one=True) or {}).get("c") or 0})
         m = re.fullmatch(r"/api/tasks/(\d+)", path)
@@ -2115,6 +2196,12 @@ class H(BaseHTTPRequestHandler):
 
 
 def on_term(*_):
+    if STOPPING.is_set():  # a second signal: stop now
+        os._exit(1)
+    try:
+        shutdown()
+    except Exception as e:  # still stop; the next daemon requeues whatever is left running
+        print("shutdown error:", e, flush=True)
     for proc in list(PROCS.values()) + list(DESIGN_PROCS.values()) + list(TASK_CHAT_PROCS.values()):
         stop(proc)
     try:
@@ -2129,7 +2216,6 @@ def serve():
     signal.signal(signal.SIGTERM, on_term)
     signal.signal(signal.SIGINT, on_term)
     init_db()
-    set_setting("draining", "0")
     load_projects()
     recover()
     threading.Thread(target=scheduler, daemon=True).start()
@@ -2153,8 +2239,6 @@ if __name__ == "__main__":
         serve()
     elif cmd == "guard":
         guard(args)
-    elif cmd == "wait-idle":
-        wait_idle()
     elif cmd in ("pause-all", "resume-all"):
         post(f"/api/{cmd}", {})
     elif cmd == "add-project" and args:

@@ -10,7 +10,7 @@ the golden version: it changes only when you promote.
 ```bash
 ./opsctl start                       # install + start the launchd service (runs at login, restarts if it dies)
 ./opsctl open                        # dashboard: http://127.0.0.1:8788  (…/#design, …/#chat open those tabs)
-./opsctl status | log | stop | restart   # restart waits until no task is running a command; --now doesn't
+./opsctl status | log | stop | restart   # stop and restart pause running tasks; the next start resumes them
 ./opsctl pause | resume              # pause every running task now / resume every paused one
 ./opsd.py add-project ~/dev/myrepo   # or "+ Project" on the dashboard
 ./opsd.py add -p myrepo "Fix the crash when the save file is empty"
@@ -59,9 +59,11 @@ several (see [Workspaces](#workspaces)). Read it, adjust it, then click **Reload
   checkout is off main or has uncommitted changes. It checks again before moving main. If something
   blocks it then, fix it and click **Retry**: that promotes without checking again.
 - With nothing new on dev, Promote only rebuilds main (no gate, no checker).
-- Promoting claude-ops itself restarts the daemon to load the new code (`opsctl restart`: it waits
-  until no task is running a command).
-- Commits made straight to main are merged into dev when the release takes its snapshot (no gate).
+- Promoting claude-ops itself restarts the daemon to load the new code (`opsctl restart`: running
+  tasks pause and resume).
+- Commits made straight to main are merged into dev when the release takes its snapshot (no gate). If they
+  conflict with dev, a worker merges them in the release's worktree, resolves the conflicts and runs the checks;
+  dev moves to that merge, and the release checks it as usual. Retry starts the merge over.
 - If the build fails, main and its build stay as they were.
 - Nothing is ever pushed. Push main yourself when you want to.
 
@@ -159,9 +161,12 @@ notes = """Project-specific guidance for design chats."""
   (a test run, a build) is stopped and it is told to check and carry on. A task paused during its gate
   runs the gate again from the start. A task that is merging can't be paused. Paused tasks stay paused
   across restarts: click **▶ Resume** on a task, or **▶ Resume all** in the header (`./opsctl resume`),
-  to queue them again. **Resume all** shows whenever a task is paused, even while others run. To restart without
-  waiting: `./opsctl pause && ./opsctl restart && ./opsctl resume`. **Pause queue** is different: it
-  holds tasks that haven't started and lets running ones finish.
+  to queue them again. **Resume all** shows whenever a task is paused, even while others run. **Pause queue** is
+  different: it holds tasks that haven't started and lets running ones finish.
+- **Restarts.** Whenever the daemon stops (`./opsctl restart` or `stop`, a promote of claude-ops, launchd, a
+  `kill`), it pauses every running task the same way, lets a merge finish, and exits. The next daemon resumes
+  those tasks on its own; tasks you paused stay paused. Nothing about a restart is saved that could hold the
+  queue: if the daemon crashes instead, the next one requeues whatever was running.
 - **Questions.** A worker that needs a decision stops with a question. Answer it on the dashboard
   and the same Claude session resumes.
 - **Talk to a working worker.** While a task is queued, working or being checked, the task page has
