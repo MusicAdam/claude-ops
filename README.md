@@ -9,11 +9,15 @@ the golden version: it changes only when you promote.
 
 ```bash
 ./opsctl start                       # install + start the launchd service (runs at login, restarts if it dies)
-./opsctl open                        # dashboard: http://127.0.0.1:8788  (…/#design opens the Design tab)
+./opsctl open                        # dashboard: http://127.0.0.1:8788  (…/#design, …/#chat open those tabs)
 ./opsctl status | log | stop | restart   # restart waits until no task is running a command; --now doesn't
 ./opsd.py add-project ~/dev/myrepo   # or "+ Project" on the dashboard
 ./opsd.py add -p myrepo "Fix the crash when the save file is empty"
 ```
+
+On the dashboard you can type a full path or just a name. A name like `mygame` means a folder next to
+your other projects (usually `~/dev/mygame`). If it doesn't exist, the dashboard offers to create it
+as a new git repo with one empty commit.
 
 `add-project` detects Unity (`scripts/unity.sh` + `Assets/`), Node (`package.json`) and Python
 projects and writes a starter config. Read it, adjust it, then click **Reload projects** (or
@@ -63,6 +67,19 @@ The Design tab is a chat with Claude about one project. It reads the project's d
 dev code but cannot edit anything (`--permission-mode dontAsk` with read-only tools). When you
 agree on the work, ask it to queue: it writes self-contained task briefs, and they appear as chips
 under its reply. Each message it gets starts with that project's current queue, so it avoids duplicates.
+
+## Chat mode
+
+The Chat tab is plain Claude in the project folder, as if you ran `claude` there. It works in your
+checkout (`repo`), not a worktree, so it can read, edit, commit and run commands there, with your own
+settings, `CLAUDE.md` and MCP servers. Each chat keeps one Claude session across messages.
+
+- Nobody can answer permission prompts on the dashboard, so it runs in auto mode: actions that would
+  prompt are denied, and Claude tells you what it couldn't do.
+- The chat header shows `cd <repo> && claude --resume <id>`. Run it to carry on in a terminal, where
+  you can answer prompts. Don't send from both places at once.
+- Edits land in your checkout and nothing else. Promote refuses while the checkout has uncommitted
+  changes, so commit or discard them first.
 
 ## Project config: `~/.claude-ops/projects/<name>.toml`
 
@@ -116,7 +133,7 @@ notes = """Project-specific guidance for design chats."""
 
 | Path | What |
 |---|---|
-| `opsd.py` | daemon: HTTP API + dashboard, scheduler, pipeline, promote, design chats |
+| `opsd.py` | daemon: HTTP API + dashboard, scheduler, pipeline, promote, design and project chats |
 | `worker_prompt.md`, `release_prompt.md`, `design_prompt.md` | briefs for workers, release checkers and design chats |
 | `dashboard.html` | the page |
 | `~/.claude-ops/projects/*.toml` | one config per project |

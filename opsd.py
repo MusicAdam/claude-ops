@@ -138,9 +138,38 @@ def prepare_worktree(p, dest, src_first=None):
                        env=dict(os.environ, OPS_REPO=str(p.repo)))
 
 
-def detect_project(path, name=None):
+def projects_home():
+    """Where a bare name like "mygame" lives: the folder most existing projects sit in, else ~/dev."""
+    parents = [p.repo.parent for p in PROJECTS.values()]
+    if parents:
+        return max(set(parents), key=parents.count)
+    return HOME / "dev" if (HOME / "dev").is_dir() else HOME
+
+
+def resolve_repo(path):
+    path = (path or "").strip()
+    if not path:
+        raise ValueError("enter a folder path or a name")
+    repo = Path(path).expanduser()
+    return (repo if repo.is_absolute() else projects_home() / repo).resolve()
+
+
+def create_repo(repo):
+    """A new, empty project: a git repo with one empty commit, so main exists for the dev branch."""
+    if repo.exists():
+        raise ValueError(f"{repo} already exists")
+    repo.mkdir(parents=True)
+    sh("git", "init", "-q", "-b", "main", cwd=repo)
+    sh("git", "commit", "-q", "--allow-empty", "-m", "Initial commit", cwd=repo)
+
+
+def detect_project(path, name=None, create=False):
     """Write a starter config for the repo at path. Returns the config path."""
-    repo = Path(path).expanduser().resolve()
+    repo = resolve_repo(path)
+    if create:
+        create_repo(repo)
+    if not repo.exists():
+        raise ValueError(f"{repo} does not exist")
     if not (repo / ".git").exists():
         raise ValueError(f"{repo} is not a git repository")
     name = re.sub(r"[^a-z0-9-]+", "-", (name or repo.name).lower()).strip("-")
@@ -220,6 +249,8 @@ def init_db():
         state TEXT DEFAULT 'idle', created REAL, updated REAL, cost REAL DEFAULT 0)""")
     q("""CREATE TABLE IF NOT EXISTS design_msgs (id INTEGER PRIMARY KEY, design_id INTEGER, role TEXT,
         text TEXT, ts REAL, task_ids TEXT, note TEXT)""")
+    if "kind" not in {r["name"] for r in q("PRAGMA table_info(designs)")}:  # databases from before project chats
+        q("ALTER TABLE designs ADD COLUMN kind TEXT DEFAULT 'design'")
     q("UPDATE designs SET state='idle' WHERE state='thinking'")  # a reply cut off by a restart
     q("CREATE TABLE IF NOT EXISTS task_msgs (id INTEGER PRIMARY KEY, task_id INTEGER, role TEXT, text TEXT, ts REAL)")
     q("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)")
@@ -851,7 +882,9 @@ def promote(p, tid, commit):
     return None
 
 
-# ---------------------------------------------------------------- design chats
+# ---------------------------------------------------------------- design chats and project chats
+# Both live in the designs table. kind 'design': read-only planning in the dev worktree that queues tasks.
+# kind 'project': plain Claude in your checkout, as if you ran `claude` there.
 
 DESIGN_TOOLS = "Read,Grep,Glob,WebSearch,WebFetch,Bash(git log:*),Bash(git show:*),Bash(git diff:*),Bash(ls:*)"
 DESIGN_PROCS = {}  # design id -> Popen
@@ -929,10 +962,16 @@ def design_turn(did, text):
     d = design(did)
     p = proj(d["project"])
     DESIGN_LIVE[did] = []
-    cmd = [CLAUDE, "-p", ops_note(p, did) + text, "--output-format", "stream-json", "--verbose",
-           "--permission-mode", "dontAsk", "--permission-prompts", "none", "--allowedTools", DESIGN_TOOLS,
-           "--strict-mcp-config", "--name", f"{p.name} design #{did}",
-           "--append-system-prompt", design_system_prompt(p)]
+    chat = d["kind"] == "project"
+    if chat:  # your own settings and MCP servers apply, like the CLI; auto mode stands in for prompts
+        cmd = [CLAUDE, "-p", text, "--output-format", "stream-json", "--verbose",
+               "--permission-mode", "auto", "--permission-prompts", "none", "--name", f"{p.name} chat #{did}",
+               "--append-system-prompt", PROJECT_CHAT_PROMPT]
+    else:
+        cmd = [CLAUDE, "-p", ops_note(p, did) + text, "--output-format", "stream-json", "--verbose",
+               "--permission-mode", "dontAsk", "--permission-prompts", "none", "--allowedTools", DESIGN_TOOLS,
+               "--strict-mcp-config", "--name", f"{p.name} design #{did}",
+               "--append-system-prompt", design_system_prompt(p)]
     if d["session_id"]:
         cmd += ["--resume", d["session_id"]]
     if setting("model"):
@@ -944,14 +983,14 @@ def design_turn(did, text):
 
     cost = 0.0
     try:
-        reply, cost = stream_claude(cmd, p.dev_wt, RUNS / f"design-{did}", DESIGN_LIVE[did], DESIGN_PROCS, did,
-                                    on_session)
-        reply, ids, note = queue_from_reply(p, reply, did)
+        reply, cost = stream_claude(cmd, p.repo if chat else p.dev_wt, RUNS / f"design-{did}", DESIGN_LIVE[did],
+                                    DESIGN_PROCS, did, on_session)
+        reply, ids, note = (reply, [], "") if chat else queue_from_reply(p, reply, did)
         q("INSERT INTO design_msgs (design_id, role, text, ts, task_ids, note) VALUES (?,?,?,?,?,?)",
           (did, "assistant", reply, time.time(), json.dumps(ids), note))
     except Exception as e:
         q("INSERT INTO design_msgs (design_id, role, text, ts) VALUES (?,?,?,?)",
-          (did, "assistant", f"(design chat error: {e})", time.time()))
+          (did, "assistant", f"(chat error: {e})", time.time()))
     finally:
         DESIGN_PROCS.pop(did, None)
         DESIGN_LIVE.pop(did, None)
@@ -990,6 +1029,10 @@ def queue_from_reply(p, reply, did):
 
 TASK_CHAT_PROCS = {}  # task id -> Popen
 TASK_CHAT_LIVE = {}  # task id -> tool lines of the reply in progress; a key here means a reply is running
+PROJECT_CHAT_PROMPT = ("You are talking with the owner through the claude-ops dashboard, not a terminal. "
+                       "Nobody can answer permission prompts here: actions that would prompt are denied. "
+                       "When one is denied, say what you tried, and that they can run it themselves or "
+                       "continue this session in a terminal with `claude --resume`.")
 CHAT_STATES = ("review", "needs_input", "failed", "done", "cancelled")  # the worker is not running
 
 
@@ -1134,13 +1177,15 @@ class H(BaseHTTPRequestHandler):
             t["can_chat"] = bool(t["session_id"]) and t["state"] in CHAT_STATES
             return self.send(200, t)
         if path == "/api/designs":
-            return self.send(200, q("SELECT id,project,title,state,updated,cost FROM designs ORDER BY updated DESC"))
+            return self.send(200, q("SELECT id,project,title,state,updated,cost,kind FROM designs ORDER BY updated DESC"))
         m = re.fullmatch(r"/api/designs/(\d+)", path)
         if m:
             did = int(m.group(1))
             d = design(did)
             if not d:
-                return self.send(404, {"error": "no such design chat"})
+                return self.send(404, {"error": "no such chat"})
+            p = PROJECTS.get(d["project"])
+            d["cwd"] = str((p.repo if d["kind"] == "project" else p.dev_wt) if p else "")
             d["msgs"] = q("SELECT role,text,ts,task_ids FROM design_msgs WHERE design_id=? ORDER BY id", (did,))
             for msg in d["msgs"]:
                 ids = json.loads(msg["task_ids"] or "[]")
@@ -1179,7 +1224,10 @@ class H(BaseHTTPRequestHandler):
                     set_setting(k, b[k])
             return
         if path == "/api/projects":
-            out = detect_project(b["path"], b.get("name") or None)
+            if b.get("check"):  # what the path resolves to, and whether it can be created
+                repo = resolve_repo(b["path"])
+                return {"repo": str(repo), "exists": repo.exists(), "git": (repo / ".git").exists()}
+            out = detect_project(b["path"], b.get("name") or None, create=bool(b.get("create")))
             load_projects()
             return {"name": out.stem, "config": str(out)}
         if path == "/api/projects/reload":
@@ -1200,15 +1248,16 @@ class H(BaseHTTPRequestHandler):
             if not text:
                 raise ValueError("say something to start the chat")
             proj(b["project"])
-            did = q("INSERT INTO designs (project, title, created, updated) VALUES (?,?,?,?)",
-                    (b["project"], text.splitlines()[0][:80], time.time(), time.time()))
+            kind = "project" if b.get("kind") == "project" else "design"
+            did = q("INSERT INTO designs (project, title, created, updated, kind) VALUES (?,?,?,?,?)",
+                    (b["project"], text.splitlines()[0][:80], time.time(), time.time(), kind))
             design_say(did, text)
             return {"id": did}
         m = re.fullmatch(r"/api/designs/(\d+)/(say|stop|rename)", path)
         if m:
             did = int(m.group(1))
             if not design(did):
-                raise ValueError("no such design chat")
+                raise ValueError("no such chat")
             if m.group(2) == "say":
                 design_say(did, b["text"].strip())
             elif m.group(2) == "stop":
@@ -1320,7 +1369,7 @@ if __name__ == "__main__":
         wait_idle()
     elif cmd == "add-project" and args:
         PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
-        out = detect_project(args[0], args[1] if len(args) > 1 else None)
+        out = detect_project(str(Path(args[0]).expanduser().absolute()), args[1] if len(args) > 1 else None)
         print(f"wrote {out}. Review it, then reload projects on the dashboard (or restart the service).")
     elif cmd == "add" and len(args) >= 2 and args[0] == "-p":
         post("/api/tasks", {"project": args[1], "body": " ".join(args[2:]) or sys.stdin.read()})

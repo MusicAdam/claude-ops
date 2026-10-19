@@ -94,6 +94,8 @@ ul.ahead { margin: 6px 0 0; padding-left: 18px; max-height: 160px; overflow: aut
 .live { color: var(--muted); font: 12px var(--mono); margin: 0 0 14px; }
 .composer { position: sticky; bottom: 0; background: var(--bg); padding-top: 10px; }
 .composer textarea { min-height: 80px; }
+.chathead { color: var(--muted); font-size: 12px; margin: 0 0 12px; }
+.chathead code { font: 12px var(--mono); background: var(--panel); padding: 1px 4px; border-radius: 4px; user-select: all; }
 .ptag { font-size: 11px; padding: 1px 6px; border-radius: 4px; background: var(--chip); color: var(--muted); }
 .maincard h2 { display: flex; justify-content: space-between; align-items: center; }
 </style>
@@ -103,7 +105,7 @@ ul.ahead { margin: 6px 0 0; padding-left: 18px; max-height: 160px; overflow: aut
   <h1>Claude Ops</h1>
   <select id="proj" title="Project"></select>
   <button id="addproj" title="Add a git repository as a project">+ Project</button>
-  <div class="tabs"><button id="tab-queue" class="on">Queue</button><button id="tab-design">Design</button></div>
+  <div class="tabs"><button id="tab-queue" class="on">Queue</button><button id="tab-design">Design</button><button id="tab-chat" title="Talk to Claude in the project folder, as in a terminal">Chat</button></div>
   <span class="stat" id="hdr"></span>
   <span style="flex:1"></span>
   <label>Parallel <input id="par" type="number" min="1" max="8" style="width:58px"></label>
@@ -116,7 +118,7 @@ ul.ahead { margin: 6px 0 0; padding-left: 18px; max-height: 160px; overflow: aut
   <section>
     <div class="card hidden" id="addcard">
       <h2>Add project</h2>
-      <input id="ppath" placeholder="/Users/you/dev/repo" style="width:100%">
+      <input id="ppath" placeholder="Folder path, or a name for a new project" style="width:100%">
       <div class="row"><label>Name <input id="pname" placeholder="from folder" style="width:140px"></label>
         <button class="primary" id="padd">Add</button><button id="pcancel">Cancel</button></div>
       <div id="pmsg" class="muted" style="margin-top:8px;white-space:pre-wrap"></div>
@@ -143,13 +145,14 @@ ul.ahead { margin: 6px 0 0; padding-left: 18px; max-height: 160px; overflow: aut
 </main>
 <div id="designview" class="hidden">
   <section>
-    <button class="primary" id="newchat" style="width:100%;margin-bottom:12px">New design chat</button>
+    <button class="primary" id="newchat" style="width:100%;margin-bottom:12px"></button>
     <div id="chats"></div>
   </section>
   <section id="chat">
+    <div id="chathead" class="chathead"></div>
     <div id="msgs"></div>
     <div class="composer">
-      <textarea id="say" placeholder="Talk through an idea. When you agree on the work, ask Claude to queue it."></textarea>
+      <textarea id="say"></textarea>
       <div class="row"><label id="cprojwrap">Project <select id="cproj"></select></label><button class="primary" id="send">Send</button><span class="muted">⌘↩</span>
         <button id="stopchat" class="danger hidden">Stop</button><span id="chatmsg" class="err"></span></div>
     </div>
@@ -159,7 +162,7 @@ ul.ahead { margin: 6px 0 0; padding-left: 18px; max-height: 160px; overflow: aut
 const $ = s => document.querySelector(s);
 let state = null, sel = null, detail = null, typing = false, pf = "";
 try { pf = localStorage.getItem("ops-proj") || ""; } catch {}
-const P = name => (state.projects.find(p => p.name === name) || {name, title: name});
+const P = name => ((state && state.projects.find(p => p.name === name)) || {name, title: name});
 const inView = name => !pf || name === pf;
 const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 const ago = (t, now) => { if (!t) return ""; const s = Math.max(0, now - t);
@@ -349,36 +352,59 @@ $("#par").onchange = () => api("/api/settings", {max_parallel: Math.max(1, +$("#
 $("#model").onchange = () => api("/api/settings", {model: $("#model").value}).then(refresh);
 $("#proj").onchange = () => {
   pf = $("#proj").value; try { localStorage.setItem("ops-proj", pf); } catch {}
-  chatSel = null; chatData = null; chatKey = ""; refresh(); if (tab === "design") refreshDesign();
+  chatSel = null; chatData = null; chatKey = ""; chatSels = {}; refresh(); if (tab !== "queue") refreshDesign();
 };
 $("#addproj").onclick = () => { showTab("queue"); $("#addcard").classList.remove("hidden"); $("#ppath").focus(); };
 $("#pcancel").onclick = () => $("#addcard").classList.add("hidden");
-$("#padd").onclick = async () => {
+$("#padd").onclick = () => addProject(false);
+async function addProject(create) {
   try {
-    const r = await api("/api/projects", {path: $("#ppath").value.trim(), name: $("#pname").value.trim()});
+    const path = $("#ppath").value.trim();
+    if (!create) {
+      const c = await api("/api/projects", {path, check: true});
+      if (!c.exists) {
+        $("#pmsg").innerHTML = `<span class="mono">${esc(c.repo)}</span> does not exist.<div class="row"><button class="primary" id="pcreate">Create it as a new git repo</button></div>`;
+        $("#pcreate").onclick = () => addProject(true);
+        return;
+      }
+    }
+    const r = await api("/api/projects", {path, name: $("#pname").value.trim(), create});
     $("#pmsg").innerHTML = `Added <b>${esc(r.name)}</b>. Its config is <span class="mono">${esc(r.config)}</span>. Check the gate and app commands there, then press Reload below if you edit it.<div class="row"><button id="preload">Reload projects</button></div>`;
     $("#preload").onclick = () => api("/api/projects/reload", {}).then(refresh);
     pf = r.name; try { localStorage.setItem("ops-proj", pf); } catch {}
     refresh();
   } catch (e) { $("#pmsg").innerHTML = `<span class="err">${esc(e.message)}</span>`; }
-};
+}
 
-// ---------------------------------------------------------------- design tab
-let tab = "queue", chatSel = null, chatData = null, chatKey = "";
-try { tab = localStorage.getItem("ops-tab") || "queue"; chatSel = +localStorage.getItem("ops-chat") || null; } catch {}
-if (location.hash === "#design" || location.hash === "#queue") tab = location.hash.slice(1);
+// ---------------------------------------------------------------- design and chat tabs
+// Both show chats from /api/designs: the Design tab those of kind "design", the Chat tab those of kind "project".
+const KIND = {design: "design", chat: "project"};
+const TABTEXT = {
+  design: {button: "New design chat", none: "No design chats yet.",
+           say: "Talk through an idea. When you agree on the work, ask Claude to queue it.",
+           intro: "Start a design chat: describe an idea, a problem, or a feature you want. Claude reads the project docs and code, asks questions, and queues tasks when you agree."},
+  chat: {button: "New chat", none: "No chats yet.", say: "Ask or tell Claude anything about this project.",
+         intro: "Talk to Claude in the project folder, as if you ran claude there. It can read, edit and run commands in your checkout. Actions that would ask for permission are denied, since nobody can answer here."}};
+let tab = "queue", chatSel = null, chatData = null, chatKey = "", chatSels = {};
+try { tab = localStorage.getItem("ops-tab") || "queue"; chatSels = JSON.parse(localStorage.getItem("ops-chats") || "{}"); } catch {}
+if (["#design", "#queue", "#chat"].includes(location.hash)) tab = location.hash.slice(1);
 
 function showTab(t) {
   tab = t;
   try { localStorage.setItem("ops-tab", t); } catch {}
-  $("#tab-queue").className = t === "queue" ? "on" : "";
-  $("#tab-design").className = t === "design" ? "on" : "";
+  for (const k of ["queue", "design", "chat"]) $(`#tab-${k}`).className = t === k ? "on" : "";
   $("#queueview").classList.toggle("hidden", t !== "queue");
-  $("#designview").classList.toggle("hidden", t !== "design");
-  if (t === "design") refreshDesign();
+  $("#designview").classList.toggle("hidden", t === "queue");
+  if (t === "queue") return;
+  chatSel = chatSels[t] || null; chatData = null; chatKey = "";
+  $("#newchat").textContent = TABTEXT[t].button;
+  $("#say").placeholder = TABTEXT[t].say;
+  if (state) renderProjects();
+  refreshDesign();
 }
 $("#tab-queue").onclick = () => showTab("queue");
 $("#tab-design").onclick = () => showTab("design");
+$("#tab-chat").onclick = () => showTab("chat");
 
 function inline(s) {
   return s.replace(/`([^`]+)`/g, "<code>$1</code>").replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>")
@@ -414,17 +440,17 @@ function md(src) {
 async function refreshDesign() {
   let chats = [];
   try { chats = await api("/api/designs"); } catch { return; }
-  chats = chats.filter(c => inView(c.project));
+  chats = chats.filter(c => inView(c.project) && (c.kind || "design") === KIND[tab]);
   $("#chats").innerHTML = chats.map(c => `<div class="chatitem ${c.id === chatSel ? "sel" : ""}" data-id="${c.id}">
     <div>${esc(c.title)}</div><div class="sub">${pf ? "" : `<span class="ptag">${esc(P(c.project).title)}</span> `}${c.state === "thinking" ? '<span class="pulse s-running">replying</span> · ' : ""}${ago(c.updated, Date.now() / 1000)} ago${c.cost ? ` · $${c.cost.toFixed(2)}` : ""}</div></div>`).join("")
-    || '<div class="muted">No design chats yet.</div>';
+    || `<div class="muted">${TABTEXT[tab].none}</div>`;
   document.querySelectorAll(".chatitem").forEach(el => el.onclick = () => { selectChat(+el.dataset.id); });
   if (chatSel) loadChat(); else renderChat();
 }
 function selectChat(id) {
   chatSel = id; chatKey = "";
   if (state) renderProjects();
-  try { localStorage.setItem("ops-chat", id || ""); } catch {}
+  chatSels[tab] = id; try { localStorage.setItem("ops-chats", JSON.stringify(chatSels)); } catch {}
   refreshDesign();
 }
 async function loadChat() {
@@ -440,7 +466,9 @@ function renderChat() {
   if (key === chatKey) return;
   chatKey = key;
   const box = $("#msgs"), stick = box.scrollTop + box.clientHeight >= box.scrollHeight - 40;
-  if (!d) { box.innerHTML = '<div class="muted" style="padding:20px 0">Start a design chat: describe an idea, a problem, or a feature you want. Claude reads the project docs and code, asks questions, and queues tasks when you agree.</div>'; return; }
+  $("#chathead").innerHTML = d && d.kind === "project" ? `Runs in <code>${esc(d.cwd)}</code>`
+    + (d.session_id ? ` · continue in a terminal: <code>cd ${esc(d.cwd)} && claude --resume ${esc(d.session_id)}</code>` : "") : "";
+  if (!d) { box.innerHTML = `<div class="muted" style="padding:20px 0">${TABTEXT[tab].intro}</div>`; return; }
   box.innerHTML = d.msgs.map(m => m.role === "user"
       ? `<div class="msg user">${esc(m.text.replace(/^\[ops:[^\n]*\]\n\n/, ""))}</div>`
       : `<div class="msg">${md(m.text)}${m.tasks.length ? `<div class="chips">${m.tasks.map(t => `<button class="chip" data-task="${t.id}">#${t.id} ${esc(t.title || "")} · ${LABEL[t.state] || t.state}</button>`).join("")}</div>` : ""}</div>`).join("")
@@ -456,7 +484,7 @@ async function sendChat() {
     else {
       const project = pf || $("#cproj").value;
       if (!project) throw new Error("pick a project");
-      const r = await api("/api/designs", {project, text}); chatSel = r.id; try { localStorage.setItem("ops-chat", r.id); } catch {} }
+      const r = await api("/api/designs", {project, text, kind: KIND[tab]}); selectChat(r.id); }
     $("#say").value = ""; $("#chatmsg").textContent = ""; chatKey = ""; refreshDesign();
   } catch (e) { $("#chatmsg").textContent = e.message; }
 }
@@ -467,7 +495,7 @@ $("#newchat").onclick = () => { selectChat(null); chatData = null; renderProject
 
 showTab(tab);
 refresh(); setInterval(refresh, 3000);
-setInterval(() => { if (tab === "design") refreshDesign(); }, 1500);
+setInterval(() => { if (tab !== "queue") refreshDesign(); }, 1500);
 </script>
 </body>
 </html>
