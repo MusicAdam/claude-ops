@@ -24,7 +24,7 @@ header h1 { font-size: 16px; margin: 0; }
 .stat b { color: var(--ink); }
 main { display: grid; grid-template-columns: 1fr minmax(340px, 460px); gap: 20px; padding: 20px;
        max-width: 1500px; margin: 0 auto; align-items: start; }
-#left { position: sticky; top: 76px; max-height: calc(100vh - 96px); overflow: auto; }
+#left { position: sticky; top: calc(var(--hdr-h, 64px) + 12px); max-height: calc(100vh - var(--hdr-h, 64px) - 32px); overflow: auto; }
 @media (max-width: 900px) { main { grid-template-columns: 1fr; padding: 16px; }
                             #left { position: static; max-height: none; overflow: visible; } }
 .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px; margin-bottom: 20px; }
@@ -608,6 +608,8 @@ $("#say").onkeydown = e => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) 
 $("#stopchat").onclick = () => api(`/api/designs/${chatSel}/stop`, {}).then(refreshDesign);
 $("#newchat").onclick = () => { selectChat(null); chatData = null; renderProjects(); $("#say").focus(); };
 
+// The header wraps to two lines on narrow windows or when it gains buttons; keep #left just below it.
+new ResizeObserver(() => document.documentElement.style.setProperty("--hdr-h", $("header").offsetHeight + "px")).observe($("header"));
 showTab(tab);
 refresh(); setInterval(refresh, 3000);
 setInterval(() => { if (tab !== "queue") refreshDesign(); }, 1500);
