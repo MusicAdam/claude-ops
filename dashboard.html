@@ -68,11 +68,37 @@ pre { white-space: pre-wrap; margin: 0; }
 details summary { cursor: pointer; color: var(--muted); margin: 10px 0 6px; }
 .err { color: var(--bad); }
 ul.ahead { margin: 6px 0 0; padding-left: 18px; max-height: 160px; overflow: auto; }
+.tabs { display: flex; gap: 4px; }
+.tabs button { background: none; border-color: transparent; color: var(--muted); }
+.tabs button.on { background: var(--chip); border-color: var(--line); color: var(--ink); font-weight: 600; }
+.hidden { display: none !important; }
+#designview { display: grid; grid-template-columns: 260px 1fr; gap: 20px; padding: 20px; max-width: 1500px; margin: 0 auto; }
+@media (max-width: 900px) { #designview { grid-template-columns: 1fr; padding: 16px; } }
+.chatitem { padding: 8px 10px; border-radius: 6px; cursor: pointer; border: 1px solid transparent; }
+.chatitem.sel { background: var(--panel); border-color: var(--accent); }
+.chatitem .sub { color: var(--muted); font-size: 12px; }
+#chat { display: flex; flex-direction: column; min-height: calc(100vh - 110px); }
+#msgs { flex: 1; overflow: auto; padding-bottom: 10px; }
+.msg { max-width: 820px; margin: 0 0 14px; padding: 10px 14px; border-radius: 10px; border: 1px solid var(--line); background: var(--panel); }
+.msg.user { margin-left: auto; background: var(--chip); max-width: 640px; white-space: pre-wrap; }
+.msg p { margin: 0 0 8px; } .msg p:last-child { margin: 0; }
+.msg h1, .msg h2, .msg h3, .msg h4 { font-size: 14px; margin: 12px 0 6px; }
+.msg ul, .msg ol { margin: 0 0 8px; padding-left: 20px; }
+.msg pre { background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 8px; overflow: auto; font: 12px var(--mono); margin: 0 0 8px; }
+.msg code { font: 12px var(--mono); background: var(--bg); padding: 1px 4px; border-radius: 4px; }
+.msg table { border-collapse: collapse; margin: 0 0 8px; font-size: 13px; }
+.msg td, .msg th { border: 1px solid var(--line); padding: 4px 8px; text-align: left; vertical-align: top; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+.chip { font-size: 12px; padding: 4px 10px; border-radius: 99px; border: 1px solid var(--accent); color: var(--accent); cursor: pointer; background: none; }
+.live { color: var(--muted); font: 12px var(--mono); margin: 0 0 14px; }
+.composer { position: sticky; bottom: 0; background: var(--bg); padding-top: 10px; }
+.composer textarea { min-height: 80px; }
 </style>
 </head>
 <body>
 <header>
   <h1>Disk Game Ops</h1>
+  <div class="tabs"><button id="tab-queue" class="on">Queue</button><button id="tab-design">Design</button></div>
   <span class="stat" id="hdr"></span>
   <span style="flex:1"></span>
   <label>Parallel <input id="par" type="number" min="1" max="8" style="width:58px"></label>
@@ -81,7 +107,7 @@ ul.ahead { margin: 6px 0 0; padding-left: 18px; max-height: 160px; overflow: aut
     <option value="sonnet">sonnet</option><option value="fable">fable</option></select></label>
   <button id="pause"></button>
 </header>
-<main>
+<main id="queueview">
   <section>
     <div class="card">
       <h2>New task</h2>
@@ -94,14 +120,14 @@ ul.ahead { margin: 6px 0 0; padding-left: 18px; max-height: 160px; overflow: aut
       <div class="row"><button class="primary" id="submit">Queue task</button> <span class="muted">⌘↩</span><span id="formmsg" class="err"></span></div>
     </div>
 
-    <div class="card" id="staging">
-      <h2>Staging</h2>
-      <div id="stg"></div>
+    <div class="card" id="maincard">
+      <h2>Main · the golden version</h2>
+      <div id="mainst"></div>
       <div class="row">
-        <button class="primary" id="play-stg">Play staging</button>
-        <button id="promote">Promote dev → staging</button>
+        <button class="primary" id="play-main">Play main</button>
+        <button id="promote">Promote dev → main</button>
       </div>
-      <div id="stgmsg" class="muted" style="margin-top:8px;white-space:pre-wrap"></div>
+      <div id="mainmsg" class="muted" style="margin-top:8px;white-space:pre-wrap"></div>
     </div>
 
     <div id="list"></div>
@@ -110,6 +136,20 @@ ul.ahead { margin: 6px 0 0; padding-left: 18px; max-height: 160px; overflow: aut
     <div class="card" id="detail"><span class="muted">Select a task to see what the worker is doing.</span></div>
   </section>
 </main>
+<div id="designview" class="hidden">
+  <section>
+    <button class="primary" id="newchat" style="width:100%;margin-bottom:12px">New design chat</button>
+    <div id="chats"></div>
+  </section>
+  <section id="chat">
+    <div id="msgs"></div>
+    <div class="composer">
+      <textarea id="say" placeholder="Talk through an idea. When you agree on the work, ask Claude to queue it."></textarea>
+      <div class="row"><button class="primary" id="send">Send</button><span class="muted">⌘↩</span>
+        <button id="stopchat" class="danger hidden">Stop</button><span id="chatmsg" class="err"></span></div>
+    </div>
+  </section>
+</div>
 <script>
 const $ = s => document.querySelector(s);
 let state = null, sel = null, detail = null, typing = false;
@@ -129,14 +169,14 @@ async function api(path, body) {
 
 async function refresh() {
   try { state = await api("/api/state"); } catch (e) { $("#hdr").innerHTML = `<span class="err">daemon not reachable</span>`; return; }
-  renderHeader(); renderStaging(); renderList();
+  renderHeader(); renderMain(); renderList();
   if (sel) loadDetail(sel);
 }
 
 function renderHeader() {
   const s = state.settings, ts = state.tasks;
   const n = st => ts.filter(t => st.includes(t.state)).length;
-  const cost = ts.reduce((a, t) => a + (t.cost || 0), 0);
+  const cost = ts.reduce((a, t) => a + (t.cost || 0), 0) + (state.design_cost || 0);
   $("#hdr").innerHTML = `<b>${state.active}</b>/${s.max_parallel} working · <b>${n(["queued"])}</b> queued · ` +
     `<b>${n(["needs_input","review","failed"])}</b> need you · $${cost.toFixed(2)} spent`;
   if (document.activeElement !== $("#par")) $("#par").value = s.max_parallel;
@@ -145,16 +185,18 @@ function renderHeader() {
   $("#pause").className = s.paused === "1" ? "primary" : "";
 }
 
-function renderStaging() {
-  const g = state.staging;
-  $("#stg").innerHTML = `<div>Staging build: <span class="mono">${esc(g.staged) || "none yet"}</span>` +
-    `${g.running ? ' · <span class="s-running">running now</span>' : ""}</div>` +
-    `<div>Latest dev: <span class="mono">${esc(g.dev)}</span> · ${!g.staged ? "not built yet: promote to build it" : g.ahead.length ? `${g.ahead.length} merge(s) not on staging` : "staging is up to date"}</div>` +
+function renderMain() {
+  const g = state.main;
+  $("#mainst").innerHTML = `<div>main: <span class="mono">${esc(g.main)}</span>` +
+    `${g.running ? ' · <span class="s-running">playing now</span>' : ""}</div>` +
+    (g.stale ? `<div class="s-review">The build is of ${esc(g.built)}, older than main. Promote to rebuild.</div>` : "") +
+    (!g.has_build ? `<div class="s-review">Not built yet. Promote to build it.</div>` : "") +
+    `<div>dev: <span class="mono">${esc(g.dev)}</span> · ${g.ahead.length ? `${g.ahead.length} merge(s) waiting to promote` : "nothing waiting"}</div>` +
     (g.ahead.length ? `<ul class="ahead mono">${g.ahead.map(l => `<li>${esc(l)}</li>`).join("")}</ul>` : "");
-  $("#play-stg").disabled = !g.built;
-  $("#promote").disabled = g.state === "building" || (!g.ahead.length && g.built);
-  $("#promote").textContent = g.state === "building" ? "Building…" : "Promote dev → staging";
-  $("#stgmsg").innerHTML = g.state === "failed" ? `<span class="err">${esc(g.msg)}</span>` : esc(g.msg);
+  $("#play-main").disabled = !g.has_build;
+  $("#promote").disabled = g.state === "building" || (!g.ahead.length && g.has_build && !g.stale);
+  $("#promote").textContent = g.state === "building" ? "Building…" : "Promote dev → main";
+  $("#mainmsg").innerHTML = g.state === "failed" ? `<span class="err">${esc(g.msg)}</span>` : esc(g.msg);
 }
 
 function renderList() {
@@ -250,9 +292,109 @@ $("#body").onkeydown = e => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey))
 $("#pause").onclick = () => api("/api/settings", {paused: state.settings.paused === "1" ? "0" : "1"}).then(refresh);
 $("#par").onchange = () => api("/api/settings", {max_parallel: Math.max(1, +$("#par").value || 1)}).then(refresh);
 $("#model").onchange = () => api("/api/settings", {model: $("#model").value}).then(refresh);
-$("#promote").onclick = () => api("/api/staging/promote", {}).then(refresh).catch(e => $("#stgmsg").textContent = e.message);
-$("#play-stg").onclick = () => api("/api/staging/play", {}).catch(e => $("#stgmsg").textContent = e.message);
+$("#promote").onclick = () => api("/api/main/promote", {}).then(refresh).catch(e => $("#mainmsg").innerHTML = `<span class="err">${esc(e.message)}</span>`);
+$("#play-main").onclick = () => api("/api/main/play", {}).catch(e => $("#mainmsg").innerHTML = `<span class="err">${esc(e.message)}</span>`);
+
+// ---------------------------------------------------------------- design tab
+let tab = "queue", chatSel = null, chatData = null, chatKey = "";
+try { tab = localStorage.getItem("ops-tab") || "queue"; chatSel = +localStorage.getItem("ops-chat") || null; } catch {}
+if (location.hash === "#design" || location.hash === "#queue") tab = location.hash.slice(1);
+
+function showTab(t) {
+  tab = t;
+  try { localStorage.setItem("ops-tab", t); } catch {}
+  $("#tab-queue").className = t === "queue" ? "on" : "";
+  $("#tab-design").className = t === "design" ? "on" : "";
+  $("#queueview").classList.toggle("hidden", t !== "queue");
+  $("#designview").classList.toggle("hidden", t !== "design");
+  if (t === "design") refreshDesign();
+}
+$("#tab-queue").onclick = () => showTab("queue");
+$("#tab-design").onclick = () => showTab("design");
+
+function inline(s) {
+  return s.replace(/`([^`]+)`/g, "<code>$1</code>").replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>")
+          .replace(/(^|[^*])\*([^*\n]+)\*/g, "$1<i>$2</i>");
+}
+function md(src) {
+  const out = [], lines = esc(src).split("\n");
+  for (let i = 0; i < lines.length; i++) {
+    const l = lines[i];
+    if (l.startsWith("```")) { const buf = []; while (++i < lines.length && !lines[i].startsWith("```")) buf.push(lines[i]); out.push(`<pre>${buf.join("\n")}</pre>`); continue; }
+    if (/^\s*\|/.test(l)) {
+      const rows = []; while (i < lines.length && /^\s*\|/.test(lines[i])) rows.push(lines[i++]); i--;
+      const cells = r => r.trim().replace(/^\||\|$/g, "").split("|").map(c => inline(c.trim()));
+      const body = rows.filter(r => !/^\s*\|[\s:|-]+\|\s*$/.test(r));
+      out.push("<table>" + body.map((r, k) => "<tr>" + cells(r).map(c => k ? `<td>${c}</td>` : `<th>${c}</th>`).join("") + "</tr>").join("") + "</table>");
+      continue;
+    }
+    let m;
+    if ((m = l.match(/^(#{1,4})\s+(.*)/))) { out.push(`<h4>${inline(m[2])}</h4>`); continue; }
+    if (/^\s*([-*]|\d+\.)\s+/.test(l)) {
+      const ordered = /^\s*\d+\./.test(l), items = [];
+      while (i < lines.length && /^\s*([-*]|\d+\.)\s+/.test(lines[i])) items.push(lines[i++].replace(/^\s*([-*]|\d+\.)\s+/, "")); i--;
+      out.push(`<${ordered ? "ol" : "ul"}>${items.map(x => `<li>${inline(x)}</li>`).join("")}</${ordered ? "ol" : "ul"}>`);
+      continue;
+    }
+    if (!l.trim()) continue;
+    const para = [l]; while (i + 1 < lines.length && lines[i + 1].trim() && !/^(```|#|\s*\||\s*([-*]|\d+\.)\s)/.test(lines[i + 1])) para.push(lines[++i]);
+    out.push(`<p>${inline(para.join("<br>"))}</p>`);
+  }
+  return out.join("");
+}
+
+async function refreshDesign() {
+  let chats = [];
+  try { chats = await api("/api/designs"); } catch { return; }
+  $("#chats").innerHTML = chats.map(c => `<div class="chatitem ${c.id === chatSel ? "sel" : ""}" data-id="${c.id}">
+    <div>${esc(c.title)}</div><div class="sub">${c.state === "thinking" ? '<span class="pulse s-running">replying</span> · ' : ""}${ago(c.updated, Date.now() / 1000)} ago${c.cost ? ` · $${c.cost.toFixed(2)}` : ""}</div></div>`).join("")
+    || '<div class="muted">No design chats yet.</div>';
+  document.querySelectorAll(".chatitem").forEach(el => el.onclick = () => { selectChat(+el.dataset.id); });
+  if (chatSel) loadChat(); else renderChat();
+}
+function selectChat(id) {
+  chatSel = id; chatKey = "";
+  try { localStorage.setItem("ops-chat", id || ""); } catch {}
+  refreshDesign();
+}
+async function loadChat() {
+  try { chatData = await api(`/api/designs/${chatSel}`); } catch { chatData = null; chatSel = null; }
+  renderChat();
+}
+function renderChat() {
+  const d = chatData && chatSel === chatData.id ? chatData : null;
+  const thinking = d && d.state === "thinking";
+  const key = d ? `${d.id}:${d.msgs.length}:${d.state}:${d.live.length}:${JSON.stringify(d.msgs.map(m => m.tasks.map(t => t.state)))}` : "none";
+  $("#stopchat").classList.toggle("hidden", !thinking);
+  $("#send").disabled = !!thinking;
+  if (key === chatKey) return;
+  chatKey = key;
+  const box = $("#msgs"), stick = box.scrollTop + box.clientHeight >= box.scrollHeight - 40;
+  if (!d) { box.innerHTML = '<div class="muted" style="padding:20px 0">Start a design chat: describe an idea, a problem with the game, or a feature you want. Claude reads the design doc and code, asks questions, and queues tasks when you agree.</div>'; return; }
+  box.innerHTML = d.msgs.map(m => m.role === "user"
+      ? `<div class="msg user">${esc(m.text.replace(/^\[ops:[^\n]*\]\n\n/, ""))}</div>`
+      : `<div class="msg">${md(m.text)}${m.tasks.length ? `<div class="chips">${m.tasks.map(t => `<button class="chip" data-task="${t.id}">#${t.id} ${esc(t.title || "")} · ${LABEL[t.state] || t.state}</button>`).join("")}</div>` : ""}</div>`).join("")
+    + (thinking ? `<div class="live"><span class="pulse s-running">Claude is thinking</span>${d.live.map(l => `<div>  ${esc(l)}</div>`).join("")}</div>` : "");
+  box.querySelectorAll("[data-task]").forEach(b => b.onclick = () => { sel = +b.dataset.task; showTab("queue"); refresh(); });
+  if (stick || thinking) box.scrollTop = box.scrollHeight;
+}
+async function sendChat() {
+  const text = $("#say").value.trim();
+  if (!text) return;
+  try {
+    if (chatSel) await api(`/api/designs/${chatSel}/say`, {text});
+    else { const r = await api("/api/designs", {text}); chatSel = r.id; try { localStorage.setItem("ops-chat", r.id); } catch {} }
+    $("#say").value = ""; $("#chatmsg").textContent = ""; chatKey = ""; refreshDesign();
+  } catch (e) { $("#chatmsg").textContent = e.message; }
+}
+$("#send").onclick = sendChat;
+$("#say").onkeydown = e => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) sendChat(); };
+$("#stopchat").onclick = () => api(`/api/designs/${chatSel}/stop`, {}).then(refreshDesign);
+$("#newchat").onclick = () => { selectChat(null); chatData = null; $("#say").focus(); };
+
+showTab(tab);
 refresh(); setInterval(refresh, 3000);
+setInterval(() => { if (tab === "design") refreshDesign(); }, 1500);
 </script>
 </body>
 </html>

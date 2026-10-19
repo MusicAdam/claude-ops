@@ -5,11 +5,10 @@
   opsd.py add "text..."    queue a task through the running daemon
 
 Layout (all outside the repo except git worktrees, which share its .git):
-  ~/dev/diskgame              your checkout (main). The queue never edits it, except a
-                              fast-forward of main on promote when it is clean.
+  ~/dev/diskgame              your checkout of main. The queue only fast-forwards it, on Promote.
   ~/dev/diskgame-wt/dev       integration worktree on branch `dev`. Finished tasks merge here.
   ~/dev/diskgame-wt/t<id>     one worktree per running task, branch task/<id>-<slug>.
-  ~/dev/diskgame-stg          staging worktree (detached). Its build only changes on Promote.
+  ~/dev/diskgame-wt/main      build of main, the golden version (detached). Changes only on Promote.
 """
 import json, os, re, shutil, signal, sqlite3, subprocess, sys, threading, time
 import xml.etree.ElementTree as ET
@@ -23,7 +22,8 @@ OPS = Path(__file__).resolve().parent
 REPO = Path(os.environ.get("OPS_REPO", HOME / "dev/diskgame"))
 WT = Path(os.environ.get("OPS_WORKTREES", HOME / "dev/diskgame-wt"))
 DEV_WT = WT / "dev"
-STG_WT = Path(os.environ.get("OPS_STAGING", HOME / "dev/diskgame-stg"))
+MAIN_WT = WT / "main"
+OLD_STG_WT = HOME / "dev/diskgame-stg"  # where the main build lived when it was called staging
 RUNS = OPS / "runs"
 DB = OPS / "queue.db"
 HOST = os.environ.get("OPS_HOST", "127.0.0.1")
@@ -36,10 +36,10 @@ MAX_FIX_ROUNDS = 3  # times a worker is sent back after a conflict or failed gat
 ACTIVE = ("running", "gating", "merging")
 DBL = threading.RLock()
 MERGE_LOCK = threading.Lock()
-STAGE_LOCK = threading.Lock()
+MAIN_LOCK = threading.Lock()
 PROCS = {}  # task id -> current Popen (claude or unity), for cancel
 THREADS = {}  # task id -> pipeline thread
-STAGING = {"state": "idle", "msg": ""}
+MAIN = {"state": "idle", "msg": ""}  # promote progress
 
 
 # ---------------------------------------------------------------- storage
@@ -70,9 +70,17 @@ def init_db():
     if "pid" not in {r["name"] for r in q("PRAGMA table_info(tasks)")}:
         q("ALTER TABLE tasks ADD COLUMN pid INTEGER")
     q("CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY, task_id INTEGER, ts REAL, text TEXT)")
+    q("""CREATE TABLE IF NOT EXISTS designs (id INTEGER PRIMARY KEY, title TEXT, session_id TEXT,
+        state TEXT DEFAULT 'idle', created REAL, updated REAL, cost REAL DEFAULT 0)""")
+    q("""CREATE TABLE IF NOT EXISTS design_msgs (id INTEGER PRIMARY KEY, design_id INTEGER, role TEXT,
+        text TEXT, ts REAL, task_ids TEXT, note TEXT)""")
+    q("UPDATE designs SET state='idle' WHERE state='thinking'")  # a reply cut off by a restart
     q("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)")
-    for k, v in {"max_parallel": "3", "paused": "0", "model": "", "staged": ""}.items():
+    for k, v in {"max_parallel": "3", "paused": "0", "model": "", "main_built": ""}.items():
         q("INSERT OR IGNORE INTO settings VALUES (?,?)", (k, v))
+    if setting("staged"):  # renamed from staging
+        set_setting("main_built", setting("staged"))
+        q("DELETE FROM settings WHERE key='staged'")
 
 
 def setting(k):
@@ -131,7 +139,7 @@ def rev(ref):
 
 def clone_library(dest):
     """Copy a warm Unity Library (APFS clone, near-instant) so a new worktree skips the full import."""
-    for src in (STG_WT / "Library", REPO / "Library"):
+    for src in (MAIN_WT / "Library", REPO / "Library"):
         if src.is_dir() and not (dest / "Library").exists():
             subprocess.run(["cp", "-cR", str(src), str(dest / "Library")], capture_output=True)
             return
@@ -149,9 +157,13 @@ def bootstrap():
         exclude.parent.mkdir(exist_ok=True)
         with open(exclude, "a") as f:
             f.write("\n.ops-result.json\n")
-    if not STG_WT.exists():
-        git("worktree", "add", "--detach", str(STG_WT), "main")
-        clone_library(STG_WT)
+    if OLD_STG_WT.exists() and not MAIN_WT.exists():
+        git("worktree", "move", str(OLD_STG_WT), str(MAIN_WT))
+    if git("rev-parse", "--verify", "-q", "refs/heads/stg", check=False):
+        git("branch", "-D", "stg")
+    if not MAIN_WT.exists():
+        git("worktree", "add", "--detach", str(MAIN_WT), "main")
+        clone_library(MAIN_WT)
 
 
 def kill_players(path):
@@ -232,7 +244,7 @@ def run_claude(tid, prompt):
 def unity(tid, step, cwd):
     """Run scripts/unity.sh <step> in cwd. Returns (ok, detail)."""
     upd(tid, phase=f"gate: {step}") if tid else None
-    log = RUNS / str(tid or "staging") / "gate.log"
+    log = RUNS / str(tid or "main") / "gate.log"
     log.parent.mkdir(parents=True, exist_ok=True)
     with open(log, "a") as f:
         f.write(f"\n==== {time.ctime()} {step} in {cwd}\n")
@@ -468,47 +480,185 @@ def recover():
         ev(t["id"], "requeued after daemon restart")
 
 
-# ---------------------------------------------------------------- staging
+# ---------------------------------------------------------------- main (the golden build)
 
-def staging_info():
-    staged = setting("staged")
-    dev = rev("dev")
-    ahead = []
-    if staged:
-        ahead = git("log", "--first-parent", "--format=%h %s", f"{staged}..dev").splitlines()[:30]
-    return {**STAGING, "staged": staged[:8], "dev": dev[:8], "ahead": ahead,
-            "running": running_from(STG_WT), "built": (STG_WT / APP_REL).exists()}
+def main_info():
+    built = setting("main_built")
+    main, dev = rev("main"), rev("dev")
+    ahead = git("log", "--first-parent", "--format=%h %s", "main..dev").splitlines()[:30]
+    return {**MAIN, "main": main[:8], "built": built[:8], "dev": dev[:8], "ahead": ahead,
+            "stale": bool(built) and built != main, "running": running_from(MAIN_WT),
+            "has_build": (MAIN_WT / APP_REL).exists()}
+
+
+def promote_blocker():
+    """Why main cannot move to dev right now, or None. Checked before anything changes."""
+    if running_from(MAIN_WT):
+        return "Quit the main build first, then promote again."
+    if git("branch", "--show-current", check=False) != "main":
+        return f"Your checkout {REPO} is not on main. Switch it back to main, then promote."
+    if git("status", "--porcelain", "-uno", check=False):
+        return f"Your checkout {REPO} has uncommitted changes. Commit or stash them, then promote."
+    return None
 
 
 def promote():
-    if not STAGE_LOCK.acquire(blocking=False):
+    if not MAIN_LOCK.acquire(blocking=False):
         return
     try:
-        if running_from(STG_WT):
-            STAGING.update(state="failed", msg="Quit the staging game first, then promote again.")
-            return
-        commit = rev("dev")
-        STAGING.update(state="building", msg=f"building {commit[:8]}")
-        git("checkout", "--detach", commit, cwd=STG_WT)
-        git("branch", "-f", "stg", commit)
-        ok, detail = unity(None, "build", STG_WT)
+        why = promote_blocker()
+        if why:
+            return MAIN.update(state="failed", msg=why)
+        with MERGE_LOCK:
+            # Commits made straight to main (outside the queue) come along into dev first.
+            if subprocess.run(["git", "merge-base", "--is-ancestor", "main", "dev"], cwd=REPO).returncode:
+                r = subprocess.run(["git", "merge", "--no-ff", "-m", "Merge main into dev", "main"],
+                                   cwd=DEV_WT, capture_output=True, text=True)
+                if r.returncode:
+                    subprocess.run(["git", "merge", "--abort"], cwd=DEV_WT, capture_output=True)
+                    return MAIN.update(state="failed", msg="main has commits that conflict with dev:\n"
+                                       + r.stdout[-1500:] + r.stderr[-1500:])
+            commit = rev("dev")
+        MAIN.update(state="building", msg=f"building {commit[:8]}")
+        app, prev = MAIN_WT / APP_REL, MAIN_WT / "Builds" / "previous.app"
+        shutil.rmtree(prev, ignore_errors=True)
+        if app.exists():
+            subprocess.run(["cp", "-cR", str(app), str(prev)], capture_output=True)
+        old = git("rev-parse", "HEAD", cwd=MAIN_WT)
+        git("checkout", "--detach", commit, cwd=MAIN_WT)
+        ok, detail = unity(None, "build", MAIN_WT)
         if not ok:
-            STAGING.update(state="failed", msg=detail[:2000])
-            return
-        set_setting("staged", commit)
-        msg = f"staging is {commit[:8]}"
-        cur = git("branch", "--show-current", check=False)
-        if cur == "main" and not git("status", "--porcelain", "-uno", check=False):
-            r = subprocess.run(["git", "merge", "--ff-only", "dev"], cwd=REPO, capture_output=True, text=True)
-            msg += "; main fast-forwarded" if r.returncode == 0 else "; main not fast-forwarded (diverged)"
-        else:
-            msg += "; main left alone (your checkout is not clean or not on main)"
-        STAGING.update(state="idle", msg=msg)
-        notify("Disk Game staging updated", msg)
+            if old:
+                git("checkout", "--detach", old, cwd=MAIN_WT, check=False)
+            if prev.exists():
+                shutil.rmtree(app, ignore_errors=True)
+                prev.rename(app)
+            return MAIN.update(state="failed", msg="Build failed; main and its build are unchanged.\n" + detail[:2000])
+        r = subprocess.run(["git", "merge", "--ff-only", commit], cwd=REPO, capture_output=True, text=True)
+        if r.returncode:
+            return MAIN.update(state="failed", msg="Built, but main could not fast-forward:\n" + r.stderr[-1000:])
+        set_setting("main_built", commit)
+        shutil.rmtree(prev, ignore_errors=True)
+        MAIN.update(state="idle", msg=f"main is now {commit[:8]}")
+        notify("Disk Game main updated", f"main is now {commit[:8]}")
     except Exception as e:
-        STAGING.update(state="failed", msg=str(e))
+        MAIN.update(state="failed", msg=str(e))
     finally:
-        STAGE_LOCK.release()
+        MAIN_LOCK.release()
+
+
+# ---------------------------------------------------------------- design chats
+
+DESIGN_TOOLS = "Read,Grep,Glob,WebSearch,WebFetch,Bash(git log:*),Bash(git show:*),Bash(git diff:*),Bash(ls:*)"
+DESIGN_PROCS = {}  # design id -> Popen
+DESIGN_LIVE = {}  # design id -> tool lines of the turn in progress
+QUEUE_BLOCK = re.compile(r"```queue[ \t]*\n(.*?)```", re.S)
+
+
+def design(did):
+    return q("SELECT * FROM designs WHERE id=?", (did,), one=True)
+
+
+def design_say(did, text):
+    """Start one design-chat turn in the background."""
+    d = design(did)
+    if d["state"] == "thinking":
+        raise ValueError("Claude is still replying")
+    q("INSERT INTO design_msgs (design_id, role, text, ts) VALUES (?,?,?,?)", (did, "user", text, time.time()))
+    q("UPDATE designs SET state='thinking', updated=? WHERE id=?", (time.time(), did))
+    threading.Thread(target=design_turn, args=(did, text), daemon=True).start()
+
+
+def ops_note(did):
+    """Context the dashboard adds to each user message: the queue, and what the last queue block did."""
+    live = q("SELECT id,state,title FROM tasks WHERE state NOT IN ('done','cancelled') ORDER BY id")
+    parts = ["queue: " + ("; ".join(f"#{t['id']} {t['state']} {t['title']}" for t in live[:25]) or "empty")]
+    last = q("SELECT note FROM design_msgs WHERE design_id=? AND role='assistant' ORDER BY id DESC LIMIT 1",
+             (did,), one=True)
+    if last and last["note"]:
+        parts.append(last["note"])
+    return "[ops: " + " | ".join(parts) + "]\n\n"
+
+
+def design_turn(did, text):
+    d = design(did)
+    DESIGN_LIVE[did] = []
+    cmd = [CLAUDE, "-p", ops_note(did) + text, "--output-format", "stream-json", "--verbose",
+           "--permission-mode", "dontAsk", "--permission-prompts", "none", "--allowedTools", DESIGN_TOOLS,
+           "--strict-mcp-config", "--name", f"diskgame design #{did}",
+           "--append-system-prompt", (OPS / "design_prompt.md").read_text().format(dev_wt=DEV_WT)]
+    if d["session_id"]:
+        cmd += ["--resume", d["session_id"]]
+    if setting("model"):
+        cmd += ["--model", setting("model")]
+    log_dir = RUNS / f"design-{did}"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    texts, cost, err_tail = [], 0.0, ""
+    try:
+        with open(log_dir / "claude.jsonl", "a") as log, open(log_dir / "claude.err", "a+") as err:
+            p = subprocess.Popen(cmd, cwd=DEV_WT, stdout=subprocess.PIPE, stderr=err, text=True,
+                                 start_new_session=True)
+            DESIGN_PROCS[did] = p
+            for line in p.stdout:
+                log.write(line)
+                log.flush()
+                try:
+                    e = json.loads(line)
+                except ValueError:
+                    continue
+                if e.get("session_id") and e["session_id"] != design(did)["session_id"]:
+                    q("UPDATE designs SET session_id=? WHERE id=?", (e["session_id"], did))
+                if e.get("type") == "assistant" and not e.get("parent_tool_use_id"):
+                    for c in e.get("message", {}).get("content", []):
+                        if c.get("type") == "text" and c.get("text", "").strip():
+                            texts.append(c["text"].strip())
+                        elif c.get("type") == "tool_use":
+                            texts.clear()  # text before a tool call is narration; the reply comes after
+                            DESIGN_LIVE[did].append(tool_line(c.get("name"), c.get("input") or {}))
+                elif e.get("type") == "result":
+                    cost += e.get("total_cost_usd") or 0
+            p.wait()
+            err.seek(0)
+            err_tail = err.read()[-1200:]
+        reply = "\n\n".join(texts)
+        if not reply:
+            reply = f"(no reply; claude exited {p.returncode})\n{err_tail.strip()}".strip()
+        reply, ids, note = queue_from_reply(reply, did)
+        q("INSERT INTO design_msgs (design_id, role, text, ts, task_ids, note) VALUES (?,?,?,?,?,?)",
+          (did, "assistant", reply, time.time(), json.dumps(ids), note))
+    except Exception as e:
+        q("INSERT INTO design_msgs (design_id, role, text, ts) VALUES (?,?,?,?)",
+          (did, "assistant", f"(design chat error: {e})", time.time()))
+    finally:
+        DESIGN_PROCS.pop(did, None)
+        DESIGN_LIVE.pop(did, None)
+        q("UPDATE designs SET state='idle', updated=?, cost=cost+? WHERE id=?", (time.time(), cost, did))
+
+
+def queue_from_reply(reply, did):
+    """Queue every task in the reply's ```queue blocks. Returns (reply without blocks, ids, note for Claude)."""
+    ids, notes = [], []
+    for block in QUEUE_BLOCK.findall(reply):
+        try:
+            items = json.loads(block)
+            items = items if isinstance(items, list) else [items]
+        except ValueError as e:
+            notes.append(f"your last queue block was not valid JSON ({e}); nothing from it was queued")
+            continue
+        local = []
+        for it in items:
+            after = it.get("after")
+            dep = local[after] if isinstance(after, int) and 0 <= after < len(local) else None
+            if it.get("after_task") and str(it["after_task"]).lstrip("#").isdigit():
+                dep = int(str(it["after_task"]).lstrip("#"))
+            tid = add_task(it.get("body") or it.get("title", ""), it.get("title", ""),
+                           priority=int(it.get("priority") or 0), hold=bool(it.get("hold")), depends_on=dep)
+            ev(tid, f"queued from design chat #{did}")
+            local.append(tid)
+        ids += local
+    if ids:
+        notes.append("your last reply queued " + ", ".join(f"#{i}" for i in ids))
+    return QUEUE_BLOCK.sub("", reply).strip(), ids, "; ".join(notes)
 
 
 # ---------------------------------------------------------------- activity feed
@@ -568,9 +718,10 @@ class H(BaseHTTPRequestHandler):
             for t in tasks:
                 t["has_build"] = bool(t["state"] == "review" and (WT / f"t{t['id']}" / APP_REL).exists())
             return self.send(200, {
-                "tasks": tasks, "now": time.time(), "staging": staging_info(),
+                "tasks": tasks, "now": time.time(), "main": main_info(),
                 "settings": {k: setting(k) for k in ("max_parallel", "paused", "model")},
-                "active": len(THREADS)})
+                "active": len(THREADS),
+                "design_cost": (q("SELECT SUM(cost) AS c FROM designs", one=True) or {}).get("c") or 0})
         m = re.fullmatch(r"/api/tasks/(\d+)", path)
         if m:
             tid = int(m.group(1))
@@ -584,6 +735,21 @@ class H(BaseHTTPRequestHandler):
                 base = "dev" if t["state"] != "done" else f"{t['merged']}^1" if t["merged"] else "dev"
                 t["diffstat"] = git("diff", "--stat", f"{base}...{t['branch']}", check=False)[-3000:]
             return self.send(200, t)
+        if path == "/api/designs":
+            return self.send(200, q("SELECT id,title,state,updated,cost FROM designs ORDER BY updated DESC"))
+        m = re.fullmatch(r"/api/designs/(\d+)", path)
+        if m:
+            did = int(m.group(1))
+            d = design(did)
+            if not d:
+                return self.send(404, {"error": "no such design chat"})
+            d["msgs"] = q("SELECT role,text,ts,task_ids FROM design_msgs WHERE design_id=? ORDER BY id", (did,))
+            for msg in d["msgs"]:
+                ids = json.loads(msg["task_ids"] or "[]")
+                msg["tasks"] = [{"id": i, "title": (task(i) or {}).get("title"), "state": (task(i) or {}).get("state")}
+                                for i in ids]
+            d["live"] = DESIGN_LIVE.get(did, [])[-12:]
+            return self.send(200, d)
         self.send(404, {"error": "not found"})
 
     def do_POST(self):
@@ -613,13 +779,38 @@ class H(BaseHTTPRequestHandler):
                 if k in b:
                     set_setting(k, b[k])
             return
-        if path == "/api/staging/promote":
+        if path == "/api/main/promote":
+            why = promote_blocker()
+            if why:
+                raise ValueError(why)
             threading.Thread(target=promote, daemon=True).start()
             return
-        if path == "/api/staging/play":
-            if not (STG_WT / APP_REL).exists():
-                raise ValueError("no staging build yet; promote first")
-            subprocess.Popen(["open", str(STG_WT / APP_REL)])
+        if path == "/api/main/play":
+            if not (MAIN_WT / APP_REL).exists():
+                raise ValueError("no build of main yet; promote first")
+            subprocess.Popen(["open", str(MAIN_WT / APP_REL)])
+            return
+        if path == "/api/designs":
+            text = (b.get("text") or "").strip()
+            if not text:
+                raise ValueError("say something to start the chat")
+            did = q("INSERT INTO designs (title, created, updated) VALUES (?,?,?)",
+                    (text.splitlines()[0][:80], time.time(), time.time()))
+            design_say(did, text)
+            return {"id": did}
+        m = re.fullmatch(r"/api/designs/(\d+)/(say|stop|rename)", path)
+        if m:
+            did = int(m.group(1))
+            if not design(did):
+                raise ValueError("no such design chat")
+            if m.group(2) == "say":
+                design_say(did, b["text"].strip())
+            elif m.group(2) == "stop":
+                p = DESIGN_PROCS.get(did)
+                if p:
+                    killgroup(p.pid)
+            else:
+                q("UPDATE designs SET title=? WHERE id=?", (b["title"][:80], did))
             return
         m = re.fullmatch(r"/api/tasks/(\d+)/(\w+)", path)
         if not m:
@@ -689,7 +880,7 @@ def killgroup(pid):
 
 
 def on_term(*_):
-    for p in list(PROCS.values()):
+    for p in list(PROCS.values()) + list(DESIGN_PROCS.values()):
         killgroup(p.pid)
     os._exit(0)
 
