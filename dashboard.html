@@ -296,15 +296,17 @@ function renderMains() {
   $("#mains").innerHTML = ps.length ? `<div class="card projs"><h2>Projects</h2>` + ps.map(g => {
     const on = g.name === fx;
     return `<div class="prow ${on ? "on" : ""}" data-proj="${esc(g.name)}">
-      <div class="phead" title="${on ? "Collapse" : "Show this project"}"><span class="pname">${esc(g.title)}</span>
+      <div class="phead" title="${on ? "Collapse and show all projects" : "Show only this project"}"><span class="pname">${esc(g.title)}</span>
         <span class="pstats">${projStats(g)}</span><span class="caret">${on ? "▼" : "▶"}</span></div>
       ${on ? `<div class="pbody">${projBody(g)}</div>` : ""}</div>`;
   }).join("") + `</div>` : `<div class="card"><h2>No projects yet</h2>Click <b>+ Project</b> and give the path of a git repository.</div>`;
   if (open) { const d = document.querySelector("#mains .prow.on details"); if (d) d.open = true; }
   document.querySelectorAll("#mains .phead").forEach(h => h.onclick = () => {
     const name = h.parentElement.dataset.proj;
-    if (pf) return;  // the header picker already pins one project
-    setFocus(name === focus ? "" : name);
+    // Opening a project also filters to it; closing it shows every project again.
+    const open = name === (pf || focus);
+    setFocus(open ? "" : name);
+    setFilter(open ? "" : name); refresh(); if (tab !== "queue") refreshDesign();
   });
   document.querySelectorAll("#mains [data-a]").forEach(b => b.onclick = () => {
     delete mainMsg[b.dataset.p];

@@ -122,7 +122,9 @@ notes = """Project-specific guidance for design chats."""
 ## Other details
 
 - **Queue tab.** Projects are on the left, one line each with their counts. Click one to open it:
-  branches, what is waiting to promote, Promote, Play and Pause. Tasks are on the right. Clicking a
+  branches, what is waiting to promote, Promote, Play and Pause. Opening a project also sets the
+  project filter in the header, so only its tasks and chats show; click it again to see every
+  project. Tasks are on the right. Clicking a
   task opens it on the left and focuses its project, and new tasks default to that project.
 - **Parallelism.** "Parallel" on the dashboard is the global limit (default 3). Workers also split
   big tasks into subtasks (with "after" ordering) and use subagents inside a task.
