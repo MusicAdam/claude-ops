@@ -257,6 +257,8 @@ def init_db():
         q("ALTER TABLE designs ADD COLUMN kind TEXT DEFAULT 'design'")
     q("UPDATE designs SET state='idle' WHERE state='thinking'")  # a reply cut off by a restart
     q("CREATE TABLE IF NOT EXISTS task_msgs (id INTEGER PRIMARY KEY, task_id INTEGER, role TEXT, text TEXT, ts REAL)")
+    if "delivered" not in {r["name"] for r in q("PRAGMA table_info(task_msgs)")}:  # databases from before steering
+        q("ALTER TABLE task_msgs ADD COLUMN delivered REAL")
     q("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)")
     for k, v in {"max_parallel": "3", "paused": "0", "model": ""}.items():
         q("INSERT OR IGNORE INTO settings VALUES (?,?)", (k, v))
@@ -403,7 +405,8 @@ def stopped(tid):
 
 
 def run_claude(p, tid, prompt):
-    """Run one headless Claude turn in the task worktree. Returns the parsed result file or None."""
+    """Run one headless Claude turn in the task worktree. Returns the parsed result file or None.
+    The prompt goes in on stdin, which stays open until the turn's result so the user can steer it."""
     t = task(tid)
     if t["state"] in STOPPED:
         if t["state"] == "paused":  # paused before Claude got this prompt: resume with it
@@ -413,7 +416,9 @@ def run_claude(p, tid, prompt):
     run_dir.mkdir(parents=True, exist_ok=True)
     rp = result_path(t)
     rp.unlink(missing_ok=True)
-    cmd = ["caffeinate", "-i", CLAUDE, "-p", prompt, "--output-format", "stream-json", "--verbose",
+    prompt, acking = with_steers(tid, prompt)
+    cmd = ["caffeinate", "-i", CLAUDE, "-p", "--input-format", "stream-json", "--replay-user-messages",
+           "--output-format", "stream-json", "--verbose",
            "--permission-mode", "auto", "--permission-prompts", "none", "--strict-mcp-config",
            "--no-chrome", "--name", f"{p.name} #{tid}"]
     if t["session_id"]:
@@ -424,11 +429,19 @@ def run_claude(p, tid, prompt):
     env = dict(os.environ, OPS_RESULT=str(rp), OPS_TASK_ID=str(tid), OPS_PORT=str(port),
                **{k: str(v).format(port=port) for k, v in p.env.items()})
     upd(tid, phase="claude working")
+    cost0 = task(tid)["cost"] or 0
     with open(run_dir / "claude.jsonl", "a") as log, open(run_dir / "claude.err", "a") as err:
         log.write(json.dumps({"type": "ops", "prompt": prompt[:2000], "ts": time.time()}) + "\n")
-        proc = subprocess.Popen(cmd, cwd=t["worktree"], env=env, stdout=subprocess.PIPE, stderr=err,
-                                text=True, start_new_session=True)
+        proc = subprocess.Popen(cmd, cwd=t["worktree"], env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                stderr=err, text=True, start_new_session=True)
         track(tid, proc)
+        try:
+            send_user(proc.stdin, prompt)
+            with STEER_LOCK:
+                STEER_PIPES[tid] = proc.stdin
+                INFLIGHT[tid] = []
+        except OSError:
+            pass  # claude died at once; its stderr says why
         for line in proc.stdout:
             log.write(line)
             log.flush()
@@ -438,10 +451,32 @@ def run_claude(p, tid, prompt):
                 continue
             if e.get("session_id") and e.get("session_id") != task(tid)["session_id"]:
                 upd(tid, session_id=e["session_id"])
-            if e.get("type") == "result":
-                upd(tid, cost=(task(tid)["cost"] or 0) + (e.get("total_cost_usd") or 0))
+            content = e.get("message", {}).get("content")
+            if e.get("type") == "user" and e.get("isReplay") and isinstance(content, str):
+                with STEER_LOCK:
+                    sent = INFLIGHT.get(tid, [])
+                    mid = next((m for txt, m in sent if txt == content), None)
+                    if mid:
+                        sent.remove((content, mid))
+                if mid:
+                    q("UPDATE task_msgs SET delivered=? WHERE id=?", (time.time(), mid))
+                    ev(tid, "the worker got your message")
+                    acking = True
+            elif e.get("type") == "assistant" and not e.get("parent_tool_use_id") and acking:
+                said = [c["text"].strip() for c in content or [] if c.get("type") == "text" and c.get("text", "").strip()]
+                if said:  # its first words after your message are its answer to it
+                    q("INSERT INTO task_msgs (task_id, role, text, ts) VALUES (?,?,?,?)",
+                      (tid, "assistant", "\n\n".join(said), time.time()))
+                    acking = False
+            elif e.get("type") == "result":
+                # total_cost_usd counts the whole process; a message sent at the very end adds a turn.
+                upd(tid, cost=cost0 + (e.get("total_cost_usd") or 0))
+                close_steer(tid)  # messages already written still get their turn before claude exits
+        close_steer(tid)
         proc.wait()
         untrack(tid)
+        with STEER_LOCK:
+            INFLIGHT.pop(tid, None)  # written but never read: still pending, so the next turn gets them
     kill_app(p, t["worktree"])
     if rp.exists():
         try:
@@ -449,6 +484,78 @@ def run_claude(p, tid, prompt):
         except ValueError:
             return {"status": "failed", "summary": f"{RESULT_FILE} was not valid JSON"}
     return None
+
+
+# ---------------------------------------------------------------- steering (messages to a working worker)
+# A message you send while a task is working goes straight into the worker's stdin; Claude reads it after its
+# current step. When no worker is running (queued, checking, between turns) it waits, and the next worker turn
+# starts with it. A task that has messages waiting never merges: the worker is resumed with them first.
+
+STEER_LOCK = threading.Lock()  # guards the two dicts below and the step from gating to merging
+STEER_PIPES = {}  # task id -> stdin of its worker, open while the worker can take a message
+INFLIGHT = {}  # task id -> [(text written to stdin, message id)], until claude replays it back as read
+STEER_STATES = ("queued", "running", "gating", "paused")  # a worker is working or will be: messages steer it
+STEER_NOTE = "[ops: a message from the user on the dashboard, sent while you work]\n\n"
+
+
+def send_user(pipe, text):
+    pipe.write(json.dumps({"type": "user", "message": {"role": "user", "content": text}}) + "\n")
+    pipe.flush()
+
+
+def close_steer(tid):
+    with STEER_LOCK:
+        pipe = STEER_PIPES.pop(tid, None)
+    if pipe:
+        try:
+            pipe.close()
+        except OSError:
+            pass
+
+
+def pending_steers(tid):
+    return q("SELECT id,text FROM task_msgs WHERE task_id=? AND role='steer' AND delivered IS NULL ORDER BY id",
+             (tid,))
+
+
+def with_steers(tid, prompt):
+    """The prompt plus any messages that waited for this turn. Returns (prompt, whether there were any)."""
+    msgs = pending_steers(tid)
+    if not msgs:
+        return prompt, False
+    q(f"UPDATE task_msgs SET delivered=? WHERE id IN ({','.join('?' * len(msgs))})",
+      (time.time(), *(m["id"] for m in msgs)))
+    ev(tid, f"the worker got {len(msgs)} waiting message(s)")
+    return (prompt + "\n\n## Messages from the user\n\nThe user sent these on the dashboard while you were not "
+            "running. They steer the task: where they conflict with the brief, follow them. Answer them in a "
+            "sentence or two of plain text first, then carry on.\n\n"
+            + "\n\n".join(f"> {m['text']}" for m in msgs)), True
+
+
+def task_steer(tid, text):
+    """Send a message to the task's worker: now if it is running, else at its next turn."""
+    if not text:
+        raise ValueError("say something")
+    with STEER_LOCK:
+        t = task(tid)
+        pipe = STEER_PIPES.get(tid)
+        if t["state"] not in STEER_STATES:
+            raise ValueError(f"the worker is not working (task is {t['state']})")
+        if t["kind"] == "release" and not pipe:
+            raise ValueError("the release checker is not running right now")
+        mid = q("INSERT INTO task_msgs (task_id, role, text, ts) VALUES (?,?,?,?)", (tid, "steer", text, time.time()))
+        if pipe:
+            try:
+                send_user(pipe, STEER_NOTE + text)
+                INFLIGHT.setdefault(tid, []).append((STEER_NOTE + text, mid))
+            except OSError:
+                pass  # the worker just stopped; the message waits for its next turn
+    ev(tid, "you sent a message: " + text[:200])
+
+
+def steered_prompt(when):
+    return (f"The user sent you new messages {when} (below). Do what they ask, re-run the checks, commit, and "
+            "write $OPS_RESULT again. If they need no change, just write $OPS_RESULT again.")
 
 
 # ---------------------------------------------------------------- gate
@@ -575,6 +682,9 @@ def _pipeline(p, tid):
                 return
             if status != "done":
                 return fail(p, tid, res.get("summary") or f"worker reported {status}")
+            if pending_steers(tid):  # sent as the worker finished
+                prompt = steered_prompt("as you finished")
+                continue
             if p.git("status", "--porcelain", cwd=wt):
                 p.git("stash", "push", "-u", "-m", "ops-autostash: uncommitted after worker", cwd=wt)
                 ev(tid, "stashed uncommitted leftovers (git stash list in the worktree)")
@@ -619,7 +729,14 @@ def _pipeline(p, tid):
                 run_step(tid, "building for review", p.build, wt, "gate.log")
                 if stopped(tid):
                     return
-            upd(tid, state="review", phase="")
+            with STEER_LOCK:
+                steered = bool(pending_steers(tid))
+                if not steered:
+                    upd(tid, state="review", phase="")
+            if steered:
+                prompt = steered_prompt("while the queue checked your work")
+                upd(tid, state="running")
+                continue
             ev(tid, "waiting for your review")
             notify(f"{p.title}: task ready for review", f"#{tid}: {t['title']}")
             return
@@ -631,7 +748,14 @@ def _pipeline(p, tid):
                 ev(tid, f"{p.dev} moved during the gate; re-checking")
                 need_claude = False
                 continue
-            upd(tid, state="merging", phase=f"merging into {p.dev}")
+            with STEER_LOCK:  # a message sent from here on is refused: the task is merging
+                steered = bool(pending_steers(tid))
+                if not steered:
+                    upd(tid, state="merging", phase=f"merging into {p.dev}")
+            if steered:
+                prompt = steered_prompt("while the queue checked your work")
+                upd(tid, state="running")
+                continue
             p.git("merge", "--no-ff", "-m", f"Merge task #{tid}: {t['title']}", t["branch"], cwd=p.dev_wt)
             merged = p.rev(p.dev)
         return finish(p, tid, merged=merged, note=f"merged into {p.dev} at {merged[:8]}")
@@ -1230,6 +1354,8 @@ def activity(tid, limit=120):
             ty = e.get("type")
             if ty == "ops":
                 out.append({"k": "ops", "t": "▶ new turn: " + e.get("prompt", "")[:240]})
+            elif ty == "user" and str(e.get("message", {}).get("content")).startswith(STEER_NOTE):
+                out.append({"k": "you", "t": "✉ you: " + e["message"]["content"][len(STEER_NOTE):][:1200]})
             elif ty == "assistant" and not e.get("parent_tool_use_id"):
                 for c in e.get("message", {}).get("content", []):
                     if c.get("type") == "text" and c.get("text", "").strip():
@@ -1296,9 +1422,11 @@ class H(BaseHTTPRequestHandler):
                 base = f"{t['merged']}^1" if t["merged"] else p.dev
                 t["diffstat"] = p.git("diff", "--stat", f"{base}...{t['branch']}", check=False)[-3000:]
             t["can_play"] = bool(p and p.launch and t["state"] == "review")
-            t["chat"] = q("SELECT role,text,ts FROM task_msgs WHERE task_id=? ORDER BY id", (tid,))
+            t["chat"] = q("SELECT role,text,ts,delivered FROM task_msgs WHERE task_id=? ORDER BY id", (tid,))
             t["chat_live"] = TASK_CHAT_LIVE.get(tid)
             t["can_chat"] = bool(t["session_id"]) and t["state"] in CHAT_STATES
+            t["steer_live"] = tid in STEER_PIPES  # the worker reads a message after its current step
+            t["can_steer"] = t["state"] in STEER_STATES and (t["kind"] != "release" or t["steer_live"])
             return self.send(200, t)
         if path == "/api/designs":
             return self.send(200, q("SELECT id,project,title,state,updated,cost,kind FROM designs ORDER BY updated DESC"))
@@ -1406,6 +1534,8 @@ class H(BaseHTTPRequestHandler):
             raise ValueError("wait for the worker's reply to your question first")
         if action == "ask":
             return task_ask(tid, (b.get("text") or "").strip())
+        if action == "steer":
+            return task_steer(tid, (b.get("text") or "").strip())
         if action == "stopask":
             stop(TASK_CHAT_PROCS.get(tid))
             return

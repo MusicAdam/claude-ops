@@ -38,6 +38,10 @@ Unit tests already passed. Your job is what they cannot catch: does the build wo
 4. Compare what you saw with what each task said it did and with the design docs.
 5. Quit everything you started.
 
+The user may message you while you check. A message arrives as a new user turn that starts with
+`[ops: a message from the user`. Answer it first in a sentence or two of plain text, then carry on with
+what it asks (you still never change the project).
+
 Block the release only for something a player would hit: a crash or hang, a broken main flow, lost or
 corrupted data, or a change that does not do what its task says. Anything smaller passes, and you list
 it as a follow-up task. If the project has no app to run, say so and check what you can from the code.
