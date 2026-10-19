@@ -49,6 +49,17 @@ write_plist() {
 </dict></plist>
 PL
 }
+case "${1:-status}" in  # start, stop and restart act on the one launchd service, whatever OPS_DATA says
+  start|stop|restart)
+    if [ "$DATA" != "$HOME/.claude-ops" ]; then
+      echo "opsctl: OPS_DATA is $DATA, but opsctl $1 acts on the launchd service (~/.claude-ops)." >&2
+      echo "Stop a scratch daemon by its pid: kill \"\$(cat \"\$OPS_DATA/opsd.pid\")\"" >&2; exit 1
+    fi
+    if [ -f "$OPS/.git" ]; then
+      echo "opsctl: $OPS is a git worktree. opsctl $1 would point the launchd service at it; run opsctl from your checkout." >&2
+      exit 1
+    fi ;;
+esac
 case "${1:-status}" in
   start)   build_app; write_plist; launchctl bootstrap "gui/$(id -u)" "$PLIST" 2>/dev/null || launchctl kickstart "gui/$(id -u)/$LABEL"
            sleep 1; echo "dashboard: http://127.0.0.1:8788" ;;

@@ -129,7 +129,7 @@ report = "Logs/test-editmode.xml"  # optional: NUnit/JUnit XML; failed cases are
 [app]                              # optional: something to build and run
 build = "scripts/unity.sh build"
 launch = "open -n 'Builds/macOS/MyGame.app'"   # run from the worktree for Play / Try
-process = "Builds/macOS/MyGame.app"            # pgrep pattern (prefixed with the worktree path)
+process = "Builds/macOS/MyGame.app"            # the app's executable or its folder, inside the worktree
 artifact = "Builds/macOS/MyGame.app"           # must exist after build; kept as a backup on promote
 
 [worker]
@@ -187,6 +187,31 @@ notes = """Project-specific guidance for design chats."""
 - **Workers** run `claude -p --permission-mode auto --permission-prompts none --strict-mcp-config`.
   Anything that would prompt is denied. They never push, and never touch your checkout, dev or main.
   None of the daemon's Claude sessions (workers, design, chat) connect to Claude in Chrome (`--no-chrome`).
+- **Processes.** The daemon and its sessions stop only processes they started. See below.
+
+## Process safety
+
+Nothing claude-ops runs may stop, signal or quit a process it did not start.
+
+- **The daemon** stops a task's command by the process handle it holds, and only while that process still
+  runs. After a restart it trusts a saved pid only if the process start time still matches.
+  **Quit the app** (Approve, Send back, a pause, the end of a worker turn) stops only your processes whose
+  executable lies in that worktree's `[app] process` path. It matches the path exactly, never as a pattern,
+  so a terminal or editor that merely names the path is spared.
+- **Workers, release checkers and project chats** run each Bash command past `opsd.py guard` first (a
+  `PreToolUse` hook passed with `--settings`). It refuses:
+  - `pkill`, `killall`, `xargs kill`, and `kill` of pids found by `pgrep`, `lsof`, `ps` or `pidof`
+  - `kill` of a pid the session did not start (not its descendant, and not running from its worktree),
+    of `0`, `-1` or a process group
+  - `launchctl` other than `print`/`list`, `sudo`, `shutdown`, `reboot`, `osascript` that quits apps or
+    drives System Events, `opsctl start|stop|restart|pause|resume`, and requests to the live dashboard's port
+
+  `kill $!` and `kill "$(cat pidfile)"` still work. The briefs state the same rule. The guard catches slips;
+  it is not a sandbox: a program can still call `kill()` itself.
+- **`opsctl start|stop|restart`** act on the one launchd service. They refuse when `OPS_DATA` is not
+  `~/.claude-ops` or when run from a git worktree, so a scratch daemon or a worker can't restart or
+  re-point the live one. Promoting claude-ops restarts the daemon only if it is that launchd service.
+- **`[app] artifact`** must be inside the worktree: Promote deletes and replaces it.
 
 ## Files
 
@@ -203,7 +228,10 @@ notes = """Project-specific guidance for design chats."""
 | `~/.claude-ops/opsd.log` | daemon log |
 | `~/.claude-ops/opsd.pid` | the running daemon's pid |
 
-Env overrides: `OPS_PORT` (8788), `OPS_HOST` (127.0.0.1), `OPS_DATA` (~/.claude-ops).
+Env overrides: `OPS_PORT` (8788), `OPS_HOST` (127.0.0.1), `OPS_DATA` (~/.claude-ops),
+`OPS_ALLOWED_HOSTS` (extra host names the API answers, comma-separated).
+The API answers only requests addressed to `127.0.0.1`, `localhost`, `OPS_HOST` or a `*.ts.net` name, so a
+web page can't reach it by re-pointing its own domain at 127.0.0.1 (DNS rebinding).
 Keep the host on 127.0.0.1: the API can start work on your machine. For phone access, use Tailscale
 rather than binding to your LAN. It is served tailnet-only on its own HTTPS port (443 is taken by
 another dashboard): `tailscale serve --bg --https=8443 http://127.0.0.1:8788`, then open

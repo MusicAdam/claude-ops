@@ -13,6 +13,10 @@ Nobody watches this session and nobody can answer you mid-run. Work the task to 
 - This worktree is a full copy of the project. Build and test tools you run here are yours alone.
   `OPS_PORT` is set to {port}, a port no other worker uses; use it for anything that listens.
 - Never post OS-level mouse or keyboard events and never take focus: the user is using this Mac.
+- Stop only processes you started in this session, by the pid you got when you started them (`$!`, or
+  a pidfile your program writes). Never stop anything by name or pattern (`pkill`, `killall`,
+  `lsof … | xargs kill`, `kill $(pgrep …)`): a pattern also matches the user's apps, terminals and other
+  workers. A guard refuses those commands. If a process of yours will not stop, leave it and say so.
 
 ## How to work
 

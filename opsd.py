@@ -6,6 +6,7 @@
   opsd.py add -p NAME "text..."        queue a task through the running daemon
   opsd.py wait-idle                    hold new tasks, wait until no task is running a command (opsctl restart)
   opsd.py pause-all | resume-all       pause every running task (it stops now, resumable) / resume every paused one
+  opsd.py guard --daemon PID [--root DIR]   PreToolUse hook: refuse Bash commands that stop processes the session did not start
 
 Per project (paths come from ~/.claude-ops/projects/<name>.toml):
   <repo>                 your checkout of the main branch. The queue only fast-forwards it, when a release passes.
@@ -17,7 +18,7 @@ A workspace (`repos = [...]` in its config) is a folder that holds several git r
 app. Each of the paths above is then a folder with a copy of the workspace's own files and one worktree per repo,
 and every repo has its own main, dev and task branches.
 """
-import base64, json, os, re, secrets, shutil, signal, sqlite3, subprocess, sys, threading, time, tomllib
+import base64, json, os, re, secrets, shlex, shutil, signal, sqlite3, subprocess, sys, threading, time, tomllib
 import xml.etree.ElementTree as ET
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
@@ -427,15 +428,51 @@ def sh(*cmd, cwd=None, check=True):
     return r.stdout.strip()
 
 
+def within(path, root):
+    """path is root or inside it, after resolving symlinks and '..'."""
+    path, root = os.path.realpath(path), os.path.realpath(root)
+    return path == root or path.startswith(root.rstrip("/") + "/")
+
+
+def proc_cwd(pid):
+    out = subprocess.run(["lsof", "-a", "-p", str(pid), "-d", "cwd", "-Fn"], capture_output=True, text=True).stdout
+    return next((l[1:] for l in out.splitlines() if l.startswith("n")), "")
+
+
+def app_pids(p, path):
+    """Copies of the project's app running from this worktree: your processes whose executable lies in
+    <path>/<process>. Matched on the executable, literally: `pkill -f` matched a regex against every
+    command line, so it also hit a shell, editor or `tail` that merely named the path."""
+    if not (p and p.process and path):
+        return []
+    app = os.path.realpath(Path(path) / p.process)
+    if not within(app, path):  # an absolute or ../ process would reach outside the worktree
+        return []
+    out = []
+    ps = subprocess.run(["ps", "-axo", "pid=,uid=,comm="], capture_output=True, text=True).stdout
+    for line in ps.splitlines():
+        pid, uid, exe = line.split(None, 2)
+        pid = int(pid)
+        if int(uid) != os.getuid() or pid == os.getpid():
+            continue
+        if not exe.startswith("/"):  # started by a relative path: ps shows it as given
+            exe = os.path.join(proc_cwd(pid) or "/nonexistent", exe)
+        if within(exe, app):
+            out.append(pid)
+    return out
+
+
 def kill_app(p, path):
     """Quit any copy of the project's app running from this worktree."""
-    if p and p.process and path:
-        subprocess.run(["pkill", "-f", f"{path}/{p.process}"], capture_output=True)
+    for pid in app_pids(p, path):
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError:
+            pass
 
 
 def app_running(p, path):
-    return bool(p.process) and subprocess.run(["pgrep", "-f", f"{path}/{p.process}"],
-                                              capture_output=True).returncode == 0
+    return bool(app_pids(p, path))
 
 
 def launch_app(p, path):
@@ -494,6 +531,172 @@ def own_pid(t):
     return pid if pid and t["pid_start"] and started_at(pid) == t["pid_start"] else None
 
 
+# ---------------------------------------------------------------- guard: sessions stop only their own processes
+# Every Claude session the daemon starts with a shell (workers, release checkers, project chats) runs each
+# Bash command past `opsd.py guard` first, a PreToolUse hook. It refuses commands that would stop or quit a
+# process the session did not start. In task #15 a worker's `pkill -f 'opsd.py serve' -U $(id -u) -n` killed
+# Chrome, the terminal and the live daemon. It is a net for slips, not a sandbox: a script can still call
+# kill() itself, so the briefs state the rule too.
+
+GUARD_RULE = ("Stop only processes you started in this session, by the pid you got when you started them "
+              "($!, or a pidfile your program writes). Never stop a process by name or pattern: a pattern also "
+              "matches the user's apps, terminals and other workers. If a process of yours will not stop, "
+              "leave it and say so.")
+SHELLS = {"sh", "bash", "zsh", "dash", "ksh", "fish"}
+WRAPPERS = {"env", "nohup", "nice", "time", "command", "exec", "builtin", "noglob", "caffeinate", "timeout",
+            "gtimeout"}
+PID_FINDERS = {"pgrep", "pidof", "lsof", "fuser", "ps"}
+LAUNCHCTL_READ = {"print", "list", "blame", "getenv", "help", "version", "print-disabled", "print-cache"}
+
+
+def guard_settings(root):
+    """--settings for a Claude session: run each Bash command past the guard. root is the session's worktree;
+    a process working or installed there counts as the session's own. None: only its descendants do."""
+    cmd = [sys.executable, str(CODE / "opsd.py"), "guard", "--daemon", str(os.getpid()), "--port", str(PORT)]
+    if root:
+        cmd += ["--root", str(root)]
+    hook = {"type": "command", "command": " ".join(shlex.quote(a) for a in cmd)}
+    return json.dumps({"hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [hook]}]}})
+
+
+def shell_segments(cmd):
+    """The simple commands in a shell command line, as word lists. Pipelines, lists, subshells and command
+    substitutions each count, and a shell's -c string is split again. Redirections are dropped."""
+    cmd = cmd.replace("`", " $ ( ").replace("\n", " ; ")  # `x` reads as $(x, enough to split it out
+    lex = shlex.shlex(cmd, posix=True, punctuation_chars=";&|()<>")
+    lex.whitespace_split = True
+    lex.commenters = ""
+    segs, cur, skip = [], [], False
+    for tok in lex:
+        if tok and set(tok) <= set(";&|()<>"):
+            if "<" in tok or ">" in tok:  # redirection: drop its target, and an fd number before it (2>)
+                skip = True
+                if cur and cur[-1].isdigit():
+                    cur.pop()
+                continue
+            segs.append(cur)
+            cur = []
+        elif skip:
+            skip = False
+        else:
+            cur.append(tok)
+    segs.append(cur)
+    out = []
+    for words in segs:
+        while words and (re.fullmatch(r"\w+=.*", words[0]) or Path(words[0]).name in WRAPPERS):
+            first = Path(words.pop(0)).name
+            while words and (words[0].startswith("-") or (first in ("timeout", "gtimeout") and
+                                                          re.fullmatch(r"[\d.]+[smhd]?", words[0]))):
+                words.pop(0)
+        if not words:
+            continue
+        if Path(words[0]).name in SHELLS and "-c" in words[:-1]:
+            out += shell_segments(words[words.index("-c") + 1])
+        elif words[0] == "eval":
+            out += shell_segments(" ".join(words[1:]))
+        else:
+            out.append(words)
+    return out
+
+
+def proc_table():
+    """pid -> (ppid, uid) for every process."""
+    out = {}
+    for line in subprocess.run(["ps", "-axo", "pid=,ppid=,uid="], capture_output=True, text=True).stdout.splitlines():
+        pid, ppid, uid = map(int, line.split())
+        out[pid] = (ppid, uid)
+    return out
+
+
+def session_owns(pid, root, daemon):
+    """pid was started by the Claude session this hook runs for: it descends from the session's process, or
+    it runs from inside the session's worktree (a server backgrounded with & outlives the Bash call that
+    started it and is re-parented to launchd, but keeps its working directory)."""
+    procs = proc_table()
+    if pid not in procs or procs[pid][1] != os.getuid():
+        return False
+    chain = []  # this hook and its ancestors: the session's Claude, the daemon, launchd
+    p = os.getpid()
+    while p in procs and p > 1:
+        chain.append(p)
+        p = procs[p][0]
+    if pid in chain:
+        return False
+    # the session's process is the daemon's child; if the daemon is not our ancestor, credit no descendants
+    top = next((p for p in chain if procs[p][0] == daemon), os.getpid())
+    p = pid
+    while p in procs and p > 1:
+        if p == top:
+            return True
+        p = procs[p][0]
+    if not root:
+        return False
+    if within(proc_cwd(pid) or "/", root):
+        return True
+    exe = subprocess.run(["ps", "-o", "comm=", "-p", str(pid)], capture_output=True, text=True).stdout.strip()
+    return exe.startswith("/") and within(exe, root)
+
+
+def guard_check(cmd, root=None, daemon=0, port=PORT):
+    """Why the guard refuses this Bash command, or None to let it run."""
+    segs = shell_segments(cmd)
+    finds_pids = any(Path(s[0]).name in PID_FINDERS for s in segs)
+    for words in segs:
+        name, args = Path(words[0]).name, words[1:]
+        if name in ("pkill", "killall"):
+            return f"`{name}` stops processes by name or pattern."
+        if name == "xargs" and {Path(a).name for a in args} & {"kill", "pkill", "killall"}:
+            return "`xargs kill` stops whatever a search found, which includes processes you did not start."
+        if name in ("shutdown", "reboot", "halt"):
+            return f"`{name}` would stop the whole Mac."
+        if name in ("sudo", "doas"):
+            return f"`{name}` runs as root, beyond what this session started."
+        if name == "launchctl" and next((a for a in args if not a.startswith("-")), "list") not in LAUNCHCTL_READ:
+            return "launchctl changes services the user runs; only `launchctl print` and `list` are allowed."
+        if name == "osascript" and re.search(r"\bquit\b|System Events", " ".join(args), re.I):
+            return "osascript quitting apps or driving System Events touches the user's apps."
+        if name == "opsctl" and args[:1] and args[0] in ("start", "stop", "restart", "pause", "resume"):
+            return f"`opsctl {args[0]}` acts on the live claude-ops service and every task it runs."
+        if any(re.search(rf"(127\.0\.0\.1|localhost|\[::1\]):{port}\b", a) for a in args):
+            return f"port {port} is the live claude-ops dashboard; its API pauses and cancels tasks."
+        if name != "kill":
+            continue
+        if args[:1] in (["-l"], ["-L"], ["-0"]) or args[:2] in (["-s", "0"], ["-n", "0"]):
+            continue  # lists signal names, or only checks that the process exists
+        if args[:1] in (["-s"], ["-n"]):
+            args = args[2:]
+        elif args[:1] and args[0].startswith("-") and args[0] != "--":
+            args = args[1:]  # the signal: -9, -TERM, -s9
+        if args[:1] == ["--"]:
+            args = args[1:]
+        for a in args:
+            if a.startswith("%"):
+                continue  # a job of this shell
+            if re.fullmatch(r"-?\d+", a):
+                if int(a) <= 0:
+                    return f"`kill {a}` signals a whole process group, or every process you own."
+                if not session_owns(int(a), root, daemon):
+                    return f"pid {a} is not a process this session started."
+            elif finds_pids:
+                return "this kills pids found by a search (pgrep, lsof, ps), which match processes you did not start."
+    return None
+
+
+def guard(argv):
+    """PreToolUse hook: read the Bash call on stdin, exit 2 with the reason to refuse it."""
+    opts = dict(zip(argv[::2], argv[1::2]))
+    cmd = ""
+    try:
+        cmd = (json.load(sys.stdin).get("tool_input") or {}).get("command") or ""
+        why = guard_check(cmd, opts.get("--root"), int(opts.get("--daemon", 0)), int(opts.get("--port", PORT)))
+    except Exception as e:  # unsure: refuse anything that could stop a process
+        why = (f"the claude-ops guard could not check this command ({e})."
+               if re.search(r"kill|launchctl|osascript|opsctl|shutdown|reboot", cmd) else None)
+    if why:
+        print(f"Blocked by claude-ops: {why} {GUARD_RULE}", file=sys.stderr)
+        sys.exit(2)
+
+
 # ---------------------------------------------------------------- claude worker
 
 def worker_prompt(p, t):
@@ -545,7 +748,8 @@ def run_claude(p, tid, prompt):
     cmd = ["caffeinate", "-i", CLAUDE, "-p", "--input-format", "stream-json", "--replay-user-messages",
            "--output-format", "stream-json", "--verbose",
            "--permission-mode", "auto", "--permission-prompts", "none", "--strict-mcp-config",
-           "--no-chrome", "--name", f"{p.name} #{tid}", "--add-dir", str(IMAGES)]
+           "--no-chrome", "--name", f"{p.name} #{tid}", "--add-dir", str(IMAGES),
+           "--settings", guard_settings(t["worktree"])]
     if t["session_id"]:
         cmd += ["--resume", t["session_id"]]
     if setting("model"):
@@ -1070,9 +1274,21 @@ def release_pipeline(p, tid):
         restart_self(tid)
 
 
+def is_service():
+    """This daemon is the launchd service that opsctl manages, not a scratch daemon a test or worker runs.
+    launchd's pid for the job is Claude Ops.app's launcher, our parent (or us, from an older plist)."""
+    out = subprocess.run(["launchctl", "list", "com.claude-ops"], capture_output=True, text=True).stdout
+    m = re.search(r'"PID" = (\d+);', out)
+    return bool(m) and int(m.group(1)) in (os.getpid(), os.getppid())
+
+
 def restart_self(tid):
     """main of claude-ops itself just moved: run `opsctl restart` to load the new code. It waits until no task
     is running a command. It runs in a session of its own, so stopping this daemon's launchd job spares it."""
+    if not is_service():
+        ev(tid, "not restarting claude-ops: this daemon is not the launchd service, and opsctl restart "
+                "would restart that one")
+        return
     ev(tid, "restarting claude-ops to load the new code, once no task is running a command")
     (RUNS / str(tid)).mkdir(parents=True, exist_ok=True)
     subprocess.Popen([str(CODE / "opsctl"), "restart"], cwd=CODE, env=dict(os.environ, OPS_DATA=str(DATA)),
@@ -1266,6 +1482,8 @@ def promote(p, tid, commit):
     on an error main and its build are unchanged."""
     if p.build:
         art = p.main_wt / p.artifact if p.artifact else None
+        if art and (not within(art, p.main_wt) or within(p.main_wt, art)):  # it gets deleted and replaced
+            return f"[app] artifact must be a path inside the worktree, not {p.artifact!r}."
         prev = art.with_name(art.name + ".previous") if art else None
         if prev:
             shutil.rmtree(prev, ignore_errors=True)
@@ -1381,7 +1599,7 @@ def design_turn(did, text):
     if chat:  # your own settings and MCP servers apply, like the CLI; auto mode stands in for prompts
         cmd = [CLAUDE, "-p", with_images(text), "--output-format", "stream-json", "--verbose",
                "--permission-mode", "auto", "--permission-prompts", "none", "--no-chrome",
-               "--name", f"{p.name} chat #{did}",
+               "--name", f"{p.name} chat #{did}", "--settings", guard_settings(None),
                "--append-system-prompt", PROJECT_CHAT_PROMPT]
     else:
         cmd = [CLAUDE, "-p", ops_note(p, did) + with_images(text), "--output-format", "stream-json", "--verbose",
@@ -1449,7 +1667,7 @@ TASK_CHAT_LIVE = {}  # task id -> tool lines of the reply in progress; a key her
 PROJECT_CHAT_PROMPT = ("You are talking with the owner through the claude-ops dashboard, not a terminal. "
                        "Nobody can answer permission prompts here: actions that would prompt are denied. "
                        "When one is denied, say what you tried, and that they can run it themselves or "
-                       "continue this session in a terminal with `claude --resume`.")
+                       "continue this session in a terminal with `claude --resume`. " + GUARD_RULE)
 CHAT_STATES = ("review", "needs_input", "failed", "done", "cancelled", "paused")  # the worker is not running
 
 
@@ -1652,7 +1870,18 @@ class H(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def host_ok(self):
+        """Refuse DNS rebinding: a web page whose own domain is re-pointed at 127.0.0.1 could otherwise
+        drive this API, and so start work on your machine, from your browser."""
+        host = (self.headers.get("Host") or "").lower()
+        host = host[1:host.find("]")] if host.startswith("[") else host.split(":")[0]
+        allowed = {"127.0.0.1", "localhost", "::1", HOST.lower()} | {
+            h.strip().lower() for h in os.environ.get("OPS_ALLOWED_HOSTS", "").split(",") if h.strip()}
+        return host in allowed or host.endswith(".ts.net")  # Tailscale serve, tailnet-only
+
     def do_GET(self):
+        if not self.host_ok():
+            return self.send(403, {"error": "unknown Host header"})
         path = urlparse(self.path).path
         if path == "/":
             return self.send(200, (CODE / "dashboard.html").read_bytes(), "text/html; charset=utf-8")
@@ -1734,6 +1963,8 @@ class H(BaseHTTPRequestHandler):
         self.send(404, {"error": "not found"})
 
     def do_POST(self):
+        if not self.host_ok():
+            return self.send(403, {"error": "unknown Host header"})
         if self.headers.get("X-Ops") != "1":  # blocks cross-site form posts
             return self.send(403, {"error": "missing X-Ops header"})
         n = int(self.headers.get("Content-Length") or 0)
@@ -1916,6 +2147,8 @@ if __name__ == "__main__":
     cmd = args.pop(0) if args else "serve"
     if cmd == "serve":
         serve()
+    elif cmd == "guard":
+        guard(args)
     elif cmd == "wait-idle":
         wait_idle()
     elif cmd in ("pause-all", "resume-all"):
