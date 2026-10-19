@@ -168,8 +168,9 @@ notes = """Project-specific guidance for design chats."""
   a "Talk to the worker" box. A message goes straight to the running worker, which reads it after its
   current step, answers in a line or two, and changes course. Where your message and the task
   description disagree, the message wins. If no worker is running at that moment (queued, rebasing,
-  running the gate), the message waits: the next worker turn starts with it, and a task with a waiting
-  message never merges or goes to review before the worker has seen it. Each message shows whether the
+  running the gate), the message waits: the next worker turn gets it as its own message right after
+  that turn's prompt, so the reply under it answers it. A task with a waiting message never merges or
+  goes to review before the worker has seen it. Each message shows whether the
   worker got it. Once the task is merging it is too late; queue a new task instead. A paused task
   offers both: **Ask** answers now, read-only; **Send when it resumes** waits for the worker.
 - **Ask the worker.** Once a worker stops (review, needs you, failed, done), you can ask it questions
