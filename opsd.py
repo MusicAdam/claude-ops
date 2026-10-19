@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
-"""diskgame-ops: a task queue for Disk Game, worked by parallel headless Claude sessions.
+"""claude-ops: a task queue for your git projects, worked by parallel headless Claude sessions.
 
-  opsd.py serve            run the dashboard + scheduler (http://127.0.0.1:8788)
-  opsd.py add "text..."    queue a task through the running daemon
+  opsd.py serve                        run the dashboard + scheduler (http://127.0.0.1:8788)
+  opsd.py add-project PATH [NAME]      detect PATH and write ~/.claude-ops/projects/NAME.toml
+  opsd.py add -p NAME "text..."        queue a task through the running daemon
 
-Layout (all outside the repo except git worktrees, which share its .git):
-  ~/dev/diskgame              your checkout of main. The queue only fast-forwards it, on Promote.
-  ~/dev/diskgame-wt/dev       integration worktree on branch `dev`. Finished tasks merge here.
-  ~/dev/diskgame-wt/t<id>     one worktree per running task, branch task/<id>-<slug>.
-  ~/dev/diskgame-wt/main      build of main, the golden version (detached). Changes only on Promote.
+Per project (paths come from ~/.claude-ops/projects/<name>.toml):
+  <repo>                 your checkout of the main branch. The queue only fast-forwards it, on Promote.
+  <worktrees>/dev        integration worktree on the dev branch. Finished tasks merge here.
+  <worktrees>/main       build of main, the golden version (detached). Changes only on Promote.
+  <worktrees>/t<id>      one worktree per task, branch task/<id>-<slug>.
 """
-import json, os, re, shutil, signal, sqlite3, subprocess, sys, threading, time
+import json, os, re, shutil, signal, sqlite3, subprocess, sys, threading, time, tomllib
 import xml.etree.ElementTree as ET
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
@@ -18,28 +19,168 @@ from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
 HOME = Path.home()
-OPS = Path(__file__).resolve().parent
-REPO = Path(os.environ.get("OPS_REPO", HOME / "dev/diskgame"))
-WT = Path(os.environ.get("OPS_WORKTREES", HOME / "dev/diskgame-wt"))
-DEV_WT = WT / "dev"
-MAIN_WT = WT / "main"
-OLD_STG_WT = HOME / "dev/diskgame-stg"  # where the main build lived when it was called staging
-RUNS = OPS / "runs"
-DB = OPS / "queue.db"
+CODE = Path(__file__).resolve().parent
+DATA = Path(os.environ.get("OPS_DATA", HOME / ".claude-ops"))
+PROJECTS_DIR = DATA / "projects"
+RUNS = DATA / "runs"
+DB = DATA / "ops.db"
 HOST = os.environ.get("OPS_HOST", "127.0.0.1")
 PORT = int(os.environ.get("OPS_PORT", "8788"))
 CLAUDE = os.environ.get("OPS_CLAUDE") or shutil.which("claude") or str(HOME / ".local/bin/claude")
-APP_REL = "Builds/macOS/DiskGame.app"
-GATE = ["compile", "test-edit", "test-play"]  # scripts/unity.sh steps a task must pass to merge
 MAX_FIX_ROUNDS = 3  # times a worker is sent back after a conflict or failed gate
+RESULT_FILE = ".ops-result.json"
 
 ACTIVE = ("running", "gating", "merging")
 DBL = threading.RLock()
-MERGE_LOCK = threading.Lock()
-MAIN_LOCK = threading.Lock()
-PROCS = {}  # task id -> current Popen (claude or unity), for cancel
+PROCS = {}  # task id -> current Popen (claude or a gate step), for cancel
 THREADS = {}  # task id -> pipeline thread
-MAIN = {"state": "idle", "msg": ""}  # promote progress
+PROMOTING = {}  # project -> {"state", "msg"}
+
+
+# ---------------------------------------------------------------- projects
+
+class Project:
+    def __init__(self, path):
+        c = tomllib.loads(path.read_text())
+        self.name = path.stem
+        self.title = c.get("title", self.name)
+        self.repo = Path(c["repo"]).expanduser()
+        self.main = c.get("main_branch", "main")
+        self.dev = c.get("dev_branch", "dev")
+        self.wt = Path(c.get("worktrees", f"{self.repo}-wt")).expanduser()
+        self.max_parallel = int(c.get("max_parallel", 0))  # 0: only the global limit applies
+        w = c.get("worktree", {})
+        self.clone = w.get("clone", [])
+        self.setup = w.get("setup", [])
+        self.gate = c.get("gate", [])
+        app = c.get("app", {})
+        self.build = app.get("build")
+        self.launch = app.get("launch")
+        self.process = app.get("process")
+        self.artifact = app.get("artifact")
+        wk = c.get("worker", {})
+        self.env = wk.get("env", {})
+        self.port_base = int(wk.get("port_base", 47900))
+        self.worker_notes = wk.get("notes", "").strip()
+        self.design_notes = c.get("design", {}).get("notes", "").strip()
+        self.dev_wt = self.wt / "dev"
+        self.main_wt = self.wt / "main"
+        self.lock = threading.Lock()  # merges into dev and promotes
+
+    def git(self, *a, cwd=None, check=True):
+        return sh("git", *a, cwd=cwd or self.repo, check=check)
+
+    def rev(self, ref):
+        return self.git("rev-parse", ref)
+
+    def port_for(self, tid):
+        return self.port_base + tid % 90
+
+
+PROJECTS = {}
+
+
+def load_projects():
+    PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
+    found = {}
+    for f in sorted(PROJECTS_DIR.glob("*.toml")):
+        try:
+            p = Project(f)
+            old = PROJECTS.get(p.name)
+            if old:
+                p.lock = old.lock
+            found[p.name] = p
+        except Exception as e:
+            print(f"project {f.name}: {e}", flush=True)
+    PROJECTS.clear()
+    PROJECTS.update(found)
+    for p in PROJECTS.values():
+        try:
+            bootstrap(p)
+        except Exception as e:
+            print(f"project {p.name} bootstrap: {e}", flush=True)
+
+
+def proj(name):
+    if name not in PROJECTS:
+        raise ValueError(f"unknown project {name!r}")
+    return PROJECTS[name]
+
+
+def bootstrap(p):
+    p.wt.mkdir(parents=True, exist_ok=True)
+    if not p.git("rev-parse", "--verify", "-q", f"refs/heads/{p.dev}", check=False):
+        p.git("branch", p.dev, p.main)
+    if not p.dev_wt.exists():
+        p.git("worktree", "add", str(p.dev_wt), p.dev)
+    exclude = Path(p.git("rev-parse", "--path-format=absolute", "--git-common-dir")) / "info" / "exclude"
+    if RESULT_FILE not in (exclude.read_text() if exclude.exists() else ""):
+        exclude.parent.mkdir(exist_ok=True)
+        with open(exclude, "a") as f:
+            f.write(f"\n{RESULT_FILE}\n")
+    if p.build and not p.main_wt.exists():
+        p.git("worktree", "add", "--detach", str(p.main_wt), p.main)
+        prepare_worktree(p, p.main_wt, src_first=p.repo)
+
+
+def prepare_worktree(p, dest, src_first=None):
+    """Clone warm caches (APFS clone, near-instant) and run the project's setup commands."""
+    for rel in p.clone:
+        if (dest / rel).exists():
+            continue
+        for src in (src_first or p.main_wt, p.repo):
+            if (src / rel).exists():
+                (dest / rel).parent.mkdir(parents=True, exist_ok=True)
+                subprocess.run(["cp", "-cR", str(src / rel), str(dest / rel)], capture_output=True)
+                break
+    for cmd in p.setup:
+        subprocess.run(cmd, shell=True, cwd=dest, capture_output=True,
+                       env=dict(os.environ, OPS_REPO=str(p.repo)))
+
+
+def detect_project(path, name=None):
+    """Write a starter config for the repo at path. Returns the config path."""
+    repo = Path(path).expanduser().resolve()
+    if not (repo / ".git").exists():
+        raise ValueError(f"{repo} is not a git repository")
+    name = re.sub(r"[^a-z0-9-]+", "-", (name or repo.name).lower()).strip("-")
+    out = PROJECTS_DIR / f"{name}.toml"
+    if out.exists():
+        raise ValueError(f"project {name} already exists ({out})")
+    main = sh("git", "symbolic-ref", "--short", "HEAD", cwd=repo, check=False) or "main"
+    dev = "dev"
+    if sh("git", "rev-parse", "--verify", "-q", "refs/heads/dev", cwd=repo, check=False):
+        dev = "ops-dev"  # don't take over a dev branch the repo already uses
+    lines = [f'title = "{repo.name}"', f'repo = "{repo}"', f'main_branch = "{main}"', f'dev_branch = "{dev}"', ""]
+    unity = repo / "scripts" / "unity.sh"
+    if unity.exists() and (repo / "Assets").is_dir():
+        app = re.search(r"Builds/macOS/([\w .-]+\.app)", unity.read_text())
+        app = f"Builds/macOS/{app.group(1)}" if app else "Builds/macOS/App.app"
+        lines += ['[worktree]', 'clone = ["Library"]   # warm Unity import cache', "",
+                  *gate_toml("compile", "scripts/unity.sh compile", log="Logs/compile.log", errors="error CS"),
+                  *gate_toml("test-edit", "scripts/unity.sh test-edit", log="Logs/test-editmode.log",
+                             report="Logs/test-editmode.xml", errors="error CS"),
+                  *gate_toml("test-play", "scripts/unity.sh test-play", log="Logs/test-playmode.log",
+                             report="Logs/test-playmode.xml", errors="error CS"),
+                  "[app]", 'build = "scripts/unity.sh build"', f'launch = "open -n \'{app}\'"',
+                  f'process = "{app}"', f'artifact = "{app}"', ""]
+    elif (repo / "package.json").exists():
+        scripts = json.loads((repo / "package.json").read_text()).get("scripts", {})
+        lines += ['[worktree]', 'setup = ["npm ci --silent"]', ""]
+        for s in ("lint", "typecheck", "test"):
+            if s in scripts:
+                lines += gate_toml(s, f"npm run {s} --silent")
+        if "build" in scripts:
+            lines += ["[app]", 'build = "npm run build --silent"', ""]
+    elif (repo / "pyproject.toml").exists() or (repo / "setup.py").exists():
+        lines += gate_toml("test", "python3 -m pytest -q")
+    lines += ["[worker]", "notes = \"\"\"", "\"\"\"", "", "[design]", "notes = \"\"\"", "\"\"\"", ""]
+    out.write_text("\n".join(lines))
+    return out
+
+
+def gate_toml(name, run, **kw):
+    return ["[[gate]]", f'name = "{name}"', f'run = "{run}"', *(f'{k} = "{v}"' for k, v in kw.items()), ""]
 
 
 # ---------------------------------------------------------------- storage
@@ -60,27 +201,24 @@ def q(sql, args=(), one=False):
 
 
 def init_db():
+    DATA.mkdir(parents=True, exist_ok=True)
+    RUNS.mkdir(exist_ok=True)
     q("""CREATE TABLE IF NOT EXISTS tasks (
-        id INTEGER PRIMARY KEY, title TEXT, body TEXT, priority INTEGER DEFAULT 0,
+        id INTEGER PRIMARY KEY, project TEXT, title TEXT, body TEXT, priority INTEGER DEFAULT 0,
         hold INTEGER DEFAULT 0, depends_on INTEGER, parent INTEGER,
         state TEXT DEFAULT 'queued', phase TEXT DEFAULT '', created REAL, started REAL,
         finished REAL, branch TEXT, worktree TEXT, session_id TEXT, cost REAL DEFAULT 0,
         rounds INTEGER DEFAULT 0, summary TEXT, question TEXT, error TEXT,
-        next_prompt TEXT, merged TEXT, start_at TEXT DEFAULT 'claude')""")
-    if "pid" not in {r["name"] for r in q("PRAGMA table_info(tasks)")}:
-        q("ALTER TABLE tasks ADD COLUMN pid INTEGER")
+        next_prompt TEXT, merged TEXT, start_at TEXT DEFAULT 'claude', pid INTEGER)""")
     q("CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY, task_id INTEGER, ts REAL, text TEXT)")
-    q("""CREATE TABLE IF NOT EXISTS designs (id INTEGER PRIMARY KEY, title TEXT, session_id TEXT,
+    q("""CREATE TABLE IF NOT EXISTS designs (id INTEGER PRIMARY KEY, project TEXT, title TEXT, session_id TEXT,
         state TEXT DEFAULT 'idle', created REAL, updated REAL, cost REAL DEFAULT 0)""")
     q("""CREATE TABLE IF NOT EXISTS design_msgs (id INTEGER PRIMARY KEY, design_id INTEGER, role TEXT,
         text TEXT, ts REAL, task_ids TEXT, note TEXT)""")
     q("UPDATE designs SET state='idle' WHERE state='thinking'")  # a reply cut off by a restart
     q("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)")
-    for k, v in {"max_parallel": "3", "paused": "0", "model": "", "main_built": ""}.items():
+    for k, v in {"max_parallel": "3", "paused": "0", "model": ""}.items():
         q("INSERT OR IGNORE INTO settings VALUES (?,?)", (k, v))
-    if setting("staged"):  # renamed from staging
-        set_setting("main_built", setting("staged"))
-        q("DELETE FROM settings WHERE key='staged'")
 
 
 def setting(k):
@@ -105,22 +243,25 @@ def ev(tid, text):
     print(f"[#{tid}] {text}", flush=True)
 
 
-def add_task(body, title="", priority=0, hold=0, depends_on=None, parent=None):
+def add_task(project, body, title="", priority=0, hold=0, depends_on=None, parent=None):
+    proj(project)
     body = body.strip()
     title = (title or body.splitlines()[0] if body else title or "untitled").strip()[:120]
-    tid = q("INSERT INTO tasks (title, body, priority, hold, depends_on, parent, created) VALUES (?,?,?,?,?,?,?)",
-            (title, body, int(priority), int(bool(hold)), depends_on or None, parent, time.time()))
+    tid = q("INSERT INTO tasks (project, title, body, priority, hold, depends_on, parent, created) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            (project, title, body, int(priority), int(bool(hold)), depends_on or None, parent, time.time()))
     ev(tid, "queued" + (f" after #{depends_on}" if depends_on else ""))
     return tid
 
 
 def notify(title, msg):
-    msg = msg.replace('"', "'")[:200]
+    msg = msg.replace('"', "'").replace("\\", "/")[:200]
+    title = title.replace('"', "'")
     subprocess.run(["osascript", "-e", f'display notification "{msg}" with title "{title}"'],
                    capture_output=True)
 
 
-# ---------------------------------------------------------------- git / shell
+# ---------------------------------------------------------------- shell / processes
 
 def sh(*cmd, cwd=None, check=True):
     r = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
@@ -129,95 +270,78 @@ def sh(*cmd, cwd=None, check=True):
     return r.stdout.strip()
 
 
-def git(*a, cwd=REPO, check=True):
-    return sh("git", *a, cwd=cwd, check=check)
+def kill_app(p, path):
+    """Quit any copy of the project's app running from this worktree."""
+    if p and p.process and path:
+        subprocess.run(["pkill", "-f", f"{path}/{p.process}"], capture_output=True)
 
 
-def rev(ref):
-    return git("rev-parse", ref)
+def app_running(p, path):
+    return bool(p.process) and subprocess.run(["pgrep", "-f", f"{path}/{p.process}"],
+                                              capture_output=True).returncode == 0
 
 
-def clone_library(dest):
-    """Copy a warm Unity Library (APFS clone, near-instant) so a new worktree skips the full import."""
-    for src in (MAIN_WT / "Library", REPO / "Library"):
-        if src.is_dir() and not (dest / "Library").exists():
-            subprocess.run(["cp", "-cR", str(src), str(dest / "Library")], capture_output=True)
-            return
+def launch_app(p, path):
+    if not p.launch:
+        raise ValueError(f"{p.name} has no [app] launch command")
+    if p.artifact and not (Path(path) / p.artifact).exists():
+        raise ValueError("there is no build there yet")
+    subprocess.Popen(p.launch, shell=True, cwd=path, start_new_session=True,
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
-def bootstrap():
-    WT.mkdir(parents=True, exist_ok=True)
-    RUNS.mkdir(exist_ok=True)
-    if git("rev-parse", "--verify", "-q", "refs/heads/dev", check=False) == "":
-        git("branch", "dev", "main")
-    if not DEV_WT.exists():
-        git("worktree", "add", str(DEV_WT), "dev")
-    exclude = Path(git("rev-parse", "--git-common-dir")).resolve() / "info" / "exclude"
-    if ".ops-result.json" not in (exclude.read_text() if exclude.exists() else ""):
-        exclude.parent.mkdir(exist_ok=True)
-        with open(exclude, "a") as f:
-            f.write("\n.ops-result.json\n")
-    if OLD_STG_WT.exists() and not MAIN_WT.exists():
-        git("worktree", "move", str(OLD_STG_WT), str(MAIN_WT))
-    if git("rev-parse", "--verify", "-q", "refs/heads/stg", check=False):
-        git("branch", "-D", "stg")
-    if not MAIN_WT.exists():
-        git("worktree", "add", "--detach", str(MAIN_WT), "main")
-        clone_library(MAIN_WT)
-
-
-def kill_players(path):
-    """Quit any game player a worker left running from its worktree."""
-    subprocess.run(["pkill", "-f", f"{path}/{APP_REL}"], capture_output=True)
-
-
-def running_from(path):
-    return subprocess.run(["pgrep", "-f", f"{path}/{APP_REL}"], capture_output=True).returncode == 0
+def killgroup(pid):
+    if pid:
+        try:
+            os.killpg(pid, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError):
+            pass
 
 
 # ---------------------------------------------------------------- claude worker
 
-def worker_prompt(t):
-    tpl = (OPS / "worker_prompt.md").read_text()
-    return tpl.format(id=t["id"], title=t["title"], body=t["body"], worktree=t["worktree"],
-                      branch=t["branch"], repo=REPO, port=port_for(t["id"]), result=result_path(t["id"]))
+def worker_prompt(p, t):
+    tpl = (CODE / "worker_prompt.md").read_text()
+    checks = ", ".join(f"`{g['run']}`" for g in p.gate) or "(none configured: run whatever tests the repo has)"
+    notes = f"## Notes for {p.title}\n\n{p.worker_notes}\n" if p.worker_notes else ""
+    return tpl.format(id=t["id"], title=t["title"], body=t["body"], project=p.title, worktree=t["worktree"],
+                      branch=t["branch"], repo=p.repo, dev=p.dev, main=p.main, port=p.port_for(t["id"]),
+                      result=result_path(t), checks=checks, notes=notes)
 
 
-def port_for(tid):
-    return 47900 + tid % 90
-
-
-def result_path(tid):
-    return WT / f"t{tid}" / ".ops-result.json"  # inside the worktree, where auto mode lets workers write
+def result_path(t):
+    return Path(t["worktree"]) / RESULT_FILE  # inside the worktree, where auto mode lets workers write
 
 
 def cancelled(tid):
     return task(tid)["state"] == "cancelled"
 
 
-def run_claude(tid, prompt):
-    """Run one headless Claude turn in the task worktree. Returns the parsed result.json or None."""
+def run_claude(p, tid, prompt):
+    """Run one headless Claude turn in the task worktree. Returns the parsed result file or None."""
     t = task(tid)
     run_dir = RUNS / str(tid)
     run_dir.mkdir(parents=True, exist_ok=True)
-    rp = result_path(tid)
+    rp = result_path(t)
     rp.unlink(missing_ok=True)
     cmd = ["caffeinate", "-i", CLAUDE, "-p", prompt, "--output-format", "stream-json", "--verbose",
            "--permission-mode", "auto", "--permission-prompts", "none", "--strict-mcp-config",
-           "--name", f"diskgame #{tid}"]
+           "--name", f"{p.name} #{tid}"]
     if t["session_id"]:
         cmd += ["--resume", t["session_id"]]
     if setting("model"):
         cmd += ["--model", setting("model")]
-    env = dict(os.environ, DISKGAME_PORT=str(port_for(tid)), OPS_RESULT=str(rp), OPS_TASK_ID=str(tid))
+    port = p.port_for(tid)
+    env = dict(os.environ, OPS_RESULT=str(rp), OPS_TASK_ID=str(tid), OPS_PORT=str(port),
+               **{k: str(v).format(port=port) for k, v in p.env.items()})
     upd(tid, phase="claude working")
     with open(run_dir / "claude.jsonl", "a") as log, open(run_dir / "claude.err", "a") as err:
         log.write(json.dumps({"type": "ops", "prompt": prompt[:2000], "ts": time.time()}) + "\n")
-        p = subprocess.Popen(cmd, cwd=t["worktree"], env=env, stdout=subprocess.PIPE, stderr=err,
-                             text=True, start_new_session=True)
-        PROCS[tid] = p
-        upd(tid, pid=p.pid)
-        for line in p.stdout:
+        proc = subprocess.Popen(cmd, cwd=t["worktree"], env=env, stdout=subprocess.PIPE, stderr=err,
+                                text=True, start_new_session=True)
+        PROCS[tid] = proc
+        upd(tid, pid=proc.pid)
+        for line in proc.stdout:
             log.write(line)
             log.flush()
             try:
@@ -228,85 +352,102 @@ def run_claude(tid, prompt):
                 upd(tid, session_id=e["session_id"])
             if e.get("type") == "result":
                 upd(tid, cost=(task(tid)["cost"] or 0) + (e.get("total_cost_usd") or 0))
-        p.wait()
+        proc.wait()
         PROCS.pop(tid, None)
-    kill_players(t["worktree"])
+    kill_app(p, t["worktree"])
     if rp.exists():
         try:
             return json.loads(rp.read_text())
         except ValueError:
-            return {"status": "failed", "summary": "result.json was not valid JSON"}
+            return {"status": "failed", "summary": f"{RESULT_FILE} was not valid JSON"}
     return None
 
 
-# ---------------------------------------------------------------- gate (unity)
+# ---------------------------------------------------------------- gate
 
-def unity(tid, step, cwd):
-    """Run scripts/unity.sh <step> in cwd. Returns (ok, detail)."""
-    upd(tid, phase=f"gate: {step}") if tid else None
-    log = RUNS / str(tid or "main") / "gate.log"
+def run_step(key, label, cmd, cwd, log_name):
+    """Run a shell step in cwd, output appended to runs/<key>/<log_name>. Returns (exit code, output tail).
+    An int key is a task id: the step shows as its phase and can be cancelled."""
+    is_task = isinstance(key, int)
+    if is_task:
+        upd(key, phase=label)
+    log = RUNS / str(key) / log_name
     log.parent.mkdir(parents=True, exist_ok=True)
     with open(log, "a") as f:
-        f.write(f"\n==== {time.ctime()} {step} in {cwd}\n")
+        f.write(f"\n==== {time.ctime()} {label}: {cmd}  (in {cwd})\n")
         f.flush()
-        p = subprocess.Popen(["caffeinate", "-i", "scripts/unity.sh", step], cwd=cwd, stdout=f,
-                             stderr=subprocess.STDOUT, start_new_session=True)
-        if tid:
-            PROCS[tid] = p
-            upd(tid, pid=p.pid)
-        rc = p.wait()
-        PROCS.pop(tid, None)
-    if rc == 0:
-        return True, ""
-    return False, failure_detail(Path(cwd), step, rc)
+        start = f.tell()
+        proc = subprocess.Popen(["caffeinate", "-i", "/bin/bash", "-lc", cmd], cwd=cwd, stdout=f,
+                                stderr=subprocess.STDOUT, start_new_session=True)
+        if is_task:
+            PROCS[key] = proc
+            upd(key, pid=proc.pid)
+        rc = proc.wait()
+        if is_task:
+            PROCS.pop(key, None)
+    with open(log, errors="replace") as f:
+        f.seek(start)
+        tail = f.read()[-3000:]
+    return rc, tail
 
 
-def failure_detail(wt, step, rc):
-    name = {"test-edit": "test-editmode", "test-play": "test-playmode"}.get(step, step)
+def gate(p, tid, wt):
+    """Run every gate step. Returns (ok, detail of the first failure)."""
+    for g in p.gate:
+        rc, tail = run_step(tid, f"gate: {g['name']}", g["run"], wt, "gate.log")
+        if cancelled(tid):
+            return False, "cancelled"
+        if rc:
+            return False, failure_detail(Path(wt), g, rc, tail)
+    return True, ""
+
+
+def failure_detail(wt, g, rc, tail):
     lines = []
-    xml = wt / "Logs" / f"{name}.xml"
-    if step.startswith("test") and xml.exists():
+    if g.get("report") and (wt / g["report"]).exists():
         try:
-            for case in ET.parse(xml).iter("test-case"):
-                if case.get("result") == "Failed":
-                    msg = (case.findtext("failure/message") or "").strip()
-                    lines.append(f"FAILED {case.get('fullname')}: {msg[:400]}")
+            for case in ET.parse(wt / g["report"]).iter():
+                if case.tag not in ("test-case", "testcase"):  # NUnit and JUnit
+                    continue
+                fail = case.find("failure")
+                if case.get("result") == "Failed" or fail is not None:
+                    msg = (case.findtext("failure/message") or (fail.get("message") if fail is not None else "")
+                           or (fail.text if fail is not None else "") or "").strip()
+                    lines.append(f"FAILED {case.get('fullname') or case.get('name')}: {msg[:400]}")
         except ET.ParseError:
             pass
-    logf = wt / "Logs" / f"{name}.log"
-    if logf.exists():
-        text = logf.read_text(errors="replace").splitlines()
-        lines += [l for l in text if "error CS" in l][:20]
+    if g.get("log") and (wt / g["log"]).exists():
+        text = (wt / g["log"]).read_text(errors="replace").splitlines()
+        if g.get("errors"):
+            lines += [l for l in text if g["errors"] in l][:20]
         if not lines:
             lines += text[-40:]
-    return f"scripts/unity.sh {step} exited {rc}\n" + "\n".join(lines[:60])
+    if not lines:
+        lines = tail.splitlines()[-40:]
+    return f"`{g['run']}` exited {rc}\n" + "\n".join(lines[:60])
 
 
 # ---------------------------------------------------------------- task pipeline
 
-def ensure_worktree(tid):
+def ensure_worktree(p, tid):
     t = task(tid)
     if t["worktree"] and Path(t["worktree"]).exists():
         return
     slug = re.sub(r"[^a-z0-9]+", "-", t["title"].lower()).strip("-")[:40] or "task"
     branch = t["branch"] or f"task/{tid}-{slug}"
-    path = WT / f"t{tid}"
-    if git("rev-parse", "--verify", "-q", f"refs/heads/{branch}", check=False):
-        git("worktree", "add", str(path), branch)
+    path = p.wt / f"t{tid}"
+    if p.git("rev-parse", "--verify", "-q", f"refs/heads/{branch}", check=False):
+        p.git("worktree", "add", str(path), branch)
     else:
-        git("worktree", "add", "-b", branch, str(path), "dev")
-    clone_library(path)
+        p.git("worktree", "add", "-b", branch, str(path), p.dev)
+    prepare_worktree(p, path)
     upd(tid, branch=branch, worktree=str(path))
     ev(tid, f"worktree {path} on {branch}")
 
 
-def ahead_of_dev(branch):
-    return int(git("rev-list", "--count", f"dev..{branch}") or 0)
-
-
 def pipeline(tid):
     try:
-        _pipeline(tid)
+        _pipeline(proj(task(tid)["project"]), tid)
     except Exception as e:  # keep the daemon alive; surface the error on the task
         if not cancelled(tid):
             upd(tid, state="failed", phase="", error=f"orchestrator error: {e}", finished=time.time())
@@ -315,127 +456,125 @@ def pipeline(tid):
         THREADS.pop(tid, None)
 
 
-def _pipeline(tid):
+def _pipeline(p, tid):
     t = task(tid)
     upd(tid, started=t["started"] or time.time(), error=None)
-    ensure_worktree(tid)
+    ensure_worktree(p, tid)
     t = task(tid)
     wt = t["worktree"]
-    prompt = t["next_prompt"] or worker_prompt(t)
+    prompt = t["next_prompt"] or worker_prompt(p, t)
     need_claude = t["start_at"] == "claude"
     upd(tid, next_prompt=None, start_at="claude")
 
     while True:
         if need_claude:
-            res = run_claude(tid, prompt)
+            res = run_claude(p, tid, prompt)
             if cancelled(tid):
                 return
             if res is None:
                 err = (RUNS / str(tid) / "claude.err").read_text(errors="replace")[-1500:]
-                return fail(tid, "worker stopped without writing a result.\n" + err)
+                return fail(p, tid, "worker stopped without writing a result.\n" + err)
             status = res.get("status")
             upd(tid, summary=res.get("summary") or task(tid)["summary"])
             if status == "split":
-                return split(tid, res)
+                return split(p, tid, res)
             if status == "needs_input":
                 upd(tid, state="needs_input", phase="", question=res.get("question") or res.get("summary"))
                 ev(tid, "needs your input")
-                notify("Disk Game task needs input", f"#{tid}: {res.get('question', '')}")
+                notify(f"{p.title}: task needs input", f"#{tid}: {res.get('question', '')}")
                 return
             if status != "done":
-                return fail(tid, res.get("summary") or f"worker reported {status}")
-            if git("status", "--porcelain", cwd=wt):
-                git("stash", "push", "-u", "-m", "ops-autostash: uncommitted after worker", cwd=wt)
+                return fail(p, tid, res.get("summary") or f"worker reported {status}")
+            if p.git("status", "--porcelain", cwd=wt):
+                p.git("stash", "push", "-u", "-m", "ops-autostash: uncommitted after worker", cwd=wt)
                 ev(tid, "stashed uncommitted leftovers (git stash list in the worktree)")
         need_claude = True
 
-        if ahead_of_dev(t["branch"]) == 0:
-            return finish(tid, merged=None, note="no code changes")
+        if int(p.git("rev-list", "--count", f"{p.dev}..{t['branch']}") or 0) == 0:
+            return finish(p, tid, merged=None, note="no code changes")
 
         # Rebase onto the latest dev, gate, then merge (or hold for review).
-        upd(tid, state="gating", phase="rebasing onto dev")
-        base = rev("dev")
-        r = subprocess.run(["git", "rebase", "dev"], cwd=wt, capture_output=True, text=True)
+        upd(tid, state="gating", phase=f"rebasing onto {p.dev}")
+        base = p.rev(p.dev)
+        r = subprocess.run(["git", "rebase", p.dev], cwd=wt, capture_output=True, text=True)
         if r.returncode:
             subprocess.run(["git", "rebase", "--abort"], cwd=wt, capture_output=True)
-            if not bump_round(tid, "rebase conflict"):
+            if not bump_round(p, tid, "rebase conflict"):
                 return
-            prompt = (f"The `dev` branch moved and branch `{t['branch']}` no longer rebases cleanly onto it. "
-                      "Run `git rebase dev`, resolve the conflicts so both your change and the new dev "
-                      "work survive, re-run compile and both test suites, commit, and write $OPS_RESULT "
-                      f"again.\n\ngit said:\n{r.stdout[-1500:]}{r.stderr[-1500:]}")
+            prompt = (f"The `{p.dev}` branch moved and branch `{t['branch']}` no longer rebases cleanly onto "
+                      f"it. Run `git rebase {p.dev}`, resolve the conflicts so both your change and the new "
+                      f"{p.dev} work survive, re-run the checks, commit, and write $OPS_RESULT again."
+                      f"\n\ngit said:\n{r.stdout[-1500:]}{r.stderr[-1500:]}")
             upd(tid, state="running")
             continue
-        ok, detail = True, ""
-        for step in GATE:
-            ok, detail = unity(tid, step, wt)
-            if cancelled(tid):
-                return
-            if not ok:
-                break
+        ok, detail = gate(p, tid, wt)
+        if cancelled(tid):
+            return
         if not ok:
             ev(tid, f"gate failed: {detail.splitlines()[0]}")
-            if not bump_round(tid, "gate failed:\n" + detail):
+            if not bump_round(p, tid, "gate failed:\n" + detail):
                 return
-            prompt = (f"The queue rebased your branch onto the latest `dev` and ran its merge check. "
+            prompt = (f"The queue rebased your branch onto the latest `{p.dev}` and ran its merge check. "
                       f"It failed:\n\n{detail}\n\nFix it in this worktree (keep the history rebased on "
-                      "dev), re-run the failing step yourself, commit, and write $OPS_RESULT again.")
+                      f"{p.dev}), re-run the failing step yourself, commit, and write $OPS_RESULT again.")
             upd(tid, state="running")
             continue
-        ev(tid, "gate passed: " + ", ".join(GATE))
+        ev(tid, "gate passed" + (": " + ", ".join(g["name"] for g in p.gate) if p.gate else " (no gate steps)"))
 
         if task(tid)["hold"]:
-            unity(tid, "build", wt)
+            if p.build:
+                run_step(tid, "building for review", p.build, wt, "gate.log")
             upd(tid, state="review", phase="")
             ev(tid, "waiting for your review")
-            notify("Disk Game task ready for review", f"#{tid}: {t['title']}")
+            notify(f"{p.title}: task ready for review", f"#{tid}: {t['title']}")
             return
 
-        with MERGE_LOCK:
-            if rev("dev") != base:
-                ev(tid, "dev moved during the gate; re-checking")
+        with p.lock:
+            if p.rev(p.dev) != base:
+                ev(tid, f"{p.dev} moved during the gate; re-checking")
                 need_claude = False
                 continue
-            upd(tid, state="merging", phase="merging into dev")
-            git("merge", "--no-ff", "-m", f"Merge task #{tid}: {t['title']}", t["branch"], cwd=DEV_WT)
-            merged = rev("dev")
-        return finish(tid, merged=merged, note=f"merged into dev at {merged[:8]}")
+            upd(tid, state="merging", phase=f"merging into {p.dev}")
+            p.git("merge", "--no-ff", "-m", f"Merge task #{tid}: {t['title']}", t["branch"], cwd=p.dev_wt)
+            merged = p.rev(p.dev)
+        return finish(p, tid, merged=merged, note=f"merged into {p.dev} at {merged[:8]}")
 
 
-def bump_round(tid, why):
+def bump_round(p, tid, why):
     n = (task(tid)["rounds"] or 0) + 1
     upd(tid, rounds=n)
     if n > MAX_FIX_ROUNDS:
-        fail(tid, f"gave up after {MAX_FIX_ROUNDS} fix rounds. Last problem: {why}")
+        fail(p, tid, f"gave up after {MAX_FIX_ROUNDS} fix rounds. Last problem: {why}")
         return False
     ev(tid, f"fix round {n}: {why.splitlines()[0]}")
     return True
 
 
-def fail(tid, why):
+def fail(p, tid, why):
     upd(tid, state="failed", phase="", error=why, finished=time.time())
     ev(tid, "failed: " + why.splitlines()[0][:200])
-    notify("Disk Game task failed", f"#{tid}: {why[:120]}")
+    notify(f"{p.title}: task failed", f"#{tid}: {why[:120]}")
 
 
-def finish(tid, merged, note):
+def finish(p, tid, merged, note):
     t = task(tid)
     upd(tid, state="done", phase="", merged=merged, finished=time.time())
     ev(tid, note)
     if t["worktree"] and Path(t["worktree"]).exists():
-        kill_players(t["worktree"])
-        git("worktree", "remove", "--force", t["worktree"], check=False)
-    notify("Disk Game task done", f"#{tid}: {t['title']}")
+        kill_app(p, t["worktree"])
+        p.git("worktree", "remove", "--force", t["worktree"], check=False)
+    notify(f"{p.title}: task done", f"#{tid}: {t['title']}")
 
 
-def split(tid, res):
+def split(p, tid, res):
+    t = task(tid)
     ids = []
     for sub in res.get("tasks") or []:
         after = sub.get("after")
         dep = ids[after] if isinstance(after, int) and 0 <= after < len(ids) else None
-        ids.append(add_task(sub.get("body") or sub.get("title", ""), sub.get("title", ""),
-                            priority=task(tid)["priority"], hold=task(tid)["hold"], depends_on=dep, parent=tid))
-    finish(tid, merged=None, note="split into " + ", ".join(f"#{i}" for i in ids))
+        ids.append(add_task(p.name, sub.get("body") or sub.get("title", ""), sub.get("title", ""),
+                            priority=t["priority"], hold=t["hold"], depends_on=dep, parent=tid))
+    finish(p, tid, merged=None, note="split into " + ", ".join(f"#{i}" for i in ids))
 
 
 # ---------------------------------------------------------------- scheduler
@@ -453,11 +592,16 @@ def schedule_once():
     if setting("paused") == "1":
         return
     slots = int(setting("max_parallel") or 1) - len(THREADS)
-    if slots <= 0:
-        return
     for t in q("SELECT * FROM tasks WHERE state='queued' ORDER BY priority DESC, id"):
         if slots <= 0:
             break
+        p = PROJECTS.get(t["project"])
+        if not p or setting(f"paused:{p.name}") == "1":
+            continue
+        if p.max_parallel:
+            mine = sum(1 for i in THREADS if (task(i) or {}).get("project") == p.name)
+            if mine >= p.max_parallel:
+                continue
         if t["depends_on"]:
             dep = task(t["depends_on"])
             if dep and dep["state"] != "done":
@@ -480,71 +624,75 @@ def recover():
         ev(t["id"], "requeued after daemon restart")
 
 
-# ---------------------------------------------------------------- main (the golden build)
+# ---------------------------------------------------------------- main (the golden version)
 
-def main_info():
-    built = setting("main_built")
-    main, dev = rev("main"), rev("dev")
-    ahead = git("log", "--first-parent", "--format=%h %s", "main..dev").splitlines()[:30]
-    return {**MAIN, "main": main[:8], "built": built[:8], "dev": dev[:8], "ahead": ahead,
-            "stale": bool(built) and built != main, "running": running_from(MAIN_WT),
-            "has_build": (MAIN_WT / APP_REL).exists()}
+def main_info(p):
+    built = setting(f"main_built:{p.name}")
+    main, dev = p.rev(p.main), p.rev(p.dev)
+    ahead = p.git("log", "--first-parent", "--format=%h %s", f"{p.main}..{p.dev}").splitlines()[:30]
+    return {**PROMOTING.get(p.name, {"state": "idle", "msg": ""}),
+            "name": p.name, "title": p.title, "main_branch": p.main, "dev_branch": p.dev,
+            "main": main[:8], "built": built[:8], "dev": dev[:8], "ahead": ahead,
+            "has_app": bool(p.build), "can_launch": bool(p.launch),
+            "stale": bool(p.build) and built != main, "running": app_running(p, p.main_wt),
+            "has_build": bool(p.build) and (not p.artifact or (p.main_wt / p.artifact).exists()),
+            "paused": setting(f"paused:{p.name}") == "1", "gate": [g["name"] for g in p.gate]}
 
 
-def promote_blocker():
+def promote_blocker(p):
     """Why main cannot move to dev right now, or None. Checked before anything changes."""
-    if running_from(MAIN_WT):
-        return "Quit the main build first, then promote again."
-    if git("branch", "--show-current", check=False) != "main":
-        return f"Your checkout {REPO} is not on main. Switch it back to main, then promote."
-    if git("status", "--porcelain", "-uno", check=False):
-        return f"Your checkout {REPO} has uncommitted changes. Commit or stash them, then promote."
+    if PROMOTING.get(p.name, {}).get("state") == "building":
+        return "A promote is already running."
+    if app_running(p, p.main_wt):
+        return f"Quit the {p.main} build first, then promote again."
+    if p.git("branch", "--show-current", check=False) != p.main:
+        return f"Your checkout {p.repo} is not on {p.main}. Switch it back, then promote."
+    if p.git("status", "--porcelain", "-uno", check=False):
+        return f"Your checkout {p.repo} has uncommitted changes. Commit or stash them, then promote."
     return None
 
 
-def promote():
-    if not MAIN_LOCK.acquire(blocking=False):
-        return
+def promote(p):
+    st = PROMOTING.setdefault(p.name, {"state": "idle", "msg": ""})
     try:
-        why = promote_blocker()
-        if why:
-            return MAIN.update(state="failed", msg=why)
-        with MERGE_LOCK:
+        with p.lock:
             # Commits made straight to main (outside the queue) come along into dev first.
-            if subprocess.run(["git", "merge-base", "--is-ancestor", "main", "dev"], cwd=REPO).returncode:
-                r = subprocess.run(["git", "merge", "--no-ff", "-m", "Merge main into dev", "main"],
-                                   cwd=DEV_WT, capture_output=True, text=True)
+            if subprocess.run(["git", "merge-base", "--is-ancestor", p.main, p.dev], cwd=p.repo).returncode:
+                r = subprocess.run(["git", "merge", "--no-ff", "-m", f"Merge {p.main} into {p.dev}", p.main],
+                                   cwd=p.dev_wt, capture_output=True, text=True)
                 if r.returncode:
-                    subprocess.run(["git", "merge", "--abort"], cwd=DEV_WT, capture_output=True)
-                    return MAIN.update(state="failed", msg="main has commits that conflict with dev:\n"
-                                       + r.stdout[-1500:] + r.stderr[-1500:])
-            commit = rev("dev")
-        MAIN.update(state="building", msg=f"building {commit[:8]}")
-        app, prev = MAIN_WT / APP_REL, MAIN_WT / "Builds" / "previous.app"
-        shutil.rmtree(prev, ignore_errors=True)
-        if app.exists():
-            subprocess.run(["cp", "-cR", str(app), str(prev)], capture_output=True)
-        old = git("rev-parse", "HEAD", cwd=MAIN_WT)
-        git("checkout", "--detach", commit, cwd=MAIN_WT)
-        ok, detail = unity(None, "build", MAIN_WT)
-        if not ok:
-            if old:
-                git("checkout", "--detach", old, cwd=MAIN_WT, check=False)
-            if prev.exists():
-                shutil.rmtree(app, ignore_errors=True)
-                prev.rename(app)
-            return MAIN.update(state="failed", msg="Build failed; main and its build are unchanged.\n" + detail[:2000])
-        r = subprocess.run(["git", "merge", "--ff-only", commit], cwd=REPO, capture_output=True, text=True)
+                    subprocess.run(["git", "merge", "--abort"], cwd=p.dev_wt, capture_output=True)
+                    return st.update(state="failed", msg=f"{p.main} has commits that conflict with {p.dev}:\n"
+                                     + r.stdout[-1500:] + r.stderr[-1500:])
+            commit = p.rev(p.dev)
+        if p.build:
+            st.update(msg=f"building {commit[:8]}")
+            art = p.main_wt / p.artifact if p.artifact else None
+            prev = art.with_name(art.name + ".previous") if art else None
+            if prev:
+                shutil.rmtree(prev, ignore_errors=True)
+                if art.exists():
+                    subprocess.run(["cp", "-cR", str(art), str(prev)], capture_output=True)
+            old = p.git("rev-parse", "HEAD", cwd=p.main_wt)
+            p.git("checkout", "--detach", commit, cwd=p.main_wt)
+            rc, tail = run_step(f"main-{p.name}", "build", p.build, p.main_wt, "build.log")
+            if rc or (art and not art.exists()):
+                p.git("checkout", "--detach", old, cwd=p.main_wt, check=False)
+                if prev and prev.exists():
+                    shutil.rmtree(art, ignore_errors=True)
+                    prev.rename(art)
+                return st.update(state="failed", msg=f"Build failed; {p.main} and its build are unchanged.\n"
+                                 + tail[-2000:])
+            if prev:
+                shutil.rmtree(prev, ignore_errors=True)
+        r = subprocess.run(["git", "merge", "--ff-only", commit], cwd=p.repo, capture_output=True, text=True)
         if r.returncode:
-            return MAIN.update(state="failed", msg="Built, but main could not fast-forward:\n" + r.stderr[-1000:])
-        set_setting("main_built", commit)
-        shutil.rmtree(prev, ignore_errors=True)
-        MAIN.update(state="idle", msg=f"main is now {commit[:8]}")
-        notify("Disk Game main updated", f"main is now {commit[:8]}")
+            return st.update(state="failed", msg=f"{p.main} could not fast-forward:\n" + r.stderr[-1000:])
+        set_setting(f"main_built:{p.name}", commit)
+        st.update(state="idle", msg=f"{p.main} is now {commit[:8]}")
+        notify(f"{p.title}: {p.main} updated", f"{p.main} is now {commit[:8]}")
     except Exception as e:
-        MAIN.update(state="failed", msg=str(e))
-    finally:
-        MAIN_LOCK.release()
+        st.update(state="failed", msg=str(e))
 
 
 # ---------------------------------------------------------------- design chats
@@ -569,9 +717,10 @@ def design_say(did, text):
     threading.Thread(target=design_turn, args=(did, text), daemon=True).start()
 
 
-def ops_note(did):
+def ops_note(p, did):
     """Context the dashboard adds to each user message: the queue, and what the last queue block did."""
-    live = q("SELECT id,state,title FROM tasks WHERE state NOT IN ('done','cancelled') ORDER BY id")
+    live = q("SELECT id,state,title FROM tasks WHERE project=? AND state NOT IN ('done','cancelled') ORDER BY id",
+             (p.name,))
     parts = ["queue: " + ("; ".join(f"#{t['id']} {t['state']} {t['title']}" for t in live[:25]) or "empty")]
     last = q("SELECT note FROM design_msgs WHERE design_id=? AND role='assistant' ORDER BY id DESC LIMIT 1",
              (did,), one=True)
@@ -580,26 +729,32 @@ def ops_note(did):
     return "[ops: " + " | ".join(parts) + "]\n\n"
 
 
+def design_system_prompt(p):
+    notes = f"## Notes for {p.title}\n\n{p.design_notes}\n" if p.design_notes else ""
+    return (CODE / "design_prompt.md").read_text().format(project=p.title, dev_wt=p.dev_wt, dev=p.dev, notes=notes)
+
+
 def design_turn(did, text):
     d = design(did)
+    p = proj(d["project"])
     DESIGN_LIVE[did] = []
-    cmd = [CLAUDE, "-p", ops_note(did) + text, "--output-format", "stream-json", "--verbose",
+    cmd = [CLAUDE, "-p", ops_note(p, did) + text, "--output-format", "stream-json", "--verbose",
            "--permission-mode", "dontAsk", "--permission-prompts", "none", "--allowedTools", DESIGN_TOOLS,
-           "--strict-mcp-config", "--name", f"diskgame design #{did}",
-           "--append-system-prompt", (OPS / "design_prompt.md").read_text().format(dev_wt=DEV_WT)]
+           "--strict-mcp-config", "--name", f"{p.name} design #{did}",
+           "--append-system-prompt", design_system_prompt(p)]
     if d["session_id"]:
         cmd += ["--resume", d["session_id"]]
     if setting("model"):
         cmd += ["--model", setting("model")]
     log_dir = RUNS / f"design-{did}"
     log_dir.mkdir(parents=True, exist_ok=True)
-    texts, cost, err_tail = [], 0.0, ""
+    texts, cost = [], 0.0
     try:
         with open(log_dir / "claude.jsonl", "a") as log, open(log_dir / "claude.err", "a+") as err:
-            p = subprocess.Popen(cmd, cwd=DEV_WT, stdout=subprocess.PIPE, stderr=err, text=True,
-                                 start_new_session=True)
-            DESIGN_PROCS[did] = p
-            for line in p.stdout:
+            proc = subprocess.Popen(cmd, cwd=p.dev_wt, stdout=subprocess.PIPE, stderr=err, text=True,
+                                    start_new_session=True)
+            DESIGN_PROCS[did] = proc
+            for line in proc.stdout:
                 log.write(line)
                 log.flush()
                 try:
@@ -617,13 +772,13 @@ def design_turn(did, text):
                             DESIGN_LIVE[did].append(tool_line(c.get("name"), c.get("input") or {}))
                 elif e.get("type") == "result":
                     cost += e.get("total_cost_usd") or 0
-            p.wait()
+            proc.wait()
             err.seek(0)
             err_tail = err.read()[-1200:]
         reply = "\n\n".join(texts)
         if not reply:
-            reply = f"(no reply; claude exited {p.returncode})\n{err_tail.strip()}".strip()
-        reply, ids, note = queue_from_reply(reply, did)
+            reply = f"(no reply; claude exited {proc.returncode})\n{err_tail.strip()}".strip()
+        reply, ids, note = queue_from_reply(p, reply, did)
         q("INSERT INTO design_msgs (design_id, role, text, ts, task_ids, note) VALUES (?,?,?,?,?,?)",
           (did, "assistant", reply, time.time(), json.dumps(ids), note))
     except Exception as e:
@@ -635,7 +790,7 @@ def design_turn(did, text):
         q("UPDATE designs SET state='idle', updated=?, cost=cost+? WHERE id=?", (time.time(), cost, did))
 
 
-def queue_from_reply(reply, did):
+def queue_from_reply(p, reply, did):
     """Queue every task in the reply's ```queue blocks. Returns (reply without blocks, ids, note for Claude)."""
     ids, notes = [], []
     for block in QUEUE_BLOCK.findall(reply):
@@ -651,7 +806,7 @@ def queue_from_reply(reply, did):
             dep = local[after] if isinstance(after, int) and 0 <= after < len(local) else None
             if it.get("after_task") and str(it["after_task"]).lstrip("#").isdigit():
                 dep = int(str(it["after_task"]).lstrip("#"))
-            tid = add_task(it.get("body") or it.get("title", ""), it.get("title", ""),
+            tid = add_task(p.name, it.get("body") or it.get("title", ""), it.get("title", ""),
                            priority=int(it.get("priority") or 0), hold=bool(it.get("hold")), depends_on=dep)
             ev(tid, f"queued from design chat #{did}")
             local.append(tid)
@@ -711,16 +866,21 @@ class H(BaseHTTPRequestHandler):
     def do_GET(self):
         path = urlparse(self.path).path
         if path == "/":
-            return self.send(200, (OPS / "dashboard.html").read_bytes(), "text/html; charset=utf-8")
+            return self.send(200, (CODE / "dashboard.html").read_bytes(), "text/html; charset=utf-8")
         if path == "/api/state":
-            tasks = q("SELECT id,title,state,phase,priority,hold,depends_on,parent,created,started,finished,"
-                      "cost,rounds,summary,question,error,merged,branch FROM tasks ORDER BY id DESC LIMIT 300")
-            for t in tasks:
-                t["has_build"] = bool(t["state"] == "review" and (WT / f"t{t['id']}" / APP_REL).exists())
+            tasks = q("SELECT id,project,title,state,phase,priority,hold,depends_on,parent,created,started,"
+                      "finished,cost,rounds,summary,question,error,merged,branch FROM tasks "
+                      "ORDER BY id DESC LIMIT 500")
+            projects = []
+            for p in PROJECTS.values():
+                try:
+                    projects.append(main_info(p))
+                except Exception as e:
+                    projects.append({"name": p.name, "title": p.title, "error": str(e)})
             return self.send(200, {
-                "tasks": tasks, "now": time.time(), "main": main_info(),
+                "tasks": tasks, "now": time.time(), "projects": projects,
                 "settings": {k: setting(k) for k in ("max_parallel", "paused", "model")},
-                "active": len(THREADS),
+                "active": len(THREADS), "data_dir": str(DATA),
                 "design_cost": (q("SELECT SUM(cost) AS c FROM designs", one=True) or {}).get("c") or 0})
         m = re.fullmatch(r"/api/tasks/(\d+)", path)
         if m:
@@ -731,12 +891,14 @@ class H(BaseHTTPRequestHandler):
             t["events"] = q("SELECT ts,text FROM events WHERE task_id=? ORDER BY id", (tid,))
             t["activity"] = activity(tid)
             t["diffstat"] = ""
-            if t["branch"]:
-                base = "dev" if t["state"] != "done" else f"{t['merged']}^1" if t["merged"] else "dev"
-                t["diffstat"] = git("diff", "--stat", f"{base}...{t['branch']}", check=False)[-3000:]
+            p = PROJECTS.get(t["project"])
+            if p and t["branch"]:
+                base = f"{t['merged']}^1" if t["merged"] else p.dev
+                t["diffstat"] = p.git("diff", "--stat", f"{base}...{t['branch']}", check=False)[-3000:]
+            t["can_play"] = bool(p and p.launch and t["state"] == "review")
             return self.send(200, t)
         if path == "/api/designs":
-            return self.send(200, q("SELECT id,title,state,updated,cost FROM designs ORDER BY updated DESC"))
+            return self.send(200, q("SELECT id,project,title,state,updated,cost FROM designs ORDER BY updated DESC"))
         m = re.fullmatch(r"/api/designs/(\d+)", path)
         if m:
             did = int(m.group(1))
@@ -772,30 +934,42 @@ class H(BaseHTTPRequestHandler):
         if path == "/api/tasks":
             if not (b.get("body") or "").strip():
                 raise ValueError("describe the task")
-            dep = int(b["depends_on"]) if str(b.get("depends_on") or "").strip() else None
-            return {"id": add_task(b["body"], b.get("title", ""), b.get("priority", 0), b.get("hold", 0), dep)}
+            dep = int(str(b["depends_on"]).lstrip("#")) if str(b.get("depends_on") or "").strip() else None
+            return {"id": add_task(b["project"], b["body"], b.get("title", ""), b.get("priority", 0),
+                                   b.get("hold", 0), dep)}
         if path == "/api/settings":
             for k in ("max_parallel", "paused", "model"):
                 if k in b:
                     set_setting(k, b[k])
             return
-        if path == "/api/main/promote":
-            why = promote_blocker()
-            if why:
-                raise ValueError(why)
-            threading.Thread(target=promote, daemon=True).start()
-            return
-        if path == "/api/main/play":
-            if not (MAIN_WT / APP_REL).exists():
-                raise ValueError("no build of main yet; promote first")
-            subprocess.Popen(["open", str(MAIN_WT / APP_REL)])
+        if path == "/api/projects":
+            out = detect_project(b["path"], b.get("name") or None)
+            load_projects()
+            return {"name": out.stem, "config": str(out)}
+        if path == "/api/projects/reload":
+            load_projects()
+            return {"projects": list(PROJECTS)}
+        m = re.fullmatch(r"/api/projects/([\w-]+)/(promote|play|pause|resume)", path)
+        if m:
+            p, act = proj(m.group(1)), m.group(2)
+            if act == "promote":
+                why = promote_blocker(p)
+                if why:
+                    raise ValueError(why)
+                PROMOTING[p.name] = {"state": "building", "msg": "starting"}
+                threading.Thread(target=promote, args=(p,), daemon=True).start()
+            elif act == "play":
+                launch_app(p, p.main_wt)
+            else:
+                set_setting(f"paused:{p.name}", "1" if act == "pause" else "0")
             return
         if path == "/api/designs":
             text = (b.get("text") or "").strip()
             if not text:
                 raise ValueError("say something to start the chat")
-            did = q("INSERT INTO designs (title, created, updated) VALUES (?,?,?)",
-                    (text.splitlines()[0][:80], time.time(), time.time()))
+            proj(b["project"])
+            did = q("INSERT INTO designs (project, title, created, updated) VALUES (?,?,?,?)",
+                    (b["project"], text.splitlines()[0][:80], time.time(), time.time()))
             design_say(did, text)
             return {"id": did}
         m = re.fullmatch(r"/api/designs/(\d+)/(say|stop|rename)", path)
@@ -806,9 +980,9 @@ class H(BaseHTTPRequestHandler):
             if m.group(2) == "say":
                 design_say(did, b["text"].strip())
             elif m.group(2) == "stop":
-                p = DESIGN_PROCS.get(did)
-                if p:
-                    killgroup(p.pid)
+                proc = DESIGN_PROCS.get(did)
+                if proc:
+                    killgroup(proc.pid)
             else:
                 q("UPDATE designs SET title=? WHERE id=?", (b["title"][:80], did))
             return
@@ -819,14 +993,15 @@ class H(BaseHTTPRequestHandler):
         t = task(tid)
         if not t:
             raise ValueError("no such task")
+        p = PROJECTS.get(t["project"])
         st = t["state"]
         if action == "cancel":
             if st in ("done", "cancelled"):
                 raise ValueError(f"task is {st}")
             upd(tid, state="cancelled", phase="", finished=time.time())
-            p = PROCS.get(tid)
-            if p:
-                killgroup(p.pid)
+            proc = PROCS.get(tid)
+            if proc:
+                killgroup(proc.pid)
             ev(tid, "cancelled")
         elif action == "retry":
             if st not in ("failed", "cancelled"):
@@ -846,22 +1021,21 @@ class H(BaseHTTPRequestHandler):
         elif action == "approve":
             if st != "review":
                 raise ValueError(f"task is {st}")
-            kill_players(t["worktree"])
+            kill_app(p, t["worktree"])
             upd(tid, state="queued", hold=0, start_at="integrate")
             ev(tid, "approved")
         elif action == "reject":
             if st != "review":
                 raise ValueError(f"task is {st}")
-            kill_players(t["worktree"])
+            kill_app(p, t["worktree"])
             upd(tid, state="queued", rounds=0,
                 next_prompt=f"The user tried your change and wants this changed:\n\n{b['feedback']}\n\n"
                             "Update the work, re-run the checks, commit, and write $OPS_RESULT.")
             ev(tid, "changes requested: " + b["feedback"][:200])
         elif action == "play":
-            app = WT / f"t{tid}" / APP_REL
-            if not app.exists():
-                raise ValueError("this task has no build")
-            subprocess.Popen(["open", "-n", str(app)])
+            if not p or not t["worktree"]:
+                raise ValueError("this task has no worktree")
+            launch_app(p, t["worktree"])
         elif action == "edit":
             if st != "queued":
                 raise ValueError("only queued tasks can be edited")
@@ -871,17 +1045,9 @@ class H(BaseHTTPRequestHandler):
             raise ValueError("unknown action")
 
 
-def killgroup(pid):
-    if pid:
-        try:
-            os.killpg(pid, signal.SIGTERM)
-        except (ProcessLookupError, PermissionError):
-            pass
-
-
 def on_term(*_):
-    for p in list(PROCS.values()) + list(DESIGN_PROCS.values()):
-        killgroup(p.pid)
+    for proc in list(PROCS.values()) + list(DESIGN_PROCS.values()):
+        killgroup(proc.pid)
     os._exit(0)
 
 
@@ -889,25 +1055,31 @@ def serve():
     signal.signal(signal.SIGTERM, on_term)
     signal.signal(signal.SIGINT, on_term)
     init_db()
-    bootstrap()
+    load_projects()
     recover()
     threading.Thread(target=scheduler, daemon=True).start()
-    print(f"diskgame-ops on http://{HOST}:{PORT}  (claude: {CLAUDE})", flush=True)
+    print(f"claude-ops on http://{HOST}:{PORT}  projects: {', '.join(PROJECTS) or 'none'}  (claude: {CLAUDE})",
+          flush=True)
     ThreadingHTTPServer((HOST, PORT), H).serve_forever()
 
 
-def cli_add(text):
-    req = Request(f"http://127.0.0.1:{PORT}/api/tasks", data=json.dumps({"body": text}).encode(),
+def post(path, body):
+    req = Request(f"http://127.0.0.1:{PORT}{path}", data=json.dumps(body).encode(),
                   headers={"Content-Type": "application/json", "X-Ops": "1"})
     print(urlopen(req).read().decode())
 
 
 if __name__ == "__main__":
-    cmd = sys.argv[1] if len(sys.argv) > 1 else "serve"
+    args = sys.argv[1:]
+    cmd = args.pop(0) if args else "serve"
     if cmd == "serve":
         serve()
-    elif cmd == "add":
-        cli_add(" ".join(sys.argv[2:]) or sys.stdin.read())
+    elif cmd == "add-project" and args:
+        PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
+        out = detect_project(args[0], args[1] if len(args) > 1 else None)
+        print(f"wrote {out}. Review it, then reload projects on the dashboard (or restart the service).")
+    elif cmd == "add" and len(args) >= 2 and args[0] == "-p":
+        post("/api/tasks", {"project": args[1], "body": " ".join(args[2:]) or sys.stdin.read()})
     else:
         print(__doc__)
         sys.exit(2)

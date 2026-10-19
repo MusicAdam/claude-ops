@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Disk Game Ops</title>
+<title>Claude Ops</title>
 <style>
 :root {
   --bg: #f6f6f3; --panel: #ffffff; --ink: #1d1d1b; --muted: #6b6b66; --line: #e2e1dc;
@@ -93,11 +93,15 @@ ul.ahead { margin: 6px 0 0; padding-left: 18px; max-height: 160px; overflow: aut
 .live { color: var(--muted); font: 12px var(--mono); margin: 0 0 14px; }
 .composer { position: sticky; bottom: 0; background: var(--bg); padding-top: 10px; }
 .composer textarea { min-height: 80px; }
+.ptag { font-size: 11px; padding: 1px 6px; border-radius: 4px; background: var(--chip); color: var(--muted); }
+.maincard h2 { display: flex; justify-content: space-between; align-items: center; }
 </style>
 </head>
 <body>
 <header>
-  <h1>Disk Game Ops</h1>
+  <h1>Claude Ops</h1>
+  <select id="proj" title="Project"></select>
+  <button id="addproj" title="Add a git repository as a project">+ Project</button>
   <div class="tabs"><button id="tab-queue" class="on">Queue</button><button id="tab-design">Design</button></div>
   <span class="stat" id="hdr"></span>
   <span style="flex:1"></span>
@@ -109,10 +113,18 @@ ul.ahead { margin: 6px 0 0; padding-left: 18px; max-height: 160px; overflow: aut
 </header>
 <main id="queueview">
   <section>
+    <div class="card hidden" id="addcard">
+      <h2>Add project</h2>
+      <input id="ppath" placeholder="/Users/you/dev/repo" style="width:100%">
+      <div class="row"><label>Name <input id="pname" placeholder="from folder" style="width:140px"></label>
+        <button class="primary" id="padd">Add</button><button id="pcancel">Cancel</button></div>
+      <div id="pmsg" class="muted" style="margin-top:8px;white-space:pre-wrap"></div>
+    </div>
     <div class="card">
       <h2>New task</h2>
-      <textarea id="body" placeholder="Describe what you want. First line is the title.&#10;&#10;Example: Add a 3-2-1 countdown before each resolution, with a sound."></textarea>
+      <textarea id="body" placeholder="Describe what you want. First line is the title."></textarea>
       <div class="row">
+        <label id="tprojwrap">Project <select id="tproj"></select></label>
         <label>Priority <select id="prio"><option value="0">normal</option><option value="1">high</option><option value="-1">low</option></select></label>
         <label>After # <input id="after" style="width:60px" placeholder="—"></label>
         <label title="Build it and wait for you to play and approve before merging"><input type="checkbox" id="hold"> Hold for my review</label>
@@ -120,15 +132,7 @@ ul.ahead { margin: 6px 0 0; padding-left: 18px; max-height: 160px; overflow: aut
       <div class="row"><button class="primary" id="submit">Queue task</button> <span class="muted">⌘↩</span><span id="formmsg" class="err"></span></div>
     </div>
 
-    <div class="card" id="maincard">
-      <h2>Main · the golden version</h2>
-      <div id="mainst"></div>
-      <div class="row">
-        <button class="primary" id="play-main">Play main</button>
-        <button id="promote">Promote dev → main</button>
-      </div>
-      <div id="mainmsg" class="muted" style="margin-top:8px;white-space:pre-wrap"></div>
-    </div>
+    <div id="mains"></div>
 
     <div id="list"></div>
   </section>
@@ -145,14 +149,17 @@ ul.ahead { margin: 6px 0 0; padding-left: 18px; max-height: 160px; overflow: aut
     <div id="msgs"></div>
     <div class="composer">
       <textarea id="say" placeholder="Talk through an idea. When you agree on the work, ask Claude to queue it."></textarea>
-      <div class="row"><button class="primary" id="send">Send</button><span class="muted">⌘↩</span>
+      <div class="row"><label id="cprojwrap">Project <select id="cproj"></select></label><button class="primary" id="send">Send</button><span class="muted">⌘↩</span>
         <button id="stopchat" class="danger hidden">Stop</button><span id="chatmsg" class="err"></span></div>
     </div>
   </section>
 </div>
 <script>
 const $ = s => document.querySelector(s);
-let state = null, sel = null, detail = null, typing = false;
+let state = null, sel = null, detail = null, typing = false, pf = "";
+try { pf = localStorage.getItem("ops-proj") || ""; } catch {}
+const P = name => (state.projects.find(p => p.name === name) || {name, title: name});
+const inView = name => !pf || name === pf;
 const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 const ago = (t, now) => { if (!t) return ""; const s = Math.max(0, now - t);
   return s < 60 ? `${s|0}s` : s < 3600 ? `${(s/60)|0}m` : s < 86400 ? `${(s/3600).toFixed(1)}h` : `${(s/86400).toFixed(1)}d`; };
@@ -169,12 +176,27 @@ async function api(path, body) {
 
 async function refresh() {
   try { state = await api("/api/state"); } catch (e) { $("#hdr").innerHTML = `<span class="err">daemon not reachable</span>`; return; }
-  renderHeader(); renderMain(); renderList();
+  if (pf && !state.projects.some(p => p.name === pf)) pf = "";
+  renderProjects(); renderHeader(); renderMains(); renderList();
   if (sel) loadDetail(sel);
 }
 
+function renderProjects() {
+  const opts = (all) => (all ? `<option value="">All projects</option>` : "") +
+    state.projects.map(p => `<option value="${esc(p.name)}">${esc(p.title)}</option>`).join("");
+  for (const [id, all] of [["#proj", true], ["#tproj", false], ["#cproj", false]]) {
+    const el = $(id), v = el.value, html = opts(all);
+    if (el.dataset.html !== html) { el.innerHTML = html; el.dataset.html = html; el.value = v; }
+    if (!all && !el.value) el.selectedIndex = 0;
+  }
+  $("#proj").value = pf;
+  if (pf) { $("#tproj").value = pf; $("#cproj").value = pf; }
+  $("#tprojwrap").classList.toggle("hidden", !!pf);
+  $("#cprojwrap").classList.toggle("hidden", !!pf || !!chatSel);
+}
+
 function renderHeader() {
-  const s = state.settings, ts = state.tasks;
+  const s = state.settings, ts = state.tasks.filter(t => inView(t.project));
   const n = st => ts.filter(t => st.includes(t.state)).length;
   const cost = ts.reduce((a, t) => a + (t.cost || 0), 0) + (state.design_cost || 0);
   $("#hdr").innerHTML = `<b>${state.active}</b>/${s.max_parallel} working · <b>${n(["queued"])}</b> queued · ` +
@@ -185,18 +207,33 @@ function renderHeader() {
   $("#pause").className = s.paused === "1" ? "primary" : "";
 }
 
-function renderMain() {
-  const g = state.main;
-  $("#mainst").innerHTML = `<div>main: <span class="mono">${esc(g.main)}</span>` +
-    `${g.running ? ' · <span class="s-running">playing now</span>' : ""}</div>` +
-    (g.stale ? `<div class="s-review">The build is of ${esc(g.built)}, older than main. Promote to rebuild.</div>` : "") +
-    (!g.has_build ? `<div class="s-review">Not built yet. Promote to build it.</div>` : "") +
-    `<div>dev: <span class="mono">${esc(g.dev)}</span> · ${g.ahead.length ? `${g.ahead.length} merge(s) waiting to promote` : "nothing waiting"}</div>` +
-    (g.ahead.length ? `<ul class="ahead mono">${g.ahead.map(l => `<li>${esc(l)}</li>`).join("")}</ul>` : "");
-  $("#play-main").disabled = !g.has_build;
-  $("#promote").disabled = g.state === "building" || (!g.ahead.length && g.has_build && !g.stale);
-  $("#promote").textContent = g.state === "building" ? "Building…" : "Promote dev → main";
-  $("#mainmsg").innerHTML = g.state === "failed" ? `<span class="err">${esc(g.msg)}</span>` : esc(g.msg);
+const mainMsg = {};  // project -> error from a click, shown until the next success
+function renderMains() {
+  const ps = state.projects.filter(p => inView(p.name));
+  $("#mains").innerHTML = ps.map(g => {
+    if (g.error) return `<div class="card maincard"><h2>${esc(g.title)}</h2><div class="err">${esc(g.error)}</div></div>`;
+    const busy = g.state === "building";
+    const msg = mainMsg[g.name] || (g.state === "failed" ? `<span class="err">${esc(g.msg)}</span>` : esc(g.msg));
+    return `<div class="card maincard">
+      <h2><span>${esc(g.title)} · ${esc(g.main_branch)} (golden)</span>
+        <button data-p="${g.name}" data-a="${g.paused ? "resume" : "pause"}" title="Pause or resume this project's tasks">${g.paused ? "▶ Resume" : "❚❚ Pause"}</button></h2>
+      <div>${esc(g.main_branch)}: <span class="mono">${esc(g.main)}</span>${g.running ? ' · <span class="s-running">running now</span>' : ""}</div>` +
+      (g.has_app && g.stale && g.built ? `<div class="s-review">The build is of ${esc(g.built)}, older than ${esc(g.main_branch)}. Promote to rebuild.</div>` : "") +
+      (g.has_app && !g.has_build ? `<div class="s-review">Not built yet. Promote to build it.</div>` : "") +
+      `<div>${esc(g.dev_branch)}: <span class="mono">${esc(g.dev)}</span> · ${g.ahead.length ? `${g.ahead.length} merge(s) waiting to promote` : "nothing waiting"}</div>` +
+      (g.ahead.length ? `<ul class="ahead mono">${g.ahead.map(l => `<li>${esc(l)}</li>`).join("")}</ul>` : "") +
+      `<div class="muted" style="font-size:12px;margin-top:4px">gate: ${g.gate.length ? esc(g.gate.join(", ")) : "none configured"}</div>
+      <div class="row">
+        ${g.can_launch ? `<button class="primary" data-p="${g.name}" data-a="play" ${g.has_build ? "" : "disabled"}>Play ${esc(g.main_branch)}</button>` : ""}
+        <button data-p="${g.name}" data-a="promote" ${busy || (!g.ahead.length && (!g.has_app || (g.has_build && !g.stale))) ? "disabled" : ""}>${busy ? "Building…" : `Promote ${esc(g.dev_branch)} → ${esc(g.main_branch)}`}</button>
+      </div>
+      <div class="muted" style="margin-top:8px;white-space:pre-wrap">${msg}</div></div>`;
+  }).join("") || (state.projects.length ? "" : `<div class="card"><h2>No projects yet</h2>Click <b>+ Project</b> and give the path of a git repository.</div>`);
+  document.querySelectorAll("#mains [data-a]").forEach(b => b.onclick = () => {
+    delete mainMsg[b.dataset.p];
+    api(`/api/projects/${b.dataset.p}/${b.dataset.a}`, {}).then(refresh)
+      .catch(e => { mainMsg[b.dataset.p] = `<span class="err">${esc(e.message)}</span>`; renderMains(); });
+  });
 }
 
 function renderList() {
@@ -208,13 +245,14 @@ function renderList() {
   ];
   const now = state.now;
   $("#list").innerHTML = groups.map(([name, sts]) => {
-    let ts = state.tasks.filter(t => sts.includes(t.state));
+    let ts = state.tasks.filter(t => sts.includes(t.state) && inView(t.project));
     if (name === "Queued") ts = ts.sort((a, b) => b.priority - a.priority || a.id - b.id);
     if (name === "Finished") ts = ts.slice(0, 40);
     if (!ts.length) return "";
     return `<div class="group"><h3>${name} (${ts.length})</h3>` + ts.map(t => {
       const live = ["running", "gating", "merging"].includes(t.state);
       const sub = [
+        pf ? "" : `<span class="ptag">${esc(P(t.project).title)}</span>`,
         t.phase && live ? esc(t.phase) : "",
         t.depends_on ? `after #${t.depends_on}` : "",
         t.parent ? `from #${t.parent}` : "",
@@ -241,14 +279,14 @@ async function loadDetail(id, fresh) {
   const live = ["running", "gating", "merging"].includes(t.state);
   const btn = (act, label, cls = "") => `<button class="${cls}" data-act="${act}">${label}</button>`;
   let actions = "";
-  if (t.state === "review") actions = btn("play", "▶ Play this build", "primary") + btn("approve", "Approve & merge");
+  if (t.state === "review") actions = (t.can_play ? btn("play", "▶ Try this build", "primary") : "") + btn("approve", "Approve & merge");
   if (["failed", "cancelled"].includes(t.state)) actions += btn("retry", "Retry");
   if (!["done", "cancelled"].includes(t.state)) actions += btn("cancel", "Cancel", "danger");
 
   $("#detail").innerHTML = `
     <h2>#${t.id} · <span class="s-${t.state}">${LABEL[t.state] || t.state}</span>${live && t.phase ? ` · ${esc(t.phase)}` : ""}</h2>
     <div style="font-weight:600;font-size:15px">${esc(t.title)}</div>
-    <div class="muted mono" style="margin:4px 0">${esc(t.branch || "")}${t.merged ? ` → dev ${t.merged.slice(0, 8)}` : ""}${t.rounds ? ` · fix rounds: ${t.rounds}` : ""}</div>
+    <div class="muted mono" style="margin:4px 0">${esc(P(t.project).title)} · ${esc(t.branch || "")}${t.merged ? ` → ${esc(P(t.project).dev_branch || "dev")} ${t.merged.slice(0, 8)}` : ""}${t.rounds ? ` · fix rounds: ${t.rounds}` : ""}</div>
     ${t.question ? `<div class="callout"><b>Question:</b> ${esc(t.question)}</div>
       <textarea id="answer" placeholder="Your answer" style="min-height:70px"></textarea>
       <div class="row">${btn("answer", "Send answer", "primary")}</div>` : ""}
@@ -283,7 +321,9 @@ async function submit() {
   const body = $("#body").value.trim();
   if (!body) return;
   try {
-    const r = await api("/api/tasks", {body, priority: +$("#prio").value, hold: $("#hold").checked ? 1 : 0, depends_on: $("#after").value.trim()});
+    const project = pf || $("#tproj").value;
+    if (!project) throw new Error("pick a project");
+    const r = await api("/api/tasks", {project, body, priority: +$("#prio").value, hold: $("#hold").checked ? 1 : 0, depends_on: $("#after").value.trim()});
     $("#body").value = ""; $("#after").value = ""; $("#formmsg").textContent = ""; sel = r.id; refresh();
   } catch (e) { $("#formmsg").textContent = e.message; }
 }
@@ -292,8 +332,21 @@ $("#body").onkeydown = e => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey))
 $("#pause").onclick = () => api("/api/settings", {paused: state.settings.paused === "1" ? "0" : "1"}).then(refresh);
 $("#par").onchange = () => api("/api/settings", {max_parallel: Math.max(1, +$("#par").value || 1)}).then(refresh);
 $("#model").onchange = () => api("/api/settings", {model: $("#model").value}).then(refresh);
-$("#promote").onclick = () => api("/api/main/promote", {}).then(refresh).catch(e => $("#mainmsg").innerHTML = `<span class="err">${esc(e.message)}</span>`);
-$("#play-main").onclick = () => api("/api/main/play", {}).catch(e => $("#mainmsg").innerHTML = `<span class="err">${esc(e.message)}</span>`);
+$("#proj").onchange = () => {
+  pf = $("#proj").value; try { localStorage.setItem("ops-proj", pf); } catch {}
+  chatSel = null; chatData = null; chatKey = ""; refresh(); if (tab === "design") refreshDesign();
+};
+$("#addproj").onclick = () => { showTab("queue"); $("#addcard").classList.remove("hidden"); $("#ppath").focus(); };
+$("#pcancel").onclick = () => $("#addcard").classList.add("hidden");
+$("#padd").onclick = async () => {
+  try {
+    const r = await api("/api/projects", {path: $("#ppath").value.trim(), name: $("#pname").value.trim()});
+    $("#pmsg").innerHTML = `Added <b>${esc(r.name)}</b>. Its config is <span class="mono">${esc(r.config)}</span>. Check the gate and app commands there, then press Reload below if you edit it.<div class="row"><button id="preload">Reload projects</button></div>`;
+    $("#preload").onclick = () => api("/api/projects/reload", {}).then(refresh);
+    pf = r.name; try { localStorage.setItem("ops-proj", pf); } catch {}
+    refresh();
+  } catch (e) { $("#pmsg").innerHTML = `<span class="err">${esc(e.message)}</span>`; }
+};
 
 // ---------------------------------------------------------------- design tab
 let tab = "queue", chatSel = null, chatData = null, chatKey = "";
@@ -346,14 +399,16 @@ function md(src) {
 async function refreshDesign() {
   let chats = [];
   try { chats = await api("/api/designs"); } catch { return; }
+  chats = chats.filter(c => inView(c.project));
   $("#chats").innerHTML = chats.map(c => `<div class="chatitem ${c.id === chatSel ? "sel" : ""}" data-id="${c.id}">
-    <div>${esc(c.title)}</div><div class="sub">${c.state === "thinking" ? '<span class="pulse s-running">replying</span> · ' : ""}${ago(c.updated, Date.now() / 1000)} ago${c.cost ? ` · $${c.cost.toFixed(2)}` : ""}</div></div>`).join("")
+    <div>${esc(c.title)}</div><div class="sub">${pf ? "" : `<span class="ptag">${esc(P(c.project).title)}</span> `}${c.state === "thinking" ? '<span class="pulse s-running">replying</span> · ' : ""}${ago(c.updated, Date.now() / 1000)} ago${c.cost ? ` · $${c.cost.toFixed(2)}` : ""}</div></div>`).join("")
     || '<div class="muted">No design chats yet.</div>';
   document.querySelectorAll(".chatitem").forEach(el => el.onclick = () => { selectChat(+el.dataset.id); });
   if (chatSel) loadChat(); else renderChat();
 }
 function selectChat(id) {
   chatSel = id; chatKey = "";
+  if (state) renderProjects();
   try { localStorage.setItem("ops-chat", id || ""); } catch {}
   refreshDesign();
 }
@@ -370,7 +425,7 @@ function renderChat() {
   if (key === chatKey) return;
   chatKey = key;
   const box = $("#msgs"), stick = box.scrollTop + box.clientHeight >= box.scrollHeight - 40;
-  if (!d) { box.innerHTML = '<div class="muted" style="padding:20px 0">Start a design chat: describe an idea, a problem with the game, or a feature you want. Claude reads the design doc and code, asks questions, and queues tasks when you agree.</div>'; return; }
+  if (!d) { box.innerHTML = '<div class="muted" style="padding:20px 0">Start a design chat: describe an idea, a problem, or a feature you want. Claude reads the project docs and code, asks questions, and queues tasks when you agree.</div>'; return; }
   box.innerHTML = d.msgs.map(m => m.role === "user"
       ? `<div class="msg user">${esc(m.text.replace(/^\[ops:[^\n]*\]\n\n/, ""))}</div>`
       : `<div class="msg">${md(m.text)}${m.tasks.length ? `<div class="chips">${m.tasks.map(t => `<button class="chip" data-task="${t.id}">#${t.id} ${esc(t.title || "")} · ${LABEL[t.state] || t.state}</button>`).join("")}</div>` : ""}</div>`).join("")
@@ -383,14 +438,17 @@ async function sendChat() {
   if (!text) return;
   try {
     if (chatSel) await api(`/api/designs/${chatSel}/say`, {text});
-    else { const r = await api("/api/designs", {text}); chatSel = r.id; try { localStorage.setItem("ops-chat", r.id); } catch {} }
+    else {
+      const project = pf || $("#cproj").value;
+      if (!project) throw new Error("pick a project");
+      const r = await api("/api/designs", {project, text}); chatSel = r.id; try { localStorage.setItem("ops-chat", r.id); } catch {} }
     $("#say").value = ""; $("#chatmsg").textContent = ""; chatKey = ""; refreshDesign();
   } catch (e) { $("#chatmsg").textContent = e.message; }
 }
 $("#send").onclick = sendChat;
 $("#say").onkeydown = e => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) sendChat(); };
 $("#stopchat").onclick = () => api(`/api/designs/${chatSel}/stop`, {}).then(refreshDesign);
-$("#newchat").onclick = () => { selectChat(null); chatData = null; $("#say").focus(); };
+$("#newchat").onclick = () => { selectChat(null); chatData = null; renderProjects(); $("#say").focus(); };
 
 showTab(tab);
 refresh(); setInterval(refresh, 3000);

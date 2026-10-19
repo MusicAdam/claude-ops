@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# opsctl start|stop|restart|status|log|open  — manage the diskgame-ops background service (launchd)
+# opsctl start|stop|restart|status|log|open  — manage the claude-ops background service (launchd)
 set -euo pipefail
 OPS="$(cd "$(dirname "$0")" && pwd)"
-LABEL=com.diskgame.ops
+LABEL=com.claude-ops
+DATA="${OPS_DATA:-$HOME/.claude-ops}"; mkdir -p "$DATA"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 write_plist() {
   mkdir -p "$(dirname "$PLIST")"
@@ -20,8 +21,8 @@ write_plist() {
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
   <key>ProcessType</key><string>Background</string>
-  <key>StandardOutPath</key><string>$OPS/opsd.log</string>
-  <key>StandardErrorPath</key><string>$OPS/opsd.log</string>
+  <key>StandardOutPath</key><string>$DATA/opsd.log</string>
+  <key>StandardErrorPath</key><string>$DATA/opsd.log</string>
 </dict></plist>
 PL
 }
@@ -31,7 +32,7 @@ case "${1:-status}" in
   stop)    launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true; echo stopped ;;
   restart) "$0" stop; sleep 1; "$0" start ;;
   status)  launchctl print "gui/$(id -u)/$LABEL" 2>/dev/null | grep -E '^\s*(state|pid|last exit code)' || echo "not running" ;;
-  log)     tail -n 100 -f "$OPS/opsd.log" ;;
+  log)     tail -n 100 -f "$DATA/opsd.log" ;;
   open)    open http://127.0.0.1:8788 ;;
   *)       sed -n 2p "$0"; exit 2 ;;
 esac
