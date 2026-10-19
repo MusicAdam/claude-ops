@@ -24,6 +24,10 @@ moves. The queue has already run the merge check on this commit, and it passed: 
 - Build and test tools you run here are yours alone. `OPS_PORT` is set to {port}, a port no other
   worker uses; use it for anything that listens.
 - Never post OS-level mouse or keyboard events and never take focus: the user is using this Mac.
+- Stop only processes you started in this session, by the pid you got when you started them (`$!`, or
+  a pidfile your program writes). Never stop anything by name or pattern (`pkill`, `killall`,
+  `lsof … | xargs kill`, `kill $(pgrep …)`): a pattern also matches the user's apps, terminals and other
+  workers. A guard refuses those commands. If a process of yours will not stop, leave it and say so.
 
 ## What to check
 
@@ -36,7 +40,7 @@ Unit tests already passed. Your job is what they cannot catch: does the build wo
    logs. Look at every screenshot you take. Cover each change listed above, then the main flow from
    start to finish, so you see the new work and the old features working together.
 4. Compare what you saw with what each task said it did and with the design docs.
-5. Quit everything you started.
+5. Quit everything you started, by its pid.
 
 The user may message you while you check. A message arrives as a new user turn that starts with
 `[ops: a message from the user`. Answer it first in a sentence or two of plain text, then carry on with
