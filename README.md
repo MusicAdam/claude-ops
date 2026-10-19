@@ -134,6 +134,10 @@ notes = """Project-specific guidance for design chats."""
   on the task page. Each question resumes its own Claude session, read-only, so it remembers the work.
   It also remembers the questions: if you then send feedback or retry, it builds on what you discussed.
 - **Notifications.** macOS notifications when a task needs you, fails, or finishes.
+- **macOS permissions.** launchd starts the daemon through `~/.claude-ops/Claude Ops.app` (built from
+  `launcher.c` by `opsctl start`), so privacy prompts (App Management, folder access) name **Claude Ops**,
+  not python3. A grant then covers the daemon, its workers and their builds, and not every Python script.
+  The app is rebuilt only when `launcher.c` changes; a rebuild changes its signature, so macOS asks again.
 - **Workers** run `claude -p --permission-mode auto --permission-prompts none --strict-mcp-config`.
   Anything that would prompt is denied. They never push, and never touch your checkout, dev or main.
 
@@ -141,6 +145,7 @@ notes = """Project-specific guidance for design chats."""
 
 | Path | What |
 |---|---|
+| `launcher.c` | `Claude Ops.app`: starts the daemon so macOS permission prompts name it |
 | `opsd.py` | daemon: HTTP API + dashboard, scheduler, pipeline, promote, design and project chats |
 | `worker_prompt.md`, `release_prompt.md`, `design_prompt.md` | briefs for workers, release checkers and design chats |
 | `dashboard.html` | the page |
