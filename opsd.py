@@ -43,6 +43,7 @@ STOPPED = ("cancelled", "paused")  # set by you; the pipeline stops at its next 
 DBL = threading.RLock()
 PROCS = {}  # task id -> current Popen (claude or a gate step), for cancel
 THREADS = {}  # task id -> pipeline thread
+PHASE_SINCE = {}  # task id -> when its phase last changed, so the dashboard can say how long a step has run
 
 
 # ---------------------------------------------------------------- projects
@@ -390,6 +391,8 @@ def upd(tid, **kw):
         guard = f" AND state NOT IN ({','.join('?' * len(STOPPED))})"
     q(f"UPDATE tasks SET {','.join(k + '=?' for k in kw)} WHERE id=?{guard}",
       (*kw.values(), tid, *(STOPPED if guard else ())))
+    if "phase" in kw:
+        PHASE_SINCE[tid] = time.time()
 
 
 def ev(tid, text):
@@ -709,10 +712,10 @@ def run_step(key, label, cmd, cwd, log_name):
 
 def gate(p, tid, wt):
     """Run every gate step. Returns (ok, detail of the first failure)."""
-    for g in p.gate:
+    for i, g in enumerate(p.gate, 1):
         if stopped(tid):
             return False, "stopped"
-        rc, tail = run_step(tid, f"gate: {g['name']}", g["run"], wt, "gate.log")
+        rc, tail = run_step(tid, f"gate {i}/{len(p.gate)}: {g['name']}", g["run"], wt, "gate.log")
         if stopped(tid):
             return False, "stopped"
         if rc:
@@ -754,6 +757,7 @@ def ensure_worktree(p, tid):
     slug = re.sub(r"[^a-z0-9]+", "-", t["title"].lower()).strip("-")[:40] or "task"
     branch = t["branch"] or f"task/{tid}-{slug}"
     path = p.wt / f"t{tid}"
+    upd(tid, phase="setting up the worktree")
     copy_workspace_files(p, path)
     for r in p.parts:
         if r.at(path).exists():  # a workspace worktree that was cut off half made
@@ -1533,6 +1537,69 @@ def activity(tid, limit=120):
     return out[-limit:]
 
 
+def last_step(tid):
+    """The worker's latest step, a tool call or what it said, read from the end of its transcript.
+    ts is when the transcript last grew: for a long command, how long it has been running."""
+    f = RUNS / str(tid) / "claude.jsonl"
+    try:
+        with open(f, "rb") as fh:
+            fh.seek(max(0, fh.seek(0, 2) - (256 << 10)))
+            lines = fh.read().decode(errors="replace").splitlines()
+        ts = f.stat().st_mtime
+    except OSError:
+        return None
+    for line in reversed(lines):
+        if '"assistant"' not in line:
+            continue
+        try:
+            e = json.loads(line)
+        except ValueError:
+            continue
+        if e.get("type") != "assistant" or e.get("parent_tool_use_id"):
+            continue  # a subagent's step: its Agent call already says what it is doing
+        for c in reversed(e.get("message", {}).get("content") or []):
+            if c.get("type") == "tool_use":
+                return {"k": "tool", "t": tool_line(c.get("name"), c.get("input") or {}), "ts": ts}
+            if c.get("type") == "text" and c.get("text", "").strip():
+                return {"k": "say", "t": c["text"].strip().splitlines()[0][:240], "ts": ts}
+    return None
+
+
+STATE_WORDS = {"running": "working", "gating": "checking", "needs_input": "needs you"}
+
+
+def wait_reasons(tasks):
+    """Why each queued task has not started yet, in the scheduler's own order of checks."""
+    if setting("draining") == "1":
+        return {t["id"]: "waiting for claude-ops to restart" for t in tasks if t["state"] == "queued"}
+    if setting("paused") == "1":
+        return {t["id"]: "the queue is paused" for t in tasks if t["state"] == "queued"}
+    free = int(setting("max_parallel") or 1) - len(THREADS)
+    mine = {}
+    for i in list(THREADS):
+        name = (task(i) or {}).get("project")
+        mine[name] = mine.get(name, 0) + 1
+    out = {}
+    for t in sorted((t for t in tasks if t["state"] == "queued"), key=lambda t: (-t["priority"], t["id"])):
+        p = PROJECTS.get(t["project"])
+        dep = task(t["depends_on"]) if t["depends_on"] else None
+        if not p:
+            why = "its project is not loaded"
+        elif setting(f"paused:{p.name}") == "1":
+            why = f"{p.title} is paused"
+        elif dep and dep["state"] != "done":
+            why = f"waiting for #{dep['id']} to finish (it is {STATE_WORDS.get(dep['state'], dep['state'])})"
+        elif p.max_parallel and mine.get(p.name, 0) >= p.max_parallel:
+            why = f"{p.title} already runs {p.max_parallel} at once, its limit"
+        elif free <= 0:
+            why = "waiting for a free slot (all busy)"
+        else:
+            why = "starting now"
+            free -= 1
+        out[t["id"]] = why
+    return out
+
+
 def tool_line(name, i):
     arg = (i.get("command") or i.get("file_path") or i.get("description") or i.get("pattern")
            or i.get("prompt") or "")
@@ -1593,6 +1660,17 @@ class H(BaseHTTPRequestHandler):
             tasks = q("SELECT id,project,title,state,phase,priority,hold,depends_on,parent,created,started,"
                       "finished,cost,rounds,summary,question,error,merged,branch,kind FROM tasks "
                       "ORDER BY id DESC LIMIT 500")
+            # What each task is doing right now, for the status line under it in the list.
+            last = {r["task_id"]: r for r in q(
+                "SELECT e.task_id, e.text, e.ts FROM events e JOIN (SELECT MAX(id) AS m FROM events "
+                "GROUP BY task_id) x ON e.id = x.m")}
+            waits = wait_reasons(tasks)
+            for t in tasks:
+                ev_ = last.get(t["id"])
+                t["last_event"] = {"text": ev_["text"], "ts": ev_["ts"]} if ev_ else None
+                t["phase_since"] = PHASE_SINCE.get(t["id"]) if t["state"] in ACTIVE else None
+                t["step"] = last_step(t["id"]) if t["state"] == "running" and t["phase"] == "claude working" else None
+                t["wait"] = waits.get(t["id"])
             projects = []
             for p in PROJECTS.values():
                 try:
