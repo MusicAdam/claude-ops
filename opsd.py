@@ -5,6 +5,7 @@
   opsd.py add-project PATH [NAME]      detect PATH and write ~/.claude-ops/projects/NAME.toml
   opsd.py add -p NAME "text..."        queue a task through the running daemon
   opsd.py wait-idle                    hold new tasks, wait until no task is running a command (opsctl restart)
+  opsd.py pause-all | resume-all       pause every running task (it stops now, resumable) / resume every paused one
 
 Per project (paths come from ~/.claude-ops/projects/<name>.toml):
   <repo>                 your checkout of the main branch. The queue only fast-forwards it, when a release passes.
@@ -32,6 +33,7 @@ MAX_FIX_ROUNDS = 3  # times a worker is sent back after a conflict or failed gat
 RESULT_FILE = ".ops-result.json"
 
 ACTIVE = ("running", "gating", "merging")
+STOPPED = ("cancelled", "paused")  # set by you; the pipeline stops at its next step and never overrides them
 DBL = threading.RLock()
 PROCS = {}  # task id -> current Popen (claude or a gate step), for cancel
 THREADS = {}  # task id -> pipeline thread
@@ -272,7 +274,11 @@ def task(tid):
 
 
 def upd(tid, **kw):
-    q(f"UPDATE tasks SET {','.join(k + '=?' for k in kw)} WHERE id=?", (*kw.values(), tid))
+    guard = ""
+    if kw.get("state") not in (None, "queued", *STOPPED):  # a pipeline state change loses to a pause or cancel
+        guard = f" AND state NOT IN ({','.join('?' * len(STOPPED))})"
+    q(f"UPDATE tasks SET {','.join(k + '=?' for k in kw)} WHERE id=?{guard}",
+      (*kw.values(), tid, *(STOPPED if guard else ())))
 
 
 def ev(tid, text):
@@ -359,13 +365,18 @@ def result_path(t):
     return Path(t["worktree"]) / RESULT_FILE  # inside the worktree, where auto mode lets workers write
 
 
-def cancelled(tid):
-    return task(tid)["state"] == "cancelled"
+def stopped(tid):
+    """You paused or cancelled the task: its pipeline returns at the next check."""
+    return task(tid)["state"] in STOPPED
 
 
 def run_claude(p, tid, prompt):
     """Run one headless Claude turn in the task worktree. Returns the parsed result file or None."""
     t = task(tid)
+    if t["state"] in STOPPED:
+        if t["state"] == "paused":  # paused before Claude got this prompt: resume with it
+            upd(tid, next_prompt=prompt, start_at="claude")
+        return None
     run_dir = RUNS / str(tid)
     run_dir.mkdir(parents=True, exist_ok=True)
     rp = result_path(t)
@@ -440,9 +451,11 @@ def run_step(key, label, cmd, cwd, log_name):
 def gate(p, tid, wt):
     """Run every gate step. Returns (ok, detail of the first failure)."""
     for g in p.gate:
+        if stopped(tid):
+            return False, "stopped"
         rc, tail = run_step(tid, f"gate: {g['name']}", g["run"], wt, "gate.log")
-        if cancelled(tid):
-            return False, "cancelled"
+        if stopped(tid):
+            return False, "stopped"
         if rc:
             return False, failure_detail(Path(wt), g, rc, tail)
     return True, ""
@@ -496,7 +509,7 @@ def pipeline(tid):
         t = task(tid)
         (release_pipeline if t["kind"] == "release" else _pipeline)(proj(t["project"]), tid)
     except Exception as e:  # keep the daemon alive; surface the error on the task
-        if not cancelled(tid):
+        if not stopped(tid):
             upd(tid, state="failed", phase="", error=f"orchestrator error: {e}", finished=time.time())
             ev(tid, f"orchestrator error: {e}")
     finally:
@@ -516,7 +529,7 @@ def _pipeline(p, tid):
     while True:
         if need_claude:
             res = run_claude(p, tid, prompt)
-            if cancelled(tid):
+            if stopped(tid):
                 return
             if res is None:
                 err = (RUNS / str(tid) / "claude.err").read_text(errors="replace")[-1500:]
@@ -546,6 +559,9 @@ def _pipeline(p, tid):
         r = subprocess.run(["git", "rebase", p.dev], cwd=wt, capture_output=True, text=True)
         if r.returncode:
             subprocess.run(["git", "rebase", "--abort"], cwd=wt, capture_output=True)
+        if stopped(tid):
+            return
+        if r.returncode:
             if not bump_round(p, tid, "rebase conflict"):
                 return
             prompt = (f"The `{p.dev}` branch moved and branch `{t['branch']}` no longer rebases cleanly onto "
@@ -555,7 +571,7 @@ def _pipeline(p, tid):
             upd(tid, state="running")
             continue
         ok, detail = gate(p, tid, wt)
-        if cancelled(tid):
+        if stopped(tid):
             return
         if not ok:
             ev(tid, f"gate failed: {detail.splitlines()[0]}")
@@ -571,12 +587,16 @@ def _pipeline(p, tid):
         if task(tid)["hold"]:
             if p.build:
                 run_step(tid, "building for review", p.build, wt, "gate.log")
+                if stopped(tid):
+                    return
             upd(tid, state="review", phase="")
             ev(tid, "waiting for your review")
             notify(f"{p.title}: task ready for review", f"#{tid}: {t['title']}")
             return
 
         with p.lock:
+            if stopped(tid):
+                return
             if p.rev(p.dev) != base:
                 ev(tid, f"{p.dev} moved during the gate; re-checking")
                 need_claude = False
@@ -692,7 +712,7 @@ def release_pipeline(p, tid):
         else:
             upd(tid, state="gating")
             ok, detail = gate(p, tid, t["worktree"])
-            if cancelled(tid):
+            if stopped(tid):
                 return
             if not ok:
                 return fail(p, tid, "gate failed, so the release stops here:\n" + detail)
@@ -700,7 +720,7 @@ def release_pipeline(p, tid):
             prompt = release_prompt(p, t)
         upd(tid, state="running")
         res = run_claude(p, tid, prompt)
-        if cancelled(tid):
+        if stopped(tid):
             return
         if res is None:
             err = (RUNS / str(tid) / "claude.err").read_text(errors="replace")[-1500:]
@@ -719,12 +739,15 @@ def release_pipeline(p, tid):
             return fail(p, tid, "release blocked: " + (res.get("summary") or f"checker reported {status}"))
         ev(tid, "release check passed")
 
-    upd(tid, start_at="promote", state="merging")  # a retry or a restart resumes here
+    upd(tid, start_at="promote")  # a retry, a resume or a restart continues here
+    if stopped(tid):
+        return
+    upd(tid, state="merging")
     why = promote_blocker(p)
     if why:
         return fail(p, tid, why + " Then click Retry: it promotes without checking again.")
     err = promote(p, tid, task(tid)["base"])
-    if cancelled(tid):
+    if stopped(tid):
         return
     if err:
         return fail(p, tid, err)
@@ -753,6 +776,8 @@ def schedule_once():
         p = PROJECTS.get(t["project"])
         if not p or setting(f"paused:{p.name}") == "1":
             continue
+        if t["id"] in THREADS:  # resumed before its paused pipeline finished stopping
+            continue
         if p.max_parallel:
             mine = sum(1 for i in THREADS if (task(i) or {}).get("project") == p.name)
             if mine >= p.max_parallel:
@@ -762,6 +787,8 @@ def schedule_once():
             if dep and dep["state"] != "done":
                 continue
         upd(t["id"], state="running", phase="starting")
+        if task(t["id"])["state"] != "running":  # paused or cancelled just now
+            continue
         ev(t["id"], "started")
         th = threading.Thread(target=pipeline, args=(t["id"],), daemon=True)
         THREADS[t["id"]] = th
@@ -810,6 +837,60 @@ def recover():
             next_prompt="The task queue restarted while you were working. Check `git status` and "
                         "`git log` in this worktree, finish the task, and write $OPS_RESULT.")
         ev(t["id"], "requeued after daemon restart")
+
+
+PAUSE_NOTE = ("The user paused this task while you were working and has now resumed it. Any command you were "
+              "running was stopped. Check `git status` and `git log` in this worktree, finish the task, and "
+              "write $OPS_RESULT.")
+
+
+def pause_task(tid):
+    """Stop a task now and keep its place: a worker resumes its Claude session, a gate starts over."""
+    t = task(tid)
+    if t["state"] == "merging":
+        raise ValueError("it is merging; that can't be paused, and it is nearly done")
+    if t["state"] not in ("queued", *ACTIVE):
+        raise ValueError(f"task is {t['state']}")
+    kw = {}
+    if t["state"] == "gating" and t["kind"] == "task":
+        kw = {"start_at": "integrate"}  # Claude's work is done: rebase and run the gate again
+    elif t["state"] == "running" and t["phase"] == "claude working" and t["session_id"]:
+        kw = {"start_at": "claude", "next_prompt": PAUSE_NOTE}
+    # Otherwise Claude has not had its prompt yet, and run_claude keeps it for the resume.
+    was = t["state"]
+    upd(tid, state="paused", phase="", **kw)
+    proc = PROCS.get(tid)
+    if proc:
+        killgroup(proc.pid)
+    if was != "queued" and t["worktree"]:
+        kill_app(PROJECTS.get(t["project"]), t["worktree"])
+    ev(tid, "paused" + (f" while {t['phase']}" if was != "queued" and t["phase"] else ""))
+
+
+def resume_task(tid):
+    if task(tid)["state"] != "paused":
+        raise ValueError(f"task is {task(tid)['state']}")
+    upd(tid, state="queued")
+    ev(tid, "resumed")
+
+
+def pause_all():
+    """Pause every running task. Returns the ids paused and the ones that could not be."""
+    done, skipped = [], []
+    for t in q(f"SELECT id,state FROM tasks WHERE state IN ({','.join('?' * len(ACTIVE))})", ACTIVE):
+        try:
+            pause_task(t["id"])
+            done.append(t["id"])
+        except ValueError:
+            skipped.append(t["id"])
+    return {"paused": done, "merging": skipped}
+
+
+def resume_all():
+    ids = [t["id"] for t in q("SELECT id FROM tasks WHERE state='paused'")]
+    for tid in ids:
+        resume_task(tid)
+    return {"resumed": ids}
 
 
 # ---------------------------------------------------------------- main (the golden version)
@@ -1033,7 +1114,7 @@ PROJECT_CHAT_PROMPT = ("You are talking with the owner through the claude-ops da
                        "Nobody can answer permission prompts here: actions that would prompt are denied. "
                        "When one is denied, say what you tried, and that they can run it themselves or "
                        "continue this session in a terminal with `claude --resume`.")
-CHAT_STATES = ("review", "needs_input", "failed", "done", "cancelled")  # the worker is not running
+CHAT_STATES = ("review", "needs_input", "failed", "done", "cancelled", "paused")  # the worker is not running
 
 
 def task_ask(tid, text):
@@ -1059,7 +1140,7 @@ def task_chat_turn(tid, text):
     made = not cwd.exists()  # the worktree goes after a merge, but the session lives under its path
     note = (f"[ops: the user is asking about this task on the dashboard; its state is {t['state']}. Answer them. "
             "This turn is read-only: do not change files and do not write $OPS_RESULT. If they want a change, "
-            "tell them which button does it (Send back with feedback, Send answer, Retry, or a new task); "
+            "tell them which button does it (Send back with feedback, Send answer, Retry, Resume, or a new task); "
             "you will carry this conversation into that work."
             + (f" Your worktree was removed after the task finished; the merged code is in {p.dev_wt}."
                if made else "") + "]\n\n")
@@ -1230,6 +1311,10 @@ class H(BaseHTTPRequestHandler):
             out = detect_project(b["path"], b.get("name") or None, create=bool(b.get("create")))
             load_projects()
             return {"name": out.stem, "config": str(out)}
+        if path == "/api/pause-all":
+            return pause_all()
+        if path == "/api/resume-all":
+            return resume_all()
         if path == "/api/projects/reload":
             load_projects()
             return {"projects": list(PROJECTS)}
@@ -1276,7 +1361,7 @@ class H(BaseHTTPRequestHandler):
             raise ValueError("no such task")
         p = PROJECTS.get(t["project"])
         st = t["state"]
-        if action in ("retry", "answer", "approve", "reject") and tid in TASK_CHAT_LIVE:
+        if action in ("retry", "answer", "approve", "reject", "resume") and tid in TASK_CHAT_LIVE:
             raise ValueError("wait for the worker's reply to your question first")
         if action == "ask":
             return task_ask(tid, (b.get("text") or "").strip())
@@ -1293,6 +1378,10 @@ class H(BaseHTTPRequestHandler):
             if proc:
                 killgroup(proc.pid)
             ev(tid, "cancelled")
+        elif action == "pause":
+            pause_task(tid)
+        elif action == "resume":
+            resume_task(tid)
         elif action == "retry":
             if st not in ("failed", "cancelled"):
                 raise ValueError(f"task is {st}")
@@ -1367,6 +1456,8 @@ if __name__ == "__main__":
         serve()
     elif cmd == "wait-idle":
         wait_idle()
+    elif cmd in ("pause-all", "resume-all"):
+        post(f"/api/{cmd}", {})
     elif cmd == "add-project" and args:
         PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
         out = detect_project(str(Path(args[0]).expanduser().absolute()), args[1] if len(args) > 1 else None)

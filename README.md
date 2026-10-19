@@ -11,6 +11,7 @@ the golden version: it changes only when you promote.
 ./opsctl start                       # install + start the launchd service (runs at login, restarts if it dies)
 ./opsctl open                        # dashboard: http://127.0.0.1:8788  (…/#design, …/#chat open those tabs)
 ./opsctl status | log | stop | restart   # restart waits until no task is running a command; --now doesn't
+./opsctl pause | resume              # pause every running task now / resume every paused one
 ./opsd.py add-project ~/dev/myrepo   # or "+ Project" on the dashboard
 ./opsd.py add -p myrepo "Fix the crash when the save file is empty"
 ```
@@ -120,6 +121,13 @@ notes = """Project-specific guidance for design chats."""
 
 - **Parallelism.** "Parallel" on the dashboard is the global limit (default 3). Workers also split
   big tasks into subtasks (with "after" ordering) and use subagents inside a task.
+- **Pausing.** **❚❚ Pause** on a task, or **Pause running** in the header (`./opsctl pause`), stops it
+  now and keeps its place. A worker's Claude session resumes where it was; a command it was running
+  (a test run, a build) is stopped and it is told to check and carry on. A task paused during its gate
+  runs the gate again from the start. A task that is merging can't be paused. Paused tasks stay paused
+  across restarts: click **▶ Resume** (or `./opsctl resume`) to queue them again. To restart without
+  waiting: `./opsctl pause && ./opsctl restart && ./opsctl resume`. **Pause queue** is different: it
+  holds tasks that haven't started and lets running ones finish.
 - **Questions.** A worker that needs a decision stops with a question. Answer it on the dashboard
   and the same Claude session resumes.
 - **Ask the worker.** Once a worker stops (review, needs you, failed, done), you can ask it questions

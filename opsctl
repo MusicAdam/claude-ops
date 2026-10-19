@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# opsctl start|stop|restart [--now]|status|log|open  — manage the claude-ops background service (launchd)
+# opsctl start|stop|restart [--now]|pause|resume|status|log|open  — manage the claude-ops background service (launchd)
 # restart waits until no task is running a command (a gate, a build, a worker's test run); --now doesn't
+# pause stops every running task now (each resumes from where it was); resume puts them back in the queue
 set -euo pipefail
 OPS="$(cd "$(dirname "$0")" && pwd)"
 LABEL=com.claude-ops
@@ -38,3 +39,4 @@ case "${1:-status}" in
   open)    open http://127.0.0.1:8788 ;;
   *)       sed -n 2p "$0"; exit 2 ;;
 esac
+  pause|resume) OPS_DATA="$DATA" /opt/homebrew/bin/python3 "$OPS/opsd.py" "$1-all" ;;

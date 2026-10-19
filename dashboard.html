@@ -53,6 +53,7 @@ label { color: var(--muted); display: inline-flex; gap: 6px; align-items: center
 .s-needs_input, .s-review { color: var(--warn); font-weight: 600; }
 .s-failed { color: var(--bad); font-weight: 600; }
 .s-cancelled { color: var(--muted); }
+.s-paused { color: var(--muted); font-weight: 600; }
 .pulse::before { content: "●"; margin-right: 4px; animation: p 1.4s infinite; }
 @keyframes p { 50% { opacity: .25; } }
 #detail { position: sticky; top: 76px; max-height: calc(100vh - 96px); overflow: auto; }
@@ -112,7 +113,8 @@ ul.ahead { margin: 6px 0 0; padding-left: 18px; max-height: 160px; overflow: aut
   <label>Model <select id="model">
     <option value="">default</option><option value="opus">opus</option>
     <option value="sonnet">sonnet</option><option value="fable">fable</option></select></label>
-  <button id="pause"></button>
+  <button id="pause" title="Hold queued tasks; running ones carry on"></button>
+  <button id="pauseall" class="hidden"></button>
 </header>
 <main id="queueview">
   <section>
@@ -168,7 +170,7 @@ const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;
 const ago = (t, now) => { if (!t) return ""; const s = Math.max(0, now - t);
   return s < 60 ? `${s|0}s` : s < 3600 ? `${(s/60)|0}m` : s < 86400 ? `${(s/3600).toFixed(1)}h` : `${(s/86400).toFixed(1)}d`; };
 const LABEL = {queued:"queued", running:"working", gating:"checking", merging:"merging", needs_input:"needs you",
-               review:"review", done:"done", failed:"failed", cancelled:"cancelled"};
+               review:"review", done:"done", failed:"failed", cancelled:"cancelled", paused:"paused"};
 
 async function api(path, body) {
   const r = await fetch(path, body === undefined ? {} :
@@ -205,11 +207,20 @@ function renderHeader() {
   const cost = ts.reduce((a, t) => a + (t.cost || 0), 0) + (state.design_cost || 0);
   $("#hdr").innerHTML = (s.draining === "1" ? `<span class="s-review">restarting when running commands finish · </span>` : "") +
     `<b>${state.active}</b>/${s.max_parallel} working · <b>${n(["queued"])}</b> queued · ` +
-    `<b>${n(["needs_input","review","failed"])}</b> need you · $${cost.toFixed(2)} spent`;
+    `<b>${n(["needs_input","review","failed"])}</b> need you · ` +
+    (n(["paused"]) ? `<b>${n(["paused"])}</b> paused · ` : "") + `$${cost.toFixed(2)} spent`;
   if (document.activeElement !== $("#par")) $("#par").value = s.max_parallel;
   $("#model").value = s.model;
   $("#pause").textContent = s.paused === "1" ? "▶ Resume queue" : "❚❚ Pause queue";
   $("#pause").className = s.paused === "1" ? "primary" : "";
+  // Pause all running tasks (e.g. before a restart), or resume every paused one. Across all projects.
+  const running = state.tasks.filter(t => ["running", "gating"].includes(t.state)).length;
+  const paused = state.tasks.filter(t => t.state === "paused").length;
+  const pa = $("#pauseall");
+  pa.className = running || paused ? (running ? "" : "primary") : "hidden";
+  pa.textContent = running ? `❚❚ Pause running (${running})` : `▶ Resume paused (${paused})`;
+  pa.title = running ? "Stop every running task now; each resumes from where it was" : "Put every paused task back in the queue";
+  pa.dataset.a = running ? "pause-all" : "resume-all";
 }
 
 const mainMsg = {};  // project -> error from a click, shown until the next success
@@ -247,6 +258,7 @@ function renderList() {
   const groups = [
     ["Needs you", ["needs_input", "review", "failed"]],
     ["In progress", ["running", "gating", "merging"]],
+    ["Paused", ["paused"]],
     ["Queued", ["queued"]],
     ["Finished", ["done", "cancelled"]],
   ];
@@ -290,6 +302,8 @@ async function loadDetail(id, fresh) {
   const btn = (act, label, cls = "") => `<button class="${cls}" data-act="${act}">${label}</button>`;
   let actions = "";
   if (t.state === "review") actions = (t.can_play ? btn("play", "▶ Try this build", "primary") : "") + btn("approve", "Approve & merge");
+  if (["queued", "running", "gating"].includes(t.state)) actions += btn("pause", "❚❚ Pause");
+  if (t.state === "paused") actions += btn("resume", "▶ Resume", "primary");
   if (["failed", "cancelled"].includes(t.state)) actions += btn("retry", "Retry");
   if (!["done", "cancelled"].includes(t.state)) actions += btn("cancel", "Cancel", "danger");
 
@@ -348,6 +362,7 @@ async function submit() {
 $("#submit").onclick = submit;
 $("#body").onkeydown = e => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) submit(); };
 $("#pause").onclick = () => api("/api/settings", {paused: state.settings.paused === "1" ? "0" : "1"}).then(refresh);
+$("#pauseall").onclick = () => api(`/api/${$("#pauseall").dataset.a}`, {}).then(refresh);
 $("#par").onchange = () => api("/api/settings", {max_parallel: Math.max(1, +$("#par").value || 1)}).then(refresh);
 $("#model").onchange = () => api("/api/settings", {model: $("#model").value}).then(refresh);
 $("#proj").onchange = () => {
