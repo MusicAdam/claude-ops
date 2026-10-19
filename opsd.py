@@ -848,9 +848,10 @@ def release_pipeline(p, tid):
     if not t["base"]:
         with p.lock:
             err = merge_main_into_dev(p)
-            if err:
-                return fail(p, tid, err)
-            upd(tid, base=p.rev(p.dev))
+            if not err:
+                upd(tid, base=p.rev(p.dev))
+        if err and not resolve_main_into_dev(p, tid, err):
+            return
         ev(tid, f"checking {p.dev} at {task(tid)['base'][:8]}")
     t = task(tid)
     if t["base"] == p.rev(p.main):
@@ -863,6 +864,8 @@ def release_pipeline(p, tid):
         upd(tid, worktree=str(path))
         ev(tid, f"worktree {path} at {t['base'][:8]}")
         t = task(tid)
+    elif p.git("rev-parse", "HEAD", cwd=t["worktree"]) != t["base"]:  # left at the merge worker's commit
+        p.git("checkout", "--force", "--detach", t["base"], cwd=t["worktree"])
 
     if start_at != "promote":
         if resume and t["session_id"]:  # an answer, a retry or a restart resumes the checker
@@ -1087,6 +1090,78 @@ def merge_main_into_dev(p):
         subprocess.run(["git", "merge", "--abort"], cwd=p.dev_wt, capture_output=True)
         return f"{p.main} has commits that conflict with {p.dev}:\n" + r.stdout[-1500:] + r.stderr[-1500:]
     return None
+
+
+def resolve_main_into_dev(p, tid, conflict):
+    """main conflicts with dev: a worker merges main in the release worktree, resolves the conflicts and runs the
+    checks, then dev moves to its merge and the release goes on from there. A pause, a restart or a retry starts
+    the merge over. Returns True once dev contains main (the task's base is set); False if it failed or stopped."""
+    path = p.wt / f"t{tid}"
+    for _ in range(MAX_FIX_ROUNDS):  # dev can move while the worker merges; then it merges again
+        if path.exists():
+            for a in (("merge", "--abort"), ("reset", "--hard"), ("clean", "-fd")):
+                subprocess.run(["git", *a], cwd=path, capture_output=True)
+            p.git("checkout", "--detach", p.dev, cwd=path)
+        else:
+            p.git("worktree", "add", "--detach", str(path), p.dev)
+            prepare_worktree(p, path)
+        upd(tid, worktree=str(path), session_id=None)
+        r = subprocess.run(["git", "merge", "--no-ff", "-m", f"Merge {p.main} into {p.dev}", p.main],
+                           cwd=path, capture_output=True, text=True)
+        if r.returncode:
+            ev(tid, f"{p.main} conflicts with {p.dev}; a worker is resolving it")
+            res = run_claude(p, tid, resolve_prompt(p, task(tid), r.stdout[-2500:] + r.stderr[-1000:]))
+            if stopped(tid):
+                return False
+            if res is None:
+                err = (RUNS / str(tid) / "claude.err").read_text(errors="replace")[-1500:]
+                fail(p, tid, f"the worker merging {p.main} into {p.dev} stopped without writing a result.\n" + err)
+                return False
+            if res.get("status") != "done":
+                fail(p, tid, f"the worker could not merge {p.main} into {p.dev}: "
+                             + (res.get("summary") or f"it reported {res.get('status')}") + "\n\n" + conflict)
+                return False
+        head = p.git("rev-parse", "HEAD", cwd=path)
+        bad = (p.git("diff", "--name-only", "--diff-filter=U", cwd=path)
+               or p.git("rev-parse", "-q", "--verify", "MERGE_HEAD", cwd=path, check=False)
+               or p.git("rev-list", "--count", f"HEAD..{p.main}", cwd=path) != "0")
+        if bad:
+            fail(p, tid, f"the worker said it merged {p.main} into {p.dev}, but the merge is not committed "
+                         f"in {path}. Click Retry to have a worker merge it again from the start.")
+            return False
+        with p.lock:
+            p.git("merge", "--ff-only", head, cwd=p.dev_wt, check=False)  # dev hasn't moved: it becomes the merge
+            if p.rev(p.dev) != head and subprocess.run(
+                    ["git", "merge", "--no-ff", "-m", f"Merge {p.main} into {p.dev}", head],
+                    cwd=p.dev_wt, capture_output=True).returncode:
+                subprocess.run(["git", "merge", "--abort"], cwd=p.dev_wt, capture_output=True)
+                ev(tid, f"{p.dev} moved while the worker merged, and conflicts again; merging again")
+                continue
+            upd(tid, base=p.rev(p.dev), session_id=None)  # the release checker starts its own session
+        ev(tid, f"merged {p.main} into {p.dev} at {head[:8]}")
+        return True
+    fail(p, tid, f"{p.dev} kept moving while a worker merged {p.main} into it. Click Retry.")
+    return False
+
+
+def resolve_prompt(p, t, conflict):
+    checks = ", ".join(f"`{g['run']}`" for g in p.gate) or "(none configured: run whatever tests the repo has)"
+    notes = f"## Notes for {p.title}\n\n{p.worker_notes}\n\n" if p.worker_notes else ""
+    return (f"You are an unattended worker on the {p.title} project, started by the claude-ops task queue. "
+            f"Nobody watches this session.\n\n"
+            f"Commits were made straight to `{p.main}`, and they conflict with `{p.dev}`. Before release #{t['id']} "
+            f"can check `{p.dev}`, `{p.main}` has to be merged into it. This worktree ({t['worktree']}) is "
+            f"detached at `{p.dev}`, with `git merge {p.main}` stopped on the conflicts:\n\n{conflict}\n\n"
+            f"Resolve every conflict so both sides' changes survive. The `{p.dev}` side came through the queue; "
+            f"the `{p.main}` side is the user's own work. Read each side's commits "
+            f"(`git log --oneline {p.dev}...{p.main}`, `git show`) to understand what each meant. Then run the "
+            f"checks ({checks}), fix anything the merge broke, and conclude the merge with `git commit --no-edit` "
+            f"(fixes go in that commit or after it). Don't abort the merge, rebase or reset, and don't touch "
+            f"other branches, worktrees or {p.repo}.\n\n{notes}"
+            f"As your last action, write JSON to $OPS_RESULT ({result_path(t)}): "
+            f'{{"status": "done", "summary": "..."}} once the merge is committed, or '
+            f'{{"status": "failed", "summary": "why"}} if the two sides can\'t be reconciled without the user. '
+            f"The user reads the summary: say in plain words how you combined the two sides.")
 
 
 def promote(p, tid, commit):

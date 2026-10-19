@@ -60,7 +60,9 @@ projects and writes a starter config. Read it, adjust it, then click **Reload pr
 - With nothing new on dev, Promote only rebuilds main (no gate, no checker).
 - Promoting claude-ops itself restarts the daemon to load the new code (`opsctl restart`: running
   tasks pause and resume).
-- Commits made straight to main are merged into dev when the release takes its snapshot (no gate).
+- Commits made straight to main are merged into dev when the release takes its snapshot (no gate). If they
+  conflict with dev, a worker merges them in the release's worktree, resolves the conflicts and runs the checks;
+  dev moves to that merge, and the release checks it as usual. Retry starts the merge over.
 - If the build fails, main and its build stay as they were.
 - Nothing is ever pushed. Push main yourself when you want to.
 
