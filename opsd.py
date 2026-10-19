@@ -113,6 +113,15 @@ class Project:
         """A revs string for people: "abc12345", or "backend abc12345, app def67890" for a workspace."""
         return ", ".join(f"{r.sub} {sha[:n]}" if r.sub else sha[:n] for r, sha in self.pairs(revs or ""))
 
+    def label(self, shas, n=8):
+        """Like show, for a list that may hold only some repos' shas, as a task's merged does."""
+        shas = (shas or "").split()
+        if not self.repos or len(shas) == len(self.parts):
+            return self.show(" ".join(shas), n)
+        found = [(r, self.mine(r, " ".join(shas))) for r in self.parts]
+        known = {s for _, s in found if s}
+        return ", ".join([f"{r.sub} {s[:n]}" for r, s in found if s] + [s[:n] for s in shas if s not in known])
+
     def mine(self, r, shas):
         """The sha in a space-separated list that is a commit of repo r, or None."""
         return next((s for s in (shas or "").split() if r.has(s)), None)
@@ -2017,6 +2026,9 @@ class H(BaseHTTPRequestHandler):
                     if st:
                         stats.append(f"{r.sub}/\n{st}" if r.sub else st)
                 t["diffstat"] = "\n\n".join(stats)[-3000:]
+            if p:  # the commits with their repo names, for the line under the title
+                t["merged_show"] = p.label(t["merged"])
+                t["base_show"] = p.label(t["base"])
             t["can_play"] = bool(p and p.launch and t["state"] == "review")
             t["chat"] = q("SELECT role,text,ts,delivered FROM task_msgs WHERE task_id=? ORDER BY id", (tid,))
             t["chat_live"] = TASK_CHAT_LIVE.get(tid)
