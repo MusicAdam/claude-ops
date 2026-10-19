@@ -147,6 +147,11 @@ notes = """Project-specific guidance for design chats."""
   project filter in the header, so only its tasks and chats show; click it again to see every
   project. Tasks are on the right. Clicking a
   task opens it on the left and focuses its project, and new tasks default to that project.
+- **Status at a glance.** Each task in the list has a line saying what is happening now. A working
+  task shows the worker's latest step (`▸ Bash: npm test · 40s ago`, or what it last said). A task
+  being checked or merged shows its step and how long it has run (`gate 2/3: test · for 1m`). A
+  queued task says why it hasn't started: a free slot, the task it runs after, a paused project or
+  queue. Tasks that need you show the question or error; finished ones show the summary.
 - **Parallelism.** "Parallel" on the dashboard is the global limit (default 3). Workers also split
   big tasks into subtasks (with "after" ordering) and use subagents inside a task.
 - **Pausing.** **❚❚ Pause** on a task, or **Pause running** in the header (`./opsctl pause`), stops it

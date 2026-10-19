@@ -24,6 +24,7 @@ header h1 { font-size: 16px; margin: 0; }
 .stat b { color: var(--ink); }
 main { display: grid; grid-template-columns: 1fr minmax(340px, 460px); gap: 20px; padding: 20px;
        max-width: 1500px; margin: 0 auto; align-items: start; }
+main > section { min-width: 0; }  /* a long one-line status is cut off, not widening its column */
 #left { position: sticky; top: calc(var(--hdr-h, 64px) + 12px); max-height: calc(100vh - var(--hdr-h, 64px) - 32px); overflow: auto; }
 @media (max-width: 900px) { main { grid-template-columns: 1fr; padding: 16px; }
                             #left { position: static; max-height: none; overflow: visible; } }
@@ -50,6 +51,9 @@ label { color: var(--muted); display: inline-flex; gap: 6px; align-items: center
 .task .id { color: var(--muted); font-family: var(--mono); font-size: 12px; }
 .task .title { flex: 1; font-weight: 550; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .task .sub { color: var(--muted); font-size: 12px; margin-top: 3px; }
+.task .now { font-size: 12px; margin-top: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.task .now .mono { font-size: 11.5px; }
+.task .now .say { font-style: italic; }
 .badge { font-size: 11px; padding: 2px 8px; border-radius: 99px; background: var(--chip); white-space: nowrap; }
 .s-running, .s-gating, .s-merging { color: var(--accent); }
 .s-done { color: var(--ok); }
@@ -260,12 +264,14 @@ function setFocus(name) {
 function projStats(g) {
   const ts = state.tasks.filter(t => t.project === g.name), n = st => ts.filter(t => st.includes(t.state)).length;
   const r = g.release, busy = r && !["done", "failed", "cancelled"].includes(r.state);
-  const w = n(LIVE), need = n(NEEDS), qd = n(["queued"]);
+  const need = n(NEEDS), qd = n(["queued"]);
   return [
     g.error ? `<span class="err">config error</span>` : "",
     g.paused ? `<span class="s-review">paused</span>` : "",
     need ? `<span class="s-review">${need} need${need === 1 ? "s" : ""} you</span>` : "",
-    w ? `<span class="s-running pulse">${w} working</span>` : "",
+    n(["running"]) ? `<span class="s-running pulse">${n(["running"])} working</span>` : "",
+    n(["gating"]) ? `<span class="s-running">${n(["gating"])} checking</span>` : "",
+    n(["merging"]) ? `<span class="s-running">${n(["merging"])} merging</span>` : "",
     qd ? `${qd} queued` : "",
     busy ? `<span class="s-running">release #${r.id}</span>` : r && r.state === "failed" ? `<span class="err">release failed</span>` : "",
     !g.error && g.ahead.length ? `${g.ahead.length} to promote` : "",
@@ -359,7 +365,6 @@ function renderList() {
       const live = ["running", "gating", "merging"].includes(t.state);
       const sub = [
         pf ? "" : `<span class="ptag">${esc(P(t.project).title)}</span>`,
-        t.phase && live ? esc(t.phase) : "",
         t.depends_on ? `after #${t.depends_on}` : "",
         t.kind === "release" ? "release" : "",
         t.parent ? `from #${t.parent}` : "",
@@ -371,10 +376,30 @@ function renderList() {
       return `<div class="task ${sel === t.id ? "sel" : ""}" data-id="${t.id}">
         <div class="top"><span class="id">#${t.id}</span><span class="title">${esc(t.title)}</span>
         <span class="badge s-${t.state} ${live ? "pulse" : ""}">${LABEL[t.state] || t.state}</span></div>
-        <div class="sub">${sub}</div></div>`;
+        ${nowLine(t, now)}<div class="sub">${sub}</div></div>`;
     }).join("") + "</div>";
   }).join("") || `<div class="muted">No tasks yet.</div>`;
   document.querySelectorAll(".task").forEach(el => el.onclick = () => selectTask(+el.dataset.id));
+}
+
+// One line under a task in the list: what it is doing right now, what it waits for, or how it ended.
+function nowLine(t, now) {
+  const first = s => String(s || "").trim().split("\n")[0];
+  const since = (ts, fmt = x => `${x} ago`) => ts ? ` <span class="muted">· ${fmt(ago(ts, now))}</span>` : "";
+  const s = t.step, e = t.last_event;
+  let text = "", h = "", cls = "muted";  // text is the whole line, also the tooltip when it is cut off
+  if (t.state === "running" && s) {
+    // The worker's latest tool call or words, and how long since its transcript last moved.
+    text = s.t; cls = "";
+    h = (s.k === "tool" ? `<span class="mono">▸ ${esc(text)}</span>` : `<span class="say">“${esc(text)}”</span>`) + since(s.ts);
+  } else if (LIVE.includes(t.state)) { text = t.phase || "starting"; h = esc(text) + since(t.phase_since, x => `for ${x}`); cls = "s-running"; }
+  else if (t.state === "queued") text = t.wait || "";
+  else if (t.state === "paused") { text = e ? e.text : ""; h = text && esc(text) + since(e.ts); }
+  else if (t.state === "needs_input") { text = first(t.question); h = text && `<b>Question:</b> ${esc(text)}`; cls = ""; }
+  else if (t.state === "review") { text = first(t.summary) || "waiting for your review"; cls = ""; }
+  else if (t.state === "failed") { text = first(t.error); cls = "err"; }
+  else if (t.state === "done") text = first(t.summary);
+  return text ? `<div class="now ${cls}" title="${esc(text)}">${h || esc(text)}</div>` : "";
 }
 
 async function loadDetail(id, fresh) {
