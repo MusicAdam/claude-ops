@@ -1,0 +1,258 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Disk Game Ops</title>
+<style>
+:root {
+  --bg: #f6f6f3; --panel: #ffffff; --ink: #1d1d1b; --muted: #6b6b66; --line: #e2e1dc;
+  --accent: #2f5bd3; --ok: #1f8a4c; --warn: #b7791f; --bad: #c0392b; --chip: #efeee9;
+  --mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root { --bg: #151514; --panel: #1f1f1d; --ink: #ecebe6; --muted: #9a9993; --line: #33332f;
+          --accent: #7a9cff; --ok: #4cc27f; --warn: #e0a546; --bad: #ef6b5e; --chip: #2a2a27; }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink);
+       font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+header { display: flex; flex-wrap: wrap; gap: 12px 20px; align-items: center; padding: 14px 20px;
+         border-bottom: 1px solid var(--line); background: var(--panel); position: sticky; top: 0; z-index: 2; }
+header h1 { font-size: 16px; margin: 0; }
+.stat { color: var(--muted); }
+.stat b { color: var(--ink); }
+main { display: grid; grid-template-columns: minmax(320px, 420px) 1fr; gap: 20px; padding: 20px;
+       max-width: 1500px; margin: 0 auto; }
+@media (max-width: 900px) { main { grid-template-columns: 1fr; padding: 16px; } }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px; margin-bottom: 20px; }
+.card h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: 0 0 10px; }
+textarea, input, select { font: inherit; color: var(--ink); background: var(--bg); border: 1px solid var(--line);
+                          border-radius: 6px; padding: 7px 9px; }
+textarea { width: 100%; min-height: 120px; resize: vertical; }
+button { font: inherit; border: 1px solid var(--line); background: var(--chip); color: var(--ink);
+         border-radius: 6px; padding: 6px 12px; cursor: pointer; }
+button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+button.danger { color: var(--bad); }
+button:disabled { opacity: .5; cursor: default; }
+.row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-top: 10px; }
+label { color: var(--muted); display: inline-flex; gap: 6px; align-items: center; }
+.mono { font-family: var(--mono); font-size: 12px; }
+.muted { color: var(--muted); }
+.group h3 { font-size: 13px; color: var(--muted); margin: 18px 0 8px; font-weight: 600; }
+.task { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px;
+        margin-bottom: 8px; cursor: pointer; }
+.task.sel { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+.task .top { display: flex; gap: 10px; align-items: baseline; }
+.task .id { color: var(--muted); font-family: var(--mono); font-size: 12px; }
+.task .title { flex: 1; font-weight: 550; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.task .sub { color: var(--muted); font-size: 12px; margin-top: 3px; }
+.badge { font-size: 11px; padding: 2px 8px; border-radius: 99px; background: var(--chip); white-space: nowrap; }
+.s-running, .s-gating, .s-merging { color: var(--accent); }
+.s-done { color: var(--ok); }
+.s-needs_input, .s-review { color: var(--warn); font-weight: 600; }
+.s-failed { color: var(--bad); font-weight: 600; }
+.s-cancelled { color: var(--muted); }
+.pulse::before { content: "●"; margin-right: 4px; animation: p 1.4s infinite; }
+@keyframes p { 50% { opacity: .25; } }
+#detail { position: sticky; top: 76px; max-height: calc(100vh - 96px); overflow: auto; }
+.feed { font-family: var(--mono); font-size: 12px; background: var(--bg); border: 1px solid var(--line);
+        border-radius: 6px; padding: 8px; max-height: 420px; overflow: auto; white-space: pre-wrap; word-break: break-word; }
+.feed .say { color: var(--ink); margin: 6px 0; font-family: -apple-system, sans-serif; font-size: 13px; }
+.feed .tool { color: var(--muted); }
+.feed .ops { color: var(--accent); margin: 6px 0; }
+.callout { border-left: 3px solid var(--warn); background: var(--bg); padding: 8px 10px; border-radius: 4px; margin: 10px 0; white-space: pre-wrap; }
+.callout.bad { border-color: var(--bad); }
+.callout.ok { border-color: var(--ok); }
+pre { white-space: pre-wrap; margin: 0; }
+details summary { cursor: pointer; color: var(--muted); margin: 10px 0 6px; }
+.err { color: var(--bad); }
+ul.ahead { margin: 6px 0 0; padding-left: 18px; max-height: 160px; overflow: auto; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Disk Game Ops</h1>
+  <span class="stat" id="hdr"></span>
+  <span style="flex:1"></span>
+  <label>Parallel <input id="par" type="number" min="1" max="8" style="width:58px"></label>
+  <label>Model <select id="model">
+    <option value="">default</option><option value="opus">opus</option>
+    <option value="sonnet">sonnet</option><option value="fable">fable</option></select></label>
+  <button id="pause"></button>
+</header>
+<main>
+  <section>
+    <div class="card">
+      <h2>New task</h2>
+      <textarea id="body" placeholder="Describe what you want. First line is the title.&#10;&#10;Example: Add a 3-2-1 countdown before each resolution, with a sound."></textarea>
+      <div class="row">
+        <label>Priority <select id="prio"><option value="0">normal</option><option value="1">high</option><option value="-1">low</option></select></label>
+        <label>After # <input id="after" style="width:60px" placeholder="—"></label>
+        <label title="Build it and wait for you to play and approve before merging"><input type="checkbox" id="hold"> Hold for my review</label>
+      </div>
+      <div class="row"><button class="primary" id="submit">Queue task</button> <span class="muted">⌘↩</span><span id="formmsg" class="err"></span></div>
+    </div>
+
+    <div class="card" id="staging">
+      <h2>Staging</h2>
+      <div id="stg"></div>
+      <div class="row">
+        <button class="primary" id="play-stg">Play staging</button>
+        <button id="promote">Promote dev → staging</button>
+      </div>
+      <div id="stgmsg" class="muted" style="margin-top:8px;white-space:pre-wrap"></div>
+    </div>
+
+    <div id="list"></div>
+  </section>
+  <section>
+    <div class="card" id="detail"><span class="muted">Select a task to see what the worker is doing.</span></div>
+  </section>
+</main>
+<script>
+const $ = s => document.querySelector(s);
+let state = null, sel = null, detail = null, typing = false;
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const ago = (t, now) => { if (!t) return ""; const s = Math.max(0, now - t);
+  return s < 60 ? `${s|0}s` : s < 3600 ? `${(s/60)|0}m` : s < 86400 ? `${(s/3600).toFixed(1)}h` : `${(s/86400).toFixed(1)}d`; };
+const LABEL = {queued:"queued", running:"working", gating:"checking", merging:"merging", needs_input:"needs you",
+               review:"review", done:"done", failed:"failed", cancelled:"cancelled"};
+
+async function api(path, body) {
+  const r = await fetch(path, body === undefined ? {} :
+    {method: "POST", headers: {"Content-Type": "application/json", "X-Ops": "1"}, body: JSON.stringify(body)});
+  const j = await r.json();
+  if (!r.ok) throw new Error(j.error || r.status);
+  return j;
+}
+
+async function refresh() {
+  try { state = await api("/api/state"); } catch (e) { $("#hdr").innerHTML = `<span class="err">daemon not reachable</span>`; return; }
+  renderHeader(); renderStaging(); renderList();
+  if (sel) loadDetail(sel);
+}
+
+function renderHeader() {
+  const s = state.settings, ts = state.tasks;
+  const n = st => ts.filter(t => st.includes(t.state)).length;
+  const cost = ts.reduce((a, t) => a + (t.cost || 0), 0);
+  $("#hdr").innerHTML = `<b>${state.active}</b>/${s.max_parallel} working · <b>${n(["queued"])}</b> queued · ` +
+    `<b>${n(["needs_input","review","failed"])}</b> need you · $${cost.toFixed(2)} spent`;
+  if (document.activeElement !== $("#par")) $("#par").value = s.max_parallel;
+  $("#model").value = s.model;
+  $("#pause").textContent = s.paused === "1" ? "▶ Resume queue" : "❚❚ Pause queue";
+  $("#pause").className = s.paused === "1" ? "primary" : "";
+}
+
+function renderStaging() {
+  const g = state.staging;
+  $("#stg").innerHTML = `<div>Staging build: <span class="mono">${esc(g.staged) || "none yet"}</span>` +
+    `${g.running ? ' · <span class="s-running">running now</span>' : ""}</div>` +
+    `<div>Latest dev: <span class="mono">${esc(g.dev)}</span> · ${!g.staged ? "not built yet: promote to build it" : g.ahead.length ? `${g.ahead.length} merge(s) not on staging` : "staging is up to date"}</div>` +
+    (g.ahead.length ? `<ul class="ahead mono">${g.ahead.map(l => `<li>${esc(l)}</li>`).join("")}</ul>` : "");
+  $("#play-stg").disabled = !g.built;
+  $("#promote").disabled = g.state === "building" || (!g.ahead.length && g.built);
+  $("#promote").textContent = g.state === "building" ? "Building…" : "Promote dev → staging";
+  $("#stgmsg").innerHTML = g.state === "failed" ? `<span class="err">${esc(g.msg)}</span>` : esc(g.msg);
+}
+
+function renderList() {
+  const groups = [
+    ["Needs you", ["needs_input", "review", "failed"]],
+    ["In progress", ["running", "gating", "merging"]],
+    ["Queued", ["queued"]],
+    ["Finished", ["done", "cancelled"]],
+  ];
+  const now = state.now;
+  $("#list").innerHTML = groups.map(([name, sts]) => {
+    let ts = state.tasks.filter(t => sts.includes(t.state));
+    if (name === "Queued") ts = ts.sort((a, b) => b.priority - a.priority || a.id - b.id);
+    if (name === "Finished") ts = ts.slice(0, 40);
+    if (!ts.length) return "";
+    return `<div class="group"><h3>${name} (${ts.length})</h3>` + ts.map(t => {
+      const live = ["running", "gating", "merging"].includes(t.state);
+      const sub = [
+        t.phase && live ? esc(t.phase) : "",
+        t.depends_on ? `after #${t.depends_on}` : "",
+        t.parent ? `from #${t.parent}` : "",
+        t.hold ? "hold for review" : "",
+        t.priority > 0 ? "high priority" : t.priority < 0 ? "low priority" : "",
+        live ? `${ago(t.started, now)} running` : t.finished ? `${ago(t.finished, now)} ago` : `queued ${ago(t.created, now)} ago`,
+        t.cost ? `$${t.cost.toFixed(2)}` : "",
+      ].filter(Boolean).join(" · ");
+      return `<div class="task ${sel === t.id ? "sel" : ""}" data-id="${t.id}">
+        <div class="top"><span class="id">#${t.id}</span><span class="title">${esc(t.title)}</span>
+        <span class="badge s-${t.state} ${live ? "pulse" : ""}">${LABEL[t.state] || t.state}</span></div>
+        <div class="sub">${sub}</div></div>`;
+    }).join("") + "</div>";
+  }).join("") || `<div class="muted">No tasks yet.</div>`;
+  document.querySelectorAll(".task").forEach(el => el.onclick = () => { sel = +el.dataset.id; renderList(); loadDetail(sel, true); });
+}
+
+async function loadDetail(id, fresh) {
+  if (typing && !fresh) return;
+  try { detail = await api(`/api/tasks/${id}`); } catch { return; }
+  if (sel !== id) return;
+  const t = detail, feedEl = $("#feed");
+  const stick = !feedEl || feedEl.scrollTop + feedEl.clientHeight >= feedEl.scrollHeight - 30;
+  const live = ["running", "gating", "merging"].includes(t.state);
+  const btn = (act, label, cls = "") => `<button class="${cls}" data-act="${act}">${label}</button>`;
+  let actions = "";
+  if (t.state === "review") actions = btn("play", "▶ Play this build", "primary") + btn("approve", "Approve & merge");
+  if (["failed", "cancelled"].includes(t.state)) actions += btn("retry", "Retry");
+  if (!["done", "cancelled"].includes(t.state)) actions += btn("cancel", "Cancel", "danger");
+
+  $("#detail").innerHTML = `
+    <h2>#${t.id} · <span class="s-${t.state}">${LABEL[t.state] || t.state}</span>${live && t.phase ? ` · ${esc(t.phase)}` : ""}</h2>
+    <div style="font-weight:600;font-size:15px">${esc(t.title)}</div>
+    <div class="muted mono" style="margin:4px 0">${esc(t.branch || "")}${t.merged ? ` → dev ${t.merged.slice(0, 8)}` : ""}${t.rounds ? ` · fix rounds: ${t.rounds}` : ""}</div>
+    ${t.question ? `<div class="callout"><b>Question:</b> ${esc(t.question)}</div>
+      <textarea id="answer" placeholder="Your answer" style="min-height:70px"></textarea>
+      <div class="row">${btn("answer", "Send answer", "primary")}</div>` : ""}
+    ${t.state === "review" ? `<textarea id="feedback" placeholder="Not right? Say what to change" style="min-height:60px;margin-top:10px"></textarea>
+      <div class="row">${btn("reject", "Send back with feedback")}</div>` : ""}
+    ${t.summary ? `<div class="callout ok">${esc(t.summary)}</div>` : ""}
+    ${t.error ? `<div class="callout bad"><pre class="mono">${esc(t.error)}</pre></div>` : ""}
+    <div class="row">${actions}</div>
+    <details ${t.state === "queued" ? "open" : ""}><summary>Task description</summary><pre>${esc(t.body)}</pre></details>
+    <details open><summary>Worker activity</summary>
+      <div class="feed" id="feed">${t.activity.map(a => `<div class="${a.k}">${a.k === "tool" ? "  " : ""}${esc(a.t)}</div>`).join("") || '<span class="muted">nothing yet</span>'}</div></details>
+    ${t.diffstat ? `<details><summary>Files changed</summary><pre class="mono">${esc(t.diffstat)}</pre></details>` : ""}
+    <details><summary>Queue log</summary><div class="mono">${t.events.map(e => `<div><span class="muted">${new Date(e.ts * 1000).toLocaleString()}</span> ${esc(e.text)}</div>`).join("")}</div></details>
+    <div id="actmsg" class="err"></div>`;
+  const f = $("#feed"); if (f && stick) f.scrollTop = f.scrollHeight;
+  document.querySelectorAll("#detail [data-act]").forEach(b => b.onclick = () => act(t.id, b.dataset.act));
+  document.querySelectorAll("#detail textarea").forEach(el => { el.onfocus = () => typing = true; el.onblur = () => typing = !!el.value; });
+}
+
+async function act(id, a) {
+  const body = {};
+  if (a === "answer") { body.answer = $("#answer").value.trim(); if (!body.answer) return; }
+  if (a === "reject") { body.feedback = $("#feedback").value.trim(); if (!body.feedback) return; }
+  if (a === "cancel" && !document.getElementById("actmsg").dataset.armed) {
+    const m = document.getElementById("actmsg"); m.dataset.armed = 1; m.textContent = "Click Cancel again to stop this task."; return;
+  }
+  try { await api(`/api/tasks/${id}/${a}`, body); typing = false; refresh(); }
+  catch (e) { $("#actmsg").textContent = e.message; }
+}
+
+async function submit() {
+  const body = $("#body").value.trim();
+  if (!body) return;
+  try {
+    const r = await api("/api/tasks", {body, priority: +$("#prio").value, hold: $("#hold").checked ? 1 : 0, depends_on: $("#after").value.trim()});
+    $("#body").value = ""; $("#after").value = ""; $("#formmsg").textContent = ""; sel = r.id; refresh();
+  } catch (e) { $("#formmsg").textContent = e.message; }
+}
+$("#submit").onclick = submit;
+$("#body").onkeydown = e => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) submit(); };
+$("#pause").onclick = () => api("/api/settings", {paused: state.settings.paused === "1" ? "0" : "1"}).then(refresh);
+$("#par").onchange = () => api("/api/settings", {max_parallel: Math.max(1, +$("#par").value || 1)}).then(refresh);
+$("#model").onchange = () => api("/api/settings", {model: $("#model").value}).then(refresh);
+$("#promote").onclick = () => api("/api/staging/promote", {}).then(refresh).catch(e => $("#stgmsg").textContent = e.message);
+$("#play-stg").onclick = () => api("/api/staging/play", {}).catch(e => $("#stgmsg").textContent = e.message);
+refresh(); setInterval(refresh, 3000);
+</script>
+</body>
+</html>
