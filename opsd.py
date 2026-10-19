@@ -25,6 +25,7 @@ CODE = Path(__file__).resolve().parent
 DATA = Path(os.environ.get("OPS_DATA", HOME / ".claude-ops"))
 PROJECTS_DIR = DATA / "projects"
 RUNS = DATA / "runs"
+PIDFILE = DATA / "opsd.pid"  # stop a daemon with kill $(cat "$OPS_DATA/opsd.pid"), never pkill -f
 DB = DATA / "ops.db"
 HOST = os.environ.get("OPS_HOST", "127.0.0.1")
 PORT = int(os.environ.get("OPS_PORT", "8788"))
@@ -1463,6 +1464,11 @@ class H(BaseHTTPRequestHandler):
 def on_term(*_):
     for proc in list(PROCS.values()) + list(DESIGN_PROCS.values()) + list(TASK_CHAT_PROCS.values()):
         stop(proc)
+    try:
+        if PIDFILE.read_text().strip() == str(os.getpid()):
+            PIDFILE.unlink()
+    except OSError:
+        pass
     os._exit(0)
 
 
@@ -1474,9 +1480,11 @@ def serve():
     load_projects()
     recover()
     threading.Thread(target=scheduler, daemon=True).start()
+    srv = ThreadingHTTPServer((HOST, PORT), H)
+    PIDFILE.write_text(f"{os.getpid()}\n")  # after the bind, so a second daemon that fails can't overwrite it
     print(f"claude-ops on http://{HOST}:{PORT}  projects: {', '.join(PROJECTS) or 'none'}  (claude: {CLAUDE})",
           flush=True)
-    ThreadingHTTPServer((HOST, PORT), H).serve_forever()
+    srv.serve_forever()
 
 
 def post(path, body):

@@ -145,6 +145,7 @@ notes = """Project-specific guidance for design chats."""
   The app is rebuilt only when `launcher.c` changes; a rebuild changes its signature, so macOS asks again.
 - **Workers** run `claude -p --permission-mode auto --permission-prompts none --strict-mcp-config`.
   Anything that would prompt is denied. They never push, and never touch your checkout, dev or main.
+  None of the daemon's Claude sessions (workers, design, chat) connect to Claude in Chrome (`--no-chrome`).
 
 ## Files
 
@@ -158,9 +159,27 @@ notes = """Project-specific guidance for design chats."""
 | `~/.claude-ops/ops.db` | SQLite: tasks, events, settings, design chats |
 | `~/.claude-ops/runs/<id>/` | `claude.jsonl` (full transcript), `claude.err`, `gate.log` |
 | `~/.claude-ops/opsd.log` | daemon log |
+| `~/.claude-ops/opsd.pid` | the running daemon's pid |
 
 Env overrides: `OPS_PORT` (8788), `OPS_HOST` (127.0.0.1), `OPS_DATA` (~/.claude-ops).
 Keep the host on 127.0.0.1: the API can start work on your machine. For phone access, use Tailscale
 rather than binding to your LAN. It is served tailnet-only on its own HTTPS port (443 is taken by
 another dashboard): `tailscale serve --bg --https=8443 http://127.0.0.1:8788`, then open
 https://adams-mac-mini.pintail-bramble.ts.net:8443. Undo with `tailscale serve --https=8443 off`.
+
+## Testing claude-ops itself
+
+Run a scratch daemon with its own data and port, and stop it by its pid, never by pattern:
+
+```bash
+d=$(mktemp -d); OPS_DATA="$d" OPS_PORT=8799 /opt/homebrew/bin/python3 opsd.py serve > "$d/log" 2>&1 &
+# ... try it ...
+kill "$(cat "$d/opsd.pid")"        # or kill $! from the same shell
+```
+
+Never use `pkill -f 'opsd.py serve' …` or `lsof -ti :PORT | xargs kill`. On macOS, `pkill` stops
+reading options at the first pattern, so `pkill -f 'opsd.py serve' -U $(id -u) -n` treats `-U`, your
+uid and `-n` as extra patterns. It then kills every process whose command line contains any of them:
+Chrome's helpers (Claude in Chrome goes down with them), Spotify, Steam, Unity, every claude-ops
+worker and the live daemon. `lsof -ti :PORT` lists clients as well as the server, so piping it to
+`kill` also kills Chrome when a tab has that dashboard open.
