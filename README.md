@@ -21,7 +21,8 @@ your other projects (usually `~/dev/mygame`). If it doesn't exist, the dashboard
 as a new git repo with one empty commit.
 
 `add-project` detects Unity (`scripts/unity.sh` + `Assets/`), Node (`package.json`) and Python
-projects and writes a starter config. Read it, adjust it, then click **Reload projects** (or
+projects and writes a starter config. It also takes a workspace: a folder that is not a git repo but holds
+several (see [Workspaces](#workspaces)). Read it, adjust it, then click **Reload projects** (or
 `./opsctl restart`).
 
 ## Flow (per project)
@@ -84,6 +85,25 @@ settings, `CLAUDE.md` and MCP servers. Each chat keeps one Claude session across
 - Edits land in your checkout and nothing else. Promote refuses while the checkout has uncommitted
   changes, so commit or discard them first.
 
+## Workspaces
+
+A workspace is a folder of separate git repos that work together, such as `~/dev/ballup-monorepo` with a
+backend (`ballup-dunk/`) and an app (`ballup-swish/`). Its config lists them: `repos = ["ballup-dunk",
+"ballup-swish"]`. `add-project` writes that list when the folder is not a git repo itself, along with each
+repo's setup and tests, run from its folder (`cd ballup-dunk && poetry run pytest -q tests/unit`), and the
+gitignored `.env` files each repo has, to clone into new worktrees.
+
+- **Branches per repo.** Each repo gets its own `dev`, `task/<id>-<slug>` branches and `main`. The repos'
+  checkouts stay where they are (`<repo>/ballup-dunk`, …).
+- **Worktrees.** A task's worktree is a folder holding a copy of the workspace's own files (`CLAUDE.md`,
+  `docs/`, `.claude/`) and one git worktree per repo. Edits to those copied files are not kept: change the
+  workspace's own files in its folder yourself.
+- **Merging.** The queue rebases every repo's task branch onto that repo's `dev` and runs the gate from the
+  worktree root. It merges each repo the task committed to; a repo with no commits is left alone.
+- **Promote.** A release snapshots `dev` in every repo and checks them together. Every checkout must be on
+  `main` and clean. `main` moves in all repos or in none.
+- Commits show as one id per repo, such as `ballup-dunk 1a2b3c4d, ballup-swish 5e6f7a8b`.
+
 ## Project config: `~/.claude-ops/projects/<name>.toml`
 
 ```toml
@@ -92,6 +112,7 @@ repo = "/Users/you/dev/mygame"
 main_branch = "main"
 dev_branch = "dev"                 # created from main if missing; add-project picks ops-dev if dev exists
 worktrees = "/Users/you/dev/mygame-wt"   # default: <repo>-wt
+# repos = ["backend", "app"]       # a workspace: repo is a folder and these folders in it are the git repos
 max_parallel = 0                   # per-project cap; 0 = only the global "Parallel" limit
 
 [worktree]

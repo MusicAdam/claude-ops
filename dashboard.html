@@ -122,7 +122,7 @@ textarea.dropping { border-color: var(--accent); box-shadow: 0 0 0 2px var(--acc
 <header>
   <h1>Claude Ops</h1>
   <select id="proj" title="Project"></select>
-  <button id="addproj" title="Add a git repository as a project">+ Project</button>
+  <button id="addproj" title="Add a git repository, or a folder of git repos, as a project">+ Project</button>
   <div class="tabs"><button id="tab-queue" class="on">Queue</button><button id="tab-design">Design</button><button id="tab-chat" title="Talk to Claude in the project folder, as in a terminal">Chat</button></div>
   <span class="stat" id="hdr"></span>
   <span style="flex:1"></span>
@@ -183,6 +183,7 @@ try { pf = localStorage.getItem("ops-proj") || ""; focus = localStorage.getItem(
 const P = name => ((state && state.projects.find(p => p.name === name)) || {name, title: name});
 const inView = name => !pf || name === pf;
 const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const shas = s => String(s || "").split(" ").map(x => x.slice(0, 8)).join(" ");  // one commit per repo in a workspace
 const ago = (t, now) => { if (!t) return ""; const s = Math.max(0, now - t);
   return s < 60 ? `${s|0}s` : s < 3600 ? `${(s/60)|0}m` : s < 86400 ? `${(s/3600).toFixed(1)}h` : `${(s/86400).toFixed(1)}d`; };
 // "[image: <path>]" in a message is a screenshot the user attached; show it. Takes escaped text.
@@ -299,7 +300,7 @@ function renderMains() {
       <div class="phead" title="${on ? "Collapse and show all projects" : "Show only this project"}"><span class="pname">${esc(g.title)}</span>
         <span class="pstats">${projStats(g)}</span><span class="caret">${on ? "▼" : "▶"}</span></div>
       ${on ? `<div class="pbody">${projBody(g)}</div>` : ""}</div>`;
-  }).join("") + `</div>` : `<div class="card"><h2>No projects yet</h2>Click <b>+ Project</b> and give the path of a git repository.</div>`;
+  }).join("") + `</div>` : `<div class="card"><h2>No projects yet</h2>Click <b>+ Project</b> and give the path of a git repository, or of a folder that holds several.</div>`;
   if (open) { const d = document.querySelector("#mains .prow.on details"); if (d) d.open = true; }
   document.querySelectorAll("#mains .phead").forEach(h => h.onclick = () => {
     const name = h.parentElement.dataset.proj;
@@ -401,7 +402,7 @@ async function loadDetail(id, fresh) {
   $("#detail").innerHTML = `
     <h2>#${t.id} · <span class="s-${t.state}">${LABEL[t.state] || t.state}</span>${live && t.phase ? ` · ${esc(t.phase)}` : ""}</h2>
     <div style="font-weight:600;font-size:15px">${esc(t.title)}</div>
-    <div class="muted mono" style="margin:4px 0">${esc(P(t.project).title)} · ${esc(t.branch || "")}${t.merged ? ` → ${esc(t.kind === "release" ? P(t.project).main_branch || "main" : P(t.project).dev_branch || "dev")} ${t.merged.slice(0, 8)}` : ""}${t.kind === "release" && t.base && !t.merged ? `checking ${t.base.slice(0, 8)}` : ""}${t.rounds ? ` · fix rounds: ${t.rounds}` : ""}</div>
+    <div class="muted mono" style="margin:4px 0">${esc(P(t.project).title)} · ${esc(t.branch || "")}${t.merged ? ` → ${esc(t.kind === "release" ? P(t.project).main_branch || "main" : P(t.project).dev_branch || "dev")} ${shas(t.merged)}` : ""}${t.kind === "release" && t.base && !t.merged ? `checking ${shas(t.base)}` : ""}${t.rounds ? ` · fix rounds: ${t.rounds}` : ""}</div>
     ${t.question ? `<div class="callout"><b>Question:</b> ${esc(t.question)}</div>
       <textarea id="answer" placeholder="Your answer (drop or paste screenshots to attach them)" style="min-height:70px"></textarea>
       <div class="row">${btn("answer", "Send answer", "primary")}</div>` : ""}
