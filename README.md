@@ -136,6 +136,14 @@ notes = """Project-specific guidance for design chats."""
   holds tasks that haven't started and lets running ones finish.
 - **Questions.** A worker that needs a decision stops with a question. Answer it on the dashboard
   and the same Claude session resumes.
+- **Talk to a working worker.** While a task is queued, working or being checked, the task page has
+  a "Talk to the worker" box. A message goes straight to the running worker, which reads it after its
+  current step, answers in a line or two, and changes course. Where your message and the task
+  description disagree, the message wins. If no worker is running at that moment (queued, rebasing,
+  running the gate), the message waits: the next worker turn starts with it, and a task with a waiting
+  message never merges or goes to review before the worker has seen it. Each message shows whether the
+  worker got it. Once the task is merging it is too late; queue a new task instead. A paused task
+  offers both: **Ask** answers now, read-only; **Send when it resumes** waits for the worker.
 - **Ask the worker.** Once a worker stops (review, needs you, failed, done), you can ask it questions
   on the task page. Each question resumes its own Claude session, read-only, so it remembers the work.
   It also remembers the questions: if you then send feedback or retry, it builds on what you discussed.

@@ -64,6 +64,8 @@ label { color: var(--muted); display: inline-flex; gap: 6px; align-items: center
 .feed .say { color: var(--ink); margin: 6px 0; font-family: -apple-system, sans-serif; font-size: 13px; }
 .feed .tool { color: var(--muted); }
 .feed .ops { color: var(--accent); margin: 6px 0; }
+.feed .you { color: var(--warn); margin: 6px 0; font-family: -apple-system, sans-serif; font-size: 13px; }
+.msg .note { color: var(--muted); font-size: 11px; margin-top: 4px; }
 .callout { border-left: 3px solid var(--warn); background: var(--bg); padding: 8px 10px; border-radius: 4px; margin: 10px 0; white-space: pre-wrap; }
 .callout.bad { border-color: var(--bad); }
 .callout.ok { border-color: var(--ok); }
@@ -381,10 +383,15 @@ async function loadDetail(id, fresh) {
     ${t.summary ? `<div class="callout ok">${esc(t.summary)}</div>` : ""}
     ${t.error ? `<div class="callout bad"><pre class="mono">${esc(t.error)}</pre></div>` : ""}
     <div class="row">${actions}</div>
-    ${t.can_chat || t.chat.length ? `<details open><summary>Ask the worker</summary>
-      <div class="tchat">${t.chat.map(m => m.role === "user" ? `<div class="msg user">${esc(m.text)}</div>` : `<div class="msg">${md(m.text)}</div>`).join("")}
+    ${t.can_steer || t.can_chat || t.chat.length ? `<details open><summary>${t.can_steer ? "Talk to the worker" : "Ask the worker"}</summary>
+      <div class="tchat">${t.chat.map(m => m.role === "assistant" ? `<div class="msg">${md(m.text)}</div>`
+          : `<div class="msg user">${esc(m.text)}${m.role === "steer" ? `<div class="note">${steerNote(t, m)}</div>` : ""}</div>`).join("")}
         ${t.chat_live ? `<div class="live"><span class="pulse s-running">Claude is thinking</span>${t.chat_live.map(l => `<div>  ${esc(l)}</div>`).join("")}</div>` : ""}</div>
-      ${t.can_chat ? `<textarea id="ask" placeholder="Ask about this work: why it did something, how it works, what it tested. Claude can read the code but not change it. (⌘↩ sends)" style="min-height:60px"></textarea>
+      ${t.state === "paused" && t.can_chat ? `<textarea id="ask" placeholder="Ask about this work now (read-only), or send a message the worker gets when you resume the task. (⌘↩ asks)" style="min-height:60px"></textarea>
+        <div class="row">${t.chat_live ? btn("stopask", "Stop") : btn("ask", "Ask", "primary")}${btn("steer", "Send when it resumes")}</div>`
+      : t.can_steer ? `<textarea id="ask" placeholder="Steer the worker: change direction, add a requirement, or ask what it is doing. It reads your message after its current step. (⌘↩ sends)" style="min-height:60px"></textarea>
+        <div class="row">${btn("steer", "Send", "primary")}</div>`
+      : t.can_chat ? `<textarea id="ask" placeholder="Ask about this work: why it did something, how it works, what it tested. Claude can read the code but not change it. (⌘↩ sends)" style="min-height:60px"></textarea>
         <div class="row">${t.chat_live ? btn("stopask", "Stop") : btn("ask", "Ask", "primary")}</div>` : ""}</details>` : ""}
     <details ${t.state === "queued" ? "open" : ""}><summary>Task description</summary><pre>${esc(t.body)}</pre></details>
     <details open><summary>Worker activity</summary>
@@ -396,14 +403,25 @@ async function loadDetail(id, fresh) {
   const c = document.querySelector("#detail .tchat"); if (c && chatStick) c.scrollTop = c.scrollHeight;
   document.querySelectorAll("#detail [data-act]").forEach(b => b.onclick = () => act(t.id, b.dataset.act));
   document.querySelectorAll("#detail textarea").forEach(el => { el.onfocus = () => typing = true; el.onblur = () => typing = !!el.value; });
-  const ask = $("#ask"); if (ask) ask.onkeydown = e => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) act(t.id, "ask"); };
+  const ask = $("#ask"); if (ask) ask.onkeydown = e => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) act(t.id, t.can_steer && !(t.state === "paused" && t.can_chat) ? "steer" : "ask"); };
+}
+
+// Where a message to a working worker stands. One that waits goes to the worker's next turn, and nothing merges first.
+function steerNote(t, m) {
+  if (m.delivered) return "✓ the worker got this";
+  if (t.steer_live) return "sent · the worker reads it after its current step";
+  if (t.state === "queued") return "waiting · the worker gets it when it starts";
+  if (t.state === "paused") return "waiting · the worker gets it when you resume the task";
+  if (["running", "gating"].includes(t.state)) return "waiting · the worker gets it at its next turn, before anything merges";
+  if (["done", "cancelled"].includes(t.state)) return "not delivered · the task ended first";
+  return "waiting · the worker gets it on its next turn (Send answer, Send back or Retry)";
 }
 
 async function act(id, a) {
   const body = {};
   if (a === "answer") { body.answer = $("#answer").value.trim(); if (!body.answer) return; }
   if (a === "reject") { body.feedback = $("#feedback").value.trim(); if (!body.feedback) return; }
-  if (a === "ask") { body.text = $("#ask").value.trim(); if (!body.text) return; }
+  if (a === "ask" || a === "steer") { body.text = $("#ask").value.trim(); if (!body.text) return; }
   if (a === "cancel" && !document.getElementById("actmsg").dataset.armed) {
     const m = document.getElementById("actmsg"); m.dataset.armed = 1; m.textContent = "Click Cancel again to stop this task."; return;
   }

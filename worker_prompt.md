@@ -30,6 +30,11 @@ and merges into `{dev}`. If that fails, you are resumed with the error.
 
 Prefer sensible defaults over stopping. If you decide something on the user's behalf, say so in the summary.
 
+The user may message you while you work. A message arrives as a new user turn that starts with
+`[ops: a message from the user`, or under "Messages from the user" in a prompt. It steers the task: where it
+conflicts with the brief, follow the message. Answer it first in a sentence or two of plain text (the user
+sees that as your reply), then carry on. If it only asks a question, answer and keep working.
+
 {notes}
 ## Report: write JSON to the file at $OPS_RESULT (`{result}`) as your last action
 
