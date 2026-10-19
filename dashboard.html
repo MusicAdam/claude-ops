@@ -22,14 +22,17 @@ header { display: flex; flex-wrap: wrap; gap: 12px 20px; align-items: center; pa
 header h1 { font-size: 16px; margin: 0; }
 .stat { color: var(--muted); }
 .stat b { color: var(--ink); }
-main { display: grid; grid-template-columns: minmax(320px, 420px) 1fr; gap: 20px; padding: 20px;
-       max-width: 1500px; margin: 0 auto; }
-@media (max-width: 900px) { main { grid-template-columns: 1fr; padding: 16px; } }
+main { display: grid; grid-template-columns: 1fr minmax(340px, 460px); gap: 20px; padding: 20px;
+       max-width: 1500px; margin: 0 auto; align-items: start; }
+#left { position: sticky; top: 76px; max-height: calc(100vh - 96px); overflow: auto; }
+@media (max-width: 900px) { main { grid-template-columns: 1fr; padding: 16px; }
+                            #left { position: static; max-height: none; overflow: visible; } }
 .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px; margin-bottom: 20px; }
 .card h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: 0 0 10px; }
 textarea, input, select { font: inherit; color: var(--ink); background: var(--bg); border: 1px solid var(--line);
                           border-radius: 6px; padding: 7px 9px; }
 textarea { width: 100%; min-height: 120px; resize: vertical; }
+#body { min-height: 72px; }
 button { font: inherit; border: 1px solid var(--line); background: var(--chip); color: var(--ink);
          border-radius: 6px; padding: 6px 12px; cursor: pointer; }
 button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
@@ -55,7 +58,6 @@ label { color: var(--muted); display: inline-flex; gap: 6px; align-items: center
 .s-cancelled { color: var(--muted); }
 .pulse::before { content: "●"; margin-right: 4px; animation: p 1.4s infinite; }
 @keyframes p { 50% { opacity: .25; } }
-#detail { position: sticky; top: 76px; max-height: calc(100vh - 96px); overflow: auto; }
 .feed { font-family: var(--mono); font-size: 12px; background: var(--bg); border: 1px solid var(--line);
         border-radius: 6px; padding: 8px; max-height: 420px; overflow: auto; white-space: pre-wrap; word-break: break-word; }
 .feed .say { color: var(--ink); margin: 6px 0; font-family: -apple-system, sans-serif; font-size: 13px; }
@@ -97,7 +99,18 @@ ul.ahead { margin: 6px 0 0; padding-left: 18px; max-height: 160px; overflow: aut
 .chathead { color: var(--muted); font-size: 12px; margin: 0 0 12px; }
 .chathead code { font: 12px var(--mono); background: var(--panel); padding: 1px 4px; border-radius: 4px; user-select: all; }
 .ptag { font-size: 11px; padding: 1px 6px; border-radius: 4px; background: var(--chip); color: var(--muted); }
-.maincard h2 { display: flex; justify-content: space-between; align-items: center; }
+.projs { padding: 6px; }
+.projs > h2 { margin: 6px 8px 6px; }
+.prow { border-radius: 6px; border: 1px solid transparent; }
+.prow + .prow { margin-top: 2px; }
+.prow.on { border-color: var(--accent); background: var(--bg); }
+.phead { display: flex; gap: 10px; align-items: baseline; padding: 6px 8px; cursor: pointer; border-radius: 6px; }
+.phead:hover { background: var(--bg); }
+.phead .pname { font-weight: 600; white-space: nowrap; }
+.phead .pstats { flex: 1; color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.phead .caret { color: var(--muted); font-size: 10px; }
+.pbody { padding: 0 10px 10px; font-size: 13px; }
+.pbody .row { margin-top: 8px; }
 </style>
 </head>
 <body>
@@ -115,7 +128,7 @@ ul.ahead { margin: 6px 0 0; padding-left: 18px; max-height: 160px; overflow: aut
   <button id="pause"></button>
 </header>
 <main id="queueview">
-  <section>
+  <section id="left">
     <div class="card hidden" id="addcard">
       <h2>Add project</h2>
       <input id="ppath" placeholder="Folder path, or a name for a new project" style="width:100%">
@@ -123,6 +136,10 @@ ul.ahead { margin: 6px 0 0; padding-left: 18px; max-height: 160px; overflow: aut
         <button class="primary" id="padd">Add</button><button id="pcancel">Cancel</button></div>
       <div id="pmsg" class="muted" style="margin-top:8px;white-space:pre-wrap"></div>
     </div>
+    <div id="mains"></div>
+    <div class="card" id="detail"><span class="muted">Select a task to see what the worker is doing.</span></div>
+  </section>
+  <section id="right">
     <div class="card">
       <h2>New task</h2>
       <textarea id="body" placeholder="Describe what you want. First line is the title."></textarea>
@@ -134,13 +151,7 @@ ul.ahead { margin: 6px 0 0; padding-left: 18px; max-height: 160px; overflow: aut
       </div>
       <div class="row"><button class="primary" id="submit">Queue task</button> <span class="muted">⌘↩</span><span id="formmsg" class="err"></span></div>
     </div>
-
-    <div id="mains"></div>
-
     <div id="list"></div>
-  </section>
-  <section>
-    <div class="card" id="detail"><span class="muted">Select a task to see what the worker is doing.</span></div>
   </section>
 </main>
 <div id="designview" class="hidden">
@@ -160,8 +171,8 @@ ul.ahead { margin: 6px 0 0; padding-left: 18px; max-height: 160px; overflow: aut
 </div>
 <script>
 const $ = s => document.querySelector(s);
-let state = null, sel = null, detail = null, typing = false, pf = "";
-try { pf = localStorage.getItem("ops-proj") || ""; } catch {}
+let state = null, sel = null, detail = null, typing = false, pf = "", focus = "";
+try { pf = localStorage.getItem("ops-proj") || ""; focus = localStorage.getItem("ops-focus") || ""; } catch {}
 const P = name => ((state && state.projects.find(p => p.name === name)) || {name, title: name});
 const inView = name => !pf || name === pf;
 const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
@@ -181,6 +192,7 @@ async function api(path, body) {
 async function refresh() {
   try { state = await api("/api/state"); } catch (e) { $("#hdr").innerHTML = `<span class="err">daemon not reachable</span>`; return; }
   if (pf && !state.projects.some(p => p.name === pf)) pf = "";
+  if (focus && !state.projects.some(p => p.name === focus)) focus = "";
   renderProjects(); renderHeader(); renderMains(); renderList();
   if (sel) loadDetail(sel);
 }
@@ -195,6 +207,8 @@ function renderProjects() {
   }
   $("#proj").value = pf;
   if (pf) { $("#tproj").value = pf; $("#cproj").value = pf; }
+  // New tasks default to the focused project; you can still pick another until the focus changes.
+  else if (focus && $("#tproj").dataset.f !== focus) { $("#tproj").value = focus; $("#tproj").dataset.f = focus; }
   $("#tprojwrap").classList.toggle("hidden", !!pf);
   $("#cprojwrap").classList.toggle("hidden", !!pf || !!chatSel);
 }
@@ -213,34 +227,80 @@ function renderHeader() {
 }
 
 const mainMsg = {};  // project -> error from a click, shown until the next success
+const LIVE = ["running", "gating", "merging"], NEEDS = ["needs_input", "review", "failed"];
+// The focused project is the one expanded in the project list. Clicking a task focuses its project.
+function setFocus(name) {
+  focus = name || "";
+  try { localStorage.setItem("ops-focus", focus); } catch {}
+  if (state) { renderProjects(); renderMains(); }
+}
+function projStats(g) {
+  const ts = state.tasks.filter(t => t.project === g.name), n = st => ts.filter(t => st.includes(t.state)).length;
+  const r = g.release, busy = r && !["done", "failed", "cancelled"].includes(r.state);
+  const w = n(LIVE), need = n(NEEDS), qd = n(["queued"]);
+  return [
+    g.error ? `<span class="err">config error</span>` : "",
+    g.paused ? `<span class="s-review">paused</span>` : "",
+    need ? `<span class="s-review">${need} need${need === 1 ? "s" : ""} you</span>` : "",
+    w ? `<span class="s-running pulse">${w} working</span>` : "",
+    qd ? `${qd} queued` : "",
+    busy ? `<span class="s-running">release #${r.id}</span>` : r && r.state === "failed" ? `<span class="err">release failed</span>` : "",
+    !g.error && g.ahead.length ? `${g.ahead.length} to promote` : "",
+    !g.error && g.has_app && (!g.has_build || (g.stale && g.built)) ? `<span class="s-review">needs build</span>` : "",
+    g.running ? `<span class="s-running">${esc(g.main_branch)} running</span>` : "",
+  ].filter(Boolean).join(" · ") || (g.error ? "" : "idle");
+}
+function projBody(g) {
+  if (g.error) return `<div class="err">${esc(g.error)}</div>`;
+  const r = g.release, busy = r && !["done", "failed", "cancelled"].includes(r.state);
+  const msg = mainMsg[g.name] || (!r ? "" : busy ? `Release #${r.id}: ${esc(r.phase || LABEL[r.state] || r.state)}`
+    : r.state === "failed" ? `<span class="err">Release #${r.id} failed: ${esc((r.error || "").split("\n")[0])}</span>` : "");
+  return `<div>${esc(g.main_branch)} (golden): <span class="mono">${esc(g.main)}</span>${g.running ? ' · <span class="s-running">running now</span>' : ""}</div>` +
+    (g.has_app && g.stale && g.built ? `<div class="s-review">The build is of ${esc(g.built)}, older than ${esc(g.main_branch)}. Promote to rebuild.</div>` : "") +
+    (g.has_app && !g.has_build ? `<div class="s-review">Not built yet. Promote to build it.</div>` : "") +
+    `<div>${esc(g.dev_branch)}: <span class="mono">${esc(g.dev)}</span> · ${g.ahead.length ? `${g.ahead.length} merge(s) waiting to promote` : "nothing waiting"}</div>` +
+    (g.ahead.length ? `<details><summary>What would be promoted</summary><ul class="ahead mono">${g.ahead.map(l => `<li>${esc(l)}</li>`).join("")}</ul></details>` : "") +
+    `<div class="muted" style="font-size:12px;margin-top:4px">gate: ${g.gate.length ? esc(g.gate.join(", ")) : "none configured"}</div>
+    <div class="row">
+      ${g.can_launch ? `<button class="primary" data-p="${g.name}" data-a="play" ${g.has_build ? "" : "disabled"}>Play ${esc(g.main_branch)}</button>` : ""}
+      <button data-p="${g.name}" data-a="promote" title="Queues a release: the gate, then Claude builds and plays ${esc(g.dev_branch)}; if it passes, ${esc(g.main_branch)} moves to it" ${busy || (!g.ahead.length && (!g.has_app || (g.has_build && !g.stale))) ? "disabled" : ""}>${busy ? `Release #${r.id} in progress` : `Promote ${esc(g.dev_branch)} → ${esc(g.main_branch)}`}</button>
+      <button data-p="${g.name}" data-a="${g.paused ? "resume" : "pause"}" title="Pause or resume this project's tasks">${g.paused ? "▶ Resume" : "❚❚ Pause"}</button>
+    </div>` + (msg ? `<div class="muted" style="margin-top:8px;white-space:pre-wrap">${msg}</div>` : "");
+}
 function renderMains() {
-  const ps = state.projects.filter(p => inView(p.name));
-  $("#mains").innerHTML = ps.map(g => {
-    if (g.error) return `<div class="card maincard"><h2>${esc(g.title)}</h2><div class="err">${esc(g.error)}</div></div>`;
-    const r = g.release, busy = r && !["done", "failed", "cancelled"].includes(r.state);
-    const msg = mainMsg[g.name] || (!r ? "" : busy ? `Release #${r.id}: ${esc(r.phase || LABEL[r.state] || r.state)}`
-      : r.state === "failed" ? `<span class="err">Release #${r.id} failed: ${esc((r.error || "").split("\n")[0])}</span>` : "");
-    return `<div class="card maincard">
-      <h2><span>${esc(g.title)} · ${esc(g.main_branch)} (golden)</span>
-        <button data-p="${g.name}" data-a="${g.paused ? "resume" : "pause"}" title="Pause or resume this project's tasks">${g.paused ? "▶ Resume" : "❚❚ Pause"}</button></h2>
-      <div>${esc(g.main_branch)}: <span class="mono">${esc(g.main)}</span>${g.running ? ' · <span class="s-running">running now</span>' : ""}</div>` +
-      (g.has_app && g.stale && g.built ? `<div class="s-review">The build is of ${esc(g.built)}, older than ${esc(g.main_branch)}. Promote to rebuild.</div>` : "") +
-      (g.has_app && !g.has_build ? `<div class="s-review">Not built yet. Promote to build it.</div>` : "") +
-      `<div>${esc(g.dev_branch)}: <span class="mono">${esc(g.dev)}</span> · ${g.ahead.length ? `${g.ahead.length} merge(s) waiting to promote` : "nothing waiting"}</div>` +
-      (g.ahead.length ? `<ul class="ahead mono">${g.ahead.map(l => `<li>${esc(l)}</li>`).join("")}</ul>` : "") +
-      `<div class="muted" style="font-size:12px;margin-top:4px">gate: ${g.gate.length ? esc(g.gate.join(", ")) : "none configured"}</div>
-      <div class="row">
-        ${g.can_launch ? `<button class="primary" data-p="${g.name}" data-a="play" ${g.has_build ? "" : "disabled"}>Play ${esc(g.main_branch)}</button>` : ""}
-        <button data-p="${g.name}" data-a="promote" title="Queues a release: the gate, then Claude builds and plays ${esc(g.dev_branch)}; if it passes, ${esc(g.main_branch)} moves to it" ${busy || (!g.ahead.length && (!g.has_app || (g.has_build && !g.stale))) ? "disabled" : ""}>${busy ? `Release #${r.id} in progress` : `Promote ${esc(g.dev_branch)} → ${esc(g.main_branch)}`}</button>
-      </div>
-      <div class="muted" style="margin-top:8px;white-space:pre-wrap">${msg}</div></div>`;
-  }).join("") || (state.projects.length ? "" : `<div class="card"><h2>No projects yet</h2>Click <b>+ Project</b> and give the path of a git repository.</div>`);
+  const ps = state.projects.filter(p => inView(p.name)), fx = pf || focus;
+  // Keep an open "What would be promoted" open across the 3-second refresh.
+  const open = !!document.querySelector("#mains .prow.on details[open]");
+  $("#mains").innerHTML = ps.length ? `<div class="card projs"><h2>Projects</h2>` + ps.map(g => {
+    const on = g.name === fx;
+    return `<div class="prow ${on ? "on" : ""}" data-proj="${esc(g.name)}">
+      <div class="phead" title="${on ? "Collapse" : "Show this project"}"><span class="pname">${esc(g.title)}</span>
+        <span class="pstats">${projStats(g)}</span><span class="caret">${on ? "▼" : "▶"}</span></div>
+      ${on ? `<div class="pbody">${projBody(g)}</div>` : ""}</div>`;
+  }).join("") + `</div>` : `<div class="card"><h2>No projects yet</h2>Click <b>+ Project</b> and give the path of a git repository.</div>`;
+  if (open) { const d = document.querySelector("#mains .prow.on details"); if (d) d.open = true; }
+  document.querySelectorAll("#mains .phead").forEach(h => h.onclick = () => {
+    const name = h.parentElement.dataset.proj;
+    if (pf) return;  // the header picker already pins one project
+    setFocus(name === focus ? "" : name);
+  });
   document.querySelectorAll("#mains [data-a]").forEach(b => b.onclick = () => {
     delete mainMsg[b.dataset.p];
     api(`/api/projects/${b.dataset.p}/${b.dataset.a}`, {})
-      .then(res => { if (res && res.id) { sel = res.id; loadDetail(sel, true); } refresh(); })
+      .then(res => { if (res && res.id) selectTask(res.id); refresh(); })
       .catch(e => { mainMsg[b.dataset.p] = `<span class="err">${esc(e.message)}</span>`; renderMains(); });
   });
+}
+
+function selectTask(id) {
+  sel = id;
+  const t = state && state.tasks.find(x => x.id === id);
+  if (t) setFocus(t.project);
+  if (state) renderList();
+  loadDetail(id, true);
+  // One column on narrow screens: bring the detail, which sits above the list, into view below the header.
+  if (matchMedia("(max-width: 900px)").matches)
+    scrollTo({top: $("#detail").getBoundingClientRect().top + scrollY - $("header").offsetHeight - 12});
 }
 
 function renderList() {
@@ -275,13 +335,14 @@ function renderList() {
         <div class="sub">${sub}</div></div>`;
     }).join("") + "</div>";
   }).join("") || `<div class="muted">No tasks yet.</div>`;
-  document.querySelectorAll(".task").forEach(el => el.onclick = () => { sel = +el.dataset.id; renderList(); loadDetail(sel, true); });
+  document.querySelectorAll(".task").forEach(el => el.onclick = () => selectTask(+el.dataset.id));
 }
 
 async function loadDetail(id, fresh) {
   if (typing && !fresh) return;
   try { detail = await api(`/api/tasks/${id}`); } catch { return; }
   if (sel !== id) return;
+  if (fresh && detail.project !== focus) setFocus(detail.project);
   const t = detail, feedEl = $("#feed");
   const stick = !feedEl || feedEl.scrollTop + feedEl.clientHeight >= feedEl.scrollHeight - 30;
   const chatEl = document.querySelector("#detail .tchat");
@@ -342,7 +403,7 @@ async function submit() {
     const project = pf || $("#tproj").value;
     if (!project) throw new Error("pick a project");
     const r = await api("/api/tasks", {project, body, priority: +$("#prio").value, hold: $("#hold").checked ? 1 : 0, depends_on: $("#after").value.trim()});
-    $("#body").value = ""; $("#after").value = ""; $("#formmsg").textContent = ""; sel = r.id; refresh();
+    $("#body").value = ""; $("#after").value = ""; $("#formmsg").textContent = ""; sel = r.id; setFocus(project); refresh();
   } catch (e) { $("#formmsg").textContent = e.message; }
 }
 $("#submit").onclick = submit;
@@ -473,7 +534,7 @@ function renderChat() {
       ? `<div class="msg user">${esc(m.text.replace(/^\[ops:[^\n]*\]\n\n/, ""))}</div>`
       : `<div class="msg">${md(m.text)}${m.tasks.length ? `<div class="chips">${m.tasks.map(t => `<button class="chip" data-task="${t.id}">#${t.id} ${esc(t.title || "")} · ${LABEL[t.state] || t.state}</button>`).join("")}</div>` : ""}</div>`).join("")
     + (thinking ? `<div class="live"><span class="pulse s-running">Claude is thinking</span>${d.live.map(l => `<div>  ${esc(l)}</div>`).join("")}</div>` : "");
-  box.querySelectorAll("[data-task]").forEach(b => b.onclick = () => { sel = +b.dataset.task; showTab("queue"); refresh(); });
+  box.querySelectorAll("[data-task]").forEach(b => b.onclick = () => { showTab("queue"); selectTask(+b.dataset.task); refresh(); });
   if (stick || thinking) box.scrollTop = box.scrollHeight;
 }
 async function sendChat() {
