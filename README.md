@@ -11,6 +11,7 @@ the golden version: it changes only when you promote.
 ./opsctl start                       # install + start the launchd service (runs at login, restarts if it dies)
 ./opsctl open                        # dashboard: http://127.0.0.1:8788  (…/#design, …/#chat open those tabs)
 ./opsctl status | log | stop | restart   # restart waits until no task is running a command; --now doesn't
+./opsctl pause | resume              # pause every running task now / resume every paused one
 ./opsd.py add-project ~/dev/myrepo   # or "+ Project" on the dashboard
 ./opsd.py add -p myrepo "Fix the crash when the save file is empty"
 ```
@@ -57,6 +58,8 @@ projects and writes a starter config. Read it, adjust it, then click **Reload pr
   checkout is off main or has uncommitted changes. It checks again before moving main. If something
   blocks it then, fix it and click **Retry**: that promotes without checking again.
 - With nothing new on dev, Promote only rebuilds main (no gate, no checker).
+- Promoting claude-ops itself restarts the daemon to load the new code (`opsctl restart`: it waits
+  until no task is running a command).
 - Commits made straight to main are merged into dev when the release takes its snapshot (no gate).
 - If the build fails, main and its build stay as they were.
 - Nothing is ever pushed. Push main yourself when you want to.
@@ -123,12 +126,23 @@ notes = """Project-specific guidance for design chats."""
   task opens it on the left and focuses its project, and new tasks default to that project.
 - **Parallelism.** "Parallel" on the dashboard is the global limit (default 3). Workers also split
   big tasks into subtasks (with "after" ordering) and use subagents inside a task.
+- **Pausing.** **❚❚ Pause** on a task, or **Pause running** in the header (`./opsctl pause`), stops it
+  now and keeps its place. A worker's Claude session resumes where it was; a command it was running
+  (a test run, a build) is stopped and it is told to check and carry on. A task paused during its gate
+  runs the gate again from the start. A task that is merging can't be paused. Paused tasks stay paused
+  across restarts: click **▶ Resume** (or `./opsctl resume`) to queue them again. To restart without
+  waiting: `./opsctl pause && ./opsctl restart && ./opsctl resume`. **Pause queue** is different: it
+  holds tasks that haven't started and lets running ones finish.
 - **Questions.** A worker that needs a decision stops with a question. Answer it on the dashboard
   and the same Claude session resumes.
 - **Ask the worker.** Once a worker stops (review, needs you, failed, done), you can ask it questions
   on the task page. Each question resumes its own Claude session, read-only, so it remembers the work.
   It also remembers the questions: if you then send feedback or retry, it builds on what you discussed.
 - **Notifications.** macOS notifications when a task needs you, fails, or finishes.
+- **macOS permissions.** launchd starts the daemon through `~/.claude-ops/Claude Ops.app` (built from
+  `launcher.c` by `opsctl start`), so privacy prompts (App Management, folder access) name **Claude Ops**,
+  not python3. A grant then covers the daemon, its workers and their builds, and not every Python script.
+  The app is rebuilt only when `launcher.c` changes; a rebuild changes its signature, so macOS asks again.
 - **Workers** run `claude -p --permission-mode auto --permission-prompts none --strict-mcp-config`.
   Anything that would prompt is denied. They never push, and never touch your checkout, dev or main.
 
@@ -136,6 +150,7 @@ notes = """Project-specific guidance for design chats."""
 
 | Path | What |
 |---|---|
+| `launcher.c` | `Claude Ops.app`: starts the daemon so macOS permission prompts name it |
 | `opsd.py` | daemon: HTTP API + dashboard, scheduler, pipeline, promote, design and project chats |
 | `worker_prompt.md`, `release_prompt.md`, `design_prompt.md` | briefs for workers, release checkers and design chats |
 | `dashboard.html` | the page |
