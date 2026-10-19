@@ -743,8 +743,8 @@ def run_claude(p, tid, prompt):
     run_dir.mkdir(parents=True, exist_ok=True)
     rp = result_path(t)
     rp.unlink(missing_ok=True)
-    prompt, acking = with_steers(tid, prompt)
     prompt = with_images(prompt)
+    acking = False  # a message was just read: its reply is the next thing the worker says
     cmd = ["caffeinate", "-i", CLAUDE, "-p", "--input-format", "stream-json", "--replay-user-messages",
            "--output-format", "stream-json", "--verbose",
            "--permission-mode", "auto", "--permission-prompts", "none", "--strict-mcp-config",
@@ -769,6 +769,10 @@ def run_claude(p, tid, prompt):
             with STEER_LOCK:
                 STEER_PIPES[tid] = proc.stdin
                 INFLIGHT[tid] = []
+                for m in pending_steers(tid):  # waited for this turn: sent like a live one, after the prompt
+                    text = WAITED_NOTE + with_images(m["text"])
+                    send_user(proc.stdin, text)
+                    INFLIGHT[tid].append((text, m["id"]))
         except OSError:
             pass  # claude died at once; its stderr says why
         for line in proc.stdout:
@@ -818,13 +822,17 @@ def run_claude(p, tid, prompt):
 # ---------------------------------------------------------------- steering (messages to a working worker)
 # A message you send while a task is working goes straight into the worker's stdin; Claude reads it after its
 # current step. When no worker is running (queued, checking, between turns) it waits, and the next worker turn
-# starts with it. A task that has messages waiting never merges: the worker is resumed with them first.
+# gets it as its own user message right after the prompt. Either way it counts as delivered only once Claude
+# replays it as read, and the worker's next words are its reply. A task with an unread message never merges:
+# the worker is resumed with it first.
 
 STEER_LOCK = threading.Lock()  # guards the two dicts below and the step from gating to merging
 STEER_PIPES = {}  # task id -> stdin of its worker, open while the worker can take a message
 INFLIGHT = {}  # task id -> [(text written to stdin, message id)], until claude replays it back as read
 STEER_STATES = ("queued", "running", "gating", "paused")  # a worker is working or will be: messages steer it
 STEER_NOTE = "[ops: a message from the user on the dashboard, sent while you work]\n\n"
+WAITED_NOTE = ("[ops: a message from the user on the dashboard, sent while you were not running. Answer it first, "
+               "before anything else you were about to say]\n\n")
 
 
 def send_user(pipe, text):
@@ -845,20 +853,6 @@ def close_steer(tid):
 def pending_steers(tid):
     return q("SELECT id,text FROM task_msgs WHERE task_id=? AND role='steer' AND delivered IS NULL ORDER BY id",
              (tid,))
-
-
-def with_steers(tid, prompt):
-    """The prompt plus any messages that waited for this turn. Returns (prompt, whether there were any)."""
-    msgs = pending_steers(tid)
-    if not msgs:
-        return prompt, False
-    q(f"UPDATE task_msgs SET delivered=? WHERE id IN ({','.join('?' * len(msgs))})",
-      (time.time(), *(m["id"] for m in msgs)))
-    ev(tid, f"the worker got {len(msgs)} waiting message(s)")
-    return (prompt + "\n\n## Messages from the user\n\nThe user sent these on the dashboard while you were not "
-            "running. They steer the task: where they conflict with the brief, follow them. Answer them in a "
-            "sentence or two of plain text first, then carry on.\n\n"
-            + "\n\n".join(f"> {m['text']}" for m in msgs)), True
 
 
 def task_steer(tid, text):
@@ -883,8 +877,9 @@ def task_steer(tid, text):
 
 
 def steered_prompt(when):
-    return (f"The user sent you new messages {when} (below). Do what they ask, re-run the checks, commit, and "
-            "write $OPS_RESULT again. If they need no change, just write $OPS_RESULT again.")
+    return (f"The user sent you new messages {when}. They come next, each as its own message. Do what they ask, "
+            "re-run the checks, commit, and write $OPS_RESULT again. If they need no change, just write $OPS_RESULT "
+            "again.")
 
 
 # ---------------------------------------------------------------- gate
