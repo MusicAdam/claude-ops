@@ -241,9 +241,10 @@ def init_db():
         finished REAL, branch TEXT, worktree TEXT, session_id TEXT, cost REAL DEFAULT 0,
         rounds INTEGER DEFAULT 0, summary TEXT, question TEXT, error TEXT,
         next_prompt TEXT, merged TEXT, start_at TEXT DEFAULT 'claude', pid INTEGER,
-        kind TEXT DEFAULT 'task', base TEXT)""")
+        kind TEXT DEFAULT 'task', base TEXT, pid_start TEXT)""")
     cols = {r["name"] for r in q("PRAGMA table_info(tasks)")}
-    for col, decl in (("kind", "TEXT DEFAULT 'task'"), ("base", "TEXT")):  # databases from before releases
+    for col, decl in (("kind", "TEXT DEFAULT 'task'"), ("base", "TEXT"),  # databases from before releases
+                      ("pid_start", "TEXT")):
         if col not in cols:
             q(f"ALTER TABLE tasks ADD COLUMN {col} {decl}")
     q("CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY, task_id INTEGER, ts REAL, text TEXT)")
@@ -341,13 +342,43 @@ def child_commands(pid):
 
 
 def killgroup(pid):
-    """Stop pid's process group and its commands' groups, so no test run or build is left orphaned."""
+    """Stop pid's process group and its commands' groups, so no test run or build is left orphaned.
+    Only for a pid that is surely ours: a stale one may by now be Chrome, a terminal shell, anything."""
     if pid:
         for g in child_commands(pid) + [pid]:
             try:
                 os.killpg(g, signal.SIGTERM)
             except (ProcessLookupError, PermissionError):
                 pass
+
+
+def stop(proc):
+    """Stop a process we started, unless it already exited (its pid may then belong to someone else)."""
+    if proc and proc.poll() is None:
+        killgroup(proc.pid)
+
+
+def started_at(pid):
+    """When pid started, as ps prints it; '' if there is no such process. With the pid, this names one
+    process: macOS reuses pids, and they wrap within hours when builds and tests run."""
+    r = subprocess.run(["ps", "-o", "lstart=", "-p", str(pid)], capture_output=True, text=True)
+    return r.stdout.strip()
+
+
+def track(tid, proc):
+    PROCS[tid] = proc
+    upd(tid, pid=proc.pid, pid_start=started_at(proc.pid))
+
+
+def untrack(tid):
+    PROCS.pop(tid, None)
+    upd(tid, pid=None, pid_start=None)
+
+
+def own_pid(t):
+    """The task's recorded pid if that process is still the one this daemon (or the last) started."""
+    pid = t["pid"]
+    return pid if pid and t["pid_start"] and started_at(pid) == t["pid_start"] else None
 
 
 # ---------------------------------------------------------------- claude worker
@@ -383,7 +414,7 @@ def run_claude(p, tid, prompt):
     rp.unlink(missing_ok=True)
     cmd = ["caffeinate", "-i", CLAUDE, "-p", prompt, "--output-format", "stream-json", "--verbose",
            "--permission-mode", "auto", "--permission-prompts", "none", "--strict-mcp-config",
-           "--name", f"{p.name} #{tid}"]
+           "--no-chrome", "--name", f"{p.name} #{tid}"]
     if t["session_id"]:
         cmd += ["--resume", t["session_id"]]
     if setting("model"):
@@ -396,8 +427,7 @@ def run_claude(p, tid, prompt):
         log.write(json.dumps({"type": "ops", "prompt": prompt[:2000], "ts": time.time()}) + "\n")
         proc = subprocess.Popen(cmd, cwd=t["worktree"], env=env, stdout=subprocess.PIPE, stderr=err,
                                 text=True, start_new_session=True)
-        PROCS[tid] = proc
-        upd(tid, pid=proc.pid)
+        track(tid, proc)
         for line in proc.stdout:
             log.write(line)
             log.flush()
@@ -410,7 +440,7 @@ def run_claude(p, tid, prompt):
             if e.get("type") == "result":
                 upd(tid, cost=(task(tid)["cost"] or 0) + (e.get("total_cost_usd") or 0))
         proc.wait()
-        PROCS.pop(tid, None)
+        untrack(tid)
     kill_app(p, t["worktree"])
     if rp.exists():
         try:
@@ -437,11 +467,10 @@ def run_step(key, label, cmd, cwd, log_name):
         proc = subprocess.Popen(["caffeinate", "-i", "/bin/bash", "-lc", cmd], cwd=cwd, stdout=f,
                                 stderr=subprocess.STDOUT, start_new_session=True)
         if is_task:
-            PROCS[key] = proc
-            upd(key, pid=proc.pid)
+            track(key, proc)
         rc = proc.wait()
         if is_task:
-            PROCS.pop(key, None)
+            untrack(key)
     with open(log, errors="replace") as f:
         f.seek(start)
         tail = f.read()[-3000:]
@@ -799,7 +828,7 @@ def schedule_once():
             dep = task(t["depends_on"])
             if dep and dep["state"] != "done":
                 continue
-        upd(t["id"], state="running", phase="starting")
+        upd(t["id"], state="running", phase="starting", pid=None, pid_start=None)
         if task(t["id"])["state"] != "running":  # paused or cancelled just now
             continue
         ev(t["id"], "started")
@@ -813,11 +842,12 @@ def busy_work():
     """What a restart would interrupt now: a task's setup, gate or build step, or a command its worker
     is running. Empty when only Claude itself is thinking, which a restart resumes cleanly."""
     out = []
-    for t in q(f"SELECT id,phase,pid FROM tasks WHERE state IN ({','.join('?' * len(ACTIVE))})", ACTIVE):
+    for t in q(f"SELECT id,phase,pid,pid_start FROM tasks WHERE state IN ({','.join('?' * len(ACTIVE))})", ACTIVE):
         if t["phase"] != "claude working":
             out.append(f"#{t['id']}: {t['phase'] or 'starting'}")
             continue
-        if t["pid"] and child_commands(t["pid"]):
+        pid = own_pid(t)
+        if pid and child_commands(pid):
             out.append(f"#{t['id']}: worker running a command")
     return out
 
@@ -845,8 +875,8 @@ def wait_idle():
 def recover():
     """Tasks that were mid-flight when the daemon stopped resume their Claude session."""
     for t in q(f"SELECT * FROM tasks WHERE state IN ({','.join('?' * len(ACTIVE))})", ACTIVE):
-        killgroup(t["pid"])  # a worker from the old daemon would otherwise run alongside its resume
-        upd(t["id"], state="queued", phase="", pid=None,
+        killgroup(own_pid(t))  # a worker from the old daemon would otherwise run alongside its resume
+        upd(t["id"], state="queued", phase="", pid=None, pid_start=None,
             next_prompt="The task queue restarted while you were working. Check `git status` and "
                         "`git log` in this worktree, finish the task, and write $OPS_RESULT.")
         ev(t["id"], "requeued after daemon restart")
@@ -872,9 +902,7 @@ def pause_task(tid):
     # Otherwise Claude has not had its prompt yet, and run_claude keeps it for the resume.
     was = t["state"]
     upd(tid, state="paused", phase="", **kw)
-    proc = PROCS.get(tid)
-    if proc:
-        killgroup(proc.pid)
+    stop(PROCS.get(tid))
     if was != "queued" and t["worktree"]:
         kill_app(PROJECTS.get(t["project"]), t["worktree"])
     ev(tid, "paused" + (f" while {t['phase']}" if was != "queued" and t["phase"] else ""))
@@ -1059,12 +1087,13 @@ def design_turn(did, text):
     chat = d["kind"] == "project"
     if chat:  # your own settings and MCP servers apply, like the CLI; auto mode stands in for prompts
         cmd = [CLAUDE, "-p", text, "--output-format", "stream-json", "--verbose",
-               "--permission-mode", "auto", "--permission-prompts", "none", "--name", f"{p.name} chat #{did}",
+               "--permission-mode", "auto", "--permission-prompts", "none", "--no-chrome",
+               "--name", f"{p.name} chat #{did}",
                "--append-system-prompt", PROJECT_CHAT_PROMPT]
     else:
         cmd = [CLAUDE, "-p", ops_note(p, did) + text, "--output-format", "stream-json", "--verbose",
                "--permission-mode", "dontAsk", "--permission-prompts", "none", "--allowedTools", DESIGN_TOOLS,
-               "--strict-mcp-config", "--name", f"{p.name} design #{did}",
+               "--strict-mcp-config", "--no-chrome", "--name", f"{p.name} design #{did}",
                "--append-system-prompt", design_system_prompt(p)]
     if d["session_id"]:
         cmd += ["--resume", d["session_id"]]
@@ -1159,7 +1188,7 @@ def task_chat_turn(tid, text):
                if made else "") + "]\n\n")
     cmd = [CLAUDE, "-p", note + text, "--output-format", "stream-json", "--verbose",
            "--permission-mode", "dontAsk", "--permission-prompts", "none", "--allowedTools", DESIGN_TOOLS,
-           "--strict-mcp-config", "--resume", t["session_id"]]
+           "--strict-mcp-config", "--no-chrome", "--resume", t["session_id"]]
     if made:
         cmd += ["--add-dir", str(p.dev_wt)]
     if setting("model"):
@@ -1359,9 +1388,7 @@ class H(BaseHTTPRequestHandler):
             if m.group(2) == "say":
                 design_say(did, b["text"].strip())
             elif m.group(2) == "stop":
-                proc = DESIGN_PROCS.get(did)
-                if proc:
-                    killgroup(proc.pid)
+                stop(DESIGN_PROCS.get(did))
             else:
                 q("UPDATE designs SET title=? WHERE id=?", (b["title"][:80], did))
             return
@@ -1379,17 +1406,13 @@ class H(BaseHTTPRequestHandler):
         if action == "ask":
             return task_ask(tid, (b.get("text") or "").strip())
         if action == "stopask":
-            proc = TASK_CHAT_PROCS.get(tid)
-            if proc:
-                killgroup(proc.pid)
+            stop(TASK_CHAT_PROCS.get(tid))
             return
         if action == "cancel":
             if st in ("done", "cancelled"):
                 raise ValueError(f"task is {st}")
             upd(tid, state="cancelled", phase="", finished=time.time())
-            proc = PROCS.get(tid)
-            if proc:
-                killgroup(proc.pid)
+            stop(PROCS.get(tid))
             ev(tid, "cancelled")
         elif action == "pause":
             pause_task(tid)
@@ -1439,7 +1462,7 @@ class H(BaseHTTPRequestHandler):
 
 def on_term(*_):
     for proc in list(PROCS.values()) + list(DESIGN_PROCS.values()) + list(TASK_CHAT_PROCS.values()):
-        killgroup(proc.pid)
+        stop(proc)
     os._exit(0)
 
 
