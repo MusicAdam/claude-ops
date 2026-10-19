@@ -1160,14 +1160,12 @@ def split(p, tid, res):
 # ---------------------------------------------------------------- release (dev -> main)
 
 def queue_release(p):
-    """The Promote button: queue a release check of dev, ahead of ordinary tasks."""
+    """The Promote button: queue a release check of dev, ahead of ordinary tasks. It never refuses: with a release
+    already open it returns that one, and whatever is in the way of moving main the release waits for."""
     open_ = q("SELECT id FROM tasks WHERE project=? AND kind='release' AND state NOT IN ('done','failed','cancelled')",
               (p.name,), one=True)
     if open_:
-        raise ValueError(f"Release #{open_['id']} is already in the queue.")
-    why = promote_blocker(p)
-    if why:
-        raise ValueError(why)
+        return open_["id"]
     body = (f"Check the latest {p.dev} as a whole: the merge check, then a build that a release checker runs "
             f"and plays like a player. If it passes, build it into {p.main} and fast-forward {p.main} to it.")
     return add_task(p.name, body, f"Release {p.dev} → {p.main}", priority=100, kind="release")
@@ -1257,12 +1255,25 @@ def release_pipeline(p, tid):
         ev(tid, "release check passed")
 
     upd(tid, start_at="promote")  # a retry, a resume or a restart continues here
-    if stopped(tid):
-        return
+    waiting = None
+    while True:  # what's in the way is yours to clear: wait for it rather than fail
+        if stopped(tid):
+            return
+        t = task(tid)
+        if not all(is_ancestor(r, p.main, sha) for r, sha in p.pairs(t["base"])):  # main moved: check again
+            ev(tid, f"{p.main} moved during the release; checking again with its new commits")
+            upd(tid, base=None, session_id=None, start_at="claude", phase="")
+            return release_pipeline(p, tid)
+        why = promote_blocker(p, t["base"])
+        if not why:
+            break
+        if why != waiting:
+            upd(tid, phase="waiting: " + why)
+            ev(tid, "waiting: " + why)
+            notify(f"{p.title}: release waiting for you", f"#{tid}: {why}")
+            waiting = why
+        time.sleep(5)
     upd(tid, state="merging")
-    why = promote_blocker(p)
-    if why:
-        return fail(p, tid, why + " Then click Retry: it promotes without checking again.")
     before = p.revs(p.main)
     err = promote(p, tid, task(tid)["base"])
     if stopped(tid):
@@ -1437,15 +1448,45 @@ def main_info(p):
             "paused": setting(f"paused:{p.name}") == "1", "gate": [g["name"] for g in p.gate], "release": rel}
 
 
-def promote_blocker(p):
-    """Why main cannot move right now, or None. Checked when Promote is clicked and again before promoting."""
+def promote_blocker(p, commit):
+    """What only you can clear before main moves to commit, or None. A release waits while there is one."""
     if app_running(p, p.main_wt):
-        return f"Quit the {p.main} build first."
-    for r in p.parts:
-        if r.git("branch", "--show-current", check=False) != p.main:
-            return f"Your checkout {r.src} is not on {p.main}. Switch it back."
-        if r.git("status", "--porcelain", "-uno", check=False):
-            return f"Your checkout {r.src} has uncommitted changes. Commit or stash them."
+        return f"Quit the {p.main} build: it is rebuilt in {p.main_wt}."
+    for r, sha in p.pairs(commit):
+        if r.git("branch", "--show-current", check=False) != p.main:  # main moves as a branch; your checkout stays
+            wt = r.git("worktree", "list", "--porcelain", check=False).split("\n\n")
+            held = [w.split("\n")[0][9:] for w in wt if f"branch refs/heads/{p.main}" in w.split("\n")]
+            if held:
+                return f"{p.main} is checked out in {held[0]}. Switch that one off it."
+            continue
+        dirty = set(r.git("diff", "--name-only", "HEAD", check=False).splitlines()
+                    + r.git("ls-files", "--others", "--exclude-standard", check=False).splitlines())
+        clash = sorted(dirty & set(r.git("diff", "--name-only", p.main, sha).splitlines()))
+        if clash:
+            return (f"Your checkout {r.src} has uncommitted changes to files this release changes: "
+                    f"{', '.join(clash[:5])}{' …' if len(clash) > 5 else ''}. Commit or stash them.")
+    return None
+
+
+def is_ancestor(r, a, b):
+    return subprocess.run(["git", "merge-base", "--is-ancestor", a, b], cwd=r.src, capture_output=True).returncode == 0
+
+
+def move_main(p, commit):
+    """Fast-forward main to commit in each repo: in your checkout when it is on main (other uncommitted changes
+    stay), else the branch alone. Every repo is checked first, so a workspace never moves only some of them.
+    Returns an error or None."""
+    for r, sha in p.pairs(commit):
+        if not is_ancestor(r, p.main, sha):
+            return f"{p.main}{f' of {r.sub}' if r.sub else ''} could not fast-forward: it has commits {p.dev} lacks."
+    for r, sha in p.pairs(commit):
+        if r.git("branch", "--show-current", check=False) == p.main:
+            res = subprocess.run(["git", "merge", "--ff-only", sha], cwd=r.src, capture_output=True, text=True)
+        else:
+            res = subprocess.run(["git", "update-ref", f"refs/heads/{p.main}", sha, r.rev(p.main)],
+                                 cwd=r.src, capture_output=True, text=True)
+        if res.returncode:
+            return f"{p.main}{f' of {r.sub}' if r.sub else ''} could not fast-forward:\n" + res.stderr[-1000:]
     return None
 
 
@@ -1579,13 +1620,9 @@ def promote(p, tid, commit):
         if prev:
             shutil.rmtree(prev, ignore_errors=True)
     upd(tid, phase=f"fast-forwarding {p.main}")
-    for r, sha in p.pairs(commit):  # check every repo first, so a workspace never moves only some of them
-        if subprocess.run(["git", "merge-base", "--is-ancestor", "HEAD", sha], cwd=r.src).returncode:
-            return f"{p.main}{f' of {r.sub}' if r.sub else ''} could not fast-forward: it has commits {p.dev} lacks."
-    for r, sha in p.pairs(commit):
-        res = subprocess.run(["git", "merge", "--ff-only", sha], cwd=r.src, capture_output=True, text=True)
-        if res.returncode:
-            return f"{p.main}{f' of {r.sub}' if r.sub else ''} could not fast-forward:\n" + res.stderr[-1000:]
+    err = move_main(p, commit)
+    if err:
+        return err
     set_setting(f"main_built:{p.name}", commit)
     notify(f"{p.title}: {p.main} updated", f"{p.main} is now {p.show(commit)}")
     return None
