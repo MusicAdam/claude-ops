@@ -746,6 +746,7 @@ def release_pipeline(p, tid):
     why = promote_blocker(p)
     if why:
         return fail(p, tid, why + " Then click Retry: it promotes without checking again.")
+    before = p.rev(p.main)
     err = promote(p, tid, task(tid)["base"])
     if stopped(tid):
         return
@@ -753,6 +754,18 @@ def release_pipeline(p, tid):
         return fail(p, tid, err)
     upd(tid, start_at="claude")
     finish(p, tid, merged=t["base"], note=f"{p.main} is now {t['base'][:8]}")
+    if Path(p.repo).resolve() == CODE and p.rev(p.main) != before:
+        restart_self(tid)
+
+
+def restart_self(tid):
+    """main of claude-ops itself just moved: run `opsctl restart` to load the new code. It waits until no task
+    is running a command. It runs in a session of its own, so stopping this daemon's launchd job spares it."""
+    ev(tid, "restarting claude-ops to load the new code, once no task is running a command")
+    (RUNS / str(tid)).mkdir(parents=True, exist_ok=True)
+    subprocess.Popen([str(CODE / "opsctl"), "restart"], cwd=CODE, env=dict(os.environ, OPS_DATA=str(DATA)),
+                     start_new_session=True, stdin=subprocess.DEVNULL,
+                     stdout=open(RUNS / str(tid) / "restart.log", "a"), stderr=subprocess.STDOUT)
 
 
 # ---------------------------------------------------------------- scheduler
