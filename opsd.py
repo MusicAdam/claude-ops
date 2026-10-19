@@ -404,7 +404,7 @@ def ev(tid, text):
 def add_task(project, body, title="", priority=0, hold=0, depends_on=None, parent=None, kind="task"):
     proj(project)
     body = body.strip()
-    title = (title or body.splitlines()[0] if body else title or "untitled").strip()[:120]
+    title = (title or (title_of(body) if body else "untitled")).strip()[:120]
     tid = q("INSERT INTO tasks (project, title, body, priority, hold, depends_on, parent, created, kind) "
             "VALUES (?,?,?,?,?,?,?,?,?)",
             (project, title, body, int(priority), int(bool(hold)), depends_on or None, parent, time.time(), kind))
@@ -1846,6 +1846,15 @@ def save_image(data_url):
     return {"path": str(path), "name": path.name}
 
 
+def title_of(text):
+    """The first line of text that is more than image references, for a task or chat title."""
+    for line in (text or "").splitlines():
+        line = IMAGE_REF.sub("", line).strip()
+        if line:
+            return line
+    return "screenshot" if IMAGE_REF.search(text or "") else "untitled"
+
+
 def with_images(text):
     """text, plus a note telling Claude to look at the images it attaches."""
     paths = [s for s in IMAGE_REF.findall(text or "") if Path(s).parent == IMAGES and Path(s).is_file()]
@@ -2025,7 +2034,7 @@ class H(BaseHTTPRequestHandler):
             proj(b["project"])
             kind = "project" if b.get("kind") == "project" else "design"
             did = q("INSERT INTO designs (project, title, created, updated, kind) VALUES (?,?,?,?,?)",
-                    (b["project"], text.splitlines()[0][:80], time.time(), time.time(), kind))
+                    (b["project"], title_of(text)[:80], time.time(), time.time(), kind))
             design_say(did, text)
             return {"id": did}
         m = re.fullmatch(r"/api/designs/(\d+)/(say|stop|rename)", path)
@@ -2104,7 +2113,7 @@ class H(BaseHTTPRequestHandler):
         elif action == "edit":
             if st != "queued":
                 raise ValueError("only queued tasks can be edited")
-            upd(tid, body=b["body"], title=(b.get("title") or b["body"].splitlines()[0])[:120],
+            upd(tid, body=b["body"], title=(b.get("title") or title_of(b["body"]))[:120],
                 priority=int(b.get("priority", t["priority"])))
         else:
             raise ValueError("unknown action")
