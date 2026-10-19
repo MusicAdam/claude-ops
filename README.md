@@ -114,4 +114,6 @@ notes = """Project-specific guidance for design chats."""
 
 Env overrides: `OPS_PORT` (8788), `OPS_HOST` (127.0.0.1), `OPS_DATA` (~/.claude-ops).
 Keep the host on 127.0.0.1: the API can start work on your machine. For phone access, use Tailscale
-with `tailscale serve` rather than binding to your LAN.
+rather than binding to your LAN. It is served tailnet-only on its own HTTPS port (443 is taken by
+another dashboard): `tailscale serve --bg --https=8443 http://127.0.0.1:8788`, then open
+https://adams-mac-mini.pintail-bramble.ts.net:8443. Undo with `tailscale serve --https=8443 off`.
