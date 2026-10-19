@@ -142,7 +142,7 @@ ul.ahead { margin: 6px 0 0; padding-left: 18px; max-height: 160px; overflow: aut
       <div id="pmsg" class="muted" style="margin-top:8px;white-space:pre-wrap"></div>
     </div>
     <div id="mains"></div>
-    <div class="card" id="detail"><span class="muted">Select a task to see what the worker is doing.</span></div>
+    <div class="card" id="detail"></div>
   </section>
   <section id="right">
     <div class="card">
@@ -198,6 +198,9 @@ async function refresh() {
   try { state = await api("/api/state"); } catch (e) { $("#hdr").innerHTML = `<span class="err">daemon not reachable</span>`; return; }
   if (pf && !state.projects.some(p => p.name === pf)) pf = "";
   if (focus && !state.projects.some(p => p.name === focus)) focus = "";
+  // The header filter hides the selected task's project: drop the selection rather than show it as part of this one.
+  const st = sel && state.tasks.find(t => t.id === sel);
+  if (st && !inView(st.project)) clearSelection();
   renderProjects(); renderHeader(); renderMains(); renderList();
   if (sel) loadDetail(sel);
 }
@@ -306,9 +309,22 @@ function renderMains() {
   });
 }
 
+function clearSelection() {
+  sel = null; detail = null; typing = false;
+  $("#detail").innerHTML = `<span class="muted">Select a task to see what the worker is doing.</span>`;
+}
+clearSelection();
+
+function setFilter(name) {
+  pf = name || ""; try { localStorage.setItem("ops-proj", pf); } catch {}
+  chatSel = null; chatData = null; chatKey = ""; chatSels = {};
+}
+
 function selectTask(id) {
   sel = id;
   const t = state && state.tasks.find(x => x.id === id);
+  // Asked for a task the header filter hides (e.g. from a chat chip): switch the filter to its project.
+  if (t && !inView(t.project)) { setFilter(t.project); renderProjects(); renderHeader(); renderMains(); }
   if (t) setFocus(t.project);
   if (state) renderList();
   loadDetail(id, true);
@@ -357,6 +373,10 @@ async function loadDetail(id, fresh) {
   if (typing && !fresh) return;
   try { detail = await api(`/api/tasks/${id}`); } catch { return; }
   if (sel !== id) return;
+  if (!inView(detail.project)) {
+    if (!fresh) { clearSelection(); return; }
+    setFilter(detail.project); refresh();
+  }
   if (fresh && detail.project !== focus) setFocus(detail.project);
   const t = detail, feedEl = $("#feed");
   const stick = !feedEl || feedEl.scrollTop + feedEl.clientHeight >= feedEl.scrollHeight - 30;
@@ -447,8 +467,7 @@ $("#resumeall").onclick = () => api("/api/resume-all", {}).then(refresh);
 $("#par").onchange = () => api("/api/settings", {max_parallel: Math.max(1, +$("#par").value || 1)}).then(refresh);
 $("#model").onchange = () => api("/api/settings", {model: $("#model").value}).then(refresh);
 $("#proj").onchange = () => {
-  pf = $("#proj").value; try { localStorage.setItem("ops-proj", pf); } catch {}
-  chatSel = null; chatData = null; chatKey = ""; chatSels = {}; refresh(); if (tab !== "queue") refreshDesign();
+  setFilter($("#proj").value); refresh(); if (tab !== "queue") refreshDesign();
 };
 $("#addproj").onclick = () => { showTab("queue"); $("#addcard").classList.remove("hidden"); $("#ppath").focus(); };
 $("#pcancel").onclick = () => $("#addcard").classList.add("hidden");
