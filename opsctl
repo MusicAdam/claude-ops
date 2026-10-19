@@ -27,11 +27,11 @@ PL
 }
 case "${1:-status}" in
   start)   write_plist; launchctl bootstrap "gui/$(id -u)" "$PLIST" 2>/dev/null || launchctl kickstart "gui/$(id -u)/$LABEL"
-           sleep 1; echo "dashboard: http://127.0.0.1:8787" ;;
+           sleep 1; echo "dashboard: http://127.0.0.1:8788" ;;
   stop)    launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true; echo stopped ;;
   restart) "$0" stop; sleep 1; "$0" start ;;
   status)  launchctl print "gui/$(id -u)/$LABEL" 2>/dev/null | grep -E '^\s*(state|pid|last exit code)' || echo "not running" ;;
   log)     tail -n 100 -f "$OPS/opsd.log" ;;
-  open)    open http://127.0.0.1:8787 ;;
+  open)    open http://127.0.0.1:8788 ;;
   *)       sed -n 2p "$0"; exit 2 ;;
 esac

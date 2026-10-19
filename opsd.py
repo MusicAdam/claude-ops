@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """diskgame-ops: a task queue for Disk Game, worked by parallel headless Claude sessions.
 
-  opsd.py serve            run the dashboard + scheduler (http://127.0.0.1:8787)
+  opsd.py serve            run the dashboard + scheduler (http://127.0.0.1:8788)
   opsd.py add "text..."    queue a task through the running daemon
 
 Layout (all outside the repo except git worktrees, which share its .git):
@@ -27,7 +27,7 @@ STG_WT = Path(os.environ.get("OPS_STAGING", HOME / "dev/diskgame-stg"))
 RUNS = OPS / "runs"
 DB = OPS / "queue.db"
 HOST = os.environ.get("OPS_HOST", "127.0.0.1")
-PORT = int(os.environ.get("OPS_PORT", "8787"))
+PORT = int(os.environ.get("OPS_PORT", "8788"))
 CLAUDE = os.environ.get("OPS_CLAUDE") or shutil.which("claude") or str(HOME / ".local/bin/claude")
 APP_REL = "Builds/macOS/DiskGame.app"
 GATE = ["compile", "test-edit", "test-play"]  # scripts/unity.sh steps a task must pass to merge

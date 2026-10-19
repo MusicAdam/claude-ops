@@ -8,7 +8,7 @@ changes when you promote it.
 
 ```bash
 ./opsctl start     # install + start the launchd service (runs at login, restarts if it dies)
-./opsctl open      # dashboard: http://127.0.0.1:8787
+./opsctl open      # dashboard: http://127.0.0.1:8788
 ./opsctl status | log | stop | restart
 ./opsd.py add "Make the goal flash when someone scores"   # queue from the terminal
 ```
@@ -52,6 +52,6 @@ changes when you promote it.
 | `runs/<id>/` | `claude.jsonl` (full worker transcript), `claude.err`, `gate.log` |
 | `opsd.log` | daemon log |
 
-Env overrides: `OPS_PORT` (8787), `OPS_HOST` (127.0.0.1), `OPS_REPO`, `OPS_WORKTREES`, `OPS_STAGING`.
+Env overrides: `OPS_PORT` (8788), `OPS_HOST` (127.0.0.1), `OPS_REPO`, `OPS_WORKTREES`, `OPS_STAGING`.
 Keep the host on 127.0.0.1: the API can start work on your machine. For phone access, use Tailscale
 with `tailscale serve` rather than binding to your LAN.
