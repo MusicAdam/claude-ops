@@ -12,6 +12,10 @@ Per project (paths come from ~/.claude-ops/projects/<name>.toml):
   <worktrees>/dev        integration worktree on the dev branch. Finished tasks merge here.
   <worktrees>/main       build of main, the golden version (detached). Changes only when a release passes.
   <worktrees>/t<id>      one worktree per task, branch task/<id>-<slug> (a release: detached at its dev snapshot).
+
+A workspace (`repos = [...]` in its config) is a folder that holds several git repos, such as a backend and an
+app. Each of the paths above is then a folder with a copy of the workspace's own files and one worktree per repo,
+and every repo has its own main, dev and task branches.
 """
 import base64, json, os, re, secrets, shutil, signal, sqlite3, subprocess, sys, threading, time, tomllib
 import xml.etree.ElementTree as ET
@@ -43,6 +47,28 @@ THREADS = {}  # task id -> pipeline thread
 
 # ---------------------------------------------------------------- projects
 
+class Part:
+    """One git repo of a project: the project itself, or one folder of a workspace."""
+
+    def __init__(self, p, sub):
+        self.sub = sub
+        self.src = p.repo / sub if sub else p.repo  # your checkout of it
+
+    def at(self, root):
+        """This repo's worktree inside a project worktree."""
+        return Path(root) / self.sub if self.sub else Path(root)
+
+    def git(self, *a, cwd=None, check=True):
+        return sh("git", *a, cwd=cwd or self.src, check=check)
+
+    def rev(self, ref):
+        return self.git("rev-parse", ref)
+
+    def has(self, sha):
+        return subprocess.run(["git", "cat-file", "-e", f"{sha}^{{commit}}"], cwd=self.src,
+                              capture_output=True).returncode == 0
+
+
 class Project:
     def __init__(self, path):
         c = tomllib.loads(path.read_text())
@@ -52,6 +78,8 @@ class Project:
         self.main = c.get("main_branch", "main")
         self.dev = c.get("dev_branch", "dev")
         self.wt = Path(c.get("worktrees", f"{self.repo}-wt")).expanduser()
+        self.repos = [r.strip("/") for r in c.get("repos", [])]  # a workspace: git repos in folders of repo
+        self.parts = [Part(self, r) for r in self.repos] or [Part(self, "")]
         self.max_parallel = int(c.get("max_parallel", 0))  # 0: only the global limit applies
         w = c.get("worktree", {})
         self.clone = w.get("clone", [])
@@ -71,11 +99,21 @@ class Project:
         self.main_wt = self.wt / "main"
         self.lock = threading.Lock()  # merges into dev and promotes
 
-    def git(self, *a, cwd=None, check=True):
-        return sh("git", *a, cwd=cwd or self.repo, check=check)
+    def revs(self, ref):
+        """ref's commit in each repo, space-separated in repos order: one sha for a plain project."""
+        return " ".join(r.rev(ref) for r in self.parts)
 
-    def rev(self, ref):
-        return self.git("rev-parse", ref)
+    def pairs(self, revs):
+        """Pair each repo with its sha in a revs string."""
+        return zip(self.parts, revs.split())
+
+    def show(self, revs, n=8):
+        """A revs string for people: "abc12345", or "backend abc12345, app def67890" for a workspace."""
+        return ", ".join(f"{r.sub} {sha[:n]}" if r.sub else sha[:n] for r, sha in self.pairs(revs or ""))
+
+    def mine(self, r, shas):
+        """The sha in a space-separated list that is a commit of repo r, or None."""
+        return next((s for s in (shas or "").split() if r.has(s)), None)
 
     def port_for(self, tid):
         return self.port_base + tid % 90
@@ -113,18 +151,42 @@ def proj(name):
 
 def bootstrap(p):
     p.wt.mkdir(parents=True, exist_ok=True)
-    if not p.git("rev-parse", "--verify", "-q", f"refs/heads/{p.dev}", check=False):
-        p.git("branch", p.dev, p.main)
-    if not p.dev_wt.exists():
-        p.git("worktree", "add", str(p.dev_wt), p.dev)
-    exclude = Path(p.git("rev-parse", "--path-format=absolute", "--git-common-dir")) / "info" / "exclude"
-    if RESULT_FILE not in (exclude.read_text() if exclude.exists() else ""):
-        exclude.parent.mkdir(exist_ok=True)
-        with open(exclude, "a") as f:
-            f.write(f"\n{RESULT_FILE}\n")
-    if p.build and not p.main_wt.exists():
-        p.git("worktree", "add", "--detach", str(p.main_wt), p.main)
-        prepare_worktree(p, p.main_wt, src_first=p.repo)
+    copy_workspace_files(p, p.dev_wt)
+    for r in p.parts:
+        if not r.git("rev-parse", "--verify", "-q", f"refs/heads/{p.dev}", check=False):
+            r.git("branch", p.dev, p.main)
+        if not r.at(p.dev_wt).exists():
+            r.git("worktree", "add", str(r.at(p.dev_wt)), p.dev)
+        exclude = Path(r.git("rev-parse", "--path-format=absolute", "--git-common-dir")) / "info" / "exclude"
+        if RESULT_FILE not in (exclude.read_text() if exclude.exists() else ""):
+            exclude.parent.mkdir(exist_ok=True)
+            with open(exclude, "a") as f:
+                f.write(f"\n{RESULT_FILE}\n")
+    if p.build:
+        copy_workspace_files(p, p.main_wt)
+        if not all(r.at(p.main_wt).exists() for r in p.parts):
+            for r in p.parts:
+                if not r.at(p.main_wt).exists():
+                    r.git("worktree", "add", "--detach", str(r.at(p.main_wt)), p.main)
+            prepare_worktree(p, p.main_wt, src_first=p.repo)
+
+
+def copy_workspace_files(p, dest):
+    """A workspace's own files (CLAUDE.md, docs, .claude, ...) are in none of its repos: copy them into dest
+    (APFS clone), replacing older copies. Edits made to them in a worktree are not kept."""
+    if not p.repos:
+        return
+    dest.mkdir(parents=True, exist_ok=True)
+    skip = {r.split("/")[0] for r in p.repos} | {".git", RESULT_FILE}
+    for src in p.repo.iterdir():
+        if src.name in skip:
+            continue
+        out = dest / src.name
+        if out.is_dir() and not out.is_symlink():
+            shutil.rmtree(out)
+        elif out.exists() or out.is_symlink():
+            out.unlink()
+        subprocess.run(["cp", "-cR", str(src), str(out)], capture_output=True)
 
 
 def prepare_worktree(p, dest, src_first=None):
@@ -174,12 +236,16 @@ def detect_project(path, name=None, create=False):
         create_repo(repo)
     if not repo.exists():
         raise ValueError(f"{repo} does not exist")
-    if not (repo / ".git").exists():
-        raise ValueError(f"{repo} is not a git repository")
+    subs = [] if (repo / ".git").exists() else sorted(d.name for d in repo.iterdir() if (d / ".git").exists())
+    if not (repo / ".git").exists() and not subs:
+        raise ValueError(f"{repo} is not a git repository, and no folder in it is one")
     name = re.sub(r"[^a-z0-9-]+", "-", (name or repo.name).lower()).strip("-")
     out = PROJECTS_DIR / f"{name}.toml"
     if out.exists():
         raise ValueError(f"project {name} already exists ({out})")
+    if subs:
+        out.write_text(workspace_toml(repo, subs))
+        return out
     main = sh("git", "symbolic-ref", "--short", "HEAD", cwd=repo, check=False) or "main"
     dev = "dev"
     if sh("git", "rev-parse", "--verify", "-q", "refs/heads/dev", cwd=repo, check=False):
@@ -210,6 +276,45 @@ def detect_project(path, name=None, create=False):
     lines += ["[worker]", "notes = \"\"\"", "\"\"\"", "", "[design]", "notes = \"\"\"", "\"\"\"", ""]
     out.write_text("\n".join(lines))
     return out
+
+
+def workspace_toml(repo, subs):
+    """Starter config for a workspace: a folder whose git repos are folders in it, such as a backend and an
+    app. Each repo's setup and tests run from its own folder."""
+    heads = {sh("git", "symbolic-ref", "--short", "HEAD", cwd=repo / s, check=False) for s in subs}
+    main = heads.pop() if len(heads) == 1 and "" not in heads else "main"
+    for s in subs:
+        if not sh("git", "rev-parse", "--verify", "-q", f"refs/heads/{main}", cwd=repo / s, check=False):
+            raise ValueError(f"{repo / s} has no {main} branch, so the repos in {repo} share no main branch")
+    dev = "dev"
+    if any(sh("git", "rev-parse", "--verify", "-q", "refs/heads/dev", cwd=repo / s, check=False) for s in subs):
+        dev = "ops-dev"  # don't take over a dev branch a repo already uses
+    setup, clone, gates = [], [], []
+    for s in subs:
+        d = repo / s
+        ignored = sh("git", "ls-files", "-o", "-i", "--exclude-standard", "--directory", cwd=d, check=False)
+        clone += [f"{s}/{f}" for f in ignored.splitlines()  # env files the repo's tests need but git lacks
+                  if not f.endswith("/") and f.count("/") < 2 and re.match(r"(.*/)?(\.env.*|.*\.env)$", f)]
+        if (d / "package.json").exists():
+            scripts = json.loads((d / "package.json").read_text()).get("scripts", {})
+            setup.append(f"cd {s} && npm ci --silent")
+            gates += [gate_toml(f"{s} {k}", f"cd {s} && npm run {k} --silent") for k in ("lint", "typecheck", "test")
+                      if k in scripts]
+        elif (d / "poetry.lock").exists():
+            setup.append(f"cd {s} && poetry install --no-interaction --quiet")
+            tests = " tests/unit" if (d / "tests" / "unit").is_dir() else ""
+            gates.append(gate_toml(f"{s} test", f"cd {s} && poetry run pytest -q{tests}"))
+        elif (d / "pyproject.toml").exists() or (d / "setup.py").exists():
+            gates.append(gate_toml(f"{s} test", f"cd {s} && python3 -m pytest -q"))
+    lines = [f'title = "{repo.name}"', f'repo = "{repo}"',
+             "repos = [" + ", ".join(f'"{s}"' for s in subs) + "]   # a workspace: each folder is its own git repo",
+             f'main_branch = "{main}"', f'dev_branch = "{dev}"', "", "[worktree]",
+             "clone = [" + ", ".join(f'"{c}"' for c in clone) + "]",
+             "setup = [" + ", ".join(f'"{c}"' for c in setup) + "]", ""]
+    for g in gates:
+        lines += g
+    lines += ["[worker]", "notes = \"\"\"", "\"\"\"", "", "[design]", "notes = \"\"\"", "\"\"\"", ""]
+    return "\n".join(lines)
 
 
 def gate_toml(name, run, **kw):
@@ -391,10 +496,24 @@ def own_pid(t):
 def worker_prompt(p, t):
     tpl = (CODE / "worker_prompt.md").read_text()
     checks = ", ".join(f"`{g['run']}`" for g in p.gate) or "(none configured: run whatever tests the repo has)"
-    notes = f"## Notes for {p.title}\n\n{p.worker_notes}\n" if p.worker_notes else ""
+    notes = workspace_note(p, t["branch"]) + (f"## Notes for {p.title}\n\n{p.worker_notes}\n" if p.worker_notes else "")
     return tpl.format(id=t["id"], title=t["title"], body=t["body"], project=p.title, worktree=t["worktree"],
                       branch=t["branch"], repo=p.repo, dev=p.dev, main=p.main, port=p.port_for(t["id"]),
                       result=result_path(t), checks=checks, notes=notes)
+
+
+def workspace_note(p, branch=None):
+    """How a workspace's worktree is laid out, for the briefs. Empty for a plain project."""
+    if not p.repos:
+        return ""
+    names = ", ".join(f"`{r}/`" for r in p.repos)
+    on = (f"Each is a git worktree of its own repo on branch `{branch}`, branched from that repo's `{p.dev}`. "
+          "Commit in each repo you change; a repo you leave alone is not merged.") if branch else \
+        "Each is a git worktree of its own repo, detached at the commit being checked."
+    return (f"## This is a workspace of {len(p.repos)} git repos\n\n"
+            f"The worktree root is not a git repo. It holds a copy of the workspace's own files (`CLAUDE.md`, "
+            f"docs, ...) and one folder per repo: {names}. {on} Run git per repo "
+            f"(`git -C {p.repos[0]} status`). Edits to files outside the repo folders are thrown away.\n\n")
 
 
 def result_path(t):
@@ -630,15 +749,19 @@ def failure_detail(wt, g, rc, tail):
 
 def ensure_worktree(p, tid):
     t = task(tid)
-    if t["worktree"] and Path(t["worktree"]).exists():
+    if t["worktree"] and all(r.at(t["worktree"]).exists() for r in p.parts):
         return
     slug = re.sub(r"[^a-z0-9]+", "-", t["title"].lower()).strip("-")[:40] or "task"
     branch = t["branch"] or f"task/{tid}-{slug}"
     path = p.wt / f"t{tid}"
-    if p.git("rev-parse", "--verify", "-q", f"refs/heads/{branch}", check=False):
-        p.git("worktree", "add", str(path), branch)
-    else:
-        p.git("worktree", "add", "-b", branch, str(path), p.dev)
+    copy_workspace_files(p, path)
+    for r in p.parts:
+        if r.at(path).exists():  # a workspace worktree that was cut off half made
+            continue
+        if r.git("rev-parse", "--verify", "-q", f"refs/heads/{branch}", check=False):
+            r.git("worktree", "add", str(r.at(path)), branch)
+        else:
+            r.git("worktree", "add", "-b", branch, str(r.at(path)), p.dev)
     prepare_worktree(p, path)
     upd(tid, branch=branch, worktree=str(path))
     ev(tid, f"worktree {path} on {branch}")
@@ -688,29 +811,34 @@ def _pipeline(p, tid):
             if pending_steers(tid):  # sent as the worker finished
                 prompt = steered_prompt("as you finished")
                 continue
-            if p.git("status", "--porcelain", cwd=wt):
-                p.git("stash", "push", "-u", "-m", "ops-autostash: uncommitted after worker", cwd=wt)
-                ev(tid, "stashed uncommitted leftovers (git stash list in the worktree)")
+            for r in p.parts:
+                if r.git("status", "--porcelain", cwd=r.at(wt)):
+                    r.git("stash", "push", "-u", "-m", "ops-autostash: uncommitted after worker", cwd=r.at(wt))
+                    ev(tid, "stashed uncommitted leftovers (git stash list in the worktree"
+                            + (f" of {r.sub})" if r.sub else ")"))
         need_claude = True
 
-        if int(p.git("rev-list", "--count", f"{p.dev}..{t['branch']}") or 0) == 0:
+        if not changed_parts(p, t["branch"]):
             return finish(p, tid, merged=None, note="no code changes")
 
         # Rebase onto the latest dev, gate, then merge (or hold for review).
         upd(tid, state="gating", phase=f"rebasing onto {p.dev}")
-        base = p.rev(p.dev)
-        r = subprocess.run(["git", "rebase", p.dev], cwd=wt, capture_output=True, text=True)
-        if r.returncode:
-            subprocess.run(["git", "rebase", "--abort"], cwd=wt, capture_output=True)
+        base = p.revs(p.dev)
+        for part in p.parts:  # every repo, so the gate checks the latest dev of each
+            r = subprocess.run(["git", "rebase", p.dev], cwd=part.at(wt), capture_output=True, text=True)
+            if r.returncode:
+                subprocess.run(["git", "rebase", "--abort"], cwd=part.at(wt), capture_output=True)
+                break
         if stopped(tid):
             return
         if r.returncode:
-            if not bump_round(p, tid, "rebase conflict"):
+            if not bump_round(p, tid, "rebase conflict" + (f" in {part.sub}" if part.sub else "")):
                 return
-            prompt = (f"The `{p.dev}` branch moved and branch `{t['branch']}` no longer rebases cleanly onto "
-                      f"it. Run `git rebase {p.dev}`, resolve the conflicts so both your change and the new "
-                      f"{p.dev} work survive, re-run the checks, commit, and write $OPS_RESULT again."
-                      f"\n\ngit said:\n{r.stdout[-1500:]}{r.stderr[-1500:]}")
+            run = f"git -C {part.sub} rebase {p.dev}" if part.sub else f"git rebase {p.dev}"
+            prompt = (f"The `{p.dev}` branch{f' of {part.sub}' if part.sub else ''} moved and branch "
+                      f"`{t['branch']}` no longer rebases cleanly onto it. Run `{run}`, resolve the conflicts "
+                      f"so both your change and the new {p.dev} work survive, re-run the checks, commit, and "
+                      f"write $OPS_RESULT again.\n\ngit said:\n{r.stdout[-1500:]}{r.stderr[-1500:]}")
             upd(tid, state="running")
             continue
         ok, detail = gate(p, tid, wt)
@@ -747,7 +875,7 @@ def _pipeline(p, tid):
         with p.lock:
             if stopped(tid):
                 return
-            if p.rev(p.dev) != base:
+            if p.revs(p.dev) != base:
                 ev(tid, f"{p.dev} moved during the gate; re-checking")
                 need_claude = False
                 continue
@@ -759,9 +887,18 @@ def _pipeline(p, tid):
                 prompt = steered_prompt("while the queue checked your work")
                 upd(tid, state="running")
                 continue
-            p.git("merge", "--no-ff", "-m", f"Merge task #{tid}: {t['title']}", t["branch"], cwd=p.dev_wt)
-            merged = p.rev(p.dev)
-        return finish(p, tid, merged=merged, note=f"merged into {p.dev} at {merged[:8]}")
+            done = []
+            for r in changed_parts(p, t["branch"]):
+                r.git("merge", "--no-ff", "-m", f"Merge task #{tid}: {t['title']}", t["branch"], cwd=r.at(p.dev_wt))
+                done.append((r, r.rev(p.dev)))
+            merged = " ".join(sha for _, sha in done)
+        where = ", ".join(f"{r.sub} {sha[:8]}" if r.sub else sha[:8] for r, sha in done)
+        return finish(p, tid, merged=merged, note=f"merged into {p.dev} at {where}")
+
+
+def changed_parts(p, ref):
+    """The repos where ref has commits that dev lacks."""
+    return [r for r in p.parts if int(r.git("rev-list", "--count", f"{p.dev}..{ref}") or 0)]
 
 
 def bump_round(p, tid, why):
@@ -786,8 +923,17 @@ def finish(p, tid, merged, note):
     ev(tid, note)
     if t["worktree"] and Path(t["worktree"]).exists():
         kill_app(p, t["worktree"])
-        p.git("worktree", "remove", "--force", t["worktree"], check=False)
+        remove_worktree(p, t["worktree"])
     notify(f"{p.title}: task done", f"#{tid}: {t['title']}")
+
+
+def remove_worktree(p, path):
+    for r in p.parts:
+        r.git("worktree", "remove", "--force", str(r.at(path)), check=False)
+    if p.repos:  # the workspace's own files
+        shutil.rmtree(path, ignore_errors=True)
+        for r in p.parts:
+            r.git("worktree", "prune", check=False)
 
 
 def add_subtasks(p, tid, items, priority=0, hold=0):
@@ -824,16 +970,18 @@ def queue_release(p):
 
 
 def release_prompt(p, t):
-    log = p.git("log", "--first-parent", "--format=%H %h %s", f"{p.main}..{t['base']}").splitlines()
-    changes = "\n".join(f"- {l.split(' ', 1)[1]}" for l in log[:60]) or f"- (nothing: this only rebuilds {p.main})"
-    shas = [l.split(" ", 1)[0] for l in log]
-    done = q(f"SELECT id,title,summary FROM tasks WHERE project=? AND merged IN ({','.join('?' * len(shas))})",
-             (p.name, *shas)) if shas else []
+    log = [(r, l) for r, sha in p.pairs(t["base"])
+           for l in r.git("log", "--first-parent", "--format=%H %h %s", f"{p.main}..{sha}").splitlines()]
+    changes = "\n".join(f"- {r.sub + ': ' if r.sub else ''}{l.split(' ', 1)[1]}" for r, l in log[:60]) \
+        or f"- (nothing: this only rebuilds {p.main})"
+    shas = {l.split(" ", 1)[0] for _, l in log}
+    done = [d for d in q("SELECT id,title,summary,merged FROM tasks WHERE project=? AND merged IS NOT NULL "
+                         "ORDER BY id", (p.name,)) if shas & set(d["merged"].split())] if shas else []
     summaries = "\n\n".join(f"#{d['id']} {d['title']}\n{(d['summary'] or '(no summary)')[:1500]}" for d in done)
     checks = ", ".join(f"`{g['run']}`" for g in p.gate) or "(none configured)"
-    notes = f"## Notes for {p.title}\n\n{p.worker_notes}\n" if p.worker_notes else ""
+    notes = workspace_note(p) + (f"## Notes for {p.title}\n\n{p.worker_notes}\n" if p.worker_notes else "")
     return (CODE / "release_prompt.md").read_text().format(
-        id=t["id"], project=p.title, dev=p.dev, main=p.main, base=t["base"], base_short=t["base"][:8],
+        id=t["id"], project=p.title, dev=p.dev, main=p.main, base=p.show(t["base"], 40), base_short=p.show(t["base"]),
         checks=checks, changes=changes, summaries=summaries or "(none recorded)", worktree=t["worktree"],
         repo=p.repo, port=p.port_for(t["id"]), build=f" (`{p.build}`)" if p.build else "",
         notes=notes, result=result_path(t))
@@ -849,18 +997,21 @@ def release_pipeline(p, tid):
             err = merge_main_into_dev(p)
             if err:
                 return fail(p, tid, err)
-            upd(tid, base=p.rev(p.dev))
-        ev(tid, f"checking {p.dev} at {task(tid)['base'][:8]}")
+            upd(tid, base=p.revs(p.dev))
+        ev(tid, f"checking {p.dev} at {p.show(task(tid)['base'])}")
     t = task(tid)
-    if t["base"] == p.rev(p.main):
+    if t["base"] == p.revs(p.main):
         start_at = "promote"  # nothing new to check: this only rebuilds main
         ev(tid, f"nothing new on {p.dev}; rebuilding {p.main}")
-    if not (t["worktree"] and Path(t["worktree"]).exists()):
+    if not (t["worktree"] and all(r.at(t["worktree"]).exists() for r in p.parts)):
         path = p.wt / f"t{tid}"
-        p.git("worktree", "add", "--detach", str(path), t["base"])
+        copy_workspace_files(p, path)
+        for r, sha in p.pairs(t["base"]):
+            if not r.at(path).exists():
+                r.git("worktree", "add", "--detach", str(r.at(path)), sha)
         prepare_worktree(p, path)
         upd(tid, worktree=str(path))
-        ev(tid, f"worktree {path} at {t['base'][:8]}")
+        ev(tid, f"worktree {path} at {p.show(t['base'])}")
         t = task(tid)
 
     if start_at != "promote":
@@ -903,15 +1054,15 @@ def release_pipeline(p, tid):
     why = promote_blocker(p)
     if why:
         return fail(p, tid, why + " Then click Retry: it promotes without checking again.")
-    before = p.rev(p.main)
+    before = p.revs(p.main)
     err = promote(p, tid, task(tid)["base"])
     if stopped(tid):
         return
     if err:
         return fail(p, tid, err)
     upd(tid, start_at="claude")
-    finish(p, tid, merged=t["base"], note=f"{p.main} is now {t['base'][:8]}")
-    if Path(p.repo).resolve() == CODE and p.rev(p.main) != before:
+    finish(p, tid, merged=t["base"], note=f"{p.main} is now {p.show(t['base'])}")
+    if Path(p.repo).resolve() == CODE and p.revs(p.main) != before:
         restart_self(tid)
 
 
@@ -1066,12 +1217,13 @@ def resume_all():
 
 def main_info(p):
     built = setting(f"main_built:{p.name}")
-    main, dev = p.rev(p.main), p.rev(p.dev)
-    ahead = p.git("log", "--first-parent", "--format=%h %s", f"{p.main}..{p.dev}").splitlines()[:30]
+    main, dev = p.revs(p.main), p.revs(p.dev)
+    ahead = [f"{r.sub + ': ' if r.sub else ''}{l}" for r in p.parts
+             for l in r.git("log", "--first-parent", "--format=%h %s", f"{p.main}..{p.dev}").splitlines()][:30]
     rel = q("SELECT id,state,phase,error FROM tasks WHERE project=? AND kind='release' ORDER BY id DESC LIMIT 1",
             (p.name,), one=True)
     return {"name": p.name, "title": p.title, "main_branch": p.main, "dev_branch": p.dev,
-            "main": main[:8], "built": built[:8], "dev": dev[:8], "ahead": ahead,
+            "main": p.show(main), "built": p.show(built), "dev": p.show(dev), "ahead": ahead,
             "has_app": bool(p.build), "can_launch": bool(p.launch),
             "stale": bool(p.build) and built != main, "running": app_running(p, p.main_wt),
             "has_build": bool(p.build) and (not p.artifact or (p.main_wt / p.artifact).exists()),
@@ -1082,28 +1234,31 @@ def promote_blocker(p):
     """Why main cannot move right now, or None. Checked when Promote is clicked and again before promoting."""
     if app_running(p, p.main_wt):
         return f"Quit the {p.main} build first."
-    if p.git("branch", "--show-current", check=False) != p.main:
-        return f"Your checkout {p.repo} is not on {p.main}. Switch it back."
-    if p.git("status", "--porcelain", "-uno", check=False):
-        return f"Your checkout {p.repo} has uncommitted changes. Commit or stash them."
+    for r in p.parts:
+        if r.git("branch", "--show-current", check=False) != p.main:
+            return f"Your checkout {r.src} is not on {p.main}. Switch it back."
+        if r.git("status", "--porcelain", "-uno", check=False):
+            return f"Your checkout {r.src} has uncommitted changes. Commit or stash them."
     return None
 
 
 def merge_main_into_dev(p):
     """Commits made straight to main (outside the queue) come along into dev. Returns an error or None.
     Call with p.lock held."""
-    if subprocess.run(["git", "merge-base", "--is-ancestor", p.main, p.dev], cwd=p.repo).returncode == 0:
-        return None
-    r = subprocess.run(["git", "merge", "--no-ff", "-m", f"Merge {p.main} into {p.dev}", p.main],
-                       cwd=p.dev_wt, capture_output=True, text=True)
-    if r.returncode:
-        subprocess.run(["git", "merge", "--abort"], cwd=p.dev_wt, capture_output=True)
-        return f"{p.main} has commits that conflict with {p.dev}:\n" + r.stdout[-1500:] + r.stderr[-1500:]
+    for part in p.parts:
+        if subprocess.run(["git", "merge-base", "--is-ancestor", p.main, p.dev], cwd=part.src).returncode == 0:
+            continue
+        r = subprocess.run(["git", "merge", "--no-ff", "-m", f"Merge {p.main} into {p.dev}", p.main],
+                           cwd=part.at(p.dev_wt), capture_output=True, text=True)
+        if r.returncode:
+            subprocess.run(["git", "merge", "--abort"], cwd=part.at(p.dev_wt), capture_output=True)
+            return (f"{p.main}{f' of {part.sub}' if part.sub else ''} has commits that conflict with {p.dev}:\n"
+                    + r.stdout[-1500:] + r.stderr[-1500:])
     return None
 
 
 def promote(p, tid, commit):
-    """Build commit in <worktrees>/main, then fast-forward main to it. Returns an error or None;
+    """Build commit (a revs string) in <worktrees>/main, then fast-forward main to it. Returns an error or None;
     on an error main and its build are unchanged."""
     if p.build:
         art = p.main_wt / p.artifact if p.artifact else None
@@ -1112,11 +1267,13 @@ def promote(p, tid, commit):
             shutil.rmtree(prev, ignore_errors=True)
             if art.exists():
                 subprocess.run(["cp", "-cR", str(art), str(prev)], capture_output=True)
-        old = p.git("rev-parse", "HEAD", cwd=p.main_wt)
-        p.git("checkout", "--detach", commit, cwd=p.main_wt)
-        rc, tail = run_step(tid, f"building {p.main} at {commit[:8]}", p.build, p.main_wt, "build.log")
+        old = [(r, r.git("rev-parse", "HEAD", cwd=r.at(p.main_wt))) for r in p.parts]
+        for r, sha in p.pairs(commit):
+            r.git("checkout", "--detach", sha, cwd=r.at(p.main_wt))
+        rc, tail = run_step(tid, f"building {p.main} at {p.show(commit)}", p.build, p.main_wt, "build.log")
         if rc or (art and not art.exists()):
-            p.git("checkout", "--detach", old, cwd=p.main_wt, check=False)
+            for r, sha in old:
+                r.git("checkout", "--detach", sha, cwd=r.at(p.main_wt), check=False)
             if prev and prev.exists():
                 shutil.rmtree(art, ignore_errors=True)
                 prev.rename(art)
@@ -1124,11 +1281,15 @@ def promote(p, tid, commit):
         if prev:
             shutil.rmtree(prev, ignore_errors=True)
     upd(tid, phase=f"fast-forwarding {p.main}")
-    r = subprocess.run(["git", "merge", "--ff-only", commit], cwd=p.repo, capture_output=True, text=True)
-    if r.returncode:
-        return f"{p.main} could not fast-forward:\n" + r.stderr[-1000:]
+    for r, sha in p.pairs(commit):  # check every repo first, so a workspace never moves only some of them
+        if subprocess.run(["git", "merge-base", "--is-ancestor", "HEAD", sha], cwd=r.src).returncode:
+            return f"{p.main}{f' of {r.sub}' if r.sub else ''} could not fast-forward: it has commits {p.dev} lacks."
+    for r, sha in p.pairs(commit):
+        res = subprocess.run(["git", "merge", "--ff-only", sha], cwd=r.src, capture_output=True, text=True)
+        if res.returncode:
+            return f"{p.main}{f' of {r.sub}' if r.sub else ''} could not fast-forward:\n" + res.stderr[-1000:]
     set_setting(f"main_built:{p.name}", commit)
-    notify(f"{p.title}: {p.main} updated", f"{p.main} is now {commit[:8]}")
+    notify(f"{p.title}: {p.main} updated", f"{p.main} is now {p.show(commit)}")
     return None
 
 
@@ -1454,8 +1615,16 @@ class H(BaseHTTPRequestHandler):
             t["diffstat"] = ""
             p = PROJECTS.get(t["project"])
             if p and t["branch"]:
-                base = f"{t['merged']}^1" if t["merged"] else p.dev
-                t["diffstat"] = p.git("diff", "--stat", f"{base}...{t['branch']}", check=False)[-3000:]
+                stats = []
+                for r in p.parts:
+                    sha = p.mine(r, t["merged"]) if p.repos else t["merged"]
+                    if t["merged"] and not sha:
+                        continue  # a workspace repo this task did not change
+                    base = f"{sha}^1" if sha else p.dev
+                    st = r.git("diff", "--stat", f"{base}...{t['branch']}", check=False)
+                    if st:
+                        stats.append(f"{r.sub}/\n{st}" if r.sub else st)
+                t["diffstat"] = "\n\n".join(stats)[-3000:]
             t["can_play"] = bool(p and p.launch and t["state"] == "review")
             t["chat"] = q("SELECT role,text,ts,delivered FROM task_msgs WHERE task_id=? ORDER BY id", (tid,))
             t["chat_live"] = TASK_CHAT_LIVE.get(tid)
