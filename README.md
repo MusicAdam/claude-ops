@@ -10,7 +10,7 @@ the golden version: it changes only when you promote.
 ```bash
 ./opsctl start                       # install + start the launchd service (runs at login, restarts if it dies)
 ./opsctl open                        # dashboard: http://127.0.0.1:8788  (…/#design opens the Design tab)
-./opsctl status | log | stop | restart
+./opsctl status | log | stop | restart   # restart waits until no task is running a command; --now doesn't
 ./opsd.py add-project ~/dev/myrepo   # or "+ Project" on the dashboard
 ./opsd.py add -p myrepo "Fix the crash when the save file is empty"
 ```

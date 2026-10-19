@@ -4,6 +4,7 @@
   opsd.py serve                        run the dashboard + scheduler (http://127.0.0.1:8788)
   opsd.py add-project PATH [NAME]      detect PATH and write ~/.claude-ops/projects/NAME.toml
   opsd.py add -p NAME "text..."        queue a task through the running daemon
+  opsd.py wait-idle                    hold new tasks, wait until no task is running a command (opsctl restart)
 
 Per project (paths come from ~/.claude-ops/projects/<name>.toml):
   <repo>                 your checkout of the main branch. The queue only fast-forwards it, when a release passes.
@@ -295,12 +296,21 @@ def launch_app(p, path):
                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
+def child_commands(pid):
+    """Commands a Claude process is running: its children other than caffeinate. Claude starts each
+    Bash command in a process group of its own."""
+    out = subprocess.run(["pgrep", "-lP", str(pid)], capture_output=True, text=True).stdout.splitlines()
+    return [int(l.split()[0]) for l in out if l.split()[1:2] != ["caffeinate"]]
+
+
 def killgroup(pid):
+    """Stop pid's process group and its commands' groups, so no test run or build is left orphaned."""
     if pid:
-        try:
-            os.killpg(pid, signal.SIGTERM)
-        except (ProcessLookupError, PermissionError):
-            pass
+        for g in child_commands(pid) + [pid]:
+            try:
+                os.killpg(g, signal.SIGTERM)
+            except (ProcessLookupError, PermissionError):
+                pass
 
 
 # ---------------------------------------------------------------- claude worker
@@ -703,7 +713,7 @@ def scheduler():
 
 
 def schedule_once():
-    if setting("paused") == "1":
+    if setting("paused") == "1" or setting("draining") == "1":
         return
     slots = int(setting("max_parallel") or 1) - len(THREADS)
     for t in q("SELECT * FROM tasks WHERE state='queued' ORDER BY priority DESC, id"):
@@ -726,6 +736,39 @@ def schedule_once():
         THREADS[t["id"]] = th
         th.start()
         slots -= 1
+
+
+def busy_work():
+    """What a restart would interrupt now: a task's setup, gate or build step, or a command its worker
+    is running. Empty when only Claude itself is thinking, which a restart resumes cleanly."""
+    out = []
+    for t in q(f"SELECT id,phase,pid FROM tasks WHERE state IN ({','.join('?' * len(ACTIVE))})", ACTIVE):
+        if t["phase"] != "claude working":
+            out.append(f"#{t['id']}: {t['phase'] or 'starting'}")
+            continue
+        if t["pid"] and child_commands(t["pid"]):
+            out.append(f"#{t['id']}: worker running a command")
+    return out
+
+
+def wait_idle():
+    """Hold new tasks, then return once nothing is running a command (twice in a row, 3 s apart)."""
+    set_setting("draining", "1")  # the next daemon clears it on start
+    last, clear = None, 0
+    try:
+        while clear < 2:
+            busy = busy_work()
+            clear = 0 if busy else clear + 1
+            if busy and busy != last:
+                print("waiting for: " + "; ".join(busy), flush=True)
+            last = busy
+            if clear < 2:
+                time.sleep(3)
+    except KeyboardInterrupt:
+        set_setting("draining", "0")
+        print("\ncancelled; new tasks start again")
+        sys.exit(1)
+    print("nothing is running a command; restarting")
 
 
 def recover():
@@ -1069,7 +1112,7 @@ class H(BaseHTTPRequestHandler):
                     projects.append({"name": p.name, "title": p.title, "error": str(e)})
             return self.send(200, {
                 "tasks": tasks, "now": time.time(), "projects": projects,
-                "settings": {k: setting(k) for k in ("max_parallel", "paused", "model")},
+                "settings": {k: setting(k) for k in ("max_parallel", "paused", "model", "draining")},
                 "active": len(THREADS), "data_dir": str(DATA),
                 "design_cost": (q("SELECT SUM(cost) AS c FROM designs", one=True) or {}).get("c") or 0})
         m = re.fullmatch(r"/api/tasks/(\d+)", path)
@@ -1253,6 +1296,7 @@ def serve():
     signal.signal(signal.SIGTERM, on_term)
     signal.signal(signal.SIGINT, on_term)
     init_db()
+    set_setting("draining", "0")
     load_projects()
     recover()
     threading.Thread(target=scheduler, daemon=True).start()
@@ -1272,6 +1316,8 @@ if __name__ == "__main__":
     cmd = args.pop(0) if args else "serve"
     if cmd == "serve":
         serve()
+    elif cmd == "wait-idle":
+        wait_idle()
     elif cmd == "add-project" and args:
         PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
         out = detect_project(args[0], args[1] if len(args) > 1 else None)

@@ -18,7 +18,11 @@ Nobody watches this session and nobody can answer you mid-run. Work the task to 
 
 1. Read `CLAUDE.md` and the docs it points to for the area the task touches. Follow the project's rules.
 2. Make the change. When the task has independent parts, use subagents to do them in parallel.
-3. Check it. The queue's merge check runs: {checks}. Run them yourself and make them pass.
+3. Check it. Run the tests that cover your change. If the change affects what a player or user sees or
+   does, build it and use it that way with the project's own tools (see `CLAUDE.md`), and look at the
+   output. When you finish, the queue runs the full merge check ({checks}) and resumes you with any
+   failure, so you need not run the whole suite yourself when it is slow. In the summary, say what you
+   ran and what you saw.
 4. Commit everything you want to keep, with clear messages. Leave the worktree clean.
 
 When you finish, the queue rebases your branch onto the latest `{dev}`, runs the merge check again,

@@ -200,7 +200,8 @@ function renderHeader() {
   const s = state.settings, ts = state.tasks.filter(t => inView(t.project));
   const n = st => ts.filter(t => st.includes(t.state)).length;
   const cost = ts.reduce((a, t) => a + (t.cost || 0), 0) + (state.design_cost || 0);
-  $("#hdr").innerHTML = `<b>${state.active}</b>/${s.max_parallel} working · <b>${n(["queued"])}</b> queued · ` +
+  $("#hdr").innerHTML = (s.draining === "1" ? `<span class="s-review">restarting when running commands finish · </span>` : "") +
+    `<b>${state.active}</b>/${s.max_parallel} working · <b>${n(["queued"])}</b> queued · ` +
     `<b>${n(["needs_input","review","failed"])}</b> need you · $${cost.toFixed(2)} spent`;
   if (document.activeElement !== $("#par")) $("#par").value = s.max_parallel;
   $("#model").value = s.model;
