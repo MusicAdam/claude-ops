@@ -13,7 +13,7 @@ Per project (paths come from ~/.claude-ops/projects/<name>.toml):
   <worktrees>/main       build of main, the golden version (detached). Changes only when a release passes.
   <worktrees>/t<id>      one worktree per task, branch task/<id>-<slug> (a release: detached at its dev snapshot).
 """
-import json, os, re, shutil, signal, sqlite3, subprocess, sys, threading, time, tomllib
+import base64, json, os, re, secrets, shutil, signal, sqlite3, subprocess, sys, threading, time, tomllib
 import xml.etree.ElementTree as ET
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
@@ -26,6 +26,7 @@ DATA = Path(os.environ.get("OPS_DATA", HOME / ".claude-ops"))
 PROJECTS_DIR = DATA / "projects"
 RUNS = DATA / "runs"
 PIDFILE = DATA / "opsd.pid"  # stop a daemon with kill $(cat "$OPS_DATA/opsd.pid"), never pkill -f
+IMAGES = DATA / "images"  # screenshots dropped or pasted into a message box
 DB = DATA / "ops.db"
 HOST = os.environ.get("OPS_HOST", "127.0.0.1")
 PORT = int(os.environ.get("OPS_PORT", "8788"))
@@ -235,6 +236,7 @@ def q(sql, args=(), one=False):
 def init_db():
     DATA.mkdir(parents=True, exist_ok=True)
     RUNS.mkdir(exist_ok=True)
+    IMAGES.mkdir(exist_ok=True)
     q("""CREATE TABLE IF NOT EXISTS tasks (
         id INTEGER PRIMARY KEY, project TEXT, title TEXT, body TEXT, priority INTEGER DEFAULT 0,
         hold INTEGER DEFAULT 0, depends_on INTEGER, parent INTEGER,
@@ -417,10 +419,11 @@ def run_claude(p, tid, prompt):
     rp = result_path(t)
     rp.unlink(missing_ok=True)
     prompt, acking = with_steers(tid, prompt)
+    prompt = with_images(prompt)
     cmd = ["caffeinate", "-i", CLAUDE, "-p", "--input-format", "stream-json", "--replay-user-messages",
            "--output-format", "stream-json", "--verbose",
            "--permission-mode", "auto", "--permission-prompts", "none", "--strict-mcp-config",
-           "--no-chrome", "--name", f"{p.name} #{tid}"]
+           "--no-chrome", "--name", f"{p.name} #{tid}", "--add-dir", str(IMAGES)]
     if t["session_id"]:
         cmd += ["--resume", t["session_id"]]
     if setting("model"):
@@ -546,8 +549,8 @@ def task_steer(tid, text):
         mid = q("INSERT INTO task_msgs (task_id, role, text, ts) VALUES (?,?,?,?)", (tid, "steer", text, time.time()))
         if pipe:
             try:
-                send_user(pipe, STEER_NOTE + text)
-                INFLIGHT.setdefault(tid, []).append((STEER_NOTE + text, mid))
+                send_user(pipe, STEER_NOTE + with_images(text))
+                INFLIGHT.setdefault(tid, []).append((STEER_NOTE + with_images(text), mid))
             except OSError:
                 pass  # the worker just stopped; the message waits for its next turn
     ev(tid, "you sent a message: " + text[:200])
@@ -1211,15 +1214,16 @@ def design_turn(did, text):
     DESIGN_LIVE[did] = []
     chat = d["kind"] == "project"
     if chat:  # your own settings and MCP servers apply, like the CLI; auto mode stands in for prompts
-        cmd = [CLAUDE, "-p", text, "--output-format", "stream-json", "--verbose",
+        cmd = [CLAUDE, "-p", with_images(text), "--output-format", "stream-json", "--verbose",
                "--permission-mode", "auto", "--permission-prompts", "none", "--no-chrome",
                "--name", f"{p.name} chat #{did}",
                "--append-system-prompt", PROJECT_CHAT_PROMPT]
     else:
-        cmd = [CLAUDE, "-p", ops_note(p, did) + text, "--output-format", "stream-json", "--verbose",
+        cmd = [CLAUDE, "-p", ops_note(p, did) + with_images(text), "--output-format", "stream-json", "--verbose",
                "--permission-mode", "dontAsk", "--permission-prompts", "none", "--allowedTools", DESIGN_TOOLS,
                "--strict-mcp-config", "--no-chrome", "--name", f"{p.name} design #{did}",
                "--append-system-prompt", design_system_prompt(p)]
+    cmd += ["--add-dir", str(IMAGES)]
     if d["session_id"]:
         cmd += ["--resume", d["session_id"]]
     if setting("model"):
@@ -1311,9 +1315,9 @@ def task_chat_turn(tid, text):
             "you will carry this conversation into that work."
             + (f" Your worktree was removed after the task finished; the merged code is in {p.dev_wt}."
                if made else "") + "]\n\n")
-    cmd = [CLAUDE, "-p", note + text, "--output-format", "stream-json", "--verbose",
+    cmd = [CLAUDE, "-p", note + with_images(text), "--output-format", "stream-json", "--verbose",
            "--permission-mode", "dontAsk", "--permission-prompts", "none", "--allowedTools", DESIGN_TOOLS,
-           "--strict-mcp-config", "--no-chrome", "--resume", t["session_id"]]
+           "--strict-mcp-config", "--no-chrome", "--resume", t["session_id"], "--add-dir", str(IMAGES)]
     if made:
         cmd += ["--add-dir", str(p.dev_wt)]
     if setting("model"):
@@ -1374,6 +1378,37 @@ def tool_line(name, i):
     return f"{name}: {str(arg).splitlines()[0][:200] if arg else ''}"
 
 
+# ---------------------------------------------------------------- images
+# The dashboard uploads a dropped or pasted screenshot here and puts "[image: <path>]" in the message.
+# Every Claude it starts gets --add-dir IMAGES, and with_images tells it to look.
+
+IMAGE_TYPES = {"image/png": ".png", "image/jpeg": ".jpg", "image/gif": ".gif", "image/webp": ".webp"}
+IMAGE_REF = re.compile(r"\[image: ([^\]\n]+)\]")
+MAX_IMAGE = 20 << 20
+
+
+def save_image(data_url):
+    m = re.fullmatch(r"data:(image/[\w.+-]+);base64,(.+)", data_url or "", re.S)
+    if not m or m.group(1) not in IMAGE_TYPES:
+        raise ValueError("only PNG, JPEG, GIF and WebP images can be attached")
+    data = base64.b64decode(m.group(2))
+    if len(data) > MAX_IMAGE:
+        raise ValueError(f"image is over {MAX_IMAGE >> 20} MB")
+    IMAGES.mkdir(parents=True, exist_ok=True)
+    path = IMAGES / f"{time.strftime('%Y%m%d-%H%M%S')}-{secrets.token_hex(4)}{IMAGE_TYPES[m.group(1)]}"
+    path.write_bytes(data)
+    return {"path": str(path), "name": path.name}
+
+
+def with_images(text):
+    """text, plus a note telling Claude to look at the images it attaches."""
+    paths = [s for s in IMAGE_REF.findall(text or "") if Path(s).parent == IMAGES and Path(s).is_file()]
+    if not paths:
+        return text
+    return (f"{text}\n\n[ops: the user attached {len(paths)} image{'s' if len(paths) > 1 else ''}. "
+            "Look at each with the Read tool before you answer: " + ", ".join(paths) + "]")
+
+
 # ---------------------------------------------------------------- http
 
 class H(BaseHTTPRequestHandler):
@@ -1428,6 +1463,10 @@ class H(BaseHTTPRequestHandler):
             t["steer_live"] = tid in STEER_PIPES  # the worker reads a message after its current step
             t["can_steer"] = t["state"] in STEER_STATES and (t["kind"] != "release" or t["steer_live"])
             return self.send(200, t)
+        m = re.fullmatch(r"/api/images/([\w-]+(\.\w+))", path)
+        if m and m.group(2) in IMAGE_TYPES.values() and (IMAGES / m.group(1)).is_file():
+            ctype = next(k for k, v in IMAGE_TYPES.items() if v == m.group(2))
+            return self.send(200, (IMAGES / m.group(1)).read_bytes(), ctype)
         if path == "/api/designs":
             return self.send(200, q("SELECT id,project,title,state,updated,cost,kind FROM designs ORDER BY updated DESC"))
         m = re.fullmatch(r"/api/designs/(\d+)", path)
@@ -1464,6 +1503,8 @@ class H(BaseHTTPRequestHandler):
             return self.send(400, {"error": str(e)})
 
     def route(self, path, b):
+        if path == "/api/images":
+            return save_image(b.get("data"))
         if path == "/api/tasks":
             if not (b.get("body") or "").strip():
                 raise ValueError("describe the task")
