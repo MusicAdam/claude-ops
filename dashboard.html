@@ -200,22 +200,48 @@ const LABEL = {queued:"queued", running:"working", gating:"checking", merging:"m
                review:"review", done:"done", failed:"failed", cancelled:"cancelled", paused:"paused"};
 
 async function api(path, body) {
-  const r = await fetch(path, body === undefined ? {} :
+  // A read that hangs would hold its poll forever (see single below), so give up on it after 20 seconds.
+  const r = await fetch(path, body === undefined ? {signal: AbortSignal.timeout(20000)} :
     {method: "POST", headers: {"Content-Type": "application/json", "X-Ops": "1"}, body: JSON.stringify(body)});
   const j = await r.json();
   if (!r.ok) throw new Error(j.error || r.status);
   return j;
 }
 
-async function refresh() {
+// Put html in el unless it is already there. Returns whether it did: if not, the caller skips rewiring it.
+function put(el, html) {
+  if (el.dataset.html === html) return false;
+  el.innerHTML = el.dataset.html = html;
+  return true;
+}
+
+// Run fn one call at a time. A call made while one runs becomes a single rerun after it, so a click still
+// gets fresh data; poll() skips instead, so polls never pile up behind a slow answer.
+function single(fn) {
+  let running = null, again = false;
+  const run = () => {
+    if (running) { again = true; return running; }
+    return running = (async () => { do { again = false; await fn(); } while (again); })().finally(() => running = null);
+  };
+  run.poll = () => running || run();
+  return run;
+}
+
+async function loadState() {
   try { state = await api("/api/state"); } catch (e) { $("#hdr").innerHTML = `<span class="err">daemon not reachable</span>`; return; }
+  render();
+  if (sel) loadDetail(sel);
+}
+const refresh = single(loadState);
+
+// Draw everything from the state we have. A click that changes the view calls this at once, then refresh.
+function render() {
   if (pf && !state.projects.some(p => p.name === pf)) pf = "";
   if (focus && !state.projects.some(p => p.name === focus)) focus = "";
   // The header filter hides the selected task's project: drop the selection rather than show it as part of this one.
   const st = sel && state.tasks.find(t => t.id === sel);
   if (st && !inView(st.project)) clearSelection();
   renderProjects(); renderHeader(); renderMains(); renderList();
-  if (sel) loadDetail(sel);
 }
 
 function renderProjects() {
@@ -313,20 +339,21 @@ function renderMains() {
   const ps = state.projects.filter(p => inView(p.name)), fx = pf || focus;
   // Keep an open "What would be promoted" open across the 3-second refresh.
   const open = !!document.querySelector("#mains .prow.on details[open]");
-  $("#mains").innerHTML = ps.length ? `<div class="card projs"><h2>Projects</h2>` + ps.map(g => {
+  const html = ps.length ? `<div class="card projs"><h2>Projects</h2>` + ps.map(g => {
     const on = g.name === fx;
     return `<div class="prow ${on ? "on" : ""}" data-proj="${esc(g.name)}">
       <div class="phead" title="${on ? "Collapse and show all projects" : "Show only this project"}"><span class="pname">${esc(g.title)}</span>
         <span class="pstats">${projStats(g)}</span><span class="caret">${on ? "▼" : "▶"}</span></div>
       ${on ? `<div class="pbody">${projBody(g)}</div>` : ""}</div>`;
   }).join("") + `</div>` : `<div class="card"><h2>No projects yet</h2>Click <b>+ Project</b> and give the path of a git repository, or of a folder that holds several.</div>`;
+  if (!put($("#mains"), html)) return;  // nothing changed: leave the page (and its open sections) alone
   if (open) { const d = document.querySelector("#mains .prow.on details"); if (d) d.open = true; }
   document.querySelectorAll("#mains .phead").forEach(h => h.onclick = () => {
     const name = h.parentElement.dataset.proj;
     // Opening a project also filters to it; closing it shows every project again.
     const open = name === (pf || focus);
     setFocus(open ? "" : name);
-    setFilter(open ? "" : name); refresh(); if (tab !== "queue") refreshDesign();
+    setFilter(open ? "" : name); render(); refresh(); if (tab !== "queue") refreshDesign();
   });
   document.querySelectorAll("#mains [data-a]").forEach(b => b.onclick = () => {
     delete mainMsg[b.dataset.p];
@@ -360,6 +387,12 @@ function selectTask(id) {
   if (t && !inView(t.project)) { setFilter(t.project); renderProjects(); renderHeader(); renderMains(); }
   if (t) setFocus(t.project);
   if (state) renderList();
+  // Show the task at once from the list; the full page follows when the daemon answers.
+  if (t && $("#detail").dataset.id !== String(id)) {
+    $("#detail").innerHTML = detailHtml = `<h2>#${t.id} · <span class="s-${t.state}">${LABEL[t.state] || t.state}</span></h2>
+      <div style="font-weight:600;font-size:15px">${esc(t.title)}</div><div class="muted" style="margin-top:8px">Loading…</div>`;
+    delete $("#detail").dataset.id;
+  }
   loadDetail(id, true);
   // One column on narrow screens: bring the detail, which sits above the list, into view below the header.
   if (matchMedia("(max-width: 900px)").matches)
@@ -375,7 +408,7 @@ function renderList() {
     ["Finished", ["done", "cancelled"]],
   ];
   const now = state.now;
-  $("#list").innerHTML = groups.map(([name, sts]) => {
+  const html = groups.map(([name, sts]) => {
     let ts = state.tasks.filter(t => sts.includes(t.state) && inView(t.project));
     if (name === "Queued") ts = ts.sort((a, b) => b.priority - a.priority || a.id - b.id);
     if (name === "Finished") ts = ts.slice(0, 40);
@@ -399,6 +432,7 @@ function renderList() {
         ${nowLine(t, now)}<div class="sub">${sub}</div></div>`;
     }).join("") + "</div>";
   }).join("") || `<div class="muted">No tasks yet.</div>`;
+  if (!put($("#list"), html)) return;
   document.querySelectorAll(".task").forEach(el => el.onclick = () => selectTask(+el.dataset.id));
 }
 
@@ -425,10 +459,17 @@ function nowLine(t, now) {
   return text ? `<div class="now ${cls}" title="${esc(text)}">${h || esc(text)}</div>` : "";
 }
 
+// A poll's read is skipped while another is under way; a click's read always goes, and an answer that a
+// newer read has overtaken is dropped, so a slow answer can't draw the task you just left.
+let detailSeq = 0, detailBusy = false;
 async function loadDetail(id, fresh) {
-  if (typing && !fresh) return;
-  try { detail = await api(`/api/tasks/${id}`); } catch { return; }
-  if (sel !== id) return;
+  if (!fresh && (typing || detailBusy)) return;
+  const seq = ++detailSeq;
+  detailBusy = true;
+  let d;
+  try { d = await api(`/api/tasks/${id}`); } catch { return; } finally { if (seq === detailSeq) detailBusy = false; }
+  if (sel !== id || seq !== detailSeq) return;
+  detail = d;
   if (!inView(detail.project)) {
     if (!fresh) { clearSelection(); return; }
     setFilter(detail.project); refresh();
@@ -536,7 +577,7 @@ $("#resumeall").onclick = () => api("/api/resume-all", {}).then(refresh);
 $("#par").onchange = () => api("/api/settings", {max_parallel: Math.max(1, +$("#par").value || 1)}).then(refresh);
 $("#model").onchange = () => api("/api/settings", {model: $("#model").value}).then(refresh);
 $("#proj").onchange = () => {
-  setFilter($("#proj").value); refresh(); if (tab !== "queue") refreshDesign();
+  setFilter($("#proj").value); if (state) render(); refresh(); if (tab !== "queue") refreshDesign();
 };
 $("#addproj").onclick = () => { showTab("queue"); $("#addcard").classList.remove("hidden"); $("#ppath").focus(); };
 $("#pcancel").onclick = () => $("#addcard").classList.add("hidden");
@@ -621,7 +662,7 @@ function md(src) {
   return out.join("");
 }
 
-async function refreshDesign() {
+async function loadDesigns() {
   let chats = [];
   try { chats = await api("/api/designs"); } catch { return; }
   chats = chats.filter(c => inView(c.project) && (c.kind || "design") === KIND[tab]);
@@ -629,8 +670,9 @@ async function refreshDesign() {
     <div>${esc(c.title)}</div><div class="sub">${pf ? "" : `<span class="ptag">${esc(P(c.project).title)}</span> `}${c.state === "thinking" ? '<span class="pulse s-running">replying</span> · ' : ""}${ago(c.updated, Date.now() / 1000)} ago${c.cost ? ` · $${c.cost.toFixed(2)}` : ""}</div></div>`).join("")
     || `<div class="muted">${TABTEXT[tab].none}</div>`;
   document.querySelectorAll(".chatitem").forEach(el => el.onclick = () => { selectChat(+el.dataset.id); });
-  if (chatSel) loadChat(); else renderChat();
+  if (chatSel) await loadChat(); else renderChat();
 }
+const refreshDesign = single(loadDesigns);
 function selectChat(id) {
   chatSel = id; chatKey = "";
   if (state) renderProjects();
@@ -727,8 +769,13 @@ document.addEventListener("paste", e => {
 });
 
 showTab(tab);
-refresh(); setInterval(refresh, 3000);
-setInterval(() => { if (tab !== "queue") refreshDesign(); }, 1500);
+// Poll while the page is in view. A hidden tab asks nothing, and catches up as soon as it is shown again.
+refresh(); setInterval(() => { if (!document.hidden) refresh.poll(); }, 3000);
+setInterval(() => { if (!document.hidden && tab !== "queue") refreshDesign.poll(); }, 1500);
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) return;
+  refresh.poll(); if (tab !== "queue") refreshDesign.poll();
+});
 </script>
 </body>
 </html>
