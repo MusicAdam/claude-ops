@@ -315,7 +315,7 @@ a[data-task] { color: var(--accent); cursor: pointer; }
   <span class="stat hidden" id="usage"></span>
   <span style="flex:1"></span>
   <label>Parallel <input id="par" type="number" min="1" max="8" style="width:58px"></label>
-  <label title="Usage brake: at this percent of the 5-hour or 7-day usage window, start no new tasks until it resets (0 = off). Chats are never held.">Brake <input id="brake" type="number" min="0" max="100" step="5" style="width:58px">%</label>
+  <label title="Usage brake: at this percent of the 5-hour or 7-day usage window, start no new task that needs Claude until it resets (0 = off). Deploys, promotes and gates still start; chats are never held.">Brake <input id="brake" type="number" min="0" max="100" step="5" style="width:58px">%</label>
   <label>Model <select id="model">
     <option value="">default</option><option value="opus">opus</option>
     <option value="sonnet">sonnet</option><option value="fable">fable</option></select></label>
