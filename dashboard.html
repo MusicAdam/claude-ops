@@ -88,6 +88,16 @@ ul.ahead { margin: 6px 0 0; padding-left: 18px; max-height: 160px; overflow: aut
 .chatitem { padding: 8px 10px; border-radius: 6px; cursor: pointer; border: 1px solid transparent; }
 .chatitem.sel { background: var(--panel); border-color: var(--accent); }
 .chatitem .sub { color: var(--muted); font-size: 12px; }
+.chatitem { position: relative; }
+.chatitem .end { position: absolute; top: 4px; right: 4px; display: none; padding: 0 6px; font-size: 12px; line-height: 18px; }
+.chatitem:hover .end { display: block; }
+.chatitem > div:first-child { padding-right: 18px; }
+.chatitem.unread > div:first-child { font-weight: 600; }
+.chatitem.unread > div:first-child::before { content: "● "; color: var(--warn); }
+#chats > h2, #chats summary { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: 18px 10px 6px; }
+#chats > h2:first-child { margin-top: 0; }
+.tabs .cnt { font-size: 11px; padding: 0 6px; margin-left: 4px; border-radius: 99px; background: var(--warn); color: var(--bg); font-weight: 600; }
+.tabs .busy { margin-left: 4px; color: var(--accent); font-size: 10px; }
 #chat { display: flex; flex-direction: column; min-height: calc(100vh - 110px); }
 #msgs { flex: 1; overflow: auto; padding-bottom: 10px; }
 .tchat { max-height: 460px; overflow: auto; margin: 6px 0; }
@@ -136,7 +146,7 @@ textarea.dropping { border-color: var(--accent); box-shadow: 0 0 0 2px var(--acc
   <h1>Claude Ops</h1>
   <select id="proj" title="Project"></select>
   <button id="addproj" title="Add a git repository, or a folder of git repos, as a project">+ Project</button>
-  <div class="tabs"><button id="tab-queue" class="on">Queue</button><button id="tab-design">Design</button><button id="tab-chat" title="Talk to Claude in the project folder, as in a terminal">Chat</button></div>
+  <div class="tabs"><button id="tab-queue" class="on">Queue</button><button id="tab-design" title="Plan work with Claude">Design</button><button id="tab-chat" title="Talk to Claude in the project folder, as in a terminal">Chat</button></div>
   <span class="stat" id="hdr"></span>
   <span style="flex:1"></span>
   <label>Parallel <input id="par" type="number" min="1" max="8" style="width:58px"></label>
@@ -187,7 +197,9 @@ textarea.dropping { border-color: var(--accent); box-shadow: 0 0 0 2px var(--acc
     <div class="composer">
       <textarea id="say"></textarea>
       <div class="row"><label id="cprojwrap">Project <select id="cproj"></select></label><button class="primary" id="send">Send</button><span class="muted">⌘↩</span>
-        <button id="stopchat" class="danger hidden">Stop</button><span id="chatmsg" class="err"></span></div>
+        <button id="stopchat" class="danger hidden">Stop</button><span id="chatmsg" class="err"></span><span style="flex:1"></span>
+        <button id="endchat" class="hidden" title="Take this chat off your list. It stays under Ended, where you can reopen it">End chat</button>
+        <button id="reopenchat" class="hidden" title="Put this chat back on your list">Reopen</button></div>
     </div>
   </section>
 </div>
@@ -296,6 +308,17 @@ function renderHeader() {
   $("#pauseall").textContent = `❚❚ Pause running (${running})`;
   $("#resumeall").classList.toggle("hidden", !paused);
   $("#resumeall").textContent = `▶ Resume all (${paused})`;
+  renderTabCounts();
+}
+// The Design and Chat tabs show how many open chats have a new reply for you, and ● while Claude is replying in one.
+function renderTabCounts() {
+  for (const [t, kind, name] of [["design", "design", "Design"], ["chat", "project", "Chat"]]) {
+    const cs = (state.chats || []).filter(c => c.kind === kind && inView(c.project));
+    const unread = cs.reduce((a, c) => a + c.unread, 0), replying = cs.reduce((a, c) => a + c.replying, 0);
+    put($(`#tab-${t}`), name + (unread ? `<span class="cnt">${unread}</span>` : "") + (replying ? `<span class="busy pulse"></span>` : ""));
+    $(`#tab-${t}`).dataset.tip = $(`#tab-${t}`).dataset.tip || $(`#tab-${t}`).title;
+    $(`#tab-${t}`).title = [unread && `${unread} with a new reply for you`, replying && `Claude is replying in ${replying}`].filter(Boolean).join(", ") || $(`#tab-${t}`).dataset.tip;
+  }
 }
 
 const mainMsg = {};  // project -> error from a click, shown until the next success
@@ -671,14 +694,32 @@ function md(src) {
   return out.join("");
 }
 
+// The list has three parts: chats ready for you (Claude has answered; a new reply is marked ●), chats where
+// Claude is still replying, and the chats you ended, folded away. Ending a chat only takes it off the list.
+let endedOpen = false, chatList = [];
+const unread = c => c.state !== "thinking" && (c.replied || 0) > (c.seen || 0);
 async function loadDesigns() {
   let chats = [];
   try { chats = await api("/api/designs"); } catch { return; }
-  chats = chats.filter(c => inView(c.project) && (c.kind || "design") === KIND[tab]);
-  $("#chats").innerHTML = chats.map(c => `<div class="chatitem ${c.id === chatSel ? "sel" : ""}" data-id="${c.id}">
-    <div>${esc(c.title)}</div><div class="sub">${pf ? "" : `<span class="ptag">${esc(P(c.project).title)}</span> `}${c.spec ? '<span class="ptag">OpenSpec</span> ' : ""}${c.state === "thinking" ? '<span class="pulse s-running">replying</span> · ' : ""}${ago(c.updated, Date.now() / 1000)} ago${c.cost ? ` · $${c.cost.toFixed(2)}` : ""}</div></div>`).join("")
-    || `<div class="muted">${TABTEXT[tab].none}</div>`;
-  document.querySelectorAll("#chats .chatitem").forEach(el => el.onclick = () => { selectChat(+el.dataset.id); });
+  chats = chatList = chats.filter(c => inView(c.project) && (c.kind || "design") === KIND[tab]);
+  const now = Date.now() / 1000;
+  const item = c => `<div class="chatitem ${c.id === chatSel ? "sel" : ""} ${!c.ended && unread(c) ? "unread" : ""}" data-id="${c.id}">
+    <div>${esc(c.title)}</div><div class="sub">${pf ? "" : `<span class="ptag">${esc(P(c.project).title)}</span> `}${c.spec ? '<span class="ptag">OpenSpec</span> ' : ""}${c.state === "thinking" ? '<span class="pulse s-running">replying</span> · ' : !c.ended && unread(c) ? '<span class="s-review">new reply</span> · ' : ""}${ago(c.ended || c.updated, now)} ago${c.cost ? ` · $${c.cost.toFixed(2)}` : ""}</div>
+    ${c.ended ? "" : `<button class="end" data-end="${c.id}" title="End chat: take it off your list">×</button>`}</div>`;
+  const ready = chats.filter(c => !c.ended && c.state !== "thinking"), busy = chats.filter(c => !c.ended && c.state === "thinking");
+  const ended = chats.filter(c => c.ended).sort((a, b) => b.ended - a.ended);
+  // Ready ones with a new reply first, then the rest, newest first within each.
+  ready.sort((a, b) => unread(b) - unread(a) || b.updated - a.updated);
+  const html = (!chats.length ? `<div class="muted">${TABTEXT[tab].none}</div>` : "")
+    + (ready.length ? `<h2>Ready for you (${ready.length})</h2>` + ready.map(item).join("") : "")
+    + (busy.length ? `<h2>Claude is replying (${busy.length})</h2>` + busy.map(item).join("") : "")
+    + (chats.length && !ready.length && !busy.length ? `<div class="muted" style="padding:0 10px">No open chats.</div>` : "")
+    + (ended.length ? `<details id="endedchats" ${endedOpen || ended.some(c => c.id === chatSel) ? "open" : ""}><summary>Ended (${ended.length})</summary>${ended.map(item).join("")}</details>` : "");
+  if (put($("#chats"), html)) {
+    document.querySelectorAll("#chats .chatitem").forEach(el => el.onclick = () => { selectChat(+el.dataset.id); });
+    document.querySelectorAll("#chats [data-end]").forEach(b => b.onclick = e => { e.stopPropagation(); endChat(+b.dataset.end); });
+    if ($("#endedchats")) $("#endedchats").ontoggle = e => { endedOpen = e.target.open; };
+  }
   refreshSpecs();
   if (chatSel) await loadChat(); else renderChat();
 }
@@ -747,7 +788,14 @@ async function loadChat() {
 function renderChat() {
   const d = chatData && chatSel === chatData.id ? chatData : null;
   const thinking = d && d.state === "thinking";
-  const key = d ? `${d.id}:${d.msgs.length}:${d.state}:${d.live.length}:${JSON.stringify(d.msgs.map(m => m.tasks.map(t => t.state)))}:${d.spec_view ? hash(JSON.stringify(d.spec_view)) : ""}` : "none";
+  $("#endchat").classList.toggle("hidden", !d || !!d.ended);
+  $("#reopenchat").classList.toggle("hidden", !d || !d.ended);
+  // You are looking at it: its latest reply is read. Only while the page is in view.
+  if (d && !d.ended && !document.hidden && (d.replied || 0) > (d.seen || 0) && d.state !== "thinking") {
+    d.seen = d.replied;
+    api(`/api/designs/${d.id}/seen`, {}).then(() => { refresh(); refreshDesign(); }).catch(() => {});
+  }
+  const key = d ? `${d.id}:${d.msgs.length}:${d.state}:${d.ended}:${d.live.length}:${JSON.stringify(d.msgs.map(m => m.tasks.map(t => t.state)))}:${d.spec_view ? hash(JSON.stringify(d.spec_view)) : ""}` : "none";
   $("#stopchat").classList.toggle("hidden", !thinking);
   $("#send").disabled = !!thinking;
   if (key === chatKey) return;
@@ -756,6 +804,7 @@ function renderChat() {
   $("#chathead").innerHTML = d && d.kind === "project" ? `Runs in <code>${esc(d.cwd)}</code>`
     + (d.session_id ? ` · continue in a terminal: <code>cd ${esc(d.cwd)} && claude --resume ${esc(d.session_id)}</code>` : "")
     : d && d.spec_view ? specHead(d) : "";
+  if (d && d.ended) $("#chathead").insertAdjacentHTML("afterbegin", `<div class="callout">You ended this chat. Send a message or click Reopen to put it back on your list.</div>`);
   $("#chathead").querySelectorAll("[data-plan]").forEach(b => b.onclick = () => queueSpec(b.dataset.plan));
   $("#chathead").querySelectorAll("details[data-file]").forEach(el => el.ontoggle = () => {
     el.open ? specOpen.add(el.dataset.file) : specOpen.delete(el.dataset.file); });
@@ -784,6 +833,18 @@ async function sendChat() {
 $("#send").onclick = sendChat;
 $("#say").onkeydown = e => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) sendChat(); };
 $("#stopchat").onclick = () => api(`/api/designs/${chatSel}/stop`, {}).then(refreshDesign);
+async function endChat(id) {
+  const c = chatList.find(x => x.id === id);
+  if (c && c.state === "thinking" && !confirm("Claude is still replying. End the chat and stop the reply?")) return;
+  try {
+    await api(`/api/designs/${id}/end`, {});
+    if (id === chatSel) selectChat(null); else refreshDesign();
+    refresh();
+  } catch (e) { $("#chatmsg").textContent = e.message; }
+}
+$("#endchat").onclick = () => endChat(chatSel);
+$("#reopenchat").onclick = () => api(`/api/designs/${chatSel}/reopen`, {}).then(() => { chatKey = ""; refreshDesign(); refresh(); })
+  .catch(e => { $("#chatmsg").textContent = e.message; });
 $("#newchat").onclick = () => { selectChat(null); chatData = null; renderProjects(); $("#say").focus(); };
 
 // The header wraps to two lines on narrow windows or when it gains buttons; keep #left just below it.

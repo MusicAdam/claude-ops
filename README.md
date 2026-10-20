@@ -122,6 +122,20 @@ Click one to open its chat. A change that is only in your checkout is first copi
 - A change copied from your checkout is still there. If it isn't committed there, delete it when you are done:
   otherwise the release that brings the change to `main` waits for it.
 
+### Which chats need you
+
+This applies to both the Design and the Chat tab.
+
+- **The list.** Chats are grouped as **Ready for you** (Claude has answered), **Claude is replying**, and
+  **Ended**, which is folded away. A chat whose reply you haven't opened yet is marked ● and **new reply**, and
+  sorts first.
+- **The tabs.** The Design and Chat tabs show how many chats have a new reply, and ● while Claude is replying in
+  one. They follow the project filter.
+- **End chat.** Click **End chat** under the message box, or × on a chat in the list, to move it under Ended.
+  Nothing is deleted, and ending a chat stops any reply in progress. To put it back, click **Reopen** or send it a
+  message. Opening an OpenSpec change reopens its chat as well.
+- Opening a chat marks its reply as read. Chats from before this feature start as read.
+
 ## Chat mode
 
 The Chat tab is plain Claude in the project folder, as if you ran `claude` there. It works in your
