@@ -125,6 +125,11 @@ textarea.dropping { border-color: var(--accent); box-shadow: 0 0 0 2px var(--acc
 .spechead .why { color: var(--muted); margin-top: 4px; }
 .spechead details summary { margin: 6px 0 0; }
 .specdoc { max-width: none; max-height: 40vh; overflow: auto; margin: 6px 0 0; }
+#specs > h2 { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+#specs > h2 button { font-size: 12px; text-transform: none; letter-spacing: 0; padding: 2px 8px; white-space: nowrap; flex: none; }
+#specform { margin: 0 4px 8px; padding: 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); display: flex; flex-direction: column; gap: 8px; }
+#specform input { width: 100%; }
+#specform .row { margin-top: 0; }
 .chathead code { font: 12px var(--mono); background: var(--panel); padding: 1px 4px; border-radius: 4px; user-select: all; }
 a.origin { color: var(--accent); cursor: pointer; text-decoration: underline; }
 .ptag { font-size: 11px; padding: 1px 6px; border-radius: 4px; background: var(--chip); color: var(--muted); }
@@ -211,7 +216,16 @@ a[data-task] { color: var(--accent); cursor: pointer; }
   <section>
     <button class="primary" id="newchat" style="width:100%;margin-bottom:12px"></button>
     <div id="chats"></div>
-    <div id="specs"></div>
+    <div id="specs" class="hidden">
+      <h2>OpenSpec changes <button id="specnew" title="Draft a new OpenSpec change with Claude">+ New change</button></h2>
+      <div id="specform" class="hidden">
+        <label id="snprojwrap">Project <select id="snproj"></select></label>
+        <label id="snsubwrap">Repo <select id="snsub"></select></label>
+        <input id="sndesc" placeholder="What should the change do? One line." maxlength="2000">
+        <div class="row"><button class="primary" id="snstart">Start</button><button id="sncancel">Cancel</button><span id="snmsg" class="err"></span></div>
+      </div>
+      <div id="speclist"></div>
+    </div>
   </section>
   <section id="chat">
     <div id="chathead" class="chathead"></div>
@@ -852,7 +866,7 @@ async function loadDesigns() {
   chats = chatList = chats.filter(c => inView(c.project) && (c.kind || "design") === KIND[tab]);
   const now = Date.now() / 1000;
   const item = c => `<div class="chatitem ${c.id === chatSel ? "sel" : ""} ${!c.ended && unread(c) ? "unread" : ""}" data-id="${c.id}">
-    <div>${esc(c.title)}</div><div class="sub">${pf ? "" : `<span class="ptag">${esc(P(c.project).title)}</span> `}${c.spec ? '<span class="ptag">OpenSpec</span> ' : ""}${c.origin ? `sent by ${esc(c.origin.words)} · ` : ""}${c.state === "thinking" ? '<span class="pulse s-running">replying</span> · ' : !c.ended && unread(c) ? '<span class="s-review">new reply</span> · ' : ""}${ago(c.ended || c.updated, now)} ago${c.cost ? ` · $${c.cost.toFixed(2)}` : ""}</div>
+    <div>${esc(c.title)}</div><div class="sub">${pf ? "" : `<span class="ptag">${esc(P(c.project).title)}</span> `}${c.spec || c.spec_draft ? '<span class="ptag">OpenSpec</span> ' : ""}${c.origin ? `sent by ${esc(c.origin.words)} · ` : ""}${c.state === "thinking" ? '<span class="pulse s-running">replying</span> · ' : !c.ended && unread(c) ? '<span class="s-review">new reply</span> · ' : ""}${ago(c.ended || c.updated, now)} ago${c.cost ? ` · $${c.cost.toFixed(2)}` : ""}</div>
     ${c.ended ? "" : `<button class="end" data-end="${c.id}" title="End chat: take it off your list">×</button>`}</div>`;
   const ready = chats.filter(c => !c.ended && c.state !== "thinking"), busy = chats.filter(c => !c.ended && c.state === "thinking");
   const ended = chats.filter(c => c.ended).sort((a, b) => b.ended - a.ended);
@@ -868,32 +882,80 @@ async function loadDesigns() {
     document.querySelectorAll("#chats [data-end]").forEach(b => b.onclick = e => { e.stopPropagation(); endChat(+b.dataset.end); });
     if ($("#endedchats")) $("#endedchats").ontoggle = e => { endedOpen = e.target.open; };
   }
-  refreshSpecs();
+  // A reply in an OpenSpec chat may have created, attached or archived a change: reload the list when one ends
+  const sig = chats.filter(c => c.spec || c.spec_draft).map(c => `${c.id}:${c.state}:${c.spec || ""}`).join();
+  refreshSpecs(sig !== specSig && (specSig = sig, true));
   if (chatSel) await loadChat(); else renderChat();
 }
 const refreshDesign = single(loadDesigns);
 
 // ---------------------------------------------------------------- OpenSpec changes (Design tab)
 // The projects' openspec/changes/<name>/ folders. Opening one opens its design chat, where Claude can edit the
-// change; the header shows its files and queues it as one task or one task per phase.
-let specs = [], specsAt = 0, specOpen = new Set(), specOpts = {hold: false, release: null};
+// change; the header shows its files and queues it as one task or one task per phase. The section shows for
+// every project in view with openspec/ on dev, even with no changes, so + New change can draft the first one.
+let specs = {changes: [], repos: [], drafts: [], cli: true}, specsAt = 0, specSig = "", specOpen = new Set(), specOpts = {hold: false, release: null};
 async function refreshSpecs(force) {
   if (tab === "design" && (force || Date.now() - specsAt > 8000)) {
     specsAt = Date.now();
     try { specs = await api("/api/openspec"); } catch {}
   }
-  const list = tab === "design" ? specs.filter(s => inView(s.project)) : [];
-  const html = !list.length ? "" : `<h2>OpenSpec changes</h2>` + list.map(s => `<div class="chatitem ${s.chat && s.chat === chatSel ? "sel" : ""}" data-spec="${esc(s.name)}" data-sub="${esc(s.sub)}" data-project="${esc(s.project)}" title="${esc(s.why)}">
-    <div>${esc(s.title)}</div><div class="sub">${pf ? "" : `<span class="ptag">${esc(P(s.project).title)}</span> `}${s.sub ? `${esc(s.sub)} · ` : ""}${s.has_tasks ? `${s.done}/${s.done + s.open} done` : "no tasks.md"}${s.where === "checkout" ? ' · <span class="s-review">only in your checkout</span>' : ""}</div></div>`).join("");
-  if ($("#specs").dataset.html === html) return;
-  $("#specs").innerHTML = $("#specs").dataset.html = html;
-  document.querySelectorAll("#specs .chatitem").forEach(el => el.onclick = async () => {
+  const repos = tab === "design" ? specs.repos.filter(r => inView(r.project)) : [];
+  $("#specs").classList.toggle("hidden", !repos.length);
+  if (!repos.length) $("#specform").classList.add("hidden");
+  const btn = $("#specnew");
+  btn.disabled = !specs.cli;
+  btn.title = specs.cli ? "Draft a new OpenSpec change with Claude" : "Install the openspec CLI: npm i -g @fission-ai/openspec";
+  if (!specs.cli) $("#specform").classList.add("hidden");
+  const ptag = name => pf ? "" : `<span class="ptag">${esc(P(name).title)}</span> `;
+  // A chat that hasn't created its change yet: "<title> · drafting", until a reply makes the folder
+  const drafts = (tab === "design" ? specs.drafts : []).filter(c => inView(c.project)).map(c => `<div class="chatitem ${c.id === chatSel ? "sel" : ""}" data-id="${c.id}">
+    <div>${esc(c.title)} · <span class="muted">drafting</span></div><div class="sub">${ptag(c.project)}${c.sub ? `${esc(c.sub)} · ` : ""}${c.state === "thinking" ? '<span class="pulse s-running">replying</span>' : "no change yet"}</div></div>`);
+  const list = tab === "design" ? specs.changes.filter(s => inView(s.project)) : [];
+  const html = drafts.join("") + list.map(s => `<div class="chatitem ${s.chat && s.chat === chatSel ? "sel" : ""}" data-spec="${esc(s.name)}" data-sub="${esc(s.sub)}" data-project="${esc(s.project)}" title="${esc(s.why)}">
+    <div>${esc(s.title)}</div><div class="sub">${ptag(s.project)}${s.sub ? `${esc(s.sub)} · ` : ""}${s.has_tasks ? `${s.done}/${s.done + s.open} done` : "no tasks.md"}${s.where === "checkout" ? ' · <span class="s-review">only in your checkout</span>' : ""}</div></div>`).join("")
+    + (!drafts.length && !list.length ? `<div class="muted" style="padding:0 10px">No open changes.</div>` : "");
+  if (!put($("#speclist"), html)) return;
+  document.querySelectorAll("#speclist .chatitem[data-id]").forEach(el => el.onclick = () => selectChat(+el.dataset.id));
+  document.querySelectorAll("#speclist .chatitem[data-spec]").forEach(el => el.onclick = async () => {
     try {
       const r = await api("/api/designs", {project: el.dataset.project, sub: el.dataset.sub, spec: el.dataset.spec});
       specsAt = 0; selectChat(r.id);
     } catch (e) { $("#chatmsg").textContent = e.message; }
   });
 }
+// + New change: pick the project (only when several in view use OpenSpec) and the repo (only when the project has
+// several with openspec/), say in a line what the change should do, Start. That opens a drafting chat.
+function specPickers() {
+  const repos = specs.repos.filter(r => inView(r.project));
+  const projects = [...new Set(repos.map(r => r.project))];
+  const pv = projects.includes($("#snproj").value) ? $("#snproj").value : projects[0] || "";
+  $("#snproj").innerHTML = projects.map(n => `<option value="${esc(n)}" ${n === pv ? "selected" : ""}>${esc(P(n).title)}</option>`).join("");
+  $("#snprojwrap").classList.toggle("hidden", projects.length < 2);
+  const subs = repos.filter(r => r.project === pv).map(r => r.sub);
+  const sv = subs.includes($("#snsub").value) ? $("#snsub").value : subs[0] || "";
+  $("#snsub").innerHTML = subs.map(s => `<option value="${esc(s)}" ${s === sv ? "selected" : ""}>${esc(s || "(root)")}</option>`).join("");
+  $("#snsubwrap").classList.toggle("hidden", subs.length < 2);
+}
+$("#specnew").onclick = () => {
+  const f = $("#specform");
+  f.classList.toggle("hidden");
+  if (!f.classList.contains("hidden")) { specPickers(); $("#snmsg").textContent = ""; $("#sndesc").focus(); }
+};
+$("#snproj").onchange = specPickers;
+$("#sncancel").onclick = () => $("#specform").classList.add("hidden");
+async function startSpec() {
+  const text = $("#sndesc").value.trim();
+  if (!text) { $("#snmsg").textContent = "Say what the change should do."; return; }
+  $("#snstart").disabled = true;
+  try {
+    const r = await api("/api/openspec/new", {project: $("#snproj").value, sub: $("#snsub").value, text});
+    $("#sndesc").value = ""; $("#specform").classList.add("hidden");
+    specsAt = 0; selectChat(r.id);
+  } catch (e) { $("#snmsg").textContent = e.message; }
+  finally { $("#snstart").disabled = false; }
+}
+$("#snstart").onclick = startSpec;
+$("#sndesc").onkeydown = e => { if (e.key === "Enter") startSpec(); if (e.key === "Escape") $("#specform").classList.add("hidden"); };
 const hash = s => { let h = 5381; for (let i = 0; i < s.length; i++) h = (h * 33 ^ s.charCodeAt(i)) | 0; return h; };
 function specHead(d) {
   const s = d.spec_view;
@@ -953,7 +1015,9 @@ function renderChat() {
   const box = $("#msgs"), stick = box.scrollTop + box.clientHeight >= box.scrollHeight - 40;
   $("#chathead").innerHTML = d && d.kind === "project" ? `Runs in <code>${esc(d.cwd)}</code>`
     + (d.session_id ? ` · continue in a terminal: <code>cd ${esc(d.cwd)} && claude --resume ${esc(d.session_id)}</code>` : "")
-    : d && d.spec_view ? specHead(d) : "";
+    : d && d.spec_view ? specHead(d)
+    : d && d.spec_draft ? `<div class="spechead"><b>Drafting a new OpenSpec change</b>${d.spec_sub ? ` in <code>${esc(d.spec_sub)}/</code>` : ""}
+      <div class="why">No change is attached yet. When a reply creates one folder in <code>openspec/changes/</code>, this chat becomes that change's chat and its files are saved to ${esc(P(d.project).dev_branch || "dev")}.</div></div>` : "";
   if (d && d.origin) {
     $("#chathead").insertAdjacentHTML("afterbegin", originLine(d.origin, "Started by"));
     $("#chathead").querySelector("a.origin").onclick = () => openOrigin(d.origin);

@@ -537,7 +537,8 @@ def init_db():
     for col, decl in (("kind", "TEXT DEFAULT 'design'"),  # databases from before project chats
                       ("spec", "TEXT"), ("spec_sub", "TEXT DEFAULT ''"),  # and before OpenSpec chats
                       ("seen", "REAL DEFAULT 0"), ("ended", "REAL"),  # and before "ready for you" and End chat
-                      ("origin", "TEXT")):  # and before peer sends
+                      ("origin", "TEXT"),  # and before peer sends
+                      ("spec_draft", "INTEGER DEFAULT 0")):  # and before New change: drafting, no change yet
         if col not in dcols:
             q(f"ALTER TABLE designs ADD COLUMN {col} {decl}")
             if col == "seen":  # chats from before count as read, so they don't all show a new reply at once
@@ -2646,7 +2647,7 @@ def design(did):
 
 # A chat is "ready for you" when Claude isn't replying, and has a new reply when its last answer (Claude's, or a
 # note from the queue) came after you last looked at it. Ending a chat takes it out of both until you reopen it.
-CHAT_COLS = ("id,project,title,state,updated,cost,kind,spec,seen,ended,(SELECT MAX(ts) FROM design_msgs m "
+CHAT_COLS = ("id,project,title,state,updated,cost,kind,spec,spec_draft,seen,ended,(SELECT MAX(ts) FROM design_msgs m "
              "WHERE m.design_id=designs.id AND m.role!='user') AS replied")
 
 
@@ -2695,6 +2696,8 @@ def design_system_prompt(p, d=None, cwd=None):
     if d and d["spec"]:
         out += "\n" + (CODE / "spec_prompt.md").read_text().format(change=d["spec"], path=SPEC_DIR / d["spec"],
                                                                    dev=p.dev)
+    elif d and d["spec_draft"]:
+        out += "\n" + (CODE / "spec_new_prompt.md").read_text().format(path=SPEC_DIR, dev=p.dev)
     return out
 
 
@@ -2739,9 +2742,11 @@ def design_turn(did, text):
     p = proj(d["project"])
     DESIGN_LIVE[did] = []
     chat = d["kind"] == "project"
-    cwd, tools, extra = p.repo if chat else p.dev_wt, DESIGN_TOOLS, ""
-    if d["spec"]:  # its own worktree of dev, where Claude may edit openspec/
+    cwd, tools, extra, before = p.repo if chat else p.dev_wt, DESIGN_TOOLS, "", None
+    if spec_chat(d):  # its own worktree of dev, where Claude may edit openspec/
         try:
+            if not d["spec"]:  # drafting: which change folder this turn creates, if any
+                before = spec_names(spec_part(p, d["spec_sub"]).at(p.dev_wt))
             cwd, extra = spec_sync(p, d)
         except Exception as e:
             q("INSERT INTO design_msgs (design_id, role, text, ts) VALUES (?,?,?,?)",
@@ -2767,7 +2772,7 @@ def design_turn(did, text):
                "--verbose", "--permission-mode", "dontAsk", "--permission-prompts", "none", "--allowedTools", tools,
                "--strict-mcp-config", "--no-chrome", "--name", f"{p.name} design #{did}",
                "--append-system-prompt", system]
-        if d["spec"]:  # deny rules win over the allowed-tools a command's own frontmatter grants
+        if spec_chat(d):  # deny rules win over the allowed-tools a command's own frontmatter grants
             cmd += ["--disallowedTools", SPEC_DENY]
     cmd += ["--add-dir", str(IMAGES)]
     if d["session_id"]:
@@ -2785,7 +2790,8 @@ def design_turn(did, text):
                                     on_session, env=dict(os.environ, OPS_FROM=f"chat:{did}", OPS_DAEMON=DAEMON_URL))
         if design(did)["ended"] and reply.startswith("(no reply;"):  # End stopped it; say so, not the exit code
             reply = "You ended the chat; the reply was stopped."
-        saved = spec_land(p, d) if d["spec"] else ""  # before any task it queues starts from dev
+        attached = spec_attach(p, d, before) if before is not None else None  # (text, note) or None
+        saved = spec_land(p, design(did)) if d["spec"] or attached else ""  # before any task it queues starts from dev
         reply, ids, note = (reply, [], "") if chat else queue_from_reply(p, reply, did)
         first = not q("SELECT id FROM design_msgs WHERE design_id=? AND role='assistant' LIMIT 1", (did,))
         q("INSERT INTO design_msgs (design_id, role, text, ts, task_ids, note) VALUES (?,?,?,?,?,?)",
@@ -2793,9 +2799,11 @@ def design_turn(did, text):
         if first and d["origin"]:  # a peer's question: its answer goes back, as a reply to a message would
             tell_origin(json.loads(d["origin"]), f"{origin_words(origin_of(f'chat:{did}'))}, which you started, "
                                                  f"replied:\n\n{gist(reply, 1500)}")
-        if saved:
+        if saved or attached:
+            text, note = attached or ("", "")
             q("INSERT INTO design_msgs (design_id, role, text, ts, note) VALUES (?,?,?,?,?)",
-              (did, "ops", saved, time.time(), "your last reply's edits: " + saved))
+              (did, "ops", " ".join(x for x in (text, saved) if x), time.time(),
+               "; ".join(x for x in (note, saved and "your last reply's edits: " + saved) if x)))
     except Exception as e:
         q("INSERT INTO design_msgs (design_id, role, text, ts) VALUES (?,?,?,?)",
           (did, "assistant", f"(chat error: {e})", time.time()))
@@ -3029,7 +3037,7 @@ def spec_sync(p, d):
     """Before a turn: keep what a cut-off turn left under openspec/, drop anything else, catch up with dev.
     Returns (the worktree, news for Claude)."""
     r, path = spec_wt(p, d)
-    spec_commit(r, path, f"OpenSpec {d['spec']}: edits from design chat #{d['id']}")
+    spec_commit(r, path, spec_msg(d))
     r.git("reset", "-q", "--hard", cwd=path)
     r.git("clean", "-fdq", cwd=path)
     return path, spec_rebase(p, r, path, d["id"])
@@ -3040,7 +3048,7 @@ def spec_land(p, d, msg=None):
     Returns a line for the owner, or "" when nothing changed."""
     try:
         r, path = spec_wt(p, d)
-        spec_commit(r, path, msg or f"OpenSpec {d['spec']}: edits from design chat #{d['id']}")
+        spec_commit(r, path, msg or spec_msg(d))
         with p.lock:  # merges into dev hold it too
             lost = spec_rebase(p, r, path, d["id"])
             files = r.git("diff", "--name-only", f"{p.dev}..HEAD", cwd=path).splitlines()
@@ -3050,12 +3058,83 @@ def spec_land(p, d, msg=None):
                                  cwd=r.at(p.dev_wt), capture_output=True, text=True)
             if res.returncode:
                 return f"Couldn't save the edits to {p.dev}: {(res.stderr or res.stdout).strip()[-300:]}"
-        pre = f"{SPEC_DIR / d['spec']}/"
+        pre = f"{SPEC_DIR / d['spec']}/" if d["spec"] else f"{SPEC_DIR}/"
         names = [f[len(pre):] if f.startswith(pre) else f for f in files]
         return (f"Saved to {p.dev} at {r.rev(p.dev)[:8]}: {', '.join(names[:6])}{' …' if len(names) > 6 else ''}."
                 + (f" {lost.capitalize()}." if lost else ""))
     except Exception as e:
         return f"Couldn't save the edits to {p.dev}: {e}"
+
+
+def spec_chat(d):
+    """Whether a design chat works on OpenSpec: about a change, or drafting a new one (no change yet)."""
+    return bool(d["spec"] or d["spec_draft"])
+
+
+def spec_msg(d):
+    """The commit message for a chat's edits; a drafting chat has no change name yet."""
+    what = d["spec"] or "new change"
+    return f"OpenSpec {what}: edits from design chat #{d['id']}"
+
+
+def spec_names(root):
+    """The open change folders in a repo's openspec/changes/ (not archive/)."""
+    d = root / SPEC_DIR
+    return {c.name for c in d.iterdir() if c.is_dir() and c.name != "archive"} if d.is_dir() else set()
+
+
+def spec_repos(p):
+    """The repos of p that use OpenSpec (have openspec/ on dev), and whether each has a propose command."""
+    return [{"project": p.name, "sub": r.sub, "propose": spec_propose(p, r.sub)} for r in p.parts
+            if (r.at(p.dev_wt) / "openspec").is_dir()]
+
+
+def spec_first(p, sub, text):
+    """The first message of a chat that drafts a new change: opsx's propose if the repo has it, else the steps."""
+    propose = spec_propose(p, sub)
+    if propose:
+        return f"{propose} {text}"
+    return (f"Create a new OpenSpec change for this: {text}\n\n"
+            f"1. Pick a short kebab-case name for it and run `openspec new change <name>`.\n"
+            f"2. Run `openspec status --change <name> --json` to see its artifacts. Write each one in order, "
+            f"following `openspec instructions <artifact> --change <name> --json`.\n"
+            f"3. Run `openspec validate <name> --strict` and fix anything it reports.")
+
+
+def spec_new(p, sub, text):
+    """Start a design chat that drafts a new change in a repo of p, with no change attached yet. It works in its
+    own worktree like a change's chat; spec_attach ties it to the change its first folder becomes."""
+    r = spec_part(p, sub)
+    text = " ".join((text or "").split())
+    if not text:
+        raise ValueError("describe the change")
+    if not shutil.which("openspec"):
+        raise ValueError("Install the openspec CLI: npm i -g @fission-ai/openspec")
+    if not (r.at(p.dev_wt) / "openspec").is_dir():
+        raise ValueError(f"{(r.sub + '/') if r.sub else ''}openspec/ isn't on {p.dev}: run openspec init there first")
+    did = q("INSERT INTO designs (project, title, created, updated, kind, spec_sub, spec_draft) VALUES (?,?,?,?,?,?,1)",
+            (p.name, f"New change: {text[:60]}", time.time(), time.time(), "design", r.sub))
+    design_say(did, spec_first(p, r.sub, text))
+    return did
+
+
+def spec_attach(p, d, before):
+    """After a drafting chat's turn: tie it to the change folder the turn created. before: the open changes on
+    dev before the turn. Returns (text for the owner, note for Claude), or None when the turn created none."""
+    _, path = spec_wt(p, d)
+    new = sorted(spec_names(path) - before)
+    if not new:  # Claude is probably asking about scope first
+        return None
+    if len(new) > 1:
+        names = ", ".join(f"`{n}`" for n in new)
+        return (f"This reply created {len(new)} changes ({names}). A chat keeps to one change, so this one is "
+                f"attached to none of them: open each from the OpenSpec list.",
+                f"your last reply created {len(new)} changes ({', '.join(new)}), so this chat is attached to none "
+                f"of them. Keep to one change per chat: the owner opens each of these in its own chat")
+    name = new[0]
+    title = spec_info(path / SPEC_DIR / name)["title"][:80]
+    q("UPDATE designs SET spec=?, spec_draft=0, title=? WHERE id=?", (name, title, d["id"]))
+    return f"Created change `{name}`.", f"this chat is now about the change {name}, which your last reply created"
 
 
 def spec_open(p, sub, name):
@@ -3303,7 +3382,7 @@ def origin_place(o):
     d, p = design(o["id"]), PROJECTS.get(o["project"])
     if not p or not d:
         return ""
-    if d["spec"]:
+    if spec_chat(d):
         return f"It works in {spec_part(p, d['spec_sub']).at(p.wt / ('spec-' + str(d['id'])))}"
     return f"It works in {p.repo if o['kind'] == 'project' else p.dev_wt}"
 
@@ -3761,11 +3840,14 @@ class H(BaseHTTPRequestHandler):
             for c in chats:
                 c["origin"] = origin_view(c["origin"])
             return self.send(200, chats)
-        if path == "/api/openspec":
-            out = []
+        if path == "/api/openspec":  # open changes, the repos that use OpenSpec, and chats drafting a new change
+            out = {"changes": [], "repos": [], "cli": bool(shutil.which("openspec")),
+                   "drafts": q("SELECT id,project,title,spec_sub AS sub,state FROM designs WHERE spec_draft=1 "
+                               "AND spec IS NULL AND ended IS NULL ORDER BY id")}
             for p in PROJECTS.values():
                 try:
-                    out += spec_changes(p)
+                    out["repos"] += spec_repos(p)
+                    out["changes"] += spec_changes(p)
                 except Exception as e:
                     print(f"project {p.name} openspec: {e}", flush=True)
             return self.send(200, out)
@@ -3777,8 +3859,9 @@ class H(BaseHTTPRequestHandler):
                 return self.send(404, {"error": "no such chat"})
             p = PROJECTS.get(d["project"])
             d["cwd"] = str((p.repo if d["kind"] == "project" else p.dev_wt) if p else "")
-            if p and d["spec"]:
+            if p and spec_chat(d):
                 d["cwd"] = str(spec_part(p, d["spec_sub"]).at(p.wt / f"spec-{did}"))
+            if p and d["spec"]:
                 d["spec_view"] = spec_view(p, d)
             d["origin"] = origin_view(d["origin"])
             d["msgs"] = q("SELECT role,text,ts,task_ids FROM design_msgs WHERE design_id=? ORDER BY id", (did,))
@@ -3818,6 +3901,8 @@ class H(BaseHTTPRequestHandler):
             dep = int(str(b["depends_on"]).lstrip("#")) if str(b.get("depends_on") or "").strip() else None
             return {"id": add_task(b["project"], b["body"], b.get("title", ""), b.get("priority", 0),
                                    b.get("hold", 0), dep, auto_release=b.get("release"))}
+        if path == "/api/openspec/new":  # New change: a design chat that drafts one
+            return {"id": spec_new(proj(b["project"]), b.get("sub") or "", b.get("text"))}
         if path == "/api/send":  # opsd.py send, from a session the queue started
             return send_peer(b.get("from"), b["project"], b.get("kind") or "task", b.get("text"), b.get("title") or "",
                              bool(b.get("hold")))
