@@ -145,6 +145,11 @@ a.origin { color: var(--accent); cursor: pointer; text-decoration: underline; }
 .phead .caret { color: var(--muted); font-size: 10px; }
 .pbody { padding: 0 10px 10px; font-size: 13px; }
 .pbody .row { margin-top: 8px; }
+#archived summary { margin: 6px 8px; }
+#archived summary h2 { display: inline; margin: 0; }
+.arow { display: flex; gap: 10px; align-items: baseline; padding: 4px 8px; }
+.arow .pname { font-weight: 600; }
+.arow button { padding: 2px 10px; font-size: 12px; }
 .ktag { font-size: 11px; padding: 0 6px; border-radius: 4px; border: 1px solid var(--accent); color: var(--accent); }
 .deploys h3 { font-size: 12px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: 14px 0 4px; font-weight: 600; }
 .dep { border-top: 1px solid var(--line); padding: 7px 0; }
@@ -244,7 +249,8 @@ a[data-task] { color: var(--accent); cursor: pointer; }
 const $ = s => document.querySelector(s);
 let state = null, sel = null, detail = null, detailHtml = "", typing = false, pf = "", focus = "";
 try { pf = localStorage.getItem("ops-proj") || ""; focus = localStorage.getItem("ops-focus") || ""; } catch {}
-const P = name => ((state && state.projects.find(p => p.name === name)) || {name, title: name});
+const P = name => ((state && (state.projects.find(p => p.name === name) || archivedP(name))) || {name, title: name});
+const archivedP = name => state && (state.archived || []).find(p => p.name === name);
 const inView = name => !pf || name === pf;
 const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 const shas = s => String(s || "").split(" ").map(x => x.slice(0, 8)).join(" ");  // one commit per repo in a workspace
@@ -387,7 +393,7 @@ function projStats(g) {
   ].filter(Boolean).join(" · ") || (g.error ? "" : "idle");
 }
 function projBody(g) {
-  if (g.error) return `<div class="err">${esc(g.error)}</div>`;
+  if (g.error) return `<div class="err">${esc(g.error)}</div><div class="row">${archiveBtn(g)}</div>${archiveAskHtml(g)}`;
   const r = g.release, busy = r && !["done", "failed", "cancelled"].includes(r.state);
   const msg = mainMsg[g.name] || (!r ? "" : busy ? `Release #${r.id}: ${esc(r.phase || LABEL[r.state] || r.state)}`
     : r.state === "failed" ? `<span class="err">Release #${r.id} failed: ${esc((r.error || "").split("\n")[0])}</span>` : "");
@@ -402,7 +408,31 @@ function projBody(g) {
       <button data-p="${g.name}" data-a="promote" title="Queues a release: the gate, then Claude builds and plays ${esc(g.dev_branch)}; if it passes, ${esc(g.main_branch)} moves to it" ${busy || (!g.ahead.length && (!g.has_app || (g.has_build && !g.stale))) ? "disabled" : ""}>${busy ? `Release #${r.id} in progress` : `Promote ${esc(g.dev_branch)} → ${esc(g.main_branch)}`}</button>
       <button data-p="${g.name}" data-a="${g.paused ? "resume" : "pause"}" title="Pause or resume this project's tasks">${g.paused ? "▶ Resume" : "❚❚ Pause"}</button>
       <label title="New tasks start with &quot;Release after merge&quot; ticked: once one merges into dev, the queue queues a release, as Promote does. You can still untick it on a task. Tasks already queued keep theirs."><input type="checkbox" data-rel="${g.name}" ${g.auto_release ? "checked" : ""}> Release after merge by default</label>
-    </div>` + (msg ? `<div class="muted" style="margin-top:8px;white-space:pre-wrap">${msg}</div>` : "") + deploysHtml(g);
+      <span style="flex:1"></span>${archiveBtn(g)}
+    </div>` + archiveAskHtml(g) + (msg ? `<div class="muted" style="margin-top:8px;white-space:pre-wrap">${msg}</div>` : "") + deploysHtml(g);
+}
+
+// ---------------------------------------------------------------- archiving: the card's Archive button and the Archived list
+// The confirm sits in the card, not in window.confirm. It is part of the card's html, so the 3-second redraw keeps it.
+let archAsk = null, archOpen = false, archMsg = "";  // archAsk: {name, busy, err}; archOpen: the list is expanded
+const archiveBtn = g => archAsk && archAsk.name === g.name ? "" :
+  `<button data-arch="${esc(g.name)}" title="Take this project off the queue. Nothing is deleted, and you can restore it">Archive</button>`;
+function archiveAskHtml(g) {
+  if (!archAsk || archAsk.name !== g.name) return "";
+  return `<div class="callout ${archAsk.err ? "bad" : ""}" style="white-space:normal"><b>Archive ${esc(g.title)}?</b>
+    <div>It leaves the queue: none of its tasks run, and it moves to Archived projects below this list.</div>
+    <div>Nothing is deleted. The repo, its worktrees, branches, tasks and settings stay as they are, and Restore brings it back as it was.</div>
+    ${archAsk.err ? `<div class="err" style="margin-top:6px;white-space:pre-wrap">${esc(archAsk.err)}</div>` : ""}
+    <div class="row"><button class="danger" data-archgo="${esc(g.name)}" ${archAsk.busy ? "disabled" : ""}>${archAsk.busy ? "Archiving…" : `Archive ${esc(g.title)}`}</button><button data-archno>Cancel</button></div></div>`;
+}
+function archivedHtml() {
+  const as = state.archived || [];
+  if (!as.length) return "";
+  return `<details class="card projs" id="archived" ${archOpen ? "open" : ""}><summary><h2>Archived projects (${as.length})</h2></summary>` +
+    as.map(a => `<div class="arow"><span class="pname">${esc(a.title)}</span>
+      <span class="muted">${a.open_tasks ? `${a.open_tasks} unfinished task${a.open_tasks === 1 ? "" : "s"}` : "no unfinished tasks"}</span>
+      <span style="flex:1"></span><button data-restore="${esc(a.name)}" title="Put it back on the queue, as it was">Restore</button></div>`).join("") +
+    (archMsg ? `<div class="err" style="margin:6px 8px;white-space:pre-wrap">${esc(archMsg)}</div>` : "") + `</details>`;
 }
 
 // ---------------------------------------------------------------- deploys: the card's section and the Deploy dialog
@@ -516,13 +546,14 @@ function renderMains() {
   const ps = state.projects.filter(p => inView(p.name)), fx = pf || focus;
   // Keep an open "What would be promoted" open across the 3-second refresh.
   const open = !!document.querySelector("#mains .prow.on details[open]");
-  const html = ps.length ? `<div class="card projs"><h2>Projects</h2>` + ps.map(g => {
+  let html = ps.length ? `<div class="card projs"><h2>Projects</h2>` + ps.map(g => {
     const on = g.name === fx;
     return `<div class="prow ${on ? "on" : ""}" data-proj="${esc(g.name)}">
       <div class="phead" title="${on ? "Collapse and show all projects" : "Show only this project"}"><span class="pname">${esc(g.title)}</span>
         <span class="pstats">${projStats(g)}</span><span class="caret">${on ? "▼" : "▶"}</span></div>
       ${on ? `<div class="pbody">${projBody(g)}</div>` : ""}</div>`;
   }).join("") + `</div>` : `<div class="card"><h2>No projects yet</h2>Click <b>+ Project</b> and give the path of a git repository, or of a folder that holds several.</div>`;
+  html += archivedHtml();
   if (!put($("#mains"), html)) return;  // nothing changed: leave the page (and its open sections) alone
   if (open) { const d = document.querySelector("#mains .prow.on details"); if (d) d.open = true; }
   document.querySelectorAll("#mains .phead").forEach(h => h.onclick = () => {
@@ -538,6 +569,23 @@ function renderMains() {
       .then(res => { if (res && res.id) selectTask(res.id); refresh(); })
       .catch(e => { mainMsg[b.dataset.p] = `<span class="err">${esc(e.message)}</span>`; renderMains(); });
   });
+  document.querySelectorAll("#mains [data-arch]").forEach(b => b.onclick = () => { archAsk = {name: b.dataset.arch}; renderMains(); });
+  document.querySelectorAll("#mains [data-archno]").forEach(b => b.onclick = () => { archAsk = null; renderMains(); });
+  document.querySelectorAll("#mains [data-archgo]").forEach(b => b.onclick = () => {
+    const name = b.dataset.archgo;
+    archAsk = {name, busy: true}; renderMains();
+    api(`/api/projects/${encodeURIComponent(name)}/archive`, {})
+      .then(() => { archAsk = null; archMsg = ""; refresh(); })
+      .catch(e => { archAsk = {name, err: e.message}; renderMains(); });  // the daemon's refusal, such as a task at work
+  });
+  document.querySelectorAll("#mains [data-restore]").forEach(b => b.onclick = () => {
+    b.disabled = true;
+    const name = b.dataset.restore;
+    api(`/api/projects/${encodeURIComponent(name)}/unarchive`, {})
+      .then(() => { archMsg = ""; refresh().then(() => setFocus(name)); })
+      .catch(e => { archMsg = e.message; renderMains(); });
+  });
+  const ad = $("#archived"); if (ad) ad.ontoggle = () => archOpen = ad.open;
   document.querySelectorAll("#mains [data-deploy]").forEach(b => b.onclick = () => openDeploy(b.dataset.p, b.dataset.deploy));
   document.querySelectorAll("#mains [data-rel]").forEach(c => c.onchange = () => {
     delete mainMsg[c.dataset.rel];
@@ -594,7 +642,7 @@ function renderList() {
     return `<div class="group"><h3>${name} (${ts.length})</h3>` + ts.map(t => {
       const live = ["running", "gating", "merging"].includes(t.state);
       const sub = [
-        pf ? "" : `<span class="ptag">${esc(P(t.project).title)}</span>`,
+        pf ? "" : `<span class="ptag">${esc(P(t.project).title)}${archivedP(t.project) ? " (archived)" : ""}</span>`,
         t.depends_on ? `after #${t.depends_on}` : "",
         t.kind === "release" || t.kind === "deploy" ? `<span class="ktag">${t.kind}</span>` : "",
         t.parent ? `from #${t.parent}` : "",
@@ -629,7 +677,7 @@ function nowLine(t, now) {
     cls = "step";
     h = `<span class="what">${s.k === "tool" ? `▸ ${esc(s.t)} ` : ""}${say ? `<span class="say">“${esc(say)}”</span>` : ""}</span>` + since(s.ts);
   } else if (LIVE.includes(t.state)) { text = t.phase || "starting"; h = esc(text) + since(t.phase_since, x => `for ${x}`); cls = "s-running"; }
-  else if (t.state === "queued") text = t.wait || "";
+  else if (t.state === "queued") text = archivedP(t.project) ? "archived project: restore it to run this" : t.wait || "";
   else if (t.state === "paused") { text = e ? e.text : ""; h = text && esc(text) + since(e.ts); }
   else if (t.state === "needs_input") { text = first(t.question); h = text && `<b>Question:</b> ${esc(text)}`; cls = ""; }
   else if (t.state === "review") { text = first(t.summary) || "waiting for your review"; cls = ""; }
