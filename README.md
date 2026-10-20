@@ -62,6 +62,11 @@ several (see [Workspaces](#workspaces)). Read it, adjust it, then click **Reload
   a branch and your checkout is left alone. If main gets new commits during the release, it starts over
   with them.
 - With nothing new on dev, Promote only rebuilds main (no gate, no checker).
+- **Release after merge** (a checkbox on a new task, and on its page until it finishes) promotes for you:
+  once the task merges into dev, the queue queues a release, the same one Promote makes. If a release is
+  already open, the task waits for it and the next release takes it. A task that splits passes the box to
+  its subtasks, and they release together after the last one merges (or is cancelled). In a design chat,
+  ask for it and the task's `release` is set.
 - Promoting claude-ops itself restarts the daemon to load the new code (`opsctl restart`: running
   tasks pause and resume).
 - Commits made straight to main are merged into dev when the release takes its snapshot (no gate). If they

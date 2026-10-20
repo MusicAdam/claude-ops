@@ -40,6 +40,8 @@ RESULT_FILE = ".ops-result.json"
 
 ACTIVE = ("running", "gating", "merging")
 STOPPED = ("cancelled", "paused")  # set by you; the pipeline stops at its next step and never overrides them
+ENDED = ("done", "failed", "cancelled")
+RELEASE_LOCK = threading.Lock()  # one release queued at a time, when tasks finish together
 DBL = threading.RLock()
 PROCS = {}  # task id -> current Popen (claude or a gate step), for cancel
 STOPPING = threading.Event()  # this daemon is shutting down: start nothing new. Never stored, so it can't outlive us
@@ -363,7 +365,7 @@ def init_db():
         kind TEXT DEFAULT 'task', base TEXT, pid_start TEXT)""")
     cols = {r["name"] for r in q("PRAGMA table_info(tasks)")}
     for col, decl in (("kind", "TEXT DEFAULT 'task'"), ("base", "TEXT"),  # databases from before releases
-                      ("pid_start", "TEXT"), ("paused_by", "TEXT")):
+                      ("pid_start", "TEXT"), ("paused_by", "TEXT"), ("auto_release", "INTEGER DEFAULT 0")):
         if col not in cols:
             q(f"ALTER TABLE tasks ADD COLUMN {col} {decl}")
     q("CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY, task_id INTEGER, ts REAL, text TEXT)")
@@ -411,13 +413,14 @@ def ev(tid, text):
     print(f"[#{tid}] {text}", flush=True)
 
 
-def add_task(project, body, title="", priority=0, hold=0, depends_on=None, parent=None, kind="task"):
+def add_task(project, body, title="", priority=0, hold=0, depends_on=None, parent=None, kind="task", auto_release=0):
     proj(project)
     body = body.strip()
     title = (title or (title_of(body) if body else "untitled")).strip()[:120]
-    tid = q("INSERT INTO tasks (project, title, body, priority, hold, depends_on, parent, created, kind) "
-            "VALUES (?,?,?,?,?,?,?,?,?)",
-            (project, title, body, int(priority), int(bool(hold)), depends_on or None, parent, time.time(), kind))
+    tid = q("INSERT INTO tasks (project, title, body, priority, hold, depends_on, parent, created, kind, auto_release) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (project, title, body, int(priority), int(bool(hold)), depends_on or None, parent, time.time(), kind,
+             int(bool(auto_release) and kind == "task")))
     ev(tid, "queued" + (f" after #{depends_on}" if depends_on else ""))
     return tid
 
@@ -1138,6 +1141,8 @@ def finish(p, tid, merged, note):
         kill_app(p, t["worktree"])
         remove_worktree(p, t["worktree"])
     notify(f"{p.title}: task done", f"#{tid}: {t['title']}")
+    if merged:  # a task marked "Release after merge", or a release that ends with more of them in dev
+        auto_release(p)
 
 
 def remove_worktree(p, path):
@@ -1149,20 +1154,20 @@ def remove_worktree(p, path):
             r.git("worktree", "prune", check=False)
 
 
-def add_subtasks(p, tid, items, priority=0, hold=0):
+def add_subtasks(p, tid, items, priority=0, hold=0, auto_release=0):
     """Queue a worker's task list ({title, body, after}) with tid as parent. Returns the new ids."""
     ids = []
     for sub in items or []:
         after = sub.get("after")
         dep = ids[after] if isinstance(after, int) and 0 <= after < len(ids) else None
         ids.append(add_task(p.name, sub.get("body") or sub.get("title", ""), sub.get("title", ""),
-                            priority=priority, hold=hold, depends_on=dep, parent=tid))
+                            priority=priority, hold=hold, depends_on=dep, parent=tid, auto_release=auto_release))
     return ids
 
 
 def split(p, tid, res):
     t = task(tid)
-    ids = add_subtasks(p, tid, res.get("tasks"), t["priority"], t["hold"])
+    ids = add_subtasks(p, tid, res.get("tasks"), t["priority"], t["hold"], t["auto_release"])
     finish(p, tid, merged=None, note="split into " + ", ".join(f"#{i}" for i in ids))
 
 
@@ -1178,6 +1183,38 @@ def queue_release(p):
     body = (f"Check the latest {p.dev} as a whole: the merge check, then a build that a release checker runs "
             f"and plays like a player. If it passes, build it into {p.main} and fast-forward {p.main} to it.")
     return add_task(p.name, body, f"Release {p.dev} → {p.main}", priority=100, kind="release")
+
+
+def root_of(t):
+    """The task a split started from: subtasks of subtasks share it."""
+    while t["parent"] and t["kind"] == "task":
+        up = task(t["parent"])
+        if not up or up["kind"] != "task":
+            break
+        t = up
+    return t["id"]
+
+
+def auto_release(p):
+    """Queue a release for tasks marked "Release after merge" once they are in dev and not yet in main. With a
+    release already open this waits: the release's own end calls it again, so anything that merged after its
+    snapshot gets the next one. The tasks of one split release together, after the last of them merges."""
+    with RELEASE_LOCK:
+        if q("SELECT id FROM tasks WHERE project=? AND kind='release' AND state NOT IN (?,?,?)",
+             (p.name, *ENDED), one=True):
+            return None
+        tasks = q("SELECT * FROM tasks WHERE project=? AND kind='task' AND auto_release=1", (p.name,))
+        busy = {root_of(t) for t in tasks if t["state"] not in ENDED}
+        ready = [t for t in tasks if t["state"] == "done" and t["merged"] and root_of(t) not in busy
+                 and not all(any(is_ancestor(r, sha, p.main) for r in p.parts if r.has(sha))
+                             for sha in t["merged"].split())]
+        if not ready:
+            return None
+        rid = queue_release(p)
+    for t in ready:
+        ev(t["id"], f"queued release #{rid}")
+    ev(rid, "queued after " + ", ".join(f"#{t['id']}" for t in ready) + " merged (release after merge)")
+    return rid
 
 
 def release_prompt(p, t):
@@ -1290,7 +1327,7 @@ def release_pipeline(p, tid):
     if err:
         return fail(p, tid, err)
     upd(tid, start_at="claude")
-    finish(p, tid, merged=t["base"], note=f"{p.main} is now {p.show(t['base'])}")
+    finish(p, tid, merged=t["base"], note=f"{p.main} is now {p.show(t['base'])}")  # and releases what merged since
     if Path(p.repo).resolve() == CODE and p.revs(p.main) != before:
         restart_self(tid)
 
@@ -1771,7 +1808,8 @@ def queue_from_reply(p, reply, did):
             if it.get("after_task") and str(it["after_task"]).lstrip("#").isdigit():
                 dep = int(str(it["after_task"]).lstrip("#"))
             tid = add_task(p.name, it.get("body") or it.get("title", ""), it.get("title", ""),
-                           priority=int(it.get("priority") or 0), hold=bool(it.get("hold")), depends_on=dep)
+                           priority=int(it.get("priority") or 0), hold=bool(it.get("hold")), depends_on=dep,
+                           auto_release=bool(it.get("release")))
             ev(tid, f"queued from design chat #{did}")
             local.append(tid)
         ids += local
@@ -2082,7 +2120,7 @@ class H(BaseHTTPRequestHandler):
             return self.send(200, (CODE / "dashboard.html").read_bytes(), "text/html; charset=utf-8")
         if path == "/api/state":
             tasks = q("SELECT id,project,title,state,phase,priority,hold,depends_on,parent,created,started,"
-                      "finished,cost,rounds,summary,question,error,merged,branch,kind FROM tasks "
+                      "finished,cost,rounds,summary,question,error,merged,branch,kind,auto_release FROM tasks "
                       "ORDER BY id DESC LIMIT 500")
             # What each task is doing right now, for the status line under it in the list.
             last = {r["task_id"]: r for r in q(
@@ -2186,7 +2224,7 @@ class H(BaseHTTPRequestHandler):
                 raise ValueError("describe the task")
             dep = int(str(b["depends_on"]).lstrip("#")) if str(b.get("depends_on") or "").strip() else None
             return {"id": add_task(b["project"], b["body"], b.get("title", ""), b.get("priority", 0),
-                                   b.get("hold", 0), dep)}
+                                   b.get("hold", 0), dep, auto_release=b.get("release", 0))}
         if path == "/api/settings":
             for k in ("max_parallel", "paused", "model"):
                 if k in b:
@@ -2262,6 +2300,13 @@ class H(BaseHTTPRequestHandler):
             upd(tid, state="cancelled", phase="", finished=time.time())
             stop(PROCS.get(tid))
             ev(tid, "cancelled")
+            if p and t["kind"] == "task" and t["auto_release"]:  # its split's other tasks may be waiting for it
+                auto_release(p)
+        elif action == "release":  # the "Release after merge" toggle
+            if t["kind"] != "task" or st in ENDED:
+                raise ValueError(f"task is {st}" if st in ENDED else "a release releases itself")
+            upd(tid, auto_release=int(bool(b.get("on"))))
+            ev(tid, "will release after it merges" if b.get("on") else "will not release after it merges")
         elif action == "pause":
             pause_task(tid)
         elif action == "resume":

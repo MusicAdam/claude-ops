@@ -161,6 +161,7 @@ textarea.dropping { border-color: var(--accent); box-shadow: 0 0 0 2px var(--acc
         <label>Priority <select id="prio"><option value="0">normal</option><option value="1">high</option><option value="-1">low</option></select></label>
         <label>After # <input id="after" style="width:60px" placeholder="—"></label>
         <label title="Build it and wait for you to play and approve before merging"><input type="checkbox" id="hold"> Hold for my review</label>
+        <label title="Once it merges into dev, queue a release, as Promote does. Tasks it splits into release together, after the last one merges."><input type="checkbox" id="autorel"> Release after merge</label>
       </div>
       <div class="row"><button class="primary" id="submit">Queue task</button> <span class="muted">⌘↩</span><span id="formmsg" class="err"></span></div>
     </div>
@@ -372,6 +373,7 @@ function renderList() {
         t.kind === "release" ? "release" : "",
         t.parent ? `from #${t.parent}` : "",
         t.hold ? "hold for review" : "",
+        t.auto_release ? "release after merge" : "",
         t.priority > 0 ? "high priority" : t.priority < 0 ? "low priority" : "",
         live ? `${ago(t.started, now)} running` : t.finished ? `${ago(t.finished, now)} ago` : `queued ${ago(t.created, now)} ago`,
         t.cost ? `$${t.cost.toFixed(2)}` : "",
@@ -425,6 +427,8 @@ async function loadDetail(id, fresh) {
   if (t.state === "paused") actions += btn("resume", "▶ Resume", "primary");
   if (["failed", "cancelled"].includes(t.state)) actions += btn("retry", "Retry");
   if (!["done", "cancelled"].includes(t.state)) actions += btn("cancel", "Cancel", "danger");
+  if (t.kind === "task" && !["done", "failed", "cancelled"].includes(t.state))
+    actions += `<label title="Once it merges into dev, queue a release, as Promote does"><input type="checkbox" data-act="release" ${t.auto_release ? "checked" : ""}> Release after merge</label>`;
 
   const html = `
     <h2>#${t.id} · <span class="s-${t.state}">${LABEL[t.state] || t.state}</span>${live && t.phase ? ` · ${esc(t.phase)}` : ""}</h2>
@@ -490,6 +494,7 @@ async function act(id, a) {
   const body = {};
   if (a === "answer") { body.answer = $("#answer").value.trim(); if (!body.answer) return; }
   if (a === "reject") { body.feedback = $("#feedback").value.trim(); if (!body.feedback) return; }
+  if (a === "release") body.on = $("#detail [data-act=release]").checked ? 1 : 0;
   if (a === "ask" || a === "steer") { body.text = $("#ask").value.trim(); if (!body.text) return; }
   if (a === "cancel" && !document.getElementById("actmsg").dataset.armed) {
     const m = document.getElementById("actmsg"); m.dataset.armed = 1; m.textContent = "Click Cancel again to stop this task."; return;
@@ -504,7 +509,7 @@ async function submit() {
   try {
     const project = pf || $("#tproj").value;
     if (!project) throw new Error("pick a project");
-    const r = await api("/api/tasks", {project, body, priority: +$("#prio").value, hold: $("#hold").checked ? 1 : 0, depends_on: $("#after").value.trim()});
+    const r = await api("/api/tasks", {project, body, priority: +$("#prio").value, hold: $("#hold").checked ? 1 : 0, release: $("#autorel").checked ? 1 : 0, depends_on: $("#after").value.trim()});
     $("#body").value = ""; $("#after").value = ""; $("#formmsg").textContent = ""; sel = r.id; setFocus(project); refresh();
   } catch (e) { $("#formmsg").textContent = e.message; }
 }
