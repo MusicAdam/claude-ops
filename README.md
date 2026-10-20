@@ -70,7 +70,10 @@ several (see [Workspaces](#workspaces)). Read it, adjust it, then click **Reload
   worktree (a worker resolves any conflicts) and put back in your checkout, unstaged, once main moves. A copy
   of them as they were is kept at `refs/ops/release-<id>`. If the worker can't merge them, the release needs
   you: answer with how to combine them and it tries again, or commit or stash them and it goes on by itself.
-  Either way main and its build stay as they were until it moves.
+  Either way main and its build stay as they were until it moves. They are not part of the release, and the
+  release's summary says so: under **Not part of this release** it lists, per repo, the uncommitted files that
+  stayed in your checkout (the first 20), whether they were carried over (and the ref of the copy), and points
+  you to Send to dev on the project card. The notification says how many were not released.
 - **Carried changes are kept safe, not shipped.** Uncommitted work in your checkout is never part of a release,
   and workers don't see it: they start from dev. While the checkout (any repo of a workspace) has uncommitted
   files, the project card shows a banner with how many, where, and the date of the oldest change; expand it for
