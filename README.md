@@ -199,13 +199,39 @@ Click one to open its chat. A change that is only in your checkout is first copi
   the project releases after merge by default; only the last task of a chain releases). You can
   also ask Claude to queue it. Each task's brief points the worker at the change's folder, names the
   sections it covers, and tells it to tick the boxes as it goes, keep to the proposal's scope, update
-  `design.md` and the deltas if it has to deviate, and not archive the change.
+  `design.md` and the deltas if it has to deviate, and not archive the change. If you have
+  `/tk:openspec:implement`, the brief tells the worker to work through the items with it.
+- **Slash commands.** In any design chat, a message that starts with `/` runs that command, as if you typed it
+  in a terminal: `/tk:openspec:audit <name>`, `/opsx:explore <name>`. The queue's usual note for the turn goes
+  into the system prompt instead of in front of your text. Other messages are sent as before.
+- **What a change's chat can run.** The chat can use skills, subagents and any `openspec` command except
+  `init` and `update` (they write outside `openspec/`, which a chat can't save), and the ones that change your
+  machine's OpenSpec setup (`config set`, `store setup`, `completion install`, `feedback`, …). It may still edit
+  only `openspec/`, and so may its subagents. The dashboard lists, in the chat's `commands`, the ones that
+  apply to the change:
+
+  | Command | Shown when | What it changes |
+  |---|---|---|
+  | validate | the `openspec` CLI is installed | nothing: it runs `openspec validate <name> --strict` |
+  | `/opsx:explore` | the repo has the opsx command or skill | nothing, unless you agree to an edit |
+  | `/opsx:sync` | the repo has the opsx command or skill | merges the deltas into `openspec/specs/` |
+  | `/opsx:archive` | the repo has the opsx command or skill | merges the deltas and moves the change to `openspec/changes/archive/` |
+  | `/tk:openspec:audit` | you have the tk command | nothing: it reports gaps and drift |
+  | `/tk:openspec:review` | you have the tk command | nothing: read-only review agents report |
+  | `/tk:openspec:deviation-check` | you have the tk command | nothing: it compares the plan with the code |
+
+  The opsx commands come from `openspec init` in the repo (`.claude/commands/opsx/`, or as skills such as
+  `openspec-explore` in `.claude/skills/` in newer versions; the dashboard sends whichever exists). Apply,
+  implement and propose are never listed: the first two change code, so queue the change instead.
 - **How big a task is.** One task per change is the default and the recommendation. A checklist item is far too
   small: every task costs a worktree, a worker start-up and a full gate run, and the worker can still split a
   big change itself. One task per phase is recommended only for a change with 25 or more open items in three
   or more phases. A phase with fewer than four open items (often "Tests" or "Docs") is folded into its
   neighbour. There is never one task per item.
-- Archiving (`openspec archive`) is not automatic: ask the chat to queue it when you are happy.
+- **Archive it in the chat.** When the work is merged, send `/opsx:archive <name>` (or ask the chat to run
+  `openspec archive <name> --yes`). It touches only `openspec/`, so the edits are saved to `dev` like any
+  other. The chat's header then says the change was archived and where it went
+  (`openspec/changes/archive/<date>-<name>/`). Nothing archives on its own.
 - A change copied from your checkout is still there. If it isn't committed there, delete it when you are done:
   otherwise the release that brings the change to `main` waits for it.
 
