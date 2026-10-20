@@ -284,6 +284,9 @@ const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;
 const shas = s => String(s || "").split(" ").map(x => x.slice(0, 8)).join(" ");  // one commit per repo in a workspace
 const ago = (t, now) => { if (!t) return ""; const s = Math.max(0, now - t);
   return s < 60 ? `${s|0}s` : s < 3600 ? `${(s/60)|0}m` : s < 86400 ? `${(s/3600).toFixed(1)}h` : `${(s/86400).toFixed(1)}d`; };
+// How long a task has run: from its first start to when it finished, or to now while it is still open.
+// Wall time, so it counts the hours it waited on you in review or for an answer.
+const took = (t, now) => t.started ? ago(t.started, t.finished || now) : "";
 // "[image: <path>]" in a message is a screenshot the user attached; show it. Takes escaped text.
 const pics = h => h.replace(/\[image: [^\]\n]*\/images\/([\w-]+\.(?:png|jpg|gif|webp))\]\n?/g,
   (_, n) => `<a href="/api/images/${n}" target="_blank"><img class="att" src="/api/images/${n}" alt="${n}"></a>`);
@@ -697,7 +700,8 @@ function renderList() {
         t.hold ? "hold for review" : "",
         t.auto_release ? "release after merge" : "",
         t.priority > 0 ? "high priority" : t.priority < 0 ? "low priority" : "",
-        live ? `${ago(t.started, now)} running` : t.finished ? `${ago(t.finished, now)} ago` : `queued ${ago(t.created, now)} ago`,
+        live ? `${took(t, now)} running` : t.finished ? `${ago(t.finished, now)} ago${t.started ? ` · took ${took(t, now)}` : ""}`
+          : t.started && t.state !== "queued" ? `started ${took(t, now)} ago` : `queued ${ago(t.created, now)} ago`,
         t.cost ? `$${t.cost.toFixed(2)}` : "",
       ].filter(Boolean).join(" · ");
       return `<div class="task ${sel === t.id ? "sel" : ""}" data-id="${t.id}">
@@ -764,6 +768,7 @@ async function loadDetail(id, fresh) {
     <h2>#${t.id} · <span class="s-${t.state}">${LABEL[t.state] || t.state}</span>${live && t.phase ? ` · ${esc(t.phase)}` : ""}</h2>
     <div style="font-weight:600;font-size:15px">${esc(t.title)}</div>
     ${originLine(t.origin, "Sent by")}
+    ${timeLine(t, live)}
     <div class="muted mono" style="margin:4px 0">${esc(P(t.project).title)} · ${esc(t.branch || "")}${t.merged ? ` → ${esc(t.kind === "release" ? P(t.project).main_branch || "main" : P(t.project).dev_branch || "dev")} ${esc(t.merged_show || shas(t.merged))}` : ""}${t.kind === "release" && t.base && !t.merged ? `checking ${esc(t.base_show || shas(t.base))}` : ""}${t.kind === "deploy" && t.base ? `deploying ${esc(t.base_show || shas(t.base))}` : ""}${t.rounds ? ` · fix rounds: ${t.rounds}` : ""}</div>
     ${t.question ? `<div class="callout"><b>Question:</b> ${esc(t.question)}</div>
       <textarea id="answer" placeholder="Your answer (drop or paste screenshots to attach them)" style="min-height:70px"></textarea>
@@ -814,6 +819,21 @@ async function loadDetail(id, fresh) {
 }
 
 // A task or chat another project's session sent: who sent it, as a link to that task or chat.
+// When a task was queued, started and finished, and how long it took. Clock times rather than "ago", so
+// a finished task's detail doesn't change while you read it; only a live task's duration ticks.
+function timeLine(t, live) {
+  const at = ts => { const d = new Date(ts * 1000), today = d.toDateString() === new Date().toDateString();
+    const hm = d.toLocaleTimeString("en-GB", {hour: "2-digit", minute: "2-digit"});
+    return today ? hm : `${day(d)} ${hm}`; };
+  const dur = took(t, Date.now() / 1000);
+  return `<div class="muted" style="margin:4px 0">${[
+    t.created && `queued ${at(t.created)}`,
+    t.started && `started ${at(t.started)}`,
+    t.finished && `finished ${at(t.finished)}`,
+    dur && (t.finished ? `took ${dur}` : live ? `running for ${dur}` : `${dur} so far`),
+  ].filter(Boolean).join(" · ")}</div>`;
+}
+
 function originLine(o, verb) {
   return o ? `<div class="muted" style="margin:4px 0">${verb} <a class="origin">${esc(o.words)}</a>${o.title ? ` · ${esc(o.title)}` : ""}</div>` : "";
 }
