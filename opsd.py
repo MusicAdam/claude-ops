@@ -1971,15 +1971,18 @@ def left_note(p, tid, left):
              + (f"and {n - LEFT_PATHS} more\n" if n > LEFT_PATHS else ""))
         if carried:
             if k == n:
-                who = "It" if n == 1 else "All of them"
+                who = "It" if n == 1 else "Both" if n == 2 else "All of them"
             elif k <= CARRIED_NAMES:
                 who = " and ".join(filter(None, [", ".join(carried[:-1]), carried[-1]]))
             else:
                 who = f"{k} of them"
             b += (f"{who} {'was' if k == 1 else 'were'} merged onto the new {p.main} and put back (copy at "
-                  f"refs/ops/release-{tid})" + ("; the others stayed as they were" if k < n else "") + ".\n")
+                  f"refs/ops/release-{tid})"
+                  + ("" if k == n else "; the other stayed as it was" if n - k == 1 else "; the others stayed as they were")
+                  + ".\n")
         blocks.append(b)
-    return "\n".join(blocks) + "Commit them to dev for them to ship." if blocks else ""
+    them = "it" if sum(len(paths) for _, paths, _ in left) == 1 else "them"
+    return "\n".join(blocks) + f"Commit {them} to dev for {them} to ship." if blocks else ""
 
 
 def snapshot(r):
