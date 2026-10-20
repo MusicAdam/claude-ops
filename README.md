@@ -159,13 +159,13 @@ run = "bin/swish release"
   command made are already in your repo. dev picks the commits up at the next release, which merges commits made
   straight to main into dev. If the deploy succeeded but main couldn't move (say the build failed), Retry only
   moves main.
-- **On the dashboard.** Expand a project to see its Deploy section. Each target shows any config error or why it
-  is blocked, the last deploy (version, commit, time, task), how many commits it is behind, and the commit it would
-  deploy now with its subject. A target with `version` has a version picker: an option that can't ship (a released
-  "same") is greyed out with the reason, and the default is preselected. A target with `note` has a note box you
-  must fill in. **Deploy** asks for a second click, then queues the deploy and opens its task, or shows why it was
-  refused. While a deploy of that target is open, a link to it replaces the button. A deploy's task page shows its
-  log in place of the worker activity.
+- **Where you deploy.** Open the project on the Queue tab: its card has a **Deploys** section, one block per target. It
+  shows what the target last shipped (commit, when, its task), how far behind main (or its `from` target) it is, and
+  for a target with `version` the current version, whether it is released and the newest build tag. **Deploy** opens
+  a dialog with the commit it will ship, a version picker (new build, patch, minor, major, or another X.Y.Z), and the
+  note when the target asks for one. While a deploy of the project is open, each button reads `Deploying… #N` and
+  links to it; **Queue deploy** next to it queues another behind it. Deploy tasks are marked `deploy` in the task list,
+  and a deploy's task page shows its log in place of the worker activity.
 - **In `/api/state`.** Each project's `deploys` lists every target: its config and any config error, the last
   deploy (commit, time, task, version), how many commits it is behind, the commit it would deploy now with its
   subject, and for a target with `version` the current version, its release tag if any, the newest release and

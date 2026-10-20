@@ -140,11 +140,27 @@ a.origin { color: var(--accent); cursor: pointer; text-decoration: underline; }
 .phead .caret { color: var(--muted); font-size: 10px; }
 .pbody { padding: 0 10px 10px; font-size: 13px; }
 .pbody .row { margin-top: 8px; }
-.pbody h4 { font-size: 12px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: 16px 0 0; font-weight: 600; }
-.dtarget { border-top: 1px solid var(--line); margin-top: 8px; padding-top: 8px; }
-.dtarget .dname { font-weight: 600; }
-.dtarget textarea { min-height: 54px; margin-top: 6px; }
-.dtarget a { color: var(--accent); cursor: pointer; }
+.ktag { font-size: 11px; padding: 0 6px; border-radius: 4px; border: 1px solid var(--accent); color: var(--accent); }
+.deploys h3 { font-size: 12px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: 14px 0 4px; font-weight: 600; }
+.dep { border-top: 1px solid var(--line); padding: 7px 0; }
+.dep .l1 { display: flex; flex-wrap: wrap; gap: 4px 8px; align-items: baseline; }
+.dep .dname { font-weight: 600; }
+.dep .nw { white-space: nowrap; }
+.dep .l1 .what { flex: 1; min-width: 0; color: var(--muted); font-size: 12px; }
+.dep .l2 { color: var(--muted); font-size: 12px; margin-top: 2px; }
+.dep button, .dep .btn { padding: 2px 10px; font-size: 12px; }
+a.btn { display: inline-block; border: 1px solid var(--line); background: var(--chip); color: var(--accent); border-radius: 6px; text-decoration: none; }
+a[data-task] { color: var(--accent); cursor: pointer; }
+#dlg { position: fixed; inset: 0; background: rgba(0, 0, 0, .45); z-index: 10; display: flex; align-items: flex-start; justify-content: center; padding: 8vh 12px 12px; overflow: auto; }
+#dlg .box { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px; width: 100%; max-width: 520px; }
+#dlg h2 { font-size: 16px; margin: 0 0 6px; }
+#dlg .vopts { margin-top: 12px; }
+#dlg .vopt { display: flex; color: var(--ink); gap: 8px; padding: 4px 0; align-items: baseline; flex-wrap: wrap; }
+#dlg .vopt.off { color: var(--muted); }
+#dlg .vopt .why { flex-basis: 100%; padding-left: 24px; font-size: 12px; color: var(--muted); }
+#dlg .vopt input[type=text] { width: 110px; padding: 2px 6px; }
+#dlg .notebox { display: block; color: var(--ink); margin-top: 12px; }
+#dlg .notebox textarea { min-height: 90px; margin-top: 4px; }
 </style>
 </head>
 <body>
@@ -209,6 +225,7 @@ a.origin { color: var(--accent); cursor: pointer; text-decoration: underline; }
     </div>
   </section>
 </div>
+<div id="dlg" class="hidden"></div>
 <script>
 const $ = s => document.querySelector(s);
 let state = null, sel = null, detail = null, detailHtml = "", typing = false, pf = "", focus = "";
@@ -371,86 +388,117 @@ function projBody(g) {
       <button data-p="${g.name}" data-a="promote" title="Queues a release: the gate, then Claude builds and plays ${esc(g.dev_branch)}; if it passes, ${esc(g.main_branch)} moves to it" ${busy || (!g.ahead.length && (!g.has_app || (g.has_build && !g.stale))) ? "disabled" : ""}>${busy ? `Release #${r.id} in progress` : `Promote ${esc(g.dev_branch)} → ${esc(g.main_branch)}`}</button>
       <button data-p="${g.name}" data-a="${g.paused ? "resume" : "pause"}" title="Pause or resume this project's tasks">${g.paused ? "▶ Resume" : "❚❚ Pause"}</button>
       <label title="New tasks start with &quot;Release after merge&quot; ticked: once one merges into dev, the queue queues a release, as Promote does. You can still untick it on a task. Tasks already queued keep theirs."><input type="checkbox" data-rel="${g.name}" ${g.auto_release ? "checked" : ""}> Release after merge by default</label>
-    </div>` + (msg ? `<div class="muted" style="margin-top:8px;white-space:pre-wrap">${msg}</div>` : "") + deploySection(g);
+    </div>` + (msg ? `<div class="muted" style="margin-top:8px;white-space:pre-wrap">${msg}</div>` : "") + deploysHtml(g);
 }
 
-// ---------------------------------------------------------------- deploy targets
-// Each [[deploy]] target in a project's config, from /api/state's deploys. Deploy queues one (POST /api/deploys);
-// it publishes things, so the button asks for a second click first. What you pick and type is kept in deployIn
-// across the 3-second redraws, and the panel doesn't redraw while you are in one of its boxes.
-const deployIn = {}, deployMsg = {}, deployArm = {};  // "project\ttarget" -> {version, note} / error html / armed
-const dkey = (p, t) => `${p}\t${t}`;
-function deploySection(g) {
-  if (!g.deploys.length) return g.deploys_loading ? `<h4>Deploy</h4><div class="muted">Reading the deploy targets…</div>` : "";
-  return `<h4>Deploy</h4>` + g.deploys.map(d => deployTarget(g, d)).join("");
+// ---------------------------------------------------------------- deploys: the card's section and the Deploy dialog
+const day = iso => { const d = new Date(iso), y = d.getFullYear() !== new Date().getFullYear();
+  return d.toLocaleDateString("en-GB", {day: "numeric", month: "short", ...(y ? {year: "numeric"} : {})}); };
+const taskLink = id => `<a data-task="${id}">#${id}</a>`;
+function deploysHtml(g) {
+  if (!g.deploys.length) return g.deploys_loading ? `<div class="deploys"><h3>Deploys</h3><div class="muted">reading…</div></div>` : "";
+  const open = g.deploy_open;
+  return `<div class="deploys"><h3>Deploys</h3>` + g.deploys.map(d => {
+    const l = d.last, base = d.from || g.main_branch;
+    const last = l ? `<span class="nw">${esc(shas(l.commit))}${l.version ? ` (${esc(l.version)})` : ""}</span> · <span class="nw">${ago(l.time, state.now)} ago</span> · ${taskLink(l.task)}` : "never deployed";
+    const why = d.error ? `<span class="err">${esc(d.error)}</span>` : d.blocked ? `<span class="s-review">${esc(d.blocked)}</span>`
+      : d.behind == null ? "" : d.behind ? `<span class="s-review nw">${d.behind} behind ${esc(base)}</span>` : `<span class="nw">up to date</span>`;
+    const stop = d.error || d.blocked || (d.version && d.version.error);
+    const queued = d.open && d.open !== open ? `<span class="nw">${taskLink(d.open)} queued</span>` : "";  // its own, waiting behind the open one
+    const btn = open ? `<a class="btn" data-task="${open}" title="A deploy of ${esc(g.title)} is open. Open it">Deploying… #${open}</a>
+        <button data-deploy="${esc(d.name)}" data-p="${esc(g.name)}" ${stop ? "disabled" : ""} title="Queue another deploy behind it">Queue deploy</button>`
+      : `<button class="primary" data-deploy="${esc(d.name)}" data-p="${esc(g.name)}" ${stop ? `disabled title="${esc(stop)}"` : ""}>Deploy</button>`;
+    return `<div class="dep"><div class="l1"><span class="dname">${esc(d.name)}</span>
+      <span class="what">${[last, why, queued].filter(Boolean).join(" · ")}</span>${btn}</div>${d.has_version ? `<div class="l2">${versionLine(d.version)}</div>` : ""}</div>`;
+  }).join("") + `</div>`;
 }
-function deployTarget(g, d) {
-  const k = dkey(g.name, d.name), inp = deployIn[k] || {}, v = d.version, now = state.now;
-  const ds = esc(k), last = d.last;
-  const lines = [];
-  if (d.error) lines.push(`<div class="err">Can't deploy: ${esc(d.error)}</div>`);
-  if (d.blocked) lines.push(`<div class="s-review">${esc(d.blocked)}</div>`);
-  lines.push(`<div>Last: ${last ? [last.version && `<b>${esc(last.version)}</b>`, `<span class="mono">${esc(last.show)}</span>`,
-    last.time && `<span title="${esc(new Date(last.time * 1000).toLocaleString())}">${ago(last.time, now)} ago</span>`,
-    last.task && `<a data-task="${last.task}">#${last.task}</a>`].filter(Boolean).join(" · ") : `<span class="muted">never deployed</span>`}</div>`);
-  if (d.commit) lines.push(`<div>Would deploy <span class="mono">${esc(d.commit.show)}</span> ${esc(d.commit.subject)}` +
-    (d.behind != null ? ` · <span class="${d.behind ? "" : "muted"}">${d.behind ? `${d.behind} commit${d.behind === 1 ? "" : "s"} behind` : "nothing new since the last deploy"}</span>` : "") + `</div>`);
-  let pick = "", shipping = "";
-  if (v && v.error) lines.push(`<div class="err">${esc(v.error)}</div>`);
-  else if (v) {
-    const tags = [v.released && `${esc(v.released.name)} released`, v.latest_release && !(v.released && v.latest_release.name === v.released.name) && `newest release ${esc(v.latest_release.name)}`,
-                  v.latest_build && `newest build ${esc(v.latest_build.name)}`].filter(Boolean);
-    lines.push(`<div class="muted">Current version ${esc(v.current)}${tags.length ? ` · ${tags.join(" · ")}` : ""}</div>`);
-    // What you picked stays picked unless it can no longer be deployed; otherwise the daemon's default.
-    const ok = o => o && !o.disabled, mine = v.options.find(o => o.key === inp.version);
-    const chosen = ok(mine) ? mine.key : v.default;
-    shipping = ` → ${(v.options.find(o => o.key === chosen) || {}).version || ""}`;
-    pick = `<label>Version <select data-dv="${ds}">${v.options.map(o => `<option value="${esc(o.key)}" ${o.key === chosen ? "selected" : ""} ${o.disabled ? "disabled" : ""} title="${esc(o.reason || "")}">${esc(o.key)} · ${esc(o.version)}${o.disabled ? " (off)" : ""}</option>`).join("")}</select></label>`;
-    const off = v.options.filter(o => o.disabled && o.reason);
-    if (off.length) lines.push(...off.map(o => `<div class="muted" style="font-size:12px">${esc(o.key)} is off: ${esc(o.reason)}</div>`));
-  }
-  const can = !d.error && !d.blocked && d.commit && !(v && v.error);
-  const note = d.note && can && !d.open ? `<textarea data-dn="${ds}" placeholder="${esc(d.note)} (required)">${esc(inp.note || "")}</textarea>` : "";
-  const button = d.open ? `<span>Deploy <a data-task="${d.open}">#${d.open}</a> is open</span>`
-    : `<button class="${deployArm[k] ? "primary" : ""}" data-dp="${ds}" ${can ? "" : "disabled"}>${deployArm[k] ? `Click again to deploy ${esc(d.name + shipping)}` : `Deploy ${esc(d.name)}`}</button>`;
-  return `<div class="dtarget"><div><span class="dname">${esc(d.name)}</span>` +
-    [d.repo && `in ${esc(d.repo)}`, d.from && `ships what ${esc(d.from)} last deployed`].filter(Boolean).map(s => ` <span class="muted">· ${s}</span>`).join("") +
-    `</div>${lines.join("")}${note}<div class="row">${d.open ? "" : pick}${button}</div>` +
-    (deployMsg[k] ? `<div style="margin-top:6px;white-space:pre-wrap">${deployMsg[k]}</div>` : "") + `</div>`;
+function versionLine(v) {
+  if (!v) return "version: reading…";
+  if (v.error) return `<span class="err">${esc(v.error)}</span>`;
+  return [`version <b>${esc(v.current)}</b>`,
+    v.released ? `<span class="s-done">released as ${esc(v.released.name)}</span> · ${day(v.released.date)}`
+      : `not released yet · ${v.latest_release ? `newest release ${esc(v.latest_release.name)}` : "no releases yet"}`,
+    v.latest_build ? `<span class="mono">${esc(v.latest_build.name)}</span>` : "no builds yet"].join(" · ");
 }
-function wireDeploys() {
-  const split = s => s.split("\t");
-  document.querySelectorAll("#mains [data-task]").forEach(a => a.onclick = () => selectTask(+a.dataset.task));
-  document.querySelectorAll("#mains [data-dv]").forEach(s => s.onchange = () => {
-    const k = s.dataset.dv;
-    (deployIn[k] ||= {}).version = s.value;
-    if (deployArm[k]) { clearTimeout(deployArm[k]); delete deployArm[k]; renderMains(true); }  // armed for another version
-  });
-  document.querySelectorAll("#mains [data-dn]").forEach(t => t.oninput = () => (deployIn[t.dataset.dn] ||= {}).note = t.value);
-  document.querySelectorAll("#mains [data-dp]").forEach(b => b.onclick = () => deploy(b.dataset.dp));
-}
-async function deploy(k) {
-  const [project, target] = k.split("\t"), g = P(project), d = (g.deploys || []).find(x => x.name === target);
+
+// The dialog is drawn once when it opens, from the state then; polls leave it alone so your picks and note stay.
+const VLABEL = {same: v => `New build on ${v}`, patch: v => `Patch → ${v}`, minor: v => `Minor → ${v}`, major: v => `Major → ${v}`};
+let dlg = null;  // {project, target, version}
+function closeDeploy() { dlg = null; $("#dlg").classList.add("hidden"); $("#dlg").innerHTML = ""; }
+function openDeploy(project, name) {
+  const g = P(project), d = (g.deploys || []).find(x => x.name === name);
   if (!d) return;
-  const box = document.querySelector(`#mains [data-dv="${CSS.escape(k)}"]`), text = document.querySelector(`#mains [data-dn="${CSS.escape(k)}"]`);
-  const version = box ? box.value : null, note = text ? text.value.trim() : "";
-  delete deployMsg[k];
-  if (d.note && !note) { deployMsg[k] = `<span class="err">${esc(d.note)} is required to deploy ${esc(target)}.</span>`; delete deployArm[k]; renderMains(true); return; }
-  if (!deployArm[k]) {  // a deploy publishes things: the first click only arms the button for a few seconds
-    deployArm[k] = setTimeout(() => { delete deployArm[k]; renderMains(true); }, 6000);
-    renderMains(true); return;
-  }
-  clearTimeout(deployArm[k]); delete deployArm[k];
-  try {
-    const r = await api("/api/deploys", {project, target, version, note});
-    delete deployIn[k];
-    selectTask(r.id);
-  } catch (e) { deployMsg[k] = `<span class="err">${esc(e.message)}</span>`; }
-  renderMains(true); refresh();
+  const v = d.version;
+  dlg = {project, target: name, version: d.has_version ? v : null, stuck: d.has_version && (!v || !!v.error)};
+  const src = d.from && g.deploys.find(x => x.name === d.from);
+  const fromLine = d.from && src && src.last ? `<div class="muted">ships what ${esc(d.from)} last deployed (${esc(shas(src.last.commit))}${src.last.version ? `, ${esc(src.last.version)}` : ""})</div>` : "";
+  const opts = !d.has_version ? "" : !v || v.error ? `<div class="err" style="margin-top:12px">${esc(v ? v.error : "the version is still being read")}</div>`
+    : `<div class="vopts">` + v.options.map(o => `<label class="vopt ${o.disabled ? "off" : ""}"><input type="radio" name="dv" value="${o.key}" data-v="${esc(o.version)}" ${o.disabled ? "disabled" : ""} ${o.key === v.default && !o.disabled ? "checked" : ""}>
+        ${esc((VLABEL[o.key] || (x => `${o.key} → ${x}`))(o.version))}${o.disabled && o.reason ? `<span class="why">${esc(o.reason)}</span>` : ""}</label>`).join("")
+      + `<label class="vopt"><input type="radio" name="dv" value="other"> Other <input type="text" id="dother" placeholder="X.Y.Z" autocomplete="off" spellcheck="false"><span class="err" id="dothererr"></span></label></div>`;
+  const busy = g.deploy_open ? `<div class="callout">Deploy ${taskLink(g.deploy_open)} is open. This one queues behind it.</div>` : "";
+  $("#dlg").innerHTML = `<div class="box" role="dialog" aria-modal="true" aria-labelledby="dtitle">
+    <h2 id="dtitle">Deploy ${esc(name)}</h2>
+    <div><span class="mono">${esc(d.commit ? d.commit.show : "")}</span> ${esc(d.commit ? d.commit.subject : "")}</div>${fromLine}
+    ${busy}${opts}
+    ${d.note ? `<label class="notebox">${esc(d.note)} <span class="muted">(required)</span><textarea id="dnote"></textarea></label>` : ""}
+    <div class="row"><button class="primary" id="dgo"></button><button id="dcancel">Cancel</button></div>
+    <div id="dmsg" class="err" style="margin-top:8px;white-space:pre-wrap"></div></div>`;
+  $("#dlg").classList.remove("hidden");
+  $("#dcancel").onclick = closeDeploy;
+  $("#dgo").onclick = confirmDeploy;
+  $("#dlg").oninput = $("#dlg").onchange = syncDeploy;
+  const other = $("#dother");  // clicking or typing in the field picks Other
+  if (other) other.onfocus = other.oninput = () => { $("#dlg input[value=other]").checked = true; syncDeploy(); };
+  syncDeploy();
+  ($("#dlg input[name=dv]:checked") || $("#dnote") || $("#dgo")).focus();
 }
-function renderMains(force) {
-  // Redrawing would take the cursor out of a deploy's note or version box: wait until you leave it.
-  if (!force && document.activeElement && document.activeElement.matches("#mains [data-dv], #mains [data-dn]")) return;
+// The version the picker stands at, as {choice, version} for the API and the button, or {error}.
+function pickedVersion() {
+  const r = $("#dlg input[name=dv]:checked");
+  if (!r) return {error: "pick a version"};
+  if (r.value !== "other") return {choice: r.value, version: r.dataset.v};
+  const s = $("#dother").value.trim(), cur = dlg.version.current.split(".").map(Number);
+  if (!/^\d+\.\d+\.\d+$/.test(s)) return {error: s ? "Use the form X.Y.Z, such as 3.5.0." : "Type a version."};
+  const n = s.split(".").map(Number), higher = n[0] - cur[0] || n[1] - cur[1] || n[2] - cur[2];
+  if (higher <= 0) return {error: `It must be higher than the current version ${dlg.version.current}.`};
+  return {choice: s, version: s};
+}
+function syncDeploy() {
+  if (!dlg) return;
+  const pick = dlg.version && !dlg.stuck ? pickedVersion() : null, note = $("#dnote");
+  const other = $("#dlg input[value=other]");
+  if ($("#dothererr")) $("#dothererr").textContent = other && other.checked && $("#dother").value.trim() && pick.error ? pick.error : "";
+  $("#dgo").textContent = `Deploy ${dlg.target}${pick && pick.version ? ` ${pick.version}` : ""}`;
+  $("#dgo").disabled = dlg.stuck || !!(pick && pick.error) || !!(note && !note.value.trim());
+}
+async function confirmDeploy() {
+  if (!dlg || $("#dgo").disabled) return;
+  const body = {project: dlg.project, target: dlg.target}, note = $("#dnote");
+  if (dlg.version) body.version = pickedVersion().choice;  // same, patch, …: the daemon picks it again at the run
+  if (note) body.note = note.value.trim();
+  $("#dgo").disabled = true; $("#dmsg").textContent = "";
+  try {
+    const r = await api("/api/deploys", body);
+    // Show the button as Deploying… now, not at the next poll.
+    const g = P(dlg.project), d = g.deploys.find(x => x.name === dlg.target);
+    if (!g.deploy_open) g.deploy_open = r.id;
+    if (d && !d.open) d.open = r.id;
+    closeDeploy(); renderMains(); selectTask(r.id); refresh();
+  } catch (e) { $("#dmsg").textContent = e.message; syncDeploy(); }
+}
+// A task link (a deploy's #id) anywhere on the page opens that task; in the dialog it closes the dialog first.
+document.addEventListener("click", e => {
+  const a = e.target.closest && e.target.closest("a[data-task]");
+  if (!a) return;
+  e.preventDefault(); if (dlg) closeDeploy(); selectTask(+a.dataset.task);
+});
+document.addEventListener("keydown", e => {
+  if (!dlg) return;
+  if (e.key === "Escape") closeDeploy();
+  else if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) confirmDeploy();
+});
+function renderMains() {
   const ps = state.projects.filter(p => inView(p.name)), fx = pf || focus;
   // Keep an open "What would be promoted" open across the 3-second refresh.
   const open = !!document.querySelector("#mains .prow.on details[open]");
@@ -463,7 +511,6 @@ function renderMains(force) {
   }).join("") + `</div>` : `<div class="card"><h2>No projects yet</h2>Click <b>+ Project</b> and give the path of a git repository, or of a folder that holds several.</div>`;
   if (!put($("#mains"), html)) return;  // nothing changed: leave the page (and its open sections) alone
   if (open) { const d = document.querySelector("#mains .prow.on details"); if (d) d.open = true; }
-  wireDeploys();
   document.querySelectorAll("#mains .phead").forEach(h => h.onclick = () => {
     const name = h.parentElement.dataset.proj;
     // Opening a project also filters to it; closing it shows every project again.
@@ -477,6 +524,7 @@ function renderMains(force) {
       .then(res => { if (res && res.id) selectTask(res.id); refresh(); })
       .catch(e => { mainMsg[b.dataset.p] = `<span class="err">${esc(e.message)}</span>`; renderMains(); });
   });
+  document.querySelectorAll("#mains [data-deploy]").forEach(b => b.onclick = () => openDeploy(b.dataset.p, b.dataset.deploy));
   document.querySelectorAll("#mains [data-rel]").forEach(c => c.onchange = () => {
     delete mainMsg[c.dataset.rel];
     api(`/api/projects/${c.dataset.rel}/release`, {on: c.checked ? 1 : 0}).then(refresh)
@@ -534,7 +582,7 @@ function renderList() {
       const sub = [
         pf ? "" : `<span class="ptag">${esc(P(t.project).title)}</span>`,
         t.depends_on ? `after #${t.depends_on}` : "",
-        t.kind === "release" || t.kind === "deploy" ? t.kind : "",
+        t.kind === "release" || t.kind === "deploy" ? `<span class="ktag">${t.kind}</span>` : "",
         t.parent ? `from #${t.parent}` : "",
         t.origin ? `sent by ${esc(t.origin.words)}` : "",
         t.hold ? "hold for review" : "",
