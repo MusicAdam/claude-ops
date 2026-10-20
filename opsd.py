@@ -8,6 +8,8 @@
   opsd.py send NAME [--design|--chat] [--title T] [--hold] "text..."
                                        from a session the queue started: a task (or chat) in another project
   opsd.py pause-all | resume-all       pause every running task (it stops now, resumable) / resume every paused one
+  opsd.py archive-project NAME         take a project off the queue: its config moves to projects/archived/
+  opsd.py unarchive-project NAME       bring an archived project back, as it was
   opsd.py guard --daemon PID [--root DIR]   PreToolUse hook: refuse Bash commands that stop processes the session did not start
 
 Per project (paths come from ~/.claude-ops/projects/<name>.toml):
@@ -26,7 +28,7 @@ import xml.etree.ElementTree as ET
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlparse
+from urllib.parse import quote, unquote, urlparse
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
@@ -249,6 +251,71 @@ def proj(name):
     if name not in PROJECTS:
         raise ValueError(f"unknown project {name!r}")
     return PROJECTS[name]
+
+
+# ---------------------------------------------------------------- archived projects
+# Archiving moves <name>.toml into archived/, which load_projects doesn't glob, and touches nothing else: the repo,
+# its worktrees, its tasks and its settings stay, so a restore brings the project back as it was.
+
+ARCHIVE_DIR = PROJECTS_DIR / "archived"
+ARCHIVE_LOCK = threading.Lock()
+
+
+def archive_blockers(name):
+    """What stops name from being archived: its tasks at work, and its open releases and deploys."""
+    rows = q(f"SELECT id,kind,state FROM tasks WHERE project=? AND (state IN ({','.join('?' * len(ACTIVE))}) OR "
+             f"(kind IN ('release','deploy') AND state NOT IN ({','.join('?' * len(ENDED))}))) ORDER BY id",
+             (name, *ACTIVE, *ENDED))
+    return [f"{t['kind']} #{t['id']} is {STATE_WORDS.get(t['state'], t['state'])}" for t in rows]
+
+
+def archive_project(name):
+    if not re.fullmatch(r"[\w-]+", name) or not (PROJECTS_DIR / f"{name}.toml").is_file():
+        raise ValueError(f"{name} is already archived" if re.fullmatch(r"[\w-]+", name) and
+                         (ARCHIVE_DIR / f"{name}.toml").is_file() else f"unknown project {name!r}")
+    with ARCHIVE_LOCK:
+        if why := archive_blockers(name):
+            raise ValueError(f"{name} can't be archived while it has work under way: {', '.join(why)}. "
+                             "Wait for it to finish, or cancel it.")
+        dest = ARCHIVE_DIR / f"{name}.toml"
+        if dest.exists():
+            raise ValueError(f"an archived project is already named {name!r}: restore or remove {dest} first")
+        ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
+        (PROJECTS_DIR / f"{name}.toml").rename(dest)
+        load_projects()
+        if why := archive_blockers(name):  # the scheduler started one between the check and the move: undo
+            dest.rename(PROJECTS_DIR / f"{name}.toml")
+            load_projects()
+            raise ValueError(f"{name} can't be archived: {', '.join(why)} just now.")
+    return {"archived": name, "config": str(dest)}
+
+
+def unarchive_project(name):
+    src = ARCHIVE_DIR / f"{name}.toml"
+    if not re.fullmatch(r"[\w-]+", name) or not src.is_file():
+        raise ValueError(f"no archived project {name!r}")
+    with ARCHIVE_LOCK:
+        dest = PROJECTS_DIR / f"{name}.toml"
+        if dest.exists():
+            raise ValueError(f"can't restore {name}: another project is already named {name!r} ({dest}). "
+                             f"Rename or archive that one first.")
+        src.rename(dest)
+        load_projects()
+    return {"restored": name, "config": str(dest)}
+
+
+def archived_projects():
+    """The archived projects for the dashboard: name, title and how many of their tasks are not finished."""
+    out = []
+    for f in sorted(ARCHIVE_DIR.glob("*.toml")):
+        try:
+            title = tomllib.loads(f.read_text()).get("title") or f.stem
+        except Exception:
+            title = f.stem
+        n = q(f"SELECT COUNT(*) AS n FROM tasks WHERE project=? AND state NOT IN ({','.join('?' * len(ENDED))})",
+              (f.stem, *ENDED), one=True)["n"]
+        out.append({"name": f.stem, "title": str(title), "open_tasks": n})
+    return out
 
 
 def bootstrap(p):
@@ -3656,7 +3723,7 @@ class H(BaseHTTPRequestHandler):
                 except Exception as e:
                     projects.append({"name": p.name, "title": p.title, "error": str(e)})
             return self.send(200, {
-                "tasks": tasks, "now": time.time(), "projects": projects,
+                "tasks": tasks, "now": time.time(), "projects": projects, "archived": archived_projects(),
                 "settings": {k: s.get(k, "") for k in ("max_parallel", "paused", "model")},
                 "active": len(THREADS), "data_dir": str(DATA),
                 "design_cost": (q("SELECT SUM(cost) AS c FROM designs", one=True) or {}).get("c") or 0,
@@ -3778,6 +3845,9 @@ class H(BaseHTTPRequestHandler):
         if path == "/api/projects/reload":
             load_projects()
             return {"projects": list(PROJECTS)}
+        m = re.fullmatch(r"/api/projects/([^/]+)/(archive|unarchive)", path)
+        if m:  # unarchive names a project that is not loaded, so these come before proj()
+            return (archive_project if m.group(2) == "archive" else unarchive_project)(unquote(m.group(1)))
         m = re.fullmatch(r"/api/projects/([\w-]+)/(promote|play|pause|resume|release)", path)
         if m:
             p, act = proj(m.group(1)), m.group(2)
@@ -3985,6 +4055,13 @@ if __name__ == "__main__":
         send_cli(args)
     elif cmd == "add" and len(args) >= 2 and args[0] == "-p":
         post("/api/tasks", {"project": args[1], "body": " ".join(args[2:]) or sys.stdin.read()})
+    elif cmd in ("archive-project", "unarchive-project") and len(args) == 1:
+        try:
+            post(f"/api/projects/{quote(args[0], safe='')}/{cmd.split('-')[0]}", {})
+        except HTTPError as e:
+            sys.exit(json.loads(e.read() or b"{}").get("error") or str(e))
+        except URLError as e:
+            sys.exit(f"the claude-ops daemon on port {PORT} did not answer ({e.reason})")
     elif cmd == "deploy" and len(args) >= 3 and args[0] == "-p":
         words, opts, rest = [], {}, args[2:]
         while rest:

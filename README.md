@@ -16,6 +16,7 @@ the golden version: it changes only when you promote.
 ./opsd.py add -p myrepo "Fix the crash when the save file is empty"
 ./opsd.py deploy -p myrepo "store test" --version patch --note "Fixes the crash"   # see Deploys
 ./opsd.py send myrepo --design "How does the save format work?"   # what a worker or chat runs to ask a peer project
+./opsd.py archive-project myrepo     # take it off the queue; unarchive-project brings it back (see Archiving)
 ```
 
 On the dashboard you can type a full path or just a name. A name like `mygame` means a folder next to
@@ -309,6 +310,24 @@ gitignored `.env` files each repo has, to clone into new worktrees.
 - **Promote.** A release snapshots `dev` in every repo and checks them together. Each checkout is handled
   as in a plain project, uncommitted changes included. `main` moves in all repos or in none.
 - Commits show as one id per repo, such as `ballup-dunk 1a2b3c4d, ballup-swish 5e6f7a8b`.
+
+## Archiving a project
+
+`./opsd.py archive-project NAME` takes a project off the queue without losing anything. It moves
+`~/.claude-ops/projects/NAME.toml` to `~/.claude-ops/projects/archived/NAME.toml` and reloads projects, so the
+project leaves the dashboard's project list. `/api/state` lists it under `archived`, with how many of its tasks
+are not finished.
+
+- **What it leaves alone.** Your repo, its worktrees, its branches, its tasks and its settings (paused, release
+  after merge, …) all stay as they are.
+- **What waits.** Queued, paused and needs-you tasks stay where they are and say "its project is not loaded".
+  They carry on after a restore.
+- **When it refuses.** While a task of the project is working, being checked or merging, or while it has an open
+  release or deploy. The error names them: wait for them to finish, or cancel them.
+- **Restore.** `./opsd.py unarchive-project NAME` moves the file back and reloads, and the project is back as it
+  was. It refuses if a new project has taken the name: rename or archive that one first.
+
+Both commands go through the running daemon (`POST /api/projects/NAME/archive` and `/unarchive`).
 
 ## Project config: `~/.claude-ops/projects/<name>.toml`
 
