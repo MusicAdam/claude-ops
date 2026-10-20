@@ -140,6 +140,11 @@ a.origin { color: var(--accent); cursor: pointer; text-decoration: underline; }
 .phead .caret { color: var(--muted); font-size: 10px; }
 .pbody { padding: 0 10px 10px; font-size: 13px; }
 .pbody .row { margin-top: 8px; }
+.pbody h4 { font-size: 12px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: 16px 0 0; font-weight: 600; }
+.dtarget { border-top: 1px solid var(--line); margin-top: 8px; padding-top: 8px; }
+.dtarget .dname { font-weight: 600; }
+.dtarget textarea { min-height: 54px; margin-top: 6px; }
+.dtarget a { color: var(--accent); cursor: pointer; }
 </style>
 </head>
 <body>
@@ -342,6 +347,7 @@ function projStats(g) {
     n(["gating"]) ? `<span class="s-running">${n(["gating"])} checking</span>` : "",
     n(["merging"]) ? `<span class="s-running">${n(["merging"])} merging</span>` : "",
     qd ? `${qd} queued` : "",
+    g.deploy_open ? `<span class="s-running">deploy #${g.deploy_open}</span>` : "",
     busy ? `<span class="s-running">release #${r.id}</span>` : r && r.state === "failed" ? `<span class="err">release failed</span>` : "",
     !g.error && g.ahead.length ? `${g.ahead.length} to promote` : "",
     !g.error && g.has_app && (!g.has_build || (g.stale && g.built)) ? `<span class="s-review">needs build</span>` : "",
@@ -365,9 +371,86 @@ function projBody(g) {
       <button data-p="${g.name}" data-a="promote" title="Queues a release: the gate, then Claude builds and plays ${esc(g.dev_branch)}; if it passes, ${esc(g.main_branch)} moves to it" ${busy || (!g.ahead.length && (!g.has_app || (g.has_build && !g.stale))) ? "disabled" : ""}>${busy ? `Release #${r.id} in progress` : `Promote ${esc(g.dev_branch)} → ${esc(g.main_branch)}`}</button>
       <button data-p="${g.name}" data-a="${g.paused ? "resume" : "pause"}" title="Pause or resume this project's tasks">${g.paused ? "▶ Resume" : "❚❚ Pause"}</button>
       <label title="New tasks start with &quot;Release after merge&quot; ticked: once one merges into dev, the queue queues a release, as Promote does. You can still untick it on a task. Tasks already queued keep theirs."><input type="checkbox" data-rel="${g.name}" ${g.auto_release ? "checked" : ""}> Release after merge by default</label>
-    </div>` + (msg ? `<div class="muted" style="margin-top:8px;white-space:pre-wrap">${msg}</div>` : "");
+    </div>` + (msg ? `<div class="muted" style="margin-top:8px;white-space:pre-wrap">${msg}</div>` : "") + deploySection(g);
 }
-function renderMains() {
+
+// ---------------------------------------------------------------- deploy targets
+// Each [[deploy]] target in a project's config, from /api/state's deploys. Deploy queues one (POST /api/deploys);
+// it publishes things, so the button asks for a second click first. What you pick and type is kept in deployIn
+// across the 3-second redraws, and the panel doesn't redraw while you are in one of its boxes.
+const deployIn = {}, deployMsg = {}, deployArm = {};  // "project\ttarget" -> {version, note} / error html / armed
+const dkey = (p, t) => `${p}\t${t}`;
+function deploySection(g) {
+  if (!g.deploys.length) return g.deploys_loading ? `<h4>Deploy</h4><div class="muted">Reading the deploy targets…</div>` : "";
+  return `<h4>Deploy</h4>` + g.deploys.map(d => deployTarget(g, d)).join("");
+}
+function deployTarget(g, d) {
+  const k = dkey(g.name, d.name), inp = deployIn[k] || {}, v = d.version, now = state.now;
+  const ds = esc(k), last = d.last;
+  const lines = [];
+  if (d.error) lines.push(`<div class="err">Can't deploy: ${esc(d.error)}</div>`);
+  if (d.blocked) lines.push(`<div class="s-review">${esc(d.blocked)}</div>`);
+  lines.push(`<div>Last: ${last ? [last.version && `<b>${esc(last.version)}</b>`, `<span class="mono">${esc(last.show)}</span>`,
+    last.time && `<span title="${esc(new Date(last.time * 1000).toLocaleString())}">${ago(last.time, now)} ago</span>`,
+    last.task && `<a data-task="${last.task}">#${last.task}</a>`].filter(Boolean).join(" · ") : `<span class="muted">never deployed</span>`}</div>`);
+  if (d.commit) lines.push(`<div>Would deploy <span class="mono">${esc(d.commit.show)}</span> ${esc(d.commit.subject)}` +
+    (d.behind != null ? ` · <span class="${d.behind ? "" : "muted"}">${d.behind ? `${d.behind} commit${d.behind === 1 ? "" : "s"} behind` : "nothing new since the last deploy"}</span>` : "") + `</div>`);
+  let pick = "", shipping = "";
+  if (v && v.error) lines.push(`<div class="err">${esc(v.error)}</div>`);
+  else if (v) {
+    const tags = [v.released && `${esc(v.released.name)} released`, v.latest_release && !(v.released && v.latest_release.name === v.released.name) && `newest release ${esc(v.latest_release.name)}`,
+                  v.latest_build && `newest build ${esc(v.latest_build.name)}`].filter(Boolean);
+    lines.push(`<div class="muted">Current version ${esc(v.current)}${tags.length ? ` · ${tags.join(" · ")}` : ""}</div>`);
+    // What you picked stays picked unless it can no longer be deployed; otherwise the daemon's default.
+    const ok = o => o && !o.disabled, mine = v.options.find(o => o.key === inp.version);
+    const chosen = ok(mine) ? mine.key : v.default;
+    shipping = ` → ${(v.options.find(o => o.key === chosen) || {}).version || ""}`;
+    pick = `<label>Version <select data-dv="${ds}">${v.options.map(o => `<option value="${esc(o.key)}" ${o.key === chosen ? "selected" : ""} ${o.disabled ? "disabled" : ""} title="${esc(o.reason || "")}">${esc(o.key)} · ${esc(o.version)}${o.disabled ? " (off)" : ""}</option>`).join("")}</select></label>`;
+    const off = v.options.filter(o => o.disabled && o.reason);
+    if (off.length) lines.push(...off.map(o => `<div class="muted" style="font-size:12px">${esc(o.key)} is off: ${esc(o.reason)}</div>`));
+  }
+  const can = !d.error && !d.blocked && d.commit && !(v && v.error);
+  const note = d.note && can && !d.open ? `<textarea data-dn="${ds}" placeholder="${esc(d.note)} (required)">${esc(inp.note || "")}</textarea>` : "";
+  const button = d.open ? `<span>Deploy <a data-task="${d.open}">#${d.open}</a> is open</span>`
+    : `<button class="${deployArm[k] ? "primary" : ""}" data-dp="${ds}" ${can ? "" : "disabled"}>${deployArm[k] ? `Click again to deploy ${esc(d.name + shipping)}` : `Deploy ${esc(d.name)}`}</button>`;
+  return `<div class="dtarget"><div><span class="dname">${esc(d.name)}</span>` +
+    [d.repo && `in ${esc(d.repo)}`, d.from && `ships what ${esc(d.from)} last deployed`].filter(Boolean).map(s => ` <span class="muted">· ${s}</span>`).join("") +
+    `</div>${lines.join("")}${note}<div class="row">${d.open ? "" : pick}${button}</div>` +
+    (deployMsg[k] ? `<div style="margin-top:6px;white-space:pre-wrap">${deployMsg[k]}</div>` : "") + `</div>`;
+}
+function wireDeploys() {
+  const split = s => s.split("\t");
+  document.querySelectorAll("#mains [data-task]").forEach(a => a.onclick = () => selectTask(+a.dataset.task));
+  document.querySelectorAll("#mains [data-dv]").forEach(s => s.onchange = () => {
+    const k = s.dataset.dv;
+    (deployIn[k] ||= {}).version = s.value;
+    if (deployArm[k]) { clearTimeout(deployArm[k]); delete deployArm[k]; renderMains(true); }  // armed for another version
+  });
+  document.querySelectorAll("#mains [data-dn]").forEach(t => t.oninput = () => (deployIn[t.dataset.dn] ||= {}).note = t.value);
+  document.querySelectorAll("#mains [data-dp]").forEach(b => b.onclick = () => deploy(b.dataset.dp));
+}
+async function deploy(k) {
+  const [project, target] = k.split("\t"), g = P(project), d = (g.deploys || []).find(x => x.name === target);
+  if (!d) return;
+  const box = document.querySelector(`#mains [data-dv="${CSS.escape(k)}"]`), text = document.querySelector(`#mains [data-dn="${CSS.escape(k)}"]`);
+  const version = box ? box.value : null, note = text ? text.value.trim() : "";
+  delete deployMsg[k];
+  if (d.note && !note) { deployMsg[k] = `<span class="err">${esc(d.note)} is required to deploy ${esc(target)}.</span>`; delete deployArm[k]; renderMains(true); return; }
+  if (!deployArm[k]) {  // a deploy publishes things: the first click only arms the button for a few seconds
+    deployArm[k] = setTimeout(() => { delete deployArm[k]; renderMains(true); }, 6000);
+    renderMains(true); return;
+  }
+  clearTimeout(deployArm[k]); delete deployArm[k];
+  try {
+    const r = await api("/api/deploys", {project, target, version, note});
+    delete deployIn[k];
+    selectTask(r.id);
+  } catch (e) { deployMsg[k] = `<span class="err">${esc(e.message)}</span>`; }
+  renderMains(true); refresh();
+}
+function renderMains(force) {
+  // Redrawing would take the cursor out of a deploy's note or version box: wait until you leave it.
+  if (!force && document.activeElement && document.activeElement.matches("#mains [data-dv], #mains [data-dn]")) return;
   const ps = state.projects.filter(p => inView(p.name)), fx = pf || focus;
   // Keep an open "What would be promoted" open across the 3-second refresh.
   const open = !!document.querySelector("#mains .prow.on details[open]");
@@ -380,6 +463,7 @@ function renderMains() {
   }).join("") + `</div>` : `<div class="card"><h2>No projects yet</h2>Click <b>+ Project</b> and give the path of a git repository, or of a folder that holds several.</div>`;
   if (!put($("#mains"), html)) return;  // nothing changed: leave the page (and its open sections) alone
   if (open) { const d = document.querySelector("#mains .prow.on details"); if (d) d.open = true; }
+  wireDeploys();
   document.querySelectorAll("#mains .phead").forEach(h => h.onclick = () => {
     const name = h.parentElement.dataset.proj;
     // Opening a project also filters to it; closing it shows every project again.
@@ -543,9 +627,10 @@ async function loadDetail(id, fresh) {
       : t.can_chat ? `<textarea id="ask" placeholder="Ask about this work: why it did something, how it works, what it tested. Claude can read the code but not change it. Drop or paste screenshots to attach them. (⌘↩ sends)" style="min-height:60px"></textarea>
         <div class="row">${t.chat_live ? btn("stopask", "Stop") : btn("ask", "Ask", "primary")}</div>` : ""}</details>` : ""}
     <details data-k="body" ${t.state === "queued" ? "open" : ""}><summary>Task description</summary><pre>${pics(esc(t.body))}</pre></details>
-    <details data-k="feed" open><summary>Worker activity</summary>
-      <div class="feed" id="feed">${t.activity.map(a => `<div class="${a.k}">${a.k === "tool" ? "  " : ""}${esc(a.t)}</div>`).join("") || '<span class="muted">nothing yet</span>'}</div></details>
-    ${t.log ? `<details data-k="dlog" open><summary>Deploy log</summary><pre class="mono">${esc(t.log)}</pre></details>` : ""}
+    ${t.kind === "deploy" ? "" : `<details data-k="feed" open><summary>Worker activity</summary>
+      <div class="feed" id="feed">${t.activity.map(a => `<div class="${a.k}">${a.k === "tool" ? "  " : ""}${esc(a.t)}</div>`).join("") || '<span class="muted">nothing yet</span>'}</div></details>`}
+    ${t.kind === "deploy" ? `<details data-k="dlog" open><summary>Deploy log</summary>
+      <div class="feed" id="feed">${t.log ? esc(t.log) : '<span class="muted">nothing yet</span>'}</div></details>` : ""}
     ${t.diffstat ? `<details data-k="files"><summary>Files changed</summary><pre class="mono">${esc(t.diffstat)}</pre></details>` : ""}
     <details data-k="log"><summary>Queue log</summary><div class="mono">${t.events.map(e => `<div><span class="muted">${new Date(e.ts * 1000).toLocaleString()}</span> ${esc(e.text)}</div>`).join("")}</div></details>
     <div id="actmsg" class="err"></div>`;
