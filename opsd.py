@@ -2132,6 +2132,8 @@ def design_turn(did, text):
     try:
         reply, cost = stream_claude(cmd, cwd, RUNS / f"design-{did}", DESIGN_LIVE[did], DESIGN_PROCS, did,
                                     on_session)
+        if design(did)["ended"] and reply.startswith("(no reply;"):  # End stopped it; say so, not the exit code
+            reply = "You ended the chat; the reply was stopped."
         saved = spec_land(p, d) if d["spec"] else ""  # before any task it queues starts from dev
         reply, ids, note = (reply, [], "") if chat else queue_from_reply(p, reply, did)
         q("INSERT INTO design_msgs (design_id, role, text, ts, task_ids, note) VALUES (?,?,?,?,?,?)",
@@ -2145,7 +2147,10 @@ def design_turn(did, text):
     finally:
         DESIGN_PROCS.pop(did, None)
         DESIGN_LIVE.pop(did, None)
-        q("UPDATE designs SET state='idle', updated=?, cost=cost+? WHERE id=?", (time.time(), cost, did))
+        # A chat ended mid-reply stays read: what the stopped turn wrote last isn't a new reply when you reopen it
+        now = time.time()
+        q("UPDATE designs SET state='idle', updated=?, cost=cost+?, seen=CASE WHEN ended IS NULL THEN seen ELSE ? END "
+          "WHERE id=?", (now, cost, now, did))
 
 
 def queue_from_reply(p, reply, did):
