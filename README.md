@@ -184,7 +184,25 @@ under its reply. Each message it gets starts with that project's current queue, 
 
 If a project uses [OpenSpec](https://github.com/Fission-AI/OpenSpec), the Design tab lists its open changes
 (`openspec/changes/<name>/`, not `archive/`) under the chats, with how many `tasks.md` items are done.
-Click one to open its chat. A change that is only in your checkout is first copied into `dev`.
+Click one to open its chat. A change that is only in your checkout is first copied into `dev`. The section
+shows for every project in view whose `dev` has an `openspec/` folder, even when it has no open changes.
+
+- **Create one.** Click **+ New change** in the section, write one line on what the change should do, and click
+  **Start**. Pick the project first when several in view use OpenSpec, and the repo when the project has several
+  with `openspec/`. The button is disabled when the `openspec` CLI isn't on the daemon's `PATH`
+  (`npm i -g @fission-ai/openspec`). Start opens a design chat, `New change: <description>`, that works like a
+  change's chat (its own worktree, edits only under `openspec/`) but has no change yet. Its first message is
+  `/opsx:propose <description>` when the repo has that command (or the `openspec-propose` skill); otherwise it
+  asks Claude to run `openspec new change <name>`, write each artifact from
+  `openspec instructions <artifact> --change <name> --json`, and run `openspec validate <name> --strict`. Claude
+  drafts one change and asks you about scope first when material details are unclear. Until it has a change,
+  the chat shows in the section as `<title> · drafting`. After each reply the queue compares the open change
+  folders in the chat's worktree with those on `dev` before the reply:
+  - **One new folder:** the chat becomes that change's chat, takes its title from `proposal.md`, and its edits
+    are saved to `dev`. It says `Created change <name>.`
+  - **None:** nothing happens; Claude is probably asking you something.
+  - **Several:** the edits are saved but the chat stays unattached, and Claude is told to keep to one change per
+    chat. Open each new change from the list.
 
 - **Read it.** The chat's header shows the title, the "Why", and each file (`proposal.md`, `design.md`,
   `tasks.md`, the spec deltas) folded open on click.
@@ -464,6 +482,7 @@ Nothing claude-ops runs may stop, signal or quit a process it did not start.
 | `opsd.py` | daemon: HTTP API + dashboard, scheduler, pipeline, promote, design and project chats |
 | `worker_prompt.md`, `release_prompt.md`, `design_prompt.md` | briefs for workers, release checkers and design chats |
 | `spec_prompt.md` | added to a design chat's brief when it is about an OpenSpec change |
+| `spec_new_prompt.md` | added instead while a chat from **+ New change** has no change yet |
 | `dashboard.html` | the page |
 | `~/.claude-ops/projects/*.toml` | one config per project |
 | `~/.claude-ops/ops.db` | SQLite: tasks, events, settings, design chats |
