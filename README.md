@@ -187,6 +187,29 @@ If a project uses [OpenSpec](https://github.com/Fission-AI/OpenSpec), the Design
 Click one to open its chat. A change that is only in your checkout is first copied into `dev`. The section
 shows for every project in view whose `dev` has an `openspec/` folder, even when it has no open changes.
 
+- **Set it up.** Each project in view, and each repo of a workspace, whose `dev` has no `openspec/` shows a muted
+  line in the section: `<project>[/<repo>]: not using OpenSpec · Set up`. In the all-projects view these lines
+  are folded under one **Set up OpenSpec…** toggle. **Set up** runs `openspec init --tools claude` for you.
+- **Refresh its commands.** **Refresh commands**, under the list of changes, runs `openspec update` in a repo that
+  uses OpenSpec, to bring its opsx commands and skills up to date with your CLI. When several repos in view use
+  OpenSpec, it lists them and you pick one.
+- **What those two do.** A change's chat can't run `openspec init` or `update`: they write into `.claude/`,
+  outside `openspec/`. So the daemon runs them (`POST /api/openspec/init` and `/api/openspec/update`, with
+  `project` and `sub`):
+  1. It makes a throwaway worktree of `dev` (`<worktrees>/openspec-<init|update>-<time>`, detached).
+  2. It runs the command there with no input and a 120-second limit.
+  3. It commits only what changed under `openspec/` and `.claude/`, as `OpenSpec: set up (dashboard)` or
+     `OpenSpec: refresh commands (dashboard)`. Anything else the CLI wrote, or anything `.gitignore` hides, is
+     dropped, and the result names those paths.
+  4. It fast-forwards `dev` to that commit, holding the project's merge lock, and removes the worktree.
+
+  These commits skip the gate: they are docs and command files only, like a chat's edits. The section shows the
+  result under the list: `Set up: committed <n> files to dev at <sha>.`, `Nothing to do: the commands are up to date.`, or the
+  CLI's error (its last 300 characters). Set up is refused when `dev` already has `openspec/`; Refresh is refused
+  when it has none. Both are refused while one of the project's tasks is merging into `dev` (try again after the
+  merge), and both are disabled when the `openspec` CLI isn't on the daemon's `PATH`. Once Set up lands, the
+  project shows **+ New change**.
+
 - **Create one.** Click **+ New change** in the section, write one line on what the change should do, and click
   **Start**. Pick the project first when several in view use OpenSpec, and the repo when the project has several
   with `openspec/`. The button is disabled when the `openspec` CLI isn't on the daemon's `PATH`
@@ -224,8 +247,8 @@ shows for every project in view whose `dev` has an `openspec/` folder, even when
   in a terminal: `/tk:openspec:audit <name>`, `/opsx:explore <name>`. The queue's usual note for the turn goes
   into the system prompt instead of in front of your text. Other messages are sent as before.
 - **What a change's chat can run.** The chat can use skills, subagents and any `openspec` command except
-  `init` and `update` (they write outside `openspec/`, which a chat can't save), and the ones that change your
-  machine's OpenSpec setup (`config set`, `store setup`, `completion install`, `feedback`, …). It may still edit
+  `init` and `update` (they write outside `openspec/`, which a chat can't save; use **Set up** and
+  **Refresh commands** instead), and the ones that change your machine's OpenSpec setup (`config set`, `store setup`, `completion install`, `feedback`, …). It may still edit
   only `openspec/`, and so may its subagents. The dashboard lists, in the chat's `commands`, the ones that
   apply to the change:
 

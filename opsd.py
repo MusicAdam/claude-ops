@@ -3089,6 +3089,94 @@ def spec_repos(p):
             if (r.at(p.dev_wt) / "openspec").is_dir()]
 
 
+def spec_bare(p):
+    """The repos of p that don't use OpenSpec yet (no openspec/ on dev), for the dashboard's Set up lines."""
+    return [{"project": p.name, "sub": r.sub} for r in p.parts
+            if r.at(p.dev_wt).is_dir() and not (r.at(p.dev_wt) / "openspec").exists()]
+
+
+# Set up and Refresh commands: the daemon runs openspec init or update, which a chat can't (they write into
+# .claude/), in a throwaway worktree of dev, and fast-forwards dev to a commit of openspec/ and .claude/ only.
+# Like a chat's edits these skip the gate: they are docs and command files.
+OPENSPEC_RUN = {"init": (["openspec", "init", "--tools", "claude", "--no-animation", "--no-copilot-cloud"],
+                         "OpenSpec: set up (dashboard)", "Set up"),
+                "update": (["openspec", "update"], "OpenSpec: refresh commands (dashboard)", "Refreshed")}
+OPENSPEC_KEEP = ("openspec", ".claude")  # the only folders whose changes are committed
+OPENSPEC_BUSY = set()  # (project, sub) being set up or refreshed now
+OPENSPEC_LOCK = threading.Lock()  # guards OPENSPEC_BUSY
+
+
+def openspec_run(p, sub, what):
+    """Set up OpenSpec in a repo of p (what="init") or refresh its commands ("update"). Returns {text, sha,
+    files, dropped}; raises ValueError when it is refused or the CLI fails."""
+    r = spec_part(p, sub)
+    argv, msg, done = OPENSPEC_RUN[what]
+    where = f"{p.name}/{r.sub}" if r.sub else p.name
+    if not shutil.which("openspec"):
+        raise ValueError("Install the openspec CLI: npm i -g @fission-ai/openspec")
+    has = (r.at(p.dev_wt) / "openspec").exists()
+    if what == "init" and has:
+        raise ValueError(f"{where} already uses OpenSpec: {p.dev} has openspec/")
+    if what == "update" and not has:
+        raise ValueError(f"{where} doesn't use OpenSpec yet: {p.dev} has no openspec/. Set it up first")
+    if q("SELECT id FROM tasks WHERE project=? AND state='merging'", (p.name,)):
+        raise ValueError(f"a task of {p.name} is merging into {p.dev}: try again after the merge")
+    with OPENSPEC_LOCK:
+        if (p.name, r.sub) in OPENSPEC_BUSY:
+            raise ValueError(f"OpenSpec is already being set up or refreshed in {where}")
+        OPENSPEC_BUSY.add((p.name, r.sub))
+    top = p.wt / f"openspec-{what}-{time.strftime('%Y%m%d-%H%M%S')}-{os.getpid()}-{threading.get_ident() % 10000}"
+    path = r.at(top)
+    try:
+        r.git("worktree", "add", "-q", "--detach", str(path), p.dev)
+        if what == "init" and (path / "openspec").exists():  # dev moved since the check above
+            raise ValueError(f"{where} already uses OpenSpec: {p.dev} has openspec/")
+        try:
+            res = subprocess.run(argv, cwd=path, stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                                 timeout=120, env=dict(os.environ, CI="1", NO_COLOR="1"))
+        except subprocess.TimeoutExpired:
+            raise ValueError(f"openspec {what} took over 120 seconds and was stopped")
+        if res.returncode:
+            out = re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", (res.stdout or "") + (res.stderr or "")).strip()
+            raise ValueError(f"openspec {what} failed: {out[-300:] or f'exit code {res.returncode}'}")
+        status = subprocess.run(["git", "status", "--porcelain", "-z", "--ignored", "--untracked-files=all"],
+                                cwd=path, capture_output=True, text=True).stdout  # not sh: it strips the codes
+        dropped = [x[3:] for x in status.split("\0") if x[3:] and  # ignored ones are never committed
+                   (x[:2] == "!!" or x[3:].split("/")[0] not in OPENSPEC_KEEP)]
+        for keep in OPENSPEC_KEEP:  # one at a time: a folder that matches nothing would fail the others too
+            r.git("add", "-A", "--", keep, cwd=path, check=False)
+        files = r.git("diff", "--cached", "--name-only", cwd=path).splitlines()
+        tail = (f" Not committed: {', '.join(dropped[:8])}{' …' if len(dropped) > 8 else ''}." if dropped else "")
+        if not files:
+            return {"text": "Nothing to do: the commands are up to date." + tail if what == "update" else
+                    "Nothing to do: openspec init changed nothing under openspec/ or .claude/." + tail,
+                    "sha": None, "files": 0, "dropped": dropped}
+        r.git("commit", "-q", "--no-verify", "-m", msg, cwd=path)
+        r.git("reset", "-q", "--hard", cwd=path)  # drop the rest, or the rebase below refuses to start
+        r.git("clean", "-fdqx", cwd=path)
+        with p.lock:  # merges into dev hold it too
+            res = subprocess.run(["git", "rebase", "-q", p.dev], cwd=path, capture_output=True, text=True)
+            if res.returncode:
+                subprocess.run(["git", "rebase", "--abort"], cwd=path, capture_output=True)
+                raise ValueError(f"{p.dev} moved and the commit no longer applies: "
+                                 f"{(res.stderr or res.stdout).strip()[-300:]}")
+            sha = r.git("rev-parse", "HEAD", cwd=path)
+            res = subprocess.run(["git", "merge", "--ff-only", "-q", sha], cwd=r.at(p.dev_wt),
+                                 capture_output=True, text=True)
+            if res.returncode:
+                raise ValueError(f"couldn't fast-forward {p.dev}: {(res.stderr or res.stdout).strip()[-300:]}")
+        n = len(files)
+        print(f"project {p.name} openspec {what}{f' ({r.sub})' if r.sub else ''}: {sha[:8]}, {n} files", flush=True)
+        return {"text": f"{done}: committed {n} file{'s' if n != 1 else ''} to {p.dev} at {sha[:8]}." + tail,
+                "sha": sha, "files": n, "dropped": dropped}
+    finally:
+        r.git("worktree", "remove", "--force", str(path), check=False)
+        shutil.rmtree(top, ignore_errors=True)
+        r.git("worktree", "prune", check=False)
+        with OPENSPEC_LOCK:
+            OPENSPEC_BUSY.discard((p.name, r.sub))
+
+
 def spec_first(p, sub, text):
     """The first message of a chat that drafts a new change: opsx's propose if the repo has it, else the steps."""
     propose = spec_propose(p, sub)
@@ -3840,13 +3928,14 @@ class H(BaseHTTPRequestHandler):
             for c in chats:
                 c["origin"] = origin_view(c["origin"])
             return self.send(200, chats)
-        if path == "/api/openspec":  # open changes, the repos that use OpenSpec, and chats drafting a new change
-            out = {"changes": [], "repos": [], "cli": bool(shutil.which("openspec")),
+        if path == "/api/openspec":  # open changes, the repos that use OpenSpec and those that don't, and drafts
+            out = {"changes": [], "repos": [], "bare": [], "cli": bool(shutil.which("openspec")),
                    "drafts": q("SELECT id,project,title,spec_sub AS sub,state FROM designs WHERE spec_draft=1 "
                                "AND spec IS NULL AND ended IS NULL ORDER BY id")}
             for p in PROJECTS.values():
                 try:
                     out["repos"] += spec_repos(p)
+                    out["bare"] += spec_bare(p)
                     out["changes"] += spec_changes(p)
                 except Exception as e:
                     print(f"project {p.name} openspec: {e}", flush=True)
@@ -3903,6 +3992,8 @@ class H(BaseHTTPRequestHandler):
                                    b.get("hold", 0), dep, auto_release=b.get("release"))}
         if path == "/api/openspec/new":  # New change: a design chat that drafts one
             return {"id": spec_new(proj(b["project"]), b.get("sub") or "", b.get("text"))}
+        if path in ("/api/openspec/init", "/api/openspec/update"):  # Set up, Refresh commands
+            return openspec_run(proj(b["project"]), b.get("sub") or "", path.rsplit("/", 1)[1])
         if path == "/api/send":  # opsd.py send, from a session the queue started
             return send_peer(b.get("from"), b["project"], b.get("kind") or "task", b.get("text"), b.get("title") or "",
                              bool(b.get("hold")))
