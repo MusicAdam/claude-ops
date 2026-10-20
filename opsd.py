@@ -2938,26 +2938,28 @@ def senddev_headline(p, d, landed):
 def senddev_summary(p, t, d, merged):
     """The task's summary: a headline in counts, then per repo what landed on dev, what was cleared, what was left
     and why, and the copy."""
-    out, landed = [], []
+    out, landed, gone = [], [], []  # gone: per repo, the paths your snapshot deleted
     for x in d["repos"]:
         r = part_of(p, x["sub"])
         m = p.mine(r, merged) if merged else None
-        landed.append(paths_of(r, "diff", "--name-only", "--no-renames", f"{m}^1", m) if m else [])
-    for x, c, here in zip(d["repos"], d["cleared"], landed):
+        landed.append(diff_status(r, f"{m}^1", m) if m else [])
+        gone.append({f for st, f in diff_status(r, x["head"], x["wip"]) if st == "D"} if x.get("wip") else set())
+    for x, c, here, dead in zip(d["repos"], d["cleared"], landed, gone):
         out += ["", f"{x['repo']}:",
-                f"- Landed on {p.dev}: {name_list(here)}." if here else
-                f"- Nothing new landed on {p.dev}: it already had these changes."]
+                f"- Landed on {p.dev}: {name_list([f + ' (deleted)' if st == 'D' else f for st, f in here])}."
+                if here else f"- Nothing new landed on {p.dev}: it already had these changes."]
         if c["why"]:
             out.append(f"- Nothing cleared: {c['why']}.")
-        if c["cleared"]:
-            out.append(f"- Cleared from your checkout: {name_list(c['cleared'])}.")
+        if c["cleared"]:  # clearing a deletion puts the file back as your HEAD has it
+            out.append(f"- Cleared from your checkout: "
+                       f"{name_list([f + ' (deletion undone)' if f in dead else f for f in c['cleared']])}.")
         if c["left"]:
             out.append(f"- Left in your checkout: {name_list(c['left'])}. {EDITED[0].upper() + EDITED[1:]}.")
         out.append(f"- A copy of your changes as they were: refs/ops/senddev-{t['id']} (commit {x['keep'][:8]}).")
     if merged and any(c["cleared"] for c in d["cleared"]):
         out.append(f"\nWhat was cleared is on {p.dev}, not in your checkout, until the next Promote brings it back.")
     worker = (t["summary"] or "").strip()
-    return (senddev_headline(p, d, landed) + "\n" + "\n".join(out)
+    return (senddev_headline(p, d, [[f for _, f in here] for here in landed]) + "\n" + "\n".join(out)
             + (f"\n\nThe worker that merged them: {worker}" if worker else ""))
 
 
