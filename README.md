@@ -235,8 +235,20 @@ shows for every project in view whose `dev` has an `openspec/` folder, even when
   - **Several:** the edits are saved but the chat stays unattached, and Claude is told to keep to one change per
     chat. Open each new change from the list.
 
-- **Read it.** The chat's header shows the title, the "Why", and each file (`proposal.md`, `design.md`,
-  `tasks.md`, the spec deltas) folded open on click.
+- **Read it.** The change opens in a reader beside its chat, like a docs site: the reader on the left and the
+  chat on the right, each scrolling on its own. The reader's header stays in view: the title, the path, overall
+  progress (`done/total`), the "Why", and the queue buttons. Below it are tabs for **Proposal**, **Design**,
+  **Tasks**, **Specs (N)** and **Other** (any other `.md` file), each shown only when it has content. The reader
+  remembers the tab for each change, and keeps your place when Claude or a worker edits the files.
+  - **On this page** lists the tab's `##` and `###` headings and marks the one you are reading. Click one to
+    jump to it. In a reader under 900px wide it is a **Sections** menu instead.
+  - **Specs** shows each delta file (`specs/<capability>/spec.md`) as cards, one per `### Requirement:`, edged
+    by what the delta does: ADDED green, MODIFIED amber, REMOVED red, RENAMED blue. Each `#### Scenario:` shows
+    its **WHEN**, **THEN** and **AND** lines as rows. A file that isn't in delta form shows as plain markdown.
+  - **Tasks** shows one section per `##` phase of `tasks.md`, with its `done/total` and a progress bar. Phases
+    that are fully done start folded.
+  - Below 1200px the window is too narrow for both: a **Read | Chat** switch shows one at a time, and remembers
+    your choice. Other chats keep the single chat column.
 - **Change it.** Talk it through. This chat may edit files under `openspec/` and nothing else. It works in its
   own worktree (`<worktrees>/spec-<chat id>`, detached at `dev` and refreshed before each message). After each
   reply the queue commits its edits there and fast-forwards `dev` to them, so the next worker sees them. The
@@ -257,7 +269,7 @@ shows for every project in view whose `dev` has an `openspec/` folder, even when
 - **What a change's chat can run.** The chat can use skills, subagents and any `openspec` command except
   `init` and `update` (they write outside `openspec/`, which a chat can't save; use **Set up** and
   **Refresh commands** instead), and the ones that change your machine's OpenSpec setup (`config set`, `store setup`, `completion install`, `feedback`, …). It may still edit
-  only `openspec/`, and so may its subagents. The change's header shows a button for each command that applies
+  only `openspec/`, and so may its subagents. The reader's header shows a button for each command that applies
   to the change (hover for what it does). A click sends the command as a chat message, as if you typed it; the
   buttons are disabled while Claude is replying:
 

@@ -140,9 +140,102 @@ textarea.dropping { border-color: var(--accent); box-shadow: 0 0 0 2px var(--acc
 .spechead { color: var(--ink); font-size: 13px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); padding: 10px 14px; }
 .spechead .row { margin-top: 8px; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 .spechead .why { color: var(--muted); margin-top: 4px; }
-.spechead details summary { margin: 6px 0 0; }
-.spechead .cmds button { padding: 2px 10px; font-size: 12px; }
-.specdoc { max-width: none; max-height: 40vh; overflow: auto; margin: 6px 0 0; }
+/* An OpenSpec change's chat: the reader (its files, docs-site style) and the chat side by side, each scrolling
+   on its own. Below 1200px a Read | Chat switch shows one at a time. */
+#rtoggle { display: none; margin-bottom: 10px; }
+#designview.reading { max-width: none; grid-template-columns: 230px minmax(0, 1fr); gap: 16px; padding: 16px; }
+#designview.reading > section:first-child { height: calc(100vh - var(--hdr-h, 64px) - 32px); overflow: auto; }
+#designview.reading #panes { display: grid; grid-template-columns: minmax(460px, 1fr) 420px; gap: 16px;
+                             height: calc(100vh - var(--hdr-h, 64px) - 32px); }
+#designview.reading #chat { min-height: 0; height: 100%; }
+#designview.reading .composer { padding-bottom: 2px; }
+@media (max-width: 1199px) {
+  #designview.reading #panes { display: flex; flex-direction: column; }
+  #designview.reading #rtoggle { display: flex; flex: none; }
+  #designview.reading #reader, #designview.reading #chat { flex: 1; min-height: 0; }
+  #designview.reading.pane-read #chat, #designview.reading.pane-chat #reader { display: none; }
+}
+@media (max-width: 900px) {
+  #designview.reading { grid-template-columns: 1fr; }
+  #designview.reading > section:first-child { height: auto; overflow: visible; }
+}
+#reader, #designview.reading #msgs, #designview.reading > section:first-child { color-scheme: light dark; }
+#reader { overflow: auto; background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+          container-type: inline-size; overscroll-behavior: contain; }
+#rhead { position: sticky; top: 0; z-index: 1; background: var(--panel); border-bottom: 1px solid var(--line);
+         padding: 12px 20px 0; font-size: 13px; }
+#rinfo .why { color: var(--muted); margin-top: 4px; }
+#rinfo .row { margin-top: 8px; gap: 8px; }
+#rinfo .advice { color: var(--muted); font-size: 12px; margin-top: 4px; }
+#rinfo .rpath { font: 12px var(--mono); color: var(--muted); }
+#rcmds:empty { display: none; }
+#rcmds button { padding: 2px 10px; font-size: 12px; }
+.prog { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); white-space: nowrap; }
+.bar { display: inline-block; width: 90px; height: 4px; border-radius: 2px; background: var(--chip); overflow: hidden; }
+.bar > i { display: block; height: 100%; background: var(--ok); }
+#rnav { display: flex; align-items: center; gap: 8px; margin-top: 10px; }
+#rnav .tabs button { border-radius: 6px 6px 0 0; border-bottom: 0; padding: 5px 12px; }
+#rnav .tabs button.on { background: var(--bg); }
+.rsections { position: relative; margin-left: auto; }
+.rsections summary { margin: 0; padding: 4px 6px; font-size: 12px; }
+.rsections .outline { position: absolute; right: 0; top: 100%; width: min(320px, 80vw); max-height: 60vh; overflow: auto;
+                      background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 8px;
+                      box-shadow: 0 6px 20px rgba(0, 0, 0, .15); }
+/* Room below the end, so the last heading can scroll up under the header and be the current section */
+#rbody { display: grid; grid-template-columns: minmax(0, 1fr); gap: 28px; padding: 20px 24px;
+         padding-bottom: calc(100vh - var(--hdr-h, 64px) - var(--rhead-h, 120px) - 120px); }
+#rbody > .outline { display: none; }
+@container (min-width: 900px) {
+  #rbody { grid-template-columns: minmax(0, 1fr) 200px; }
+  #rbody > .outline { display: block; position: sticky; top: calc(var(--rhead-h, 120px) + 16px); align-self: start;
+                      max-height: calc(100vh - var(--hdr-h, 64px) - var(--rhead-h, 120px) - 80px); overflow: auto; }
+  .rsections { display: none; }
+}
+.outline .otitle { font-size: 11px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: 0 0 6px; }
+.outline a { display: block; color: var(--muted); text-decoration: none; font-size: 12.5px; line-height: 1.35;
+             padding: 3px 8px; border-left: 2px solid var(--line); cursor: pointer; }
+.outline a.l3 { padding-left: 20px; }
+.outline a:hover { color: var(--ink); }
+.outline a.on { color: var(--accent); border-left-color: var(--accent); font-weight: 600; }
+.msg.rdoc { max-width: 75ch; margin: 0; padding: 0; border: 0; background: none; font-size: 15px; line-height: 1.6; }
+.rdoc h1 { font-size: 24px; } .rdoc h2 { font-size: 20px; margin-top: 28px; } .rdoc h3 { font-size: 17px; margin-top: 20px; }
+.rdoc h4 { font-size: 15px; }
+.rdoc h1, .rdoc h2, .rdoc h3, .rdoc h4 { scroll-margin-top: calc(var(--rhead-h, 120px) + 12px); }
+.rdoc p, .rdoc ul, .rdoc ol, .rdoc pre, .rdoc table, .rdoc blockquote { margin-bottom: 12px; }
+.rdoc code, .rdoc pre { font-size: 13px; }
+.rdoc .fname { font: 12px var(--mono); color: var(--muted); margin: 28px 0 4px; }
+.rdoc .fname:first-child { margin-top: 0; }
+.rdoc .cap { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; border-bottom: 1px solid var(--line); padding-bottom: 4px; }
+.rdoc .cap code { color: var(--muted); background: none; }
+.rdoc .cap h2 { margin: 0; }
+.rdoc section + section { margin-top: 36px; }
+.rdoc .cap + * { margin-top: 12px; }
+.rdoc section h1 { font-size: 13px; color: var(--muted); font-weight: 600; margin: 0 0 8px; }
+.req { border: 1px solid var(--line); border-left: 4px solid var(--rc, var(--line)); border-radius: 6px;
+       padding: 10px 16px 12px; margin: 0 0 14px; background: var(--panel); }
+.req.added { --rc: var(--ok); } .req.modified { --rc: var(--warn); } .req.removed { --rc: var(--bad); } .req.renamed { --rc: var(--accent); }
+.req .rlabel { font-size: 11px; font-weight: 700; letter-spacing: .05em; color: var(--rc); }
+.req h3 { margin: 2px 0 8px; }
+.req > .rtext > :last-child { margin-bottom: 0; }
+.req.removed h3 { text-decoration: line-through; text-decoration-color: var(--bad); }
+.scn { background: var(--bg); border-radius: 6px; padding: 8px 12px; margin-top: 10px; }
+.scn .sname { font-weight: 600; font-size: 14px; margin-bottom: 4px; }
+.scn .sname span { color: var(--muted); font-weight: 500; }
+.scn .srow { display: grid; grid-template-columns: 56px minmax(0, 1fr); gap: 10px; align-items: baseline; }
+.scn .srow + .srow { margin-top: 2px; }
+.scn .kw { font-size: 11px; font-weight: 700; letter-spacing: .05em; color: var(--muted); }
+.scn .srow.when .kw { color: var(--accent); } .scn .srow.then .kw { color: var(--ok); }
+.scn .stext > :last-child { margin-bottom: 0; }
+details.phase { margin: 0 0 10px; }
+details.phase > summary { display: flex; align-items: baseline; gap: 10px; color: var(--ink); margin: 0; padding: 6px 0;
+                          border-bottom: 1px solid var(--line); }
+details.phase > summary h2 { font-size: 17px; margin: 0; flex: 1; }
+details.phase > summary::before { content: "▸"; color: var(--muted); font-size: 14px; width: 12px; }
+details.phase[open] > summary::before { content: "▾"; }
+details.phase > summary::-webkit-details-marker { display: none; }
+details.phase > summary .prog { align-self: center; }
+details.phase[open] > summary { margin-bottom: 10px; }
+details.phase.full > summary h2 { color: var(--muted); }
 #specs > h2 { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 #specs > h2 button { font-size: 12px; text-transform: none; letter-spacing: 0; padding: 2px 8px; white-space: nowrap; flex: none; }
 .specline { font-size: 12px; color: var(--muted); padding: 3px 10px; }
@@ -261,6 +354,9 @@ a[data-task] { color: var(--accent); cursor: pointer; }
       <div id="specbare"></div>
     </div>
   </section>
+  <div id="panes">
+  <div id="rtoggle" class="tabs"><button data-pane="read">Read</button><button data-pane="chat">Chat</button></div>
+  <section id="reader" class="hidden"><div id="rhead"><div id="rinfo"></div><div id="rnav"></div></div><div id="rbody"></div></section>
   <section id="chat">
     <div id="chathead" class="chathead"></div>
     <div id="msgs"></div>
@@ -272,6 +368,7 @@ a[data-task] { color: var(--accent); cursor: pointer; }
         <button id="reopenchat" class="hidden" title="Put this chat back on your list">Reopen</button></div>
     </div>
   </section>
+  </div>
 </div>
 <div id="dlg" class="hidden"></div>
 <script>
@@ -1127,7 +1224,7 @@ const refreshDesign = single(loadDesigns);
 // change; the header shows its files and queues it as one task or one task per phase. The section shows for
 // every project in view with openspec/ on dev, even with no changes, so + New change can draft the first one,
 // and for every one without it, with a Set up line (folded under one toggle in the all-projects view).
-let specs = {changes: [], repos: [], bare: [], drafts: [], cli: true}, specsAt = 0, specSig = "", specOpen = new Set(), specOpts = {hold: false, release: null};
+let specs = {changes: [], repos: [], bare: [], drafts: [], cli: true}, specsAt = 0, specSig = "", specOpts = {hold: false, release: null};
 async function refreshSpecs(force) {
   if (tab === "design" && (force || Date.now() - specsAt > 8000)) {
     specsAt = Date.now();
@@ -1238,35 +1335,186 @@ async function startSpec() {
 $("#snstart").onclick = startSpec;
 $("#sndesc").onkeydown = e => { if (e.key === "Enter") startSpec(); if (e.key === "Escape") $("#specform").classList.add("hidden"); };
 const hash = s => { let h = 5381; for (let i = 0; i < s.length; i++) h = (h * 33 ^ s.charCodeAt(i)) | 0; return h; };
-function specHead(d) {
-  const s = d.spec_view;
-  const dev = esc(P(d.project).dev_branch || "dev");
-  if (s.archived) return `<div class="spechead">The OpenSpec change <code>${esc(s.name)}</code> was archived on ${dev}: it is now in <code>${esc((s.sub ? s.sub + "/" : "") + s.archive)}/</code>.</div>`;
-  if (s.missing) return `<div class="spechead">The OpenSpec change <code>${esc(s.name)}</code> is no longer on ${dev}: it was removed.</div>`;
+function specGone(d) {
+  const s = d.spec_view, dev = esc(P(d.project).dev_branch || "dev");
+  return s.archived ? `<div class="spechead">The OpenSpec change <code>${esc(s.name)}</code> was archived on ${dev}: it is now in <code>${esc((s.sub ? s.sub + "/" : "") + s.archive)}/</code>.</div>`
+    : `<div class="spechead">The OpenSpec change <code>${esc(s.name)}</code> is no longer on ${dev}: it was removed.</div>`;
+}
+
+// ---------------------------------------------------------------- the reader: an OpenSpec change beside its chat
+// Tabs per kind of file, an "On this page" outline, requirement cards and task phases, all parsed here from the
+// spec_view texts. The body is rebuilt only when the files or the tab change, keeping your place in it.
+let specTabs = {}, pane = "read";
+try { specTabs = JSON.parse(localStorage.getItem("ops-spectabs") || "{}"); pane = localStorage.getItem("ops-pane") || "read"; } catch {}
+const rd = {d: null, id: "", tab: "", sig: "", scroll: {}, folds: {}, io: null, hs: []};
+const liveSpec = d => d && d.spec_view && !d.spec_view.missing ? d.spec_view : null;
+const bar = (done, total) => `<span class="bar"><i style="width:${total ? Math.round(100 * done / total) : 0}%"></i></span>`;
+const CHECK = /^\s*[-*]\s+\[([ xX])\]\s+/;  // as opsd.py's CHECKBOX
+function readerTabs(s) {
+  const has = f => f && f.text.trim(), core = ["proposal.md", "design.md", "tasks.md"];
+  const named = n => [s.files.find(f => f.name === n)].filter(has), specFiles = s.files.filter(f => f.name.startsWith("specs/") && has(f));
+  return [{k: "proposal", label: "Proposal", files: named("proposal.md")}, {k: "design", label: "Design", files: named("design.md")},
+          {k: "tasks", label: "Tasks", files: named("tasks.md")}, {k: "specs", label: `Specs (${specFiles.length})`, files: specFiles},
+          {k: "other", label: "Other", files: s.files.filter(f => !core.includes(f.name) && !f.name.startsWith("specs/") && has(f))}]
+    .filter(t => t.files.length);
+}
+// Split lines into blocks at each line matching re: [{m: null, lines: [before the first]}, {m: match, lines}, …]
+function splitAt(lines, re) {
+  const out = [{m: null, lines: []}];
+  for (const l of lines) { const m = l.match(re); if (m) out.push({m, lines: []}); else out[out.length - 1].lines.push(l); }
+  return out;
+}
+// tasks.md: one foldable section per ## phase, with its progress. Fully done phases start folded.
+function tasksHtml(text, id) {
+  const [pre, ...phases] = splitAt(text.split(/\r?\n/), /^##\s+(.+)/);
+  return md(pre.lines.join("\n"), "rd-t-") + phases.map((ph, k) => {
+    const boxes = ph.lines.map(l => l.match(CHECK)).filter(Boolean), done = boxes.filter(m => m[1] !== " ").length;
+    const full = boxes.length && done === boxes.length, title = ph.m[1].trim(), fold = rd.folds[`${id}|${title}`];
+    return `<details class="phase${full ? " full" : ""}" data-fold="${esc(title)}" ${fold ?? !full ? "open" : ""}><summary>`
+      + `<h2 id="rd-p${k}">${inline(esc(title))}</h2>${boxes.length ? `<span class="prog">${bar(done, boxes.length)} ${done}/${boxes.length}</span>` : ""}</summary>`
+      + md(ph.lines.join("\n"), `rd-p${k}-`) + `</details>`;
+  }).join("");
+}
+// A spec delta: each "### Requirement:" of an ADDED/MODIFIED/REMOVED/RENAMED section is a card, its scenarios
+// WHEN/THEN rows. Anything else in the file is plain markdown; a file with no such section is all plain.
+const KW = /^\s*[-*]\s+\*\*(WHEN|THEN|AND|GIVEN|BUT|OR):?\*\*:?\s*(.*)$/i;
+function scenarioHtml(sc, pre) {
+  const rows = [], extra = [];
+  for (const l of sc.lines) {
+    const m = l.match(KW);
+    if (m) rows.push({kw: m[1].toUpperCase(), text: [m[2]]});
+    else if (rows.length) rows[rows.length - 1].text.push(l.replace(/^ {1,2}/, ""));
+    else extra.push(l);
+  }
+  return `<div class="scn"><div class="sname"><span>Scenario:</span> ${inline(esc(sc.m[1].trim()))}</div>${md(extra.join("\n"), pre)}`
+    + rows.map(r => `<div class="srow ${r.kw.toLowerCase()}"><div class="kw">${r.kw}</div><div class="stext">${md(r.text.join("\n"), pre)}</div></div>`).join("")
+    + `</div>`;
+}
+function reqHtml(kind, name, lines, hid) {
+  const [text, ...scns] = splitAt(lines, /^####\s+Scenario:\s*(.*)/i);
+  return `<div class="req ${kind}"><div class="rlabel">${kind.toUpperCase()}</div>${name ? `<h3 id="${hid}">${inline(esc(name))}</h3>` : ""}`
+    + `<div class="rtext">${md(text.lines.join("\n"), hid + "-")}</div>${scns.map((sc, k) => scenarioHtml(sc, `${hid}-s${k}-`)).join("")}</div>`;
+}
+function specHtml(text, pre) {
+  const KIND = /^##\s+(ADDED|MODIFIED|REMOVED|RENAMED)\s+Requirements\s*$/i;
+  const secs = splitAt(text.split(/\r?\n/), /^##\s+.*$/);
+  if (!secs.some(s => s.m && KIND.test(s.m[0]))) return md(text, pre);
+  return secs.map((sec, k) => {
+    const kind = sec.m && sec.m[0].match(KIND);
+    if (!kind) return md((sec.m ? sec.m[0] + "\n" : "") + sec.lines.join("\n"), `${pre}${k}-`);
+    const [lead, ...reqs] = splitAt(sec.lines, /^###\s+Requirement:\s*(.*)/i), kd = kind[1].toLowerCase();
+    if (!reqs.length) return lead.lines.join("").trim() ? reqHtml(kd, "", lead.lines, `${pre}${k}`) : "";  // RENAMED's FROM/TO list
+    return md(lead.lines.join("\n"), `${pre}${k}-`) + reqs.map((r, j) => reqHtml(kd, r.m[1].trim(), r.lines, `${pre}${k}r${j}`)).join("");
+  }).join("");
+}
+function tabHtml(t, id) {
+  if (t.k === "tasks") return tasksHtml(t.files[0].text, id);
+  if (t.k === "specs") return t.files.map((f, k) => `<section><div class="cap"><h2 id="rd-c${k}">${esc(f.name.replace(/^specs\//, "").replace(/\/spec\.md$/, ""))}</h2>`
+    + `<code>${esc(f.name)}</code></div>${specHtml(f.text, `rd-c${k}-`)}</section>`).join("");
+  if (t.files.length === 1) return md(t.files[0].text, "rd-");
+  return t.files.map((f, k) => `<div class="fname">${esc(f.name)}</div>${md(f.text, `rd-f${k}-`)}`).join("");
+}
+// The sticky header: title, path, progress, the Why, and the queue controls.
+function readerHead(d) {
+  const s = d.spec_view, total = s.done + s.open;
   const btn = (plan, label, title) => `<button class="${s.advice === plan ? "primary" : ""}" data-plan="${plan}" title="${esc(title)}">${label}</button>`;
   const phases = s.groups.length >= 2 ? btn("phases", `Queue ${s.groups.length} tasks, one per phase`,
     s.groups.map((g, k) => `${k + 1}. ${g.title} (${g.open} open)`).join("\n")) : "";
   const advice = s.advice === "phases"
     ? `Recommended: one task per phase. ${s.open} open items in ${s.groups.length} phases is a lot for one worker, and each phase is checked and merged before the next starts.`
     : `Recommended: one task. Each task costs a worktree, a worker start-up and a full merge check, so a checklist item is far too small for one. The worker can still split a big change itself.`;
-  return `<div class="spechead"><b>${esc(s.title)}</b> · <code>${esc((s.sub ? s.sub + "/" : "") + s.path)}</code>${s.has_tasks ? ` · ${s.done}/${s.done + s.open} done` : ""}
+  return `<div><b style="font-size:15px">${esc(s.title)}</b> · <span class="rpath">${esc((s.sub ? s.sub + "/" : "") + s.path)}</span>`
+    + `${s.has_tasks ? ` · <span class="prog">${bar(s.done, total)} ${s.done}/${total} done</span>` : ""}</div>
     ${s.why ? `<div class="why">${esc(s.why)}</div>` : ""}
     <div class="row">${s.open || !s.has_tasks
       ? btn("whole", "Queue as one task", "One worker builds the whole change") + phases
         + `<label><input type="checkbox" id="spechold" ${specOpts.hold ? "checked" : ""}> Hold for review</label><label><input type="checkbox" id="specrel" ${(specOpts.release ?? P(d.project).auto_release) ? "checked" : ""}> Release after merge</label>`
       : `<span class="muted">Every item in tasks.md is ticked. Ask Claude to queue archiving it when you're happy.</span>`}</div>
-    ${s.open ? `<div class="why">${advice}</div>` : ""}
-    ${s.commands.length ? `<div class="row cmds">${s.commands.map(c => `<button data-cmd="${esc(c.id)}" title="${esc(c.tip)}" ${d.state === "thinking" ? "disabled" : ""}>${esc(c.label)}</button>`).join("")}</div>` : ""}
-    <div>${s.files.map(f => `<details data-file="${esc(f.name)}" ${specOpen.has(f.name) ? "open" : ""}><summary>${esc(f.name)}</summary><div class="msg specdoc">${md(f.text)}</div></details>`).join("")}</div>
-    <div class="why">Claude can edit this change's files. Its edits are saved to ${esc(P(d.project).dev_branch || "dev")} after each reply.</div></div>`;
+    ${s.open ? `<div class="advice">${advice}</div>` : ""}<div id="rcmds" class="row">${s.commands.map(c =>
+      `<button data-cmd="${esc(c.id)}" title="${esc(c.tip)}" ${d.state === "thinking" ? "disabled" : ""}>${esc(c.label)}</button>`).join("")}</div>`;
 }
+function renderReader(d) {
+  const s = liveSpec(d), dv = $("#designview"), reader = $("#reader");
+  keepPlace();
+  rd.d = d;
+  dv.classList.toggle("reading", !!s);
+  reader.classList.toggle("hidden", !s);
+  dv.classList.toggle("pane-read", pane === "read"); dv.classList.toggle("pane-chat", pane !== "read");
+  $("#rtoggle").querySelectorAll("button").forEach(b => b.classList.toggle("on", b.dataset.pane === pane));
+  if (!s) { rd.id = ""; rd.io?.disconnect(); return; }
+  if (put($("#rinfo"), readerHead(d))) {
+    $("#rinfo").querySelectorAll("[data-plan]").forEach(b => b.onclick = () => queueSpec(b.dataset.plan));
+    $("#rinfo").querySelectorAll("[data-cmd]").forEach(b => b.onclick = () => {
+      const c = rd.d.spec_view.commands.find(x => x.id === b.dataset.cmd); if (c) sayChat(c.text); });
+    for (const [id, k] of [["#spechold", "hold"], ["#specrel", "release"]])
+      if ($(id)) $(id).onchange = e => { specOpts[k] = e.target.checked; };
+  }
+  const id = `${d.project}/${s.sub}/${s.name}`, tabs = readerTabs(s);
+  const tab = (tabs.find(t => t.k === specTabs[id]) || tabs[0] || {}).k || "", sig = hash(JSON.stringify(s.files));
+  if (id === rd.id && tab === rd.tab && sig === rd.sig) return;
+  rd.id = id; rd.tab = tab; rd.sig = sig;
+  const t = tabs.find(x => x.k === tab);
+  $("#rnav").innerHTML = `<div class="tabs">${tabs.map(x => `<button data-rtab="${x.k}" class="${x.k === tab ? "on" : ""}">${esc(x.label)}</button>`).join("")}</div>`
+    + `<details class="rsections"><summary>Sections</summary><div class="outline"></div></details>`;
+  $("#rbody").innerHTML = `<article class="msg rdoc">${t ? tabHtml(t, id) : '<p class="muted">This change has no files yet.</p>'}</article><nav class="outline"></nav>`;
+  $("#rnav").querySelectorAll("[data-rtab]").forEach(b => b.onclick = () => {
+    specTabs[id] = b.dataset.rtab; try { localStorage.setItem("ops-spectabs", JSON.stringify(specTabs)); } catch {}
+    renderReader(rd.d);
+  });
+  $("#rbody").querySelectorAll("details[data-fold]").forEach(el => el.ontoggle = () => { rd.folds[`${id}|${el.dataset.fold}`] = el.open; });
+  // On this page: the tab's ## and ### headings
+  rd.hs = [...$("#rbody article").querySelectorAll("h2[id], h3[id]")];
+  const outline = rd.hs.length ? `<div class="otitle">On this page</div>` + rd.hs.map(h =>
+    `<a class="l${h.tagName[1]}" data-to="${h.id}">${esc(h.textContent)}</a>`).join("") : "";
+  document.querySelectorAll("#reader .outline").forEach(o => { o.innerHTML = outline; o.classList.toggle("hidden", !outline); });
+  $("#rnav .rsections").classList.toggle("hidden", !outline);
+  document.querySelectorAll("#reader .outline a").forEach(a => a.onclick = () => {
+    $("#rnav .rsections").open = false; toHeading(document.getElementById(a.dataset.to)); });
+  reader.scrollTop = rd.scroll[`${id}|${tab}`] || 0;
+  rd.io?.disconnect();
+  rd.io = new IntersectionObserver(markOutline, {root: reader, rootMargin: `-${$("#rhead").offsetHeight}px 0px -50% 0px`});
+  rd.hs.forEach(h => rd.io.observe(h));
+  markOutline();
+}
+// Where you are in each change's tabs. Only while the reader shows: a hidden one has no scroll position.
+function keepPlace() { if (rd.id && $("#reader").clientHeight) rd.scroll[`${rd.id}|${rd.tab}`] = $("#reader").scrollTop; }
+function toHeading(h) {
+  if (!h) return;
+  for (let p = h.parentElement; p && p.id !== "reader"; p = p.parentElement) if (p.tagName === "DETAILS") p.open = true;
+  const reader = $("#reader");
+  reader.scrollTop += h.getBoundingClientRect().top - reader.getBoundingClientRect().top - $("#rhead").offsetHeight - 12;
+}
+// The current section: the last heading above a line just below the sticky header. The observer calls this as
+// headings cross the top half of the reader.
+function markOutline() {
+  const hs = rd.hs.filter(h => h.getClientRects().length);
+  if (!hs.length) return;
+  const line = $("#reader").getBoundingClientRect().top + $("#rhead").offsetHeight + 24;
+  let cur = hs[0];
+  for (const h of hs) { if (h.getBoundingClientRect().top <= line) cur = h; else break; }
+  document.querySelectorAll("#reader .outline a").forEach(a => a.classList.toggle("on", a.dataset.to === cur.id));
+}
+$("#reader").addEventListener("click", e => {  // a link to a heading in the same tab scrolls the reader, not the page
+  const a = e.target.closest("#rbody a[href^='#']"); if (!a) return;
+  e.preventDefault(); toHeading(document.getElementById(decodeURIComponent(a.getAttribute("href").slice(1))));
+});
+new ResizeObserver(() => $("#reader").style.setProperty("--rhead-h", $("#rhead").offsetHeight + "px")).observe($("#rhead"));
+$("#rtoggle").querySelectorAll("button").forEach(b => b.onclick = () => {
+  keepPlace();
+  pane = b.dataset.pane; try { localStorage.setItem("ops-pane", pane); } catch {}
+  renderReader(rd.d);
+  if (pane === "chat") $("#msgs").scrollTop = $("#msgs").scrollHeight;
+  else if (rd.id) { $("#reader").scrollTop = rd.scroll[`${rd.id}|${rd.tab}`] || 0; markOutline(); }
+});
 async function queueSpec(plan) {
   const d = chatData;
   if (d.msgs.some(m => m.tasks.some(t => !["done", "cancelled", "failed"].includes(t.state)))
       && !confirm("Tasks from this chat are still open. Queue the change again?")) return;
   try {
     const r = await api(`/api/designs/${d.id}/queue`, {plan, hold: specOpts.hold, release: specOpts.release});
-    $("#chatmsg").textContent = ""; chatKey = ""; specOpts = {hold: false, release: null}; refreshDesign(); refresh();
+    $("#chatmsg").textContent = ""; chatKey = ""; specOpts = {hold: false, release: null};
+    delete $("#rinfo").dataset.html;  // redraw the header, whose boxes you ticked, even though its html is unchanged
+    refreshDesign(); refresh();
   } catch (e) { $("#chatmsg").textContent = e.message; }
 }
 function selectChat(id) {
@@ -1292,13 +1540,16 @@ function renderChat() {
   const key = d ? `${d.id}:${d.msgs.length}:${d.state}:${d.ended}:${d.live.length}:${JSON.stringify(d.msgs.map(m => m.tasks.map(t => t.state)))}:${d.spec_view ? hash(JSON.stringify(d.spec_view)) : ""}` : "none";
   $("#stopchat").classList.toggle("hidden", !thinking);
   $("#send").disabled = !!thinking;
-  $("#chathead").querySelectorAll("[data-cmd]").forEach(b => b.disabled = !!thinking);
+  $("#rinfo").querySelectorAll("[data-cmd]").forEach(b => b.disabled = !!thinking);
   if (key === chatKey) return;
+  // A chat you just opened, or a message you just sent, starts at the bottom
+  const box = $("#msgs"), stick = box.scrollTop + box.clientHeight >= box.scrollHeight - 40 || !chatKey.startsWith(`${d && d.id}:`);
   chatKey = key;
-  const box = $("#msgs"), stick = box.scrollTop + box.clientHeight >= box.scrollHeight - 40;
+  renderReader(d);
   $("#chathead").innerHTML = d && d.kind === "project" ? `Runs in <code>${esc(d.cwd)}</code>`
     + (d.session_id ? ` · continue in a terminal: <code>cd ${esc(d.cwd)} && claude --resume ${esc(d.session_id)}</code>` : "")
-    : d && d.spec_view ? specHead(d)
+    : liveSpec(d) ? `Claude can edit this change's files. Its edits are saved to ${esc(P(d.project).dev_branch || "dev")} after each reply.`
+    : d && d.spec_view ? specGone(d)
     : d && d.spec_draft ? `<div class="spechead"><b>Drafting a new OpenSpec change</b>${d.spec_sub ? ` in <code>${esc(d.spec_sub)}/</code>` : ""}
       <div class="why">No change is attached yet. When a reply creates one folder in <code>openspec/changes/</code>, this chat becomes that change's chat and its files are saved to ${esc(P(d.project).dev_branch || "dev")}.</div></div>` : "";
   if (d && d.origin) {
@@ -1306,13 +1557,6 @@ function renderChat() {
     $("#chathead").querySelector("a.origin").onclick = () => openOrigin(d.origin);
   }
   if (d && d.ended) $("#chathead").insertAdjacentHTML("afterbegin", `<div class="callout">You ended this chat. Send a message or click Reopen to put it back on your list.</div>`);
-  $("#chathead").querySelectorAll("[data-plan]").forEach(b => b.onclick = () => queueSpec(b.dataset.plan));
-  $("#chathead").querySelectorAll("[data-cmd]").forEach(b => b.onclick = () => {
-    const c = d.spec_view.commands.find(x => x.id === b.dataset.cmd); if (c) sayChat(c.text); });
-  $("#chathead").querySelectorAll("details[data-file]").forEach(el => el.ontoggle = () => {
-    el.open ? specOpen.add(el.dataset.file) : specOpen.delete(el.dataset.file); });
-  for (const [id, k] of [["#spechold", "hold"], ["#specrel", "release"]])
-    if ($(id)) $(id).onchange = e => { specOpts[k] = e.target.checked; };
   if (!d) { box.innerHTML = `<div class="muted" style="padding:20px 0">${TABTEXT[tab].intro}</div>`; return; }
   box.innerHTML = d.msgs.map(m => m.role === "user"
       ? `<div class="msg user">${pics(esc(m.text.replace(/^\[ops:[^\n]*\]\n\n/, "")))}</div>`
@@ -1322,7 +1566,7 @@ function renderChat() {
   if (stick || thinking) box.scrollTop = box.scrollHeight;
 }
 async function sayChat(text) {  // a change's command button: sent as if typed, leaving the message box alone
-  $("#chathead").querySelectorAll("[data-cmd]").forEach(b => b.disabled = true);
+  $("#rinfo").querySelectorAll("[data-cmd]").forEach(b => b.disabled = true);
   try { await api(`/api/designs/${chatSel}/say`, {text}); $("#chatmsg").textContent = ""; }
   catch (e) { $("#chatmsg").textContent = e.message; }
   chatKey = ""; refreshDesign();
