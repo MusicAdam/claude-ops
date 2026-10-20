@@ -1878,8 +1878,10 @@ def activity(tid, limit=120):
 
 
 def last_step(tid):
-    """The worker's latest step, a tool call or what it said, read from the end of its transcript.
-    ts is when the transcript last grew: for a long command, how long it has been running."""
+    """What the worker is doing, in words, read from the end of its transcript. t is its latest tool
+    call as a phrase ("Run the tests", "Editing opsd.py"), or what it said if it spoke last; say is
+    what it said before that call, while still recent. ts is when the transcript last grew: for a
+    long command, how long it has been running."""
     f = RUNS / str(tid) / "claude.jsonl"
     try:
         with open(f, "rb") as fh:
@@ -1888,6 +1890,7 @@ def last_step(tid):
         ts = f.stat().st_mtime
     except OSError:
         return None
+    step, calls = None, 0
     for line in reversed(lines):
         if '"assistant"' not in line:
             continue
@@ -1899,10 +1902,17 @@ def last_step(tid):
             continue  # a subagent's step: its Agent call already says what it is doing
         for c in reversed(e.get("message", {}).get("content") or []):
             if c.get("type") == "tool_use":
-                return {"k": "tool", "t": tool_line(c.get("name"), c.get("input") or {}), "ts": ts}
-            if c.get("type") == "text" and c.get("text", "").strip():
-                return {"k": "say", "t": c["text"].strip().splitlines()[0][:240], "ts": ts}
-    return None
+                calls += 1
+                if not step:
+                    step = {"k": "tool", "t": step_phrase(c.get("name"), c.get("input") or {}), "ts": ts}
+                elif calls > 8:  # words from that many calls back no longer describe this step
+                    return step
+            elif c.get("type") == "text" and c.get("text", "").strip():
+                if not step:
+                    return {"k": "say", "t": first_words(c["text"]), "ts": ts}
+                step["say"] = first_words(c["text"])
+                return step
+    return step
 
 
 STATE_WORDS = {"running": "working", "gating": "checking", "needs_input": "needs you"}
@@ -1944,6 +1954,60 @@ def tool_line(name, i):
     arg = (i.get("command") or i.get("file_path") or i.get("description") or i.get("pattern")
            or i.get("prompt") or "")
     return f"{name}: {str(arg).splitlines()[0][:200] if arg else ''}"
+
+
+def clip(text, n):
+    """The first line of text, cut to n characters."""
+    t = str(text or "").strip()
+    t = t.splitlines()[0] if t else ""
+    return t if len(t) <= n else t[:n - 1].rstrip() + "…"
+
+
+def step_phrase(name, i):
+    """A tool call in words, for the task list: what it does, not the command it runs."""
+    name = name or "a tool"
+    base = lambda v: Path(str(v)).name or str(v)
+    if i.get("description") and name not in ("Agent", "Task"):
+        d = clip(i["description"], 160)  # Bash, Monitor and others say what they do themselves
+        return d[:1].upper() + d[1:]
+    if name == "Bash":
+        words = [w for w in str(i.get("command", "")).split() if "=" not in w and w not in ("cd", "&&", "(")]
+        return f"Running {base(words[0])}" if words else "Running a command"
+    if name in ("Agent", "Task"):
+        return f"Subagent: {clip(i['description'], 160)}" if i.get("description") else "Starting a subagent"
+    if name == "Read":
+        return f"Reading {base(i.get('file_path') or 'a file')}"
+    if name in ("Edit", "MultiEdit", "NotebookEdit"):
+        return f"Editing {base(i.get('file_path') or i.get('notebook_path') or 'a file')}"
+    if name == "Write":
+        return f"Writing {base(i.get('file_path') or 'a file')}"
+    if name == "Grep":
+        return f"Searching the code for “{clip(i.get('pattern'), 60)}”"
+    if name == "Glob":
+        return f"Looking for files named {clip(i.get('pattern'), 60)}"
+    if name == "WebSearch":
+        return f"Searching the web for “{clip(i.get('query'), 80)}”"
+    if name == "WebFetch":
+        return f"Reading {urlparse(str(i.get('url') or '')).netloc or 'a web page'}"
+    if name == "TodoWrite":  # the item it marked in progress is the best summary there is
+        now = next((t for t in i.get("todos") or [] if t.get("status") == "in_progress"), None)
+        return clip(now.get("activeForm") or now.get("content"), 160) if now else "Updating its to-do list"
+    if name == "Skill":
+        return f"Using the {i['skill']} skill" if i.get("skill") else "Using a skill"
+    if name == "ToolSearch":
+        return "Loading tools"
+    if name.startswith("mcp__"):
+        return "Using " + " ".join(name.split("__")[1:]).replace("_", " ")
+    return f"Using {name}"
+
+
+def first_words(text, n=240):
+    """The opening of what the worker said: its first paragraph, cut at a sentence when it is long."""
+    t = " ".join(re.sub(r"[*`#>]+", "", text.strip().split("\n\n")[0]).split())
+    if len(t) <= n:
+        return t
+    cut = max(t.rfind(". ", 0, n), t.rfind("? ", 0, n), t.rfind("! ", 0, n))
+    return t[:cut + 1] if cut > n // 3 else t[:n - 1].rstrip() + "…"
 
 
 # ---------------------------------------------------------------- images
