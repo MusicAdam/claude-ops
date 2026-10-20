@@ -92,6 +92,9 @@ ul.ahead { margin: 6px 0 0; padding-left: 18px; max-height: 160px; overflow: aut
 .hidden { display: none !important; }
 #limitbar { flex-basis: 100%; display: flex; gap: 12px; align-items: center; padding: 6px 12px; border-radius: 8px;
             border: 1px solid var(--warn); color: var(--warn); font-weight: 600; }
+#usage { font-variant-numeric: tabular-nums; cursor: default; }
+#usage.warn, #usage.warn b { color: var(--warn); font-weight: 600; }
+#usage.bad, #usage.bad b { color: var(--bad); font-weight: 600; }
 #designview { display: grid; grid-template-columns: 260px 1fr; gap: 20px; padding: 20px; max-width: 1500px; margin: 0 auto; }
 @media (max-width: 900px) { #designview { grid-template-columns: 1fr; padding: 16px; } }
 .chatitem { padding: 8px 10px; border-radius: 6px; cursor: pointer; border: 1px solid transparent; }
@@ -309,8 +312,10 @@ a[data-task] { color: var(--accent); cursor: pointer; }
   <button id="addproj" title="Add a git repository, or a folder of git repos, as a project">+ Project</button>
   <div class="tabs"><button id="tab-queue" class="on">Queue</button><button id="tab-design" title="Plan work with Claude">Design</button><button id="tab-chat" title="Talk to Claude in the project folder, as in a terminal">Chat</button></div>
   <span class="stat" id="hdr"></span>
+  <span class="stat hidden" id="usage"></span>
   <span style="flex:1"></span>
   <label>Parallel <input id="par" type="number" min="1" max="8" style="width:58px"></label>
+  <label title="Usage brake: at this percent of the 5-hour or 7-day usage window, start no new tasks until it resets (0 = off). Chats are never held.">Brake <input id="brake" type="number" min="0" max="100" step="5" style="width:58px">%</label>
   <label>Model <select id="model">
     <option value="">default</option><option value="opus">opus</option>
     <option value="sonnet">sonnet</option><option value="fable">fable</option></select></label>
@@ -502,7 +507,19 @@ function renderHeader() {
   // The Claude usage limit hit: the queue starts nothing until it resets, then resumes what it paused.
   $("#limitbar").classList.toggle("hidden", !state.limit);
   if (state.limit) $("#limitwords").textContent = state.limit.words;
+  renderUsage();
   renderTabCounts();
+}
+// The usage meter: how much of each Claude usage window is used, account-wide. Amber at the brake (no new tasks
+// start), red while the queue waits out the usage limit itself.
+function renderUsage() {
+  const u = state.usage || {windows: []}, el = $("#usage");
+  if (document.activeElement !== $("#brake")) $("#brake").value = state.settings.usage_brake;
+  el.innerHTML = u.windows.map(w => `${w.short} <b>${w.pct}%</b>`).join(" · ");
+  el.title = u.windows.map(w => `${w.label} window: ${w.pct}% used` + (w.resets ? `, resets ${w.resets}` : " (reset since)")).join("\n") +
+    (u.braked ? `\n${u.braked.words}` : "") +
+    (u.brake ? `\nBrake at ${u.brake}%: no new tasks start at or above it` : "\nBrake off");
+  el.className = "stat" + (u.windows.length ? "" : " hidden") + (state.limit ? " bad" : u.braked ? " warn" : "");
 }
 // The Design and Chat tabs show how many open chats have a new reply for you, and ● while Claude is replying in one.
 function renderTabCounts() {
@@ -1008,6 +1025,7 @@ $("#pause").onclick = () => api("/api/settings", {paused: state.settings.paused 
 $("#pauseall").onclick = () => api("/api/pause-all", {}).then(refresh);
 $("#resumeall").onclick = () => api("/api/resume-all", {}).then(refresh);
 $("#trynow").onclick = () => api("/api/limit/clear", {}).then(refresh);
+$("#brake").onchange = () => api("/api/settings", {usage_brake: Math.min(100, Math.max(0, +$("#brake").value || 0))}).then(refresh);
 $("#par").onchange = () => api("/api/settings", {max_parallel: Math.max(1, +$("#par").value || 1)}).then(refresh);
 $("#model").onchange = () => api("/api/settings", {model: $("#model").value}).then(refresh);
 $("#proj").onchange = () => {

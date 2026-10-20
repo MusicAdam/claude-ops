@@ -484,8 +484,9 @@ notes = """Project-specific guidance for design chats."""
   being checked or merged shows its step and how long it has run (`gate 2/3: test · for 1m`). A
   queued task says why it hasn't started: a free slot, the task it runs after, a paused project or
   queue. Tasks that need you show the question or error; finished ones show the summary.
-- **Parallelism.** "Parallel" on the dashboard is the global limit (default 3). Workers also split
-  big tasks into subtasks (with "after" ordering) and use subagents inside a task.
+- **Parallelism.** "Parallel" on the dashboard is the global limit (default 3; setting `max_parallel`). Workers
+  also split big tasks into subtasks (with "after" ordering) and use subagents inside a task. "Brake %" next to it
+  is the usage brake (setting `usage_brake`, default 85; see Usage limits).
 - **Pausing.** **❚❚ Pause** on a task, or **Pause running** in the header (`./opsctl pause`), stops it
   now and keeps its place. A worker's Claude session resumes where it was; a command it was running
   (a test run, a build) is stopped and it is told to check and carry on. A task paused during its gate
@@ -512,6 +513,20 @@ notes = """Project-specific guidance for design chats."""
   - **Chats.** A design chat, project chat or question to a worker that hits the limit replies
     `Usage limit reached. Resets at 3:00 pm.` and sets the same flag. The message is not sent again by itself: send it
     again after the reset.
+  - **The usage brake stops starting tasks before the limit hits**, so the end of each window is left for your own
+    design chats, chats and answers. Every Claude stream reports how much of each usage window is used
+    (`rate_limit_event`, from 0 to 1, account-wide, so it counts your own Claude use outside claude-ops too). The daemon
+    reads it in every stream it parses (workers, release checkers, chats) and keeps the latest reading per window in
+    the settings `usage:five_hour` and `usage:seven_day` (`{utilization, resetsAt, ts}`). A reading whose reset has
+    passed is stale and counts as 0.
+  - **The setting `usage_brake`** is a percent: default 85, 0 turns the brake off. Set it as **Brake %** next to
+    Parallel (`POST /api/settings {"usage_brake": 85}`). While either window is at or above it, the queue starts no
+    new task of any kind (task, release, deploy). Running tasks, gates and merges carry on, and design chats and
+    chats are never blocked. Queued tasks say `Usage at 87% of the 5-hour window · starts again after 3:00 pm`. The
+    brake lifts when that window resets or a newer reading is under the brake. You get one notification per window
+    per reset: `Usage at 85% of the 5-hour window: no new tasks until 3:00 pm`.
+  - **The header meter** shows both windows, `5h 62% · 7d 14%`, with their reset times on hover. It turns amber at
+    or above the brake, and red while the queue waits out the usage limit itself.
 - **Restarts.** Whenever the daemon stops (`./opsctl restart` or `stop`, a promote of claude-ops, launchd, a
   `kill`), it pauses every running task the same way, lets a merge finish, and exits. The next daemon resumes
   those tasks on its own; tasks you paused stay paused, and so do tasks the usage limit paused, until it resets. Nothing about a restart is saved that could hold the
