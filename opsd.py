@@ -4224,6 +4224,17 @@ def gist(text, n):
     return t if len(t) <= n else t[:n - 1].rstrip() + "…"
 
 
+def list_summary(t):
+    """A task's summary as one line for the list. A Send to dev summary from before it had a headline
+    starts with "<repo>:", which says nothing, so its first "- " detail line stands in for it."""
+    lines = str(t["summary"] or "").strip().splitlines()
+    if t["kind"] == "senddev" and lines and lines[0].rstrip().endswith(":"):
+        detail = next((l.strip()[2:] for l in lines[1:] if l.strip().startswith("- ")), "")
+        if detail.strip():
+            return clip(detail, 400)
+    return clip(t["summary"], 400) or None
+
+
 def origin_of(ref):
     """The task or chat an OPS_FROM value ("task:12", "chat:3") names, as stored on what it sends. None for a
     send from outside the queue (someone at a terminal)."""
@@ -4668,7 +4679,8 @@ class H(BaseHTTPRequestHandler):
             s = settings_now()
             waits = wait_reasons(tasks, s)
             for t in tasks:
-                for k in ("summary", "question", "error"):  # the list shows a first line; the task page has the rest
+                t["summary"] = list_summary(t)  # the list shows one line; the task page has the rest
+                for k in ("question", "error"):
                     t[k] = clip(t[k], 400) or None
                 ev_ = last.get(t["id"])
                 t["last_event"] = {"text": ev_["text"], "ts": ev_["ts"]} if ev_ else None

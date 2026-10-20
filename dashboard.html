@@ -876,9 +876,6 @@ function nowLine(t, now) {
   else if (t.state === "review") { text = first(t.summary) || "waiting for your review"; cls = ""; }
   else if (t.state === "failed") { text = first(t.error); cls = "err"; }
   else if (t.state === "done") text = first(t.summary);
-  // A Send to dev summary from before it had a headline starts with "<repo>:": show its first detail line instead.
-  if (t.kind === "senddev" && t.state === "done" && text.endsWith(":"))
-    text = String(t.summary).trim().split("\n")[1]?.replace(/^- /, "") || text;
   return text ? `<div class="now ${cls}" title="${esc(text)}">${h || esc(text)}</div>` : "";
 }
 
