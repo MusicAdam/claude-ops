@@ -331,19 +331,20 @@ gitignored `.env` files each repo has, to clone into new worktrees.
 
 ## Archiving a project
 
-`./opsd.py archive-project NAME` takes a project off the queue without losing anything. It moves
-`~/.claude-ops/projects/NAME.toml` to `~/.claude-ops/projects/archived/NAME.toml` and reloads projects, so the
+On the dashboard, open a project's card and click **Archive**, or run `./opsd.py archive-project NAME`. Either
+takes a project off the queue without losing anything. It moves `~/.claude-ops/projects/NAME.toml` to `~/.claude-ops/projects/archived/NAME.toml` and reloads projects, so the
 project leaves the dashboard's project list. `/api/state` lists it under `archived`, with how many of its tasks
 are not finished.
 
 - **What it leaves alone.** Your repo, its worktrees, its branches, its tasks and its settings (paused, release
   after merge, …) all stay as they are.
-- **What waits.** Queued, paused and needs-you tasks stay where they are and say "its project is not loaded".
-  They carry on after a restore.
+- **What waits.** Queued, paused and needs-you tasks stay where they are. The dashboard tags them
+  "(archived)" and a queued one says "archived project". They carry on after a restore.
 - **When it refuses.** While a task of the project is working, being checked or merging, or while it has an open
   release or deploy. The error names them: wait for them to finish, or cancel them.
-- **Restore.** `./opsd.py unarchive-project NAME` moves the file back and reloads, and the project is back as it
-  was. It refuses if a new project has taken the name: rename or archive that one first.
+- **Restore.** Click **Restore** under **Archived projects** at the bottom of the dashboard's project list (it is
+  collapsed, and hidden when none are archived), or run `./opsd.py unarchive-project NAME`. Either moves the
+  file back and reloads, and the project is back as it was. It refuses if a new project has taken the name: rename or archive that one first.
 
 Both commands go through the running daemon (`POST /api/projects/NAME/archive` and `/unarchive`).
 
