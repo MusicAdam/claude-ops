@@ -1956,19 +1956,28 @@ def dirty(r):
 
 
 LEFT_PATHS = 20  # paths a release summary lists per repo
+CARRIED_NAMES = 5  # carried paths it names; more are counted
 
 
 def left_note(p, tid, left):
-    """The release summary's section on the uncommitted files main moved under ([(part, paths, carried)]), or ""."""
+    """The release summary's section on the uncommitted files main moved under ([(part, paths, carried paths)]),
+    or ""."""
     blocks = []
     for r, paths, carried in left:
-        n = len(paths)
+        n, k = len(paths), len(carried)
         b = (f"Not part of this release: {n} uncommitted {files(n)} in {str(r.src).replace(str(HOME), '~', 1)} "
              f"stayed in your checkout and {'was' if n == 1 else 'were'} not shipped:\n"
              + "".join(f"- {x}\n" for x in paths[:LEFT_PATHS])
              + (f"and {n - LEFT_PATHS} more\n" if n > LEFT_PATHS else ""))
         if carried:
-            b += (f"They were merged onto the new {p.main} and put back (copy at refs/ops/release-{tid}).\n")
+            if k == n:
+                who = "It" if n == 1 else "All of them"
+            elif k <= CARRIED_NAMES:
+                who = " and ".join(filter(None, [", ".join(carried[:-1]), carried[-1]]))
+            else:
+                who = f"{k} of them"
+            b += (f"{who} {'was' if k == 1 else 'were'} merged onto the new {p.main} and put back (copy at "
+                  f"refs/ops/release-{tid})" + ("; the others stayed as they were" if k < n else "") + ".\n")
         blocks.append(b)
     return "\n".join(blocks) + "Commit them to dev for them to ship." if blocks else ""
 
@@ -2108,11 +2117,12 @@ def move_main(p, tid, commit, note="", left=None):
     uncommitted changes stay: ones to files the release changes are merged onto it (by a worker, if they conflict)
     and put back. Every repo is checked first, so a workspace never moves only some of them. Returns an error or
     None; raises NeedsYou if your changes can't be carried over. Fills the list left, if given, with what stayed
-    uncommitted in each checkout on main: (part, sorted paths, carried by the plan)."""
+    uncommitted in each checkout on main: (part, sorted paths, sorted paths the plan merged and put back)."""
     for r, sha in p.pairs(commit):
         if not is_ancestor(r, p.main, sha):
             return f"{p.main}{f' of {r.sub}' if r.sub else ''} could not fast-forward: it has commits {p.dev} lacks."
-    kept = [(r, sorted(d)) for r, _ in p.pairs(commit)
+    kept = [(r, sorted(d), sorted(d & set(r.git("diff", "--name-only", p.main, sha).splitlines())))
+            for r, sha in p.pairs(commit)
             if r.git("branch", "--show-current", check=False) == p.main and (d := dirty(r))]
     plan = carry(p, tid, commit, note)
     if plan is None:
@@ -2133,7 +2143,7 @@ def move_main(p, tid, commit, note="", left=None):
         if res.returncode:
             return f"{p.main}{f' of {r.sub}' if r.sub else ''} could not fast-forward:\n" + res.stderr[-1000:]
     if left is not None:
-        left[:] = [(r, paths, r in carried) for r, paths in kept]
+        left[:] = [(r, paths, touched if r in carried else []) for r, paths, touched in kept]
     return None
 
 
