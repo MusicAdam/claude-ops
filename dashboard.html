@@ -134,6 +134,14 @@ ul.ahead { margin: 6px 0 0; padding-left: 18px; max-height: 160px; overflow: aut
 .live { color: var(--muted); font: 12px var(--mono); margin: 0 0 14px; }
 .composer { position: sticky; bottom: 0; background: var(--bg); padding-top: 10px; }
 .composer textarea { min-height: 80px; }
+/* / in a change's message box: its commands, just above the box */
+#slash { position: absolute; left: 0; right: 0; bottom: calc(100% - 8px); max-height: 50vh; overflow: auto; z-index: 2;
+         background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 4px;
+         box-shadow: 0 6px 20px rgba(0, 0, 0, .15); font-size: 13px; }
+#slash .sl { display: flex; gap: 10px; align-items: baseline; padding: 4px 8px; border-radius: 6px; cursor: pointer; }
+#slash .sl.on { background: var(--chip); }
+#slash .sl code { font: 12px var(--mono); color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#slash .muted { padding: 4px 8px; font-size: 12px; }
 .att { display: block; max-width: 260px; max-height: 200px; margin: 6px 0; border-radius: 6px; border: 1px solid var(--line); }
 textarea.dropping { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent); }
 .chathead { color: var(--muted); font-size: 12px; margin: 0 0 12px; }
@@ -363,6 +371,7 @@ a[data-task] { color: var(--accent); cursor: pointer; }
     <div id="chathead" class="chathead"></div>
     <div id="msgs"></div>
     <div class="composer">
+      <div id="slash" class="hidden"></div>
       <textarea id="say"></textarea>
       <div class="row"><label id="cprojwrap">Project <select id="cproj"></select></label><button class="primary" id="send">Send</button><span class="muted">⌘↩</span>
         <button id="stopchat" class="danger hidden">Stop</button><span id="chatmsg" class="err"></span><span style="flex:1"></span>
@@ -1440,8 +1449,17 @@ function readerHead(d) {
       ? btn("whole", "Queue as one task", "One worker builds the whole change") + phases
         + `<label><input type="checkbox" id="spechold" ${specOpts.hold ? "checked" : ""}> Hold for review</label><label><input type="checkbox" id="specrel" ${(specOpts.release ?? P(d.project).auto_release) ? "checked" : ""}> Release after merge</label>`
       : `<span class="muted">Every item in tasks.md is ticked. Ask Claude to queue archiving it when you're happy.</span>`}</div>
-    ${s.open ? `<div class="advice">${advice}</div>` : ""}<div id="rcmds" class="row">${s.commands.map(c =>
-      `<button data-cmd="${esc(c.id)}" title="${esc(c.tip)}" ${d.state === "thinking" ? "disabled" : ""}>${esc(c.label)}</button>`).join("")}</div>`;
+    ${s.open ? `<div class="advice">${advice}</div>` : ""}<div id="rcmds" class="row">${specCmds(s).map(c =>
+      `<button data-cmd="${esc(c.id)}" title="${esc(c.tip)}" ${d.state === "thinking" ? "disabled" : ""}>${esc(c.label)}</button>`).join("")}${
+      bareCmds(s) ? `<span class="muted">${NO_OPSX}</span>` : ""}</div>`;
+}
+// The change's commands, in the daemon's order. Deviation check needs something built to compare with.
+const specCmds = s => s.commands.filter(c => c.id !== "deviation-check" || s.done > 0);
+const bareCmds = s => !s.commands.some(c => c.id !== "validate");  // no opsx and no tk commands: Validate at most
+const NO_OPSX = "Run Set up OpenSpec or Refresh OpenSpec commands to add the opsx commands.";
+function runCmd(s, c) {
+  if (c.id === "archive" && !confirm(`Archive ${s.name}? This moves it to openspec/changes/archive and merges its spec deltas into openspec/specs. Saved to dev after the reply.`)) return;
+  sayChat(c.text);
 }
 function renderReader(d) {
   const s = liveSpec(d), dv = $("#designview"), reader = $("#reader");
@@ -1455,7 +1473,7 @@ function renderReader(d) {
   if (put($("#rinfo"), readerHead(d))) {
     $("#rinfo").querySelectorAll("[data-plan]").forEach(b => b.onclick = () => queueSpec(b.dataset.plan));
     $("#rinfo").querySelectorAll("[data-cmd]").forEach(b => b.onclick = () => {
-      const c = rd.d.spec_view.commands.find(x => x.id === b.dataset.cmd); if (c) sayChat(c.text); });
+      const s = rd.d.spec_view, c = s.commands.find(x => x.id === b.dataset.cmd); if (c) runCmd(s, c); });
     for (const [id, k] of [["#spechold", "hold"], ["#specrel", "release"]])
       if ($(id)) $(id).onchange = e => { specOpts[k] = e.target.checked; };
   }
@@ -1555,7 +1573,7 @@ function renderChat() {
   // A chat you just opened, or a message you just sent, starts at the bottom
   const box = $("#msgs"), stick = box.scrollTop + box.clientHeight >= box.scrollHeight - 40 || !chatKey.startsWith(`${d && d.id}:`);
   chatKey = key;
-  renderReader(d);
+  renderReader(d); renderSlash();
   $("#chathead").innerHTML = d && d.kind === "project" ? `Runs in <code>${esc(d.cwd)}</code>`
     + (d.session_id ? ` · continue in a terminal: <code>cd ${esc(d.cwd)} && claude --resume ${esc(d.session_id)}</code>` : "")
     : liveSpec(d) ? `Claude can edit this change's files. Its edits are saved to ${esc(P(d.project).dev_branch || "dev")} after each reply.`
@@ -1590,11 +1608,44 @@ async function sendChat() {
       const project = pf || $("#cproj").value;
       if (!project) throw new Error("pick a project");
       const r = await api("/api/designs", {project, text, kind: KIND[tab]}); selectChat(r.id); }
-    $("#say").value = ""; $("#chatmsg").textContent = ""; chatKey = ""; refreshDesign();
+    $("#say").value = ""; $("#chatmsg").textContent = ""; chatKey = ""; renderSlash(); refreshDesign();
   } catch (e) { $("#chatmsg").textContent = e.message; }
 }
 $("#send").onclick = sendChat;
-$("#say").onkeydown = e => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) sendChat(); };
+// / as the first character of a change's message box lists its commands, filtered by label or text as you type.
+// Up/Down move, Enter or Tab puts the command's text in the box, Esc closes. After either, the list stays shut
+// until the box no longer starts with /. Other chats show nothing for now.
+const slash = {items: [], k: 0, shut: false};
+function renderSlash() {
+  const v = $("#say").value, box = $("#slash"), s = chatData && chatSel === chatData.id ? liveSpec(chatData) : null;
+  if (!v.startsWith("/")) slash.shut = false;
+  const q = v.slice(1).toLowerCase(), on = !!s && v.startsWith("/") && !slash.shut && document.activeElement === $("#say");
+  slash.items = on ? specCmds(s).filter(c => c.label.toLowerCase().includes(q) || c.text.toLowerCase().includes(q)) : [];
+  const hint = on && bareCmds(s);
+  box.classList.toggle("hidden", !slash.items.length && !hint);
+  slash.k = Math.max(0, Math.min(slash.k, slash.items.length - 1));
+  box.innerHTML = slash.items.map((c, k) => `<div class="sl${k === slash.k ? " on" : ""}" data-k="${k}" title="${esc(c.tip)}">`
+    + `<b>${esc(c.label)}</b><code>${esc(c.text)}</code></div>`).join("") + (hint ? `<div class="muted">${NO_OPSX}</div>` : "");
+  box.querySelectorAll("[data-k]").forEach(el => el.onmousedown = e => { e.preventDefault(); pickSlash(+el.dataset.k); });
+  box.querySelector(".on")?.scrollIntoView({block: "nearest"});
+}
+function pickSlash(k) {
+  const c = slash.items[k]; if (!c) return;
+  const say = $("#say"); say.value = c.text; say.setSelectionRange(c.text.length, c.text.length);
+  slash.shut = true; renderSlash();
+}
+$("#say").oninput = () => { slash.k = 0; renderSlash(); };
+$("#say").onfocus = renderSlash;
+$("#say").onblur = () => $("#slash").classList.add("hidden");
+$("#say").onkeydown = e => {
+  const n = slash.items.length, open = !$("#slash").classList.contains("hidden");
+  if (open && n && !e.metaKey && !e.ctrlKey && !e.altKey) {
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") { e.preventDefault(); slash.k = (slash.k + (e.key === "ArrowDown" ? 1 : n - 1)) % n; renderSlash(); return; }
+    if ((e.key === "Enter" && !e.shiftKey) || e.key === "Tab") { e.preventDefault(); pickSlash(slash.k); return; }
+  }
+  if (open && e.key === "Escape") { e.preventDefault(); e.stopPropagation(); slash.shut = true; renderSlash(); return; }
+  if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) sendChat();
+};
 $("#stopchat").onclick = () => api(`/api/designs/${chatSel}/stop`, {}).then(refreshDesign);
 async function endChat(id) {
   const c = chatList.find(x => x.id === id);
