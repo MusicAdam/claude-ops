@@ -78,7 +78,30 @@ several (see [Workspaces](#workspaces)). Read it, adjust it, then click **Reload
   and workers don't see it: they start from dev. While the checkout (any repo of a workspace) has uncommitted
   files, the project card shows a banner with how many, where, and the date of the oldest change; expand it for
   the paths. The New task form warns that workers won't see them, `opsd.py add` prints the same warning, and a
-  design chat's `[ops: ...]` line names them. Commit them to dev for them to ship.
+  design chat's `[ops: ...]` line names them. Commit them to dev, or click **Send to dev**, for them to ship.
+- **Send to dev** (a button on that banner) turns the stranded work into a normal queued change on dev, then
+  clears it from your checkout, so there is exactly one copy. It queues a task of its own kind, `Send uncommitted
+  changes in <repo> to dev` (marked `send to dev` in the list), with no hold and the project's Release after
+  merge default. A project has one open at a time: while it is open, the button links to it.
+  1. **At the click** it snapshots each repo with uncommitted files (tracked and untracked, not ignored), as
+     `snapshot` does for a release, and keeps the snapshot as a commit on your HEAD at `refs/ops/senddev-<id>`.
+     That ref is your copy: it stays after the task ends.
+  2. **On dev.** In the task's worktree, on its branch made from dev, it applies the snapshot with
+     `git cherry-pick --no-commit` and commits it as `Your uncommitted changes from <repo>`, listing the files.
+     If it conflicts with dev, a worker resolves it so both sides survive, commits, and may fix what the gate finds.
+     If the worker can't merge it, the task needs you, with its reason.
+  3. **Then the normal path:** rebase, gate (with fix rounds) and merge into dev, as for any task.
+  4. **Clearing, only after the merge into dev.** Per repo: if your checkout's HEAD moved since the snapshot (a
+     commit, or a release that moved main), nothing is cleared and the summary says so. Otherwise each file the
+     snapshot changed that still matches it is put back as HEAD has it (deleted if HEAD lacks it), in the working
+     tree and the index; folders left empty are removed. A file you edited after the click stays as it is and is
+     named in the summary. Files outside the snapshot are never touched. Clearing waits while a release or deploy
+     is moving main in your checkout.
+  5. **The summary** lists the files that landed on dev, the files cleared, any left and why, and the ref.
+
+  Pausing, stopping or cancelling the task before the merge clears nothing; Retry after a merge clears then. Until
+  the next Promote the work is in dev but not in your checkout: the card says `On dev, not released yet. Promote to
+  get it back here.` with a link to the task, until main contains it.
 - With nothing new on dev, Promote only rebuilds main (no gate, no checker).
 - **Release after merge** (a checkbox on a new task, and on its page until it finishes) promotes for you:
   once the task merges into dev, the queue queues a release, the same one Promote makes. If a release is
@@ -325,7 +348,9 @@ settings, `CLAUDE.md` and MCP servers. Each chat keeps one Claude session across
 - Edits land in your checkout and nothing else. Uncommitted ones survive a release: it merges them onto the
   new main and puts them back.
 - Those edits are not on dev, so they don't ship and workers don't see them until you commit them to dev. The
-  project card shows a banner while the checkout has any.
+  project card shows a banner while the checkout has any. **Send to dev** on that banner lands them on dev as a
+  queued change and then clears them from the checkout (see [main is the golden version](#main-is-the-golden-version));
+  they come back with the next Promote.
 
 ## Projects hand work to each other
 

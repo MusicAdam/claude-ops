@@ -84,6 +84,8 @@ ul.ahead { margin: 6px 0 0; padding-left: 18px; max-height: 160px; overflow: aut
 .dirty .lines { flex: 1; min-width: 0; }
 .dirty details summary { color: var(--ink); margin: 0; }
 .dirty details + details { margin-top: 6px; }
+.dirty > button, .dirty > a.btn { white-space: nowrap; flex: none; }
+.dirty > a.btn { padding: 6px 12px; }
 .tabs { display: flex; gap: 4px; }
 .tabs button { background: none; border-color: transparent; color: var(--muted); }
 .tabs button.on { background: var(--chip); border-color: var(--line); color: var(--ink); font-weight: 600; }
@@ -518,6 +520,8 @@ function projStats(g) {
     n(["merging"]) ? `<span class="s-running">${n(["merging"])} merging</span>` : "",
     qd ? `${qd} queued` : "",
     g.deploy_open ? `<span class="s-running">deploy #${g.deploy_open}</span>` : "",
+    g.senddev_open ? `<span class="s-running">sending to ${esc(g.dev_branch)} #${g.senddev_open}</span>` : "",
+    (g.senddev_pending || []).length ? `<span class="s-review" title="Sent to ${esc(g.dev_branch)} from your checkout; Promote brings it back">sent work to promote</span>` : "",
     busy ? `<span class="s-running">release #${r.id}</span>` : r && r.state === "failed" ? `<span class="err">release failed</span>` : "",
     !g.error && g.ahead.length ? `${g.ahead.length} to promote` : "",
     !g.error && g.has_app && (!g.has_build || (g.stale && g.built)) ? `<span class="s-review">needs build</span>` : "",
@@ -531,7 +535,7 @@ function projBody(g) {
   const r = g.release, busy = r && !["done", "failed", "cancelled"].includes(r.state);
   const msg = mainMsg[g.name] || (!r ? "" : busy ? `Release #${r.id}: ${esc(r.phase || LABEL[r.state] || r.state)}`
     : r.state === "failed" ? `<span class="err">Release #${r.id} failed: ${esc((r.error || "").split("\n")[0])}</span>` : "");
-  return dirtyHtml(g) + `<div>${esc(g.main_branch)} (golden): <span class="mono">${esc(g.main)}</span>${g.running ? ' · <span class="s-running">running now</span>' : ""}</div>` +
+  return dirtyHtml(g) + sentHtml(g) + `<div>${esc(g.main_branch)} (golden): <span class="mono">${esc(g.main)}</span>${g.running ? ' · <span class="s-running">running now</span>' : ""}</div>` +
     (g.has_app && g.stale && g.built ? `<div class="s-review">The build is of ${esc(g.built)}, older than ${esc(g.main_branch)}. Promote to rebuild.</div>` : "") +
     (g.has_app && !g.has_build ? `<div class="s-review">Not built yet. Promote to build it.</div>` : "") +
     `<div>${esc(g.dev_branch)}: <span class="mono">${esc(g.dev)}</span> · ${g.ahead.length ? `${g.ahead.length} merge(s) waiting to promote` : "nothing waiting"}</div>` +
@@ -573,15 +577,21 @@ function archivedHtml() {
 const files = n => `${n} file${n === 1 ? "" : "s"}`;
 const dirtyCount = g => (g.uncommitted || []).reduce((a, u) => a + u.count, 0);
 function dirtyHtml(g) {
-  const us = g.uncommitted || [];
+  const us = g.uncommitted || [], dev = esc(g.dev_branch), open = g.senddev_open;
   if (!us.length) return "";
+  // Send to dev lands this work on dev as a queued change, then clears it here. One at a time: an open one is linked.
+  const btn = open ? `<a class="btn" data-task="${open}" title="Your changes are being sent to ${dev}. Open the task">Sending to ${dev}… #${open}</a>`
+    : `<button data-p="${esc(g.name)}" data-a="senddev" title="Queue a task that lands these changes on ${dev} through the gate, as any task. Once it has merged, the files that still match what was sent are cleared from your checkout. A copy is kept at refs/ops/senddev-&lt;id&gt;.">Send to ${dev}</button>`;
   return `<div class="callout dirty"><div class="lines">` + us.map(u => {
     const more = u.count - u.paths.length, list = u.paths.join("\n") + (more > 0 ? `\n…and ${more} more` : "");
     return `<details data-k="dirty:${esc(u.repo)}"><summary title="${esc(list)}">${files(u.count)} changed in <span class="mono">${esc(u.repo)}</span>
       ${u.count === 1 ? "is" : "are"} not on ${esc(g.dev_branch)} and won't be in any release${u.oldest ? ` (oldest change: ${day(u.oldest * 1000)})` : ""}</summary>
       <ul class="ahead mono">${u.paths.map(x => `<li>${esc(x)}</li>`).join("")}${more > 0 ? `<li class="muted">…and ${more} more</li>` : ""}</ul></details>`;
-  }).join("") + `</div></div>`;
+  }).join("") + `</div>${btn}</div>`;
 }
+// Work Send to dev took out of your checkout that is on dev but not yet in main: Promote brings it back.
+const sentHtml = g => { const ids = g.senddev_pending || [];
+  return ids.length ? `<div class="callout">Sent from your checkout by ${ids.map(taskLink).join(", ")}: On ${esc(g.dev_branch)}, not released yet. Promote to get ${ids.length === 1 ? "it" : "them"} back here.</div>` : ""; };
 
 // ---------------------------------------------------------------- deploys: the card's section and the Deploy dialog
 const day = iso => { const d = new Date(iso), y = d.getFullYear() !== new Date().getFullYear();
@@ -792,7 +802,7 @@ function renderList() {
       const sub = [
         pf ? "" : `<span class="ptag">${esc(P(t.project).title)}${archivedP(t.project) ? " (archived)" : ""}</span>`,
         t.depends_on ? `after #${t.depends_on}` : "",
-        t.kind === "release" || t.kind === "deploy" ? `<span class="ktag">${t.kind}</span>` : "",
+        t.kind === "release" || t.kind === "deploy" ? `<span class="ktag">${t.kind}</span>` : t.kind === "senddev" ? `<span class="ktag">send to dev</span>` : "",
         t.parent ? `from #${t.parent}` : "",
         t.origin ? `sent by ${esc(t.origin.words)}` : "",
         t.hold ? "hold for review" : "",
@@ -859,7 +869,7 @@ async function loadDetail(id, fresh) {
   if (t.state === "paused") actions += btn("resume", "▶ Resume", "primary");
   if (["failed", "cancelled"].includes(t.state)) actions += btn("retry", "Retry");
   if (!["done", "cancelled"].includes(t.state)) actions += btn("cancel", "Cancel", "danger");
-  if (t.kind === "task" && !["done", "failed", "cancelled"].includes(t.state))
+  if ((t.kind === "task" || t.kind === "senddev") && !["done", "failed", "cancelled"].includes(t.state))
     actions += `<label title="Once it merges into dev, queue a release, as Promote does"><input type="checkbox" data-act="release" ${t.auto_release ? "checked" : ""}> Release after merge</label>`;
 
   const html = `
