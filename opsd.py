@@ -1791,7 +1791,7 @@ def main_info(p, s=None):
             "auto_release": s.get(f"auto_release:{p.name}") == "1",  # release_default(p), from the snapshot
             "gate": [g["name"] for g in p.gate], "release": rel,
             "deploys": deploys, "deploys_loading": bool(p.deploys) and f.get("deploys") is None,
-            "deploy_open": opens[0]["id"] if opens else None}
+            "deploy_open": opens[0]["id"] if opens else None, "uncommitted": f.get("uncommitted") or []}
 
 
 # ---------------------------------------------------------------- project facts for the dashboard
@@ -1826,11 +1826,63 @@ def read_facts(p, deploys=True):
         f["deploys"] = deploy_facts(p, f["main"]) if deploys else None  # tags, and version commands
     except Exception as e:
         f = {"error": str(e)}
+    f["uncommitted"] = uncommitted(p)
     f["at"] = time.time() if deploys or not p.deploys else 0  # without its deploys: reread at once
     with FACTS_LOCK:
         FACTS[p.name] = f
         FACTS_BUSY.discard(p.name)
     return f
+
+
+UNCOMMITTED_PATHS = 50  # paths kept per repo, for the dashboard to list
+UNCOMMITTED_STAT = 2000  # paths whose mtime is read for the oldest change: a huge untracked tree stays cheap
+
+
+def uncommitted(p):
+    """Uncommitted files in your checkout, per repo: on no branch, so no worker sees them and no release ships
+    them. [{"repo": path, "count", "paths": first few, "oldest": mtime or None}], only repos that have any."""
+    out = []
+    for r in p.parts:
+        try:  # --no-optional-locks: a status every few seconds must not take index.lock from under your git
+            st = subprocess.run(["git", "--no-optional-locks", "status", "--porcelain", "-z", "--untracked-files=all"],
+                                cwd=r.src, capture_output=True, text=True, timeout=10)
+            if st.returncode:
+                continue
+            paths, it = [], iter(st.stdout.split("\0"))
+            for e in it:
+                if len(e) > 3:
+                    paths.append(e[3:])
+                    if e[0] in "RC":
+                        next(it, None)  # a rename's or copy's old path: one change, not two
+            if not paths:
+                continue
+            times = []
+            for x in paths[:UNCOMMITTED_STAT]:
+                try:
+                    times.append(os.lstat(r.src / x).st_mtime)
+                except OSError:  # deleted: nothing to date
+                    pass
+            out.append({"repo": str(r.src).replace(str(HOME), "~", 1), "count": len(paths),
+                        "paths": paths[:UNCOMMITTED_PATHS], "oldest": min(times) if times else None})
+        except Exception:  # the other facts matter more than this one
+            continue
+    return out
+
+
+def files(n):
+    return "file" if n == 1 else "files"
+
+
+def day(ts):
+    """A date as the dashboard shows one: 20 Oct, with the year when it isn't this one."""
+    t = time.localtime(ts)
+    return f"{t.tm_mday} {time.strftime('%b', t)}" + (f" {t.tm_year}" if t.tm_year != time.localtime().tm_year else "")
+
+
+def uncommitted_warning(p):
+    """The line the New task form and `opsd.py add` show while your checkout has uncommitted files, or ""."""
+    n = sum(u["count"] for u in facts(p).get("uncommitted") or [])
+    return f"Workers start from dev and won't see your {n} uncommitted {files(n)}." if n else ""
 
 
 def facts(p):
@@ -2676,6 +2728,11 @@ def ops_note(p, did, extra=""):
              (p.name,))
     parts = ["queue: " + ("; ".join(f"#{t['id']} {t['state']} {t['title']}" for t in live[:25]) or "empty"),
              "release after merge: " + ("on" if release_default(p) else "off") + " by default for this project"]
+    dirty = facts(p).get("uncommitted") or []
+    if dirty:
+        parts.append("checkout: " + "; ".join(
+            f"{u['count']} uncommitted {files(u['count'])} in {u['repo']} (not on {p.dev}"
+            + (f"; oldest {day(u['oldest'])}" if u["oldest"] else "") + ")" for u in dirty))
     parts += news(did) + ([extra] if extra else [])
     return "[ops: " + " | ".join(parts) + "]\n\n"
 
@@ -3988,8 +4045,10 @@ class H(BaseHTTPRequestHandler):
             if not (b.get("body") or "").strip():
                 raise ValueError("describe the task")
             dep = int(str(b["depends_on"]).lstrip("#")) if str(b.get("depends_on") or "").strip() else None
-            return {"id": add_task(b["project"], b["body"], b.get("title", ""), b.get("priority", 0),
-                                   b.get("hold", 0), dep, auto_release=b.get("release"))}
+            tid = add_task(b["project"], b["body"], b.get("title", ""), b.get("priority", 0),
+                           b.get("hold", 0), dep, auto_release=b.get("release"))
+            p = PROJECTS.get(b["project"])
+            return {"id": tid, **({"warning": w} if p and (w := uncommitted_warning(p)) else {})}
         if path == "/api/openspec/new":  # New change: a design chat that drafts one
             return {"id": spec_new(proj(b["project"]), b.get("sub") or "", b.get("text"))}
         if path in ("/api/openspec/init", "/api/openspec/update"):  # Set up, Refresh commands
@@ -4187,7 +4246,9 @@ def serve():
 def post(path, body):
     req = Request(f"http://127.0.0.1:{PORT}{path}", data=json.dumps(body).encode(),
                   headers={"Content-Type": "application/json", "X-Ops": "1"})
-    print(urlopen(req).read().decode())
+    out = urlopen(req).read().decode()
+    print(out)
+    return out
 
 
 def send_cli(argv):
@@ -4230,7 +4291,9 @@ if __name__ == "__main__":
     elif cmd == "send" and args and not args[0].startswith("-"):
         send_cli(args)
     elif cmd == "add" and len(args) >= 2 and args[0] == "-p":
-        post("/api/tasks", {"project": args[1], "body": " ".join(args[2:]) or sys.stdin.read()})
+        out = post("/api/tasks", {"project": args[1], "body": " ".join(args[2:]) or sys.stdin.read()})
+        if w := (json.loads(out or "{}") or {}).get("warning"):
+            print(w, file=sys.stderr)
     elif cmd in ("archive-project", "unarchive-project") and len(args) == 1:
         try:
             post(f"/api/projects/{quote(args[0], safe='')}/{cmd.split('-')[0]}", {})

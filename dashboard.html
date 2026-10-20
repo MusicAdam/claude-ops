@@ -79,6 +79,11 @@ pre { white-space: pre-wrap; margin: 0; }
 details summary { cursor: pointer; color: var(--muted); margin: 10px 0 6px; }
 .err { color: var(--bad); }
 ul.ahead { margin: 6px 0 0; padding-left: 18px; max-height: 160px; overflow: auto; }
+/* Uncommitted work in your checkout: one line per repo. The row leaves room on the right for a button. */
+.dirty { display: flex; gap: 10px; align-items: flex-start; white-space: normal; margin: 0 0 10px; }
+.dirty .lines { flex: 1; min-width: 0; }
+.dirty details summary { color: var(--ink); margin: 0; }
+.dirty details + details { margin-top: 6px; }
 .tabs { display: flex; gap: 4px; }
 .tabs button { background: none; border-color: transparent; color: var(--muted); }
 .tabs button.on { background: var(--chip); border-color: var(--line); color: var(--ink); font-weight: 600; }
@@ -230,6 +235,7 @@ a[data-task] { color: var(--accent); cursor: pointer; }
         <label title="Build it and wait for you to play and approve before merging"><input type="checkbox" id="hold"> Hold for my review</label>
         <label title="Once it merges into dev, queue a release, as Promote does. Tasks it splits into release together, after the last one merges. Starts as the project's default, set on its card."><input type="checkbox" id="autorel"> Release after merge</label>
       </div>
+      <div class="callout hidden" id="dirtywarn"></div>
       <div class="row"><button class="primary" id="submit">Queue task</button> <span class="muted">⌘↩</span><span id="formmsg" class="err"></span></div>
     </div>
     <div id="list"></div>
@@ -350,6 +356,10 @@ function renderProjects() {
 function syncRelease() {
   const name = pf || $("#tproj").value, on = !!P(name).auto_release, k = `${name}:${on}`, el = $("#autorel");
   if (el.dataset.k !== k) { el.checked = on; el.dataset.k = k; }
+  // Warn, don't block: work only in your checkout is not in what a worker starts from.
+  const n = dirtyCount(P(name)), w = $("#dirtywarn");
+  w.textContent = n ? `Workers start from dev and won't see your ${n} uncommitted ${n === 1 ? "file" : "files"}.` : "";
+  w.classList.toggle("hidden", !n);
 }
 $("#tproj").addEventListener("change", syncRelease);
 
@@ -412,6 +422,7 @@ function projStats(g) {
     !g.error && g.has_app && (!g.has_build || (g.stale && g.built)) ? `<span class="s-review">needs build</span>` : "",
     g.running ? `<span class="s-running">${esc(g.main_branch)} running</span>` : "",
     g.auto_release ? `<span title="New tasks release after they merge">auto release</span>` : "",
+    dirtyCount(g) ? `<span class="s-review" title="Files in your checkout that are not on ${esc(g.dev_branch)}">${files(dirtyCount(g))} uncommitted</span>` : "",
   ].filter(Boolean).join(" · ") || (g.error ? "" : "idle");
 }
 function projBody(g) {
@@ -419,11 +430,11 @@ function projBody(g) {
   const r = g.release, busy = r && !["done", "failed", "cancelled"].includes(r.state);
   const msg = mainMsg[g.name] || (!r ? "" : busy ? `Release #${r.id}: ${esc(r.phase || LABEL[r.state] || r.state)}`
     : r.state === "failed" ? `<span class="err">Release #${r.id} failed: ${esc((r.error || "").split("\n")[0])}</span>` : "");
-  return `<div>${esc(g.main_branch)} (golden): <span class="mono">${esc(g.main)}</span>${g.running ? ' · <span class="s-running">running now</span>' : ""}</div>` +
+  return dirtyHtml(g) + `<div>${esc(g.main_branch)} (golden): <span class="mono">${esc(g.main)}</span>${g.running ? ' · <span class="s-running">running now</span>' : ""}</div>` +
     (g.has_app && g.stale && g.built ? `<div class="s-review">The build is of ${esc(g.built)}, older than ${esc(g.main_branch)}. Promote to rebuild.</div>` : "") +
     (g.has_app && !g.has_build ? `<div class="s-review">Not built yet. Promote to build it.</div>` : "") +
     `<div>${esc(g.dev_branch)}: <span class="mono">${esc(g.dev)}</span> · ${g.ahead.length ? `${g.ahead.length} merge(s) waiting to promote` : "nothing waiting"}</div>` +
-    (g.ahead.length ? `<details><summary>What would be promoted</summary><ul class="ahead mono">${g.ahead.map(l => `<li>${esc(l)}</li>`).join("")}</ul></details>` : "") +
+    (g.ahead.length ? `<details data-k="ahead"><summary>What would be promoted</summary><ul class="ahead mono">${g.ahead.map(l => `<li>${esc(l)}</li>`).join("")}</ul></details>` : "") +
     `<div class="muted" style="font-size:12px;margin-top:4px">gate: ${g.gate.length ? esc(g.gate.join(", ")) : "none configured"}</div>
     <div class="row">
       ${g.can_launch ? `<button class="primary" data-p="${g.name}" data-a="play" ${g.has_build ? "" : "disabled"}>Play ${esc(g.main_branch)}</button>` : ""}
@@ -455,6 +466,20 @@ function archivedHtml() {
       <span class="muted">${a.open_tasks ? `${a.open_tasks} unfinished task${a.open_tasks === 1 ? "" : "s"}` : "no unfinished tasks"}</span>
       <span style="flex:1"></span><button data-restore="${esc(a.name)}" title="Put it back on the queue, as it was">Restore</button></div>`).join("") +
     (archMsg ? `<div class="err" style="margin:6px 8px;white-space:pre-wrap">${esc(archMsg)}</div>` : "") + `</details>`;
+}
+
+// Uncommitted files in your checkout (each repo of a workspace): no worker sees them and no release ships them.
+const files = n => `${n} file${n === 1 ? "" : "s"}`;
+const dirtyCount = g => (g.uncommitted || []).reduce((a, u) => a + u.count, 0);
+function dirtyHtml(g) {
+  const us = g.uncommitted || [];
+  if (!us.length) return "";
+  return `<div class="callout dirty"><div class="lines">` + us.map(u => {
+    const more = u.count - u.paths.length, list = u.paths.join("\n") + (more > 0 ? `\n…and ${more} more` : "");
+    return `<details data-k="dirty:${esc(u.repo)}"><summary title="${esc(list)}">${files(u.count)} changed in <span class="mono">${esc(u.repo)}</span>
+      ${u.count === 1 ? "is" : "are"} not on ${esc(g.dev_branch)} and won't be in any release${u.oldest ? ` (oldest change: ${day(u.oldest * 1000)})` : ""}</summary>
+      <ul class="ahead mono">${u.paths.map(x => `<li>${esc(x)}</li>`).join("")}${more > 0 ? `<li class="muted">…and ${more} more</li>` : ""}</ul></details>`;
+  }).join("") + `</div></div>`;
 }
 
 // ---------------------------------------------------------------- deploys: the card's section and the Deploy dialog
@@ -566,8 +591,8 @@ document.addEventListener("keydown", e => {
 });
 function renderMains() {
   const ps = state.projects.filter(p => inView(p.name)), fx = pf || focus;
-  // Keep an open "What would be promoted" open across the 3-second refresh.
-  const open = !!document.querySelector("#mains .prow.on details[open]");
+  // Keep an open "What would be promoted" or list of uncommitted files open across the 3-second refresh.
+  const open = [...document.querySelectorAll("#mains .prow.on details[open]")].map(d => d.dataset.k);
   let html = ps.length ? `<div class="card projs"><h2>Projects</h2>` + ps.map(g => {
     const on = g.name === fx;
     return `<div class="prow ${on ? "on" : ""}" data-proj="${esc(g.name)}">
@@ -577,7 +602,7 @@ function renderMains() {
   }).join("") + `</div>` : `<div class="card"><h2>No projects yet</h2>Click <b>+ Project</b> and give the path of a git repository, or of a folder that holds several.</div>`;
   html += archivedHtml();
   if (!put($("#mains"), html)) return;  // nothing changed: leave the page (and its open sections) alone
-  if (open) { const d = document.querySelector("#mains .prow.on details"); if (d) d.open = true; }
+  document.querySelectorAll("#mains .prow.on details").forEach(d => { if (open.includes(d.dataset.k)) d.open = true; });
   document.querySelectorAll("#mains .phead").forEach(h => h.onclick = () => {
     const name = h.parentElement.dataset.proj;
     // Opening a project also filters to it; closing it shows every project again.

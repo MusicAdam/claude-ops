@@ -71,6 +71,11 @@ several (see [Workspaces](#workspaces)). Read it, adjust it, then click **Reload
   of them as they were is kept at `refs/ops/release-<id>`. If the worker can't merge them, the release needs
   you: answer with how to combine them and it tries again, or commit or stash them and it goes on by itself.
   Either way main and its build stay as they were until it moves.
+- **Carried changes are kept safe, not shipped.** Uncommitted work in your checkout is never part of a release,
+  and workers don't see it: they start from dev. While the checkout (any repo of a workspace) has uncommitted
+  files, the project card shows a banner with how many, where, and the date of the oldest change; expand it for
+  the paths. The New task form warns that workers won't see them, `opsd.py add` prints the same warning, and a
+  design chat's `[ops: ...]` line names them. Commit them to dev for them to ship.
 - With nothing new on dev, Promote only rebuilds main (no gate, no checker).
 - **Release after merge** (a checkbox on a new task, and on its page until it finishes) promotes for you:
   once the task merges into dev, the queue queues a release, the same one Promote makes. If a release is
@@ -303,6 +308,8 @@ settings, `CLAUDE.md` and MCP servers. Each chat keeps one Claude session across
   you can answer prompts. Don't send from both places at once.
 - Edits land in your checkout and nothing else. Uncommitted ones survive a release: it merges them onto the
   new main and puts them back.
+- Those edits are not on dev, so they don't ship and workers don't see them until you commit them to dev. The
+  project card shows a banner while the checkout has any.
 
 ## Projects hand work to each other
 
