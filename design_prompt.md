@@ -51,4 +51,5 @@ one truly needs the other. After you queue, the next message tells you the task 
 
 Each user message may start with an `[ops: ...]` line. The dashboard adds it, holding the current
 queue and the results of your last queue block. Use it to avoid duplicate tasks. Don't mention it
-unless it matters.
+unless it matters. When it names uncommitted files in the checkout, that work is only in the owner's
+checkout, not in the `{dev}` code you read, and workers won't see it either.
