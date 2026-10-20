@@ -4,6 +4,7 @@
   opsd.py serve                        run the dashboard + scheduler (http://127.0.0.1:8788)
   opsd.py add-project PATH [NAME]      detect PATH and write ~/.claude-ops/projects/NAME.toml
   opsd.py add -p NAME "text..."        queue a task through the running daemon
+  opsd.py deploy -p NAME TARGET [--version same|patch|minor|major|X.Y.Z] [--note TEXT]   deploy a [[deploy]] target
   opsd.py pause-all | resume-all       pause every running task (it stops now, resumable) / resume every paused one
   opsd.py guard --daemon PID [--root DIR]   PreToolUse hook: refuse Bash commands that stop processes the session did not start
 
@@ -12,16 +13,18 @@ Per project (paths come from ~/.claude-ops/projects/<name>.toml):
   <worktrees>/dev        integration worktree on the dev branch. Finished tasks merge here.
   <worktrees>/main       build of main, the golden version (detached). Changes only when a release passes.
   <worktrees>/t<id>      one worktree per task, branch task/<id>-<slug> (a release: detached at its dev snapshot).
+  <worktrees>/deploy     where deploy targets run (detached). Reset for each deploy but never cleaned.
 
 A workspace (`repos = [...]` in its config) is a folder that holds several git repos, such as a backend and an
 app. Each of the paths above is then a folder with a copy of the workspace's own files and one worktree per repo,
 and every repo has its own main, dev and task branches.
 """
-import base64, json, os, re, secrets, shlex, shutil, signal, sqlite3, subprocess, sys, threading, time, tomllib
+import base64, fnmatch, json, os, re, secrets, shlex, shutil, signal, sqlite3, subprocess, sys, threading, time, tomllib
 import xml.etree.ElementTree as ET
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 from urllib.parse import urlparse
+from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 HOME = Path.home()
@@ -109,7 +112,15 @@ class Project:
         self.design_notes = c.get("design", {}).get("notes", "").strip()
         self.dev_wt = self.wt / "dev"
         self.main_wt = self.wt / "main"
+        self.deploy_wt = self.wt / "deploy"  # persistent: build output survives from one deploy to the next
+        self.deploys = deploy_targets(self, c.get("deploy", []))
         self.lock = threading.Lock()  # merges into dev and promotes
+
+    def target(self, name):
+        t = next((t for t in self.deploys if t.name == name), None)
+        if not t:
+            raise ValueError(f"{self.name} has no deploy target {name!r}")
+        return t
 
     def revs(self, ref):
         """ref's commit in each repo, space-separated in repos order: one sha for a plain project."""
@@ -140,6 +151,64 @@ class Project:
         return self.port_base + tid % 90
 
 
+class Target:
+    """One [[deploy]] target: a command the daemon runs only when you click Deploy. error is why its config can't
+    be deployed, or None."""
+
+    def __init__(self, c):
+        c = c if isinstance(c, dict) else {}
+        val = lambda k: str(c.get(k) or "").strip()
+        self.name, self.run, self.repo, self.from_, self.note = (val(k) for k in ("name", "run", "repo", "from", "note"))
+        self.repo = self.repo.strip("/")
+        self.version, self.release_tag, self.build_tags = val("version"), val("release_tag"), val("build_tags")
+        self.error = None
+
+    def parts(self, p):
+        """The repos this target deploys: its repo, or all of them."""
+        return [r for r in p.parts if r.sub == self.repo] if self.repo else p.parts
+
+    def folder(self, root):
+        """Where its commands run: its repo's folder in a project worktree, or the worktree root."""
+        return Path(root) / self.repo if self.repo else Path(root)
+
+
+def deploy_targets(p, items):
+    """The [[deploy]] targets, each with error set if its config is wrong (it then can't be deployed)."""
+    out, errs = [], {}
+    for k, c in enumerate(items if isinstance(items, list) else [], 1):
+        t = Target(c)
+        e = errs[id(t)] = []
+        if not t.name:
+            t.name = f"[[deploy]] #{k}"
+            e.append("it has no name")
+        elif any(o.name == t.name for o in out):
+            e.append(f"another target is also named {t.name!r}")
+        if not t.run:
+            e.append("it has no run command")
+        if t.repo and t.repo not in p.repos:
+            e.append(f"repo {t.repo!r} is not one of repos" if p.repos else "repo is only for a workspace")
+        for key in ("release_tag", "build_tags"):
+            v = getattr(t, key)
+            if v and not t.version:
+                e.append(f"{key} needs version")
+            elif v and "{version}" not in v:
+                e.append(f"{key} has no {{version}}")
+        out.append(t)
+    names = {t.name for t in out}
+    for t in out:
+        if t.from_ and t.from_ not in names:
+            errs[id(t)].append(f"from {t.from_!r} names no target")
+        seen, cur = {t.name}, t
+        while cur and cur.from_:  # a chain that comes back round can never deploy: each waits for the next
+            if cur.from_ in seen:
+                errs[id(t)].append(f"its from chain loops back to {cur.from_!r}")
+                break
+            seen.add(cur.from_)
+            cur = next((o for o in out if o.name == cur.from_), None)
+        t.error = "; ".join(errs[id(t)]) or None
+    return out
+
+
 PROJECTS = {}
 
 
@@ -149,6 +218,9 @@ def load_projects():
     for f in sorted(PROJECTS_DIR.glob("*.toml")):
         try:
             p = Project(f)
+            for t in p.deploys:
+                if t.error:
+                    print(f"project {f.name}: deploy target {t.name}: {t.error}", flush=True)
             old = PROJECTS.get(p.name)
             if old:
                 p.lock = old.lock
@@ -215,7 +287,7 @@ def copy_workspace_files(p, dest):
         subprocess.run(["cp", "-cR", str(src), str(out)], capture_output=True)
 
 
-def prepare_worktree(p, dest, src_first=None):
+def prepare_worktree(p, dest, src_first=None, setup=True):
     """Clone warm caches (APFS clone, near-instant) and run the project's setup commands."""
     for rel in p.clone:
         if (dest / rel).exists():
@@ -225,7 +297,7 @@ def prepare_worktree(p, dest, src_first=None):
                 (dest / rel).parent.mkdir(parents=True, exist_ok=True)
                 subprocess.run(["cp", "-cR", str(src / rel), str(dest / rel)], capture_output=True)
                 break
-    for cmd in p.setup:
+    for cmd in p.setup if setup else []:
         subprocess.run(cmd, shell=True, cwd=dest, capture_output=True,
                        env=dict(os.environ, OPS_REPO=str(p.repo)))
 
@@ -378,7 +450,8 @@ def init_db():
         kind TEXT DEFAULT 'task', base TEXT, pid_start TEXT)""")
     cols = {r["name"] for r in q("PRAGMA table_info(tasks)")}
     for col, decl in (("kind", "TEXT DEFAULT 'task'"), ("base", "TEXT"),  # databases from before releases
-                      ("pid_start", "TEXT"), ("paused_by", "TEXT"), ("auto_release", "INTEGER DEFAULT 0")):
+                      ("pid_start", "TEXT"), ("paused_by", "TEXT"), ("auto_release", "INTEGER DEFAULT 0"),
+                      ("deploy", "TEXT")):  # a deploy's target and choices, as JSON
         if col not in cols:
             q(f"ALTER TABLE tasks ADD COLUMN {col} {decl}")
     q("CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY, task_id INTEGER, ts REAL, text TEXT)")
@@ -441,17 +514,21 @@ def ev(tid, text):
     stale_facts((task(tid) or {}).get("project"))  # a step that may have moved dev or main, or quit the build
 
 
-def add_task(project, body, title="", priority=0, hold=0, depends_on=None, parent=None, kind="task", auto_release=None):
-    """auto_release None takes the project's default ("Release after merge" on the project)."""
+def add_task(project, body, title="", priority=0, hold=0, depends_on=None, parent=None, kind="task", auto_release=None,
+             deploy=None):
+    """auto_release None takes the project's default ("Release after merge" on the project).
+    A deploy (kind "deploy") is made only by queue_deploy: you clicked Deploy, or ran `opsd.py deploy`."""
     p = proj(project)
     if auto_release is None:
         auto_release = release_default(p)
     body = body.strip()
     title = (title or (title_of(body) if body else "untitled")).strip()[:120]
-    tid = q("INSERT INTO tasks (project, title, body, priority, hold, depends_on, parent, created, kind, auto_release) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?)",
+    if (kind == "deploy") != bool(deploy):
+        raise ValueError("a deploy needs its target, and only a deploy has one")
+    tid = q("INSERT INTO tasks (project, title, body, priority, hold, depends_on, parent, created, kind, auto_release, "
+            "deploy) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
             (project, title, body, int(priority), int(bool(hold)), depends_on or None, parent, time.time(), kind,
-             int(bool(auto_release) and kind == "task")))
+             int(bool(auto_release) and kind == "task"), json.dumps(deploy) if deploy else None))
     ev(tid, "queued" + (f" after #{depends_on}" if depends_on else ""))
     return tid
 
@@ -926,6 +1003,8 @@ def task_steer(tid, text):
         pipe = STEER_PIPES.get(tid)
         if t["state"] not in STEER_STATES:
             raise ValueError(f"the worker is not working (task is {t['state']})")
+        if t["kind"] == "deploy":
+            raise ValueError("a deploy runs its own command; there is no worker to talk to")
         if t["kind"] == "release" and not pipe:
             raise ValueError("the release checker is not running right now")
         mid = q("INSERT INTO task_msgs (task_id, role, text, ts) VALUES (?,?,?,?)", (tid, "steer", text, time.time()))
@@ -946,7 +1025,7 @@ def steered_prompt(when):
 
 # ---------------------------------------------------------------- gate
 
-def run_step(key, label, cmd, cwd, log_name):
+def run_step(key, label, cmd, cwd, log_name, env=None):
     """Run a shell step in cwd, output appended to runs/<key>/<log_name>. Returns (exit code, output tail).
     An int key is a task id: the step shows as its phase and can be cancelled."""
     is_task = isinstance(key, int)
@@ -959,7 +1038,7 @@ def run_step(key, label, cmd, cwd, log_name):
         f.flush()
         start = f.tell()
         proc = subprocess.Popen(["caffeinate", "-i", "/bin/bash", "-lc", cmd], cwd=cwd, stdout=f,
-                                stderr=subprocess.STDOUT, start_new_session=True)
+                                stderr=subprocess.STDOUT, start_new_session=True, env=env)
         if is_task:
             track(key, proc)
         rc = proc.wait()
@@ -1035,7 +1114,7 @@ def ensure_worktree(p, tid):
 def pipeline(tid):
     try:
         t = task(tid)
-        (release_pipeline if t["kind"] == "release" else _pipeline)(proj(t["project"]), tid)
+        {"release": release_pipeline, "deploy": deploy_pipeline}.get(t["kind"], _pipeline)(proj(t["project"]), tid)
     except Exception as e:  # keep the daemon alive; surface the error on the task
         if not stopped(tid):
             upd(tid, state="failed", phase="", error=f"orchestrator error: {e}", finished=time.time())
@@ -1269,6 +1348,7 @@ def auto_release(p):
 ANSWERED = "The user answered your question:"  # how an answer reaches a task's next turn
 WAIT = "waiting on you"  # the phase of a release that needs you because something is in the way of moving main
 WAIT_CHANGES = "waiting on your changes"  # ... because your uncommitted changes could not be carried over
+WAIT_MAIN = "waiting on main"  # a deploy's commits can't fast-forward main: it moved during the deploy
 
 
 class NeedsYou(Exception):
@@ -1280,12 +1360,12 @@ def wait_for_you(p, tid, why, phase):
     answer."""
     upd(tid, state="needs_input", phase=phase, question=why)
     ev(tid, "needs you: " + why)
-    notify(f"{p.title}: release needs you", f"#{tid}: {why}")
+    notify(f"{p.title}: {task(tid)['kind']} needs you", f"#{tid}: {why}")
 
 
 def unblock_releases():
-    """Requeue each release that needs you once you've cleared its way: quit the build, switched the worktree off
-    main, or (for changes that could not be carried over) committed or stashed them."""
+    """Requeue each release (or deploy moving main) that needs you once you've cleared its way: quit the build,
+    switched the worktree off main, or (for changes that could not be carried over) committed or stashed them."""
     for t in q("SELECT * FROM tasks WHERE kind='release' AND state='needs_input' AND phase IN (?,?)",
                (WAIT, WAIT_CHANGES)):
         p = PROJECTS.get(t["project"])
@@ -1297,6 +1377,18 @@ def unblock_releases():
             continue
         if q("UPDATE tasks SET state='queued', phase='', question=NULL WHERE id=? AND state='needs_input' "
              "RETURNING id", (t["id"],)):  # unless you answered or cancelled it just now
+            ev(t["id"], "the way is clear; going on")
+    for t in q("SELECT * FROM tasks WHERE kind='deploy' AND state='needs_input' AND phase IN (?,?,?)",
+               (WAIT, WAIT_CHANGES, WAIT_MAIN)):  # a deploy whose commits are waiting to move main
+        p = PROJECTS.get(t["project"])
+        try:
+            if not p or deploy_in_the_way(p, t):
+                continue
+        except Exception as e:
+            print(f"unblock #{t['id']}:", e, flush=True)
+            continue
+        if q("UPDATE tasks SET state='queued', phase='', question=NULL WHERE id=? AND state='needs_input' "
+             "RETURNING id", (t["id"],)):
             ev(t["id"], "the way is clear; going on")
 
 
@@ -1467,6 +1559,8 @@ def schedule_once():
             dep = task(t["depends_on"])
             if dep and dep["state"] != "done":
                 continue
+        if exclusive_blocker(t):
+            continue
         upd(t["id"], state="running", phase="starting", pid=None, pid_start=None)
         if task(t["id"])["state"] != "running":  # paused or cancelled just now
             continue
@@ -1475,6 +1569,21 @@ def schedule_once():
         THREADS[t["id"]] = th
         th.start()
         slots -= 1
+
+
+def exclusive_blocker(t):
+    """The deploy or release of t's project that t has to wait for, or None. A project runs one deploy at a time,
+    and never a deploy and a release at once: both move main. Releases are one at a time already (queue_release).
+    An open one blocks unless it is queued behind t too, so two waiting ones never wait for each other."""
+    if t["kind"] not in ("deploy", "release"):
+        return None
+    kinds = ("deploy", "release") if t["kind"] == "deploy" else ("deploy",)
+    for o in q(f"SELECT id,kind,state,priority FROM tasks WHERE project=? AND id!=? AND kind IN "
+               f"({','.join('?' * len(kinds))}) AND state NOT IN (?,?,?) ORDER BY priority DESC, id",
+               (t["project"], t["id"], *kinds, *ENDED)):
+        if o["state"] != "queued" or (-o["priority"], o["id"]) < (-t["priority"], t["id"]):
+            return o
+    return None
 
 
 RESTART_NOTE = ("The task queue restarted while you were working. Any command you were running was stopped. "
@@ -1486,7 +1595,15 @@ PAUSE_NOTE = ("The user paused this task while you were working and has now resu
 
 def recover():
     """On start: resume the tasks the last daemon paused as it stopped, and requeue any it left mid-flight
-    (it crashed or was killed) so they resume their Claude session. Tasks you paused stay paused."""
+    (it crashed or was killed) so they resume their Claude session. Tasks you paused stay paused.
+    A deploy cut off while its command ran is not run again by itself (it publishes things): it fails, and Retry
+    starts it over. One whose command had finished goes on moving main."""
+    for t in q(f"SELECT id FROM tasks WHERE kind='deploy' AND start_at!='promote' AND (state IN "
+               f"({','.join('?' * len(ACTIVE))}) OR (state='paused' AND paused_by='restart'))", ACTIVE):
+        q("UPDATE tasks SET state='failed', phase='', paused_by=NULL, pid=NULL, pid_start=NULL, finished=?, error=? "
+          "WHERE id=?", (time.time(), "claude-ops restarted while the deploy ran, and stopped its command. Retry "
+                                      "starts the deploy over.", t["id"]))
+        ev(t["id"], "failed: claude-ops restarted during the deploy")
     for t in q("SELECT id FROM tasks WHERE state='paused' AND paused_by='restart'"):
         upd(t["id"], state="queued", paused_by=None)
         ev(t["id"], "resumed after the restart")
@@ -1574,6 +1691,10 @@ def main_info(p, s=None):
     built = s.get(f"main_built:{p.name}", "")
     rel = q("SELECT id,state,phase,error FROM tasks WHERE project=? AND kind='release' ORDER BY id DESC LIMIT 1",
             (p.name,), one=True)
+    opens = q("SELECT id,state,deploy FROM tasks WHERE project=? AND kind='deploy' AND state NOT IN (?,?,?) "
+              "ORDER BY state='queued', priority DESC, id", (p.name, *ENDED))  # the one under way first
+    deploys = [dict(x, open=next((o["id"] for o in opens if json.loads(o["deploy"] or "{}").get("target") == x["name"]),
+                                 None)) for x in f.get("deploys") or []]
     return {"name": p.name, "title": p.title, "main_branch": p.main, "dev_branch": p.dev,
             "main": p.show(f["main"]), "built": p.show(built), "dev": p.show(f["dev"]), "ahead": f["ahead"],
             "has_app": bool(p.build), "can_launch": bool(p.launch),
@@ -1581,7 +1702,9 @@ def main_info(p, s=None):
             "has_build": bool(p.build) and f["has_build"],
             "paused": s.get(f"paused:{p.name}") == "1",
             "auto_release": s.get(f"auto_release:{p.name}") == "1",  # release_default(p), from the snapshot
-            "gate": [g["name"] for g in p.gate], "release": rel}
+            "gate": [g["name"] for g in p.gate], "release": rel,
+            "deploys": deploys, "deploys_loading": bool(p.deploys) and f.get("deploys") is None,
+            "deploy_open": opens[0]["id"] if opens else None}
 
 
 # ---------------------------------------------------------------- project facts for the dashboard
@@ -1590,14 +1713,14 @@ def main_info(p, s=None):
 # FACTS at once and rereads an entry older than FACTS_TTL behind the request: what it shows is at most a poll old.
 # Every task event marks its project's entry stale and rereads it, so a merge or promote shows on the next poll.
 
-FACTS = {}  # project name -> {"at": when read, "main", "dev": revs, "ahead": [lines], "running", "has_build"}
+FACTS = {}  # project name -> {"at": when read, "main", "dev": revs, "ahead": [lines], "running", "has_build", "deploys"}
 FACTS_TTL = 5
 FACTS_BUSY = set()  # projects being reread now, so a burst of requests starts one reread, not one each
 FACTS_LOCK = threading.Lock()
 AHEAD = {}  # (repo, main sha, dev sha) -> dev's first-parent log since main; a pair of shas never changes
 
 
-def read_facts(p):
+def read_facts(p, deploys=True):
     try:
         main, dev, ahead = [], [], []
         for r in p.parts:
@@ -1613,9 +1736,10 @@ def read_facts(p):
         f = {"main": " ".join(main), "dev": " ".join(dev), "ahead": ahead[:30],
              "running": app_running(p, p.main_wt),
              "has_build": not p.artifact or (p.main_wt / p.artifact).exists()}
+        f["deploys"] = deploy_facts(p, f["main"]) if deploys else None  # tags, and version commands
     except Exception as e:
         f = {"error": str(e)}
-    f["at"] = time.time()
+    f["at"] = time.time() if deploys or not p.deploys else 0  # without its deploys: reread at once
     with FACTS_LOCK:
         FACTS[p.name] = f
         FACTS_BUSY.discard(p.name)
@@ -1631,7 +1755,11 @@ def facts(p):
         if f:
             refresh_facts(p)
             return f
-    return read_facts(p)  # the first request after a start or reload waits for it
+    f = read_facts(p, deploys=False)  # the first request after a start or reload waits for git, not version commands
+    if p.deploys:
+        with FACTS_LOCK:
+            refresh_facts(p)
+    return f
 
 
 def refresh_facts(p):
@@ -1990,6 +2118,429 @@ def promote(p, tid, commit, note=""):
     set_setting(f"main_built:{p.name}", commit)
     notify(f"{p.title}: {p.main} updated", f"{p.main} is now {p.show(commit)}")
     return None
+
+
+# ---------------------------------------------------------------- deploys
+# A project lists deploy targets ([[deploy]] in its config): store test builds, store releases, a backend's prod
+# deploy. The daemon runs one only when you click Deploy (or run `opsd.py deploy`), never on its own, from a
+# release or from anything Claude does. It runs the target's command itself, in one persistent worktree per project
+# (<worktrees>/deploy) that is reset but never cleaned, so a build's output is still there for the next target to
+# upload. A deploy records what it shipped (settings key deployed:<project>:<target>). Commits its command makes,
+# such as a build-number bump, move main: the one way main moves without a release.
+
+VERSION = re.compile(r"\d+\.\d+(\.\d+)?")
+APP_STORE = "{tag} is released; the App Store closes a version once approved"
+VERSIONS = {}  # (project, target, version command, commit) -> (when read, version or error); a commit doesn't change
+PEEK_LOCKS = {}  # project name -> lock on its <worktrees>/deploy-peek, where versions are read
+
+
+def deploy_record(p, name, s=None):
+    """What target name last deployed: {commit, revs, time, task, version}, or None."""
+    raw = (s or {}).get(f"deployed:{p.name}:{name}") if s is not None else setting(f"deployed:{p.name}:{name}")
+    try:
+        return json.loads(raw) if raw else None
+    except ValueError:
+        return None
+
+
+def deploy_input(p, t, main=None):
+    """The commit target t deploys now, as revs (one sha per repo): main, or for a `from` target the commit that
+    target last deployed (in its repo; the other repos sit at main). Raises ValueError if there is none yet."""
+    shas = (main or p.revs(p.main)).split()
+    if t.from_:
+        rec = deploy_record(p, t.from_)
+        src = (rec or {}).get("revs", "").split()
+        if not rec:
+            raise ValueError(f"Deploy {t.from_} first.")
+        if len(src) != len(shas):
+            raise ValueError(f"{t.from_} was last deployed with other repos; deploy {t.from_} again first.")
+        shas = [s if not t.repo or r.sub == t.repo else m for r, m, s in zip(p.parts, shas, src)]
+    return " ".join(shas)
+
+
+def target_commit(p, t, revs):
+    """revs as a target sees it (OPS_COMMIT, the record): its repo's sha, or the whole revs string."""
+    return dict(zip((r.sub for r in p.parts), revs.split()))[t.repo] if t.repo else revs
+
+
+def target_show(p, t, commit):
+    return f"{t.repo} {commit[:8]}" if t.repo else p.show(commit)
+
+
+def parse_version(out):
+    """X.Y.Z (or X.Y, read as X.Y.0) as a tuple of 3 ints. Raises ValueError otherwise."""
+    v = (out or "").strip()
+    if not VERSION.fullmatch(v):
+        raise ValueError(f"`version` printed {clip(v, 60)!r}, not a version like 1.2.3")
+    return tuple(int(x) for x in (v + ".0").split(".")[:3]) if v.count(".") == 1 else tuple(map(int, v.split(".")))
+
+
+def vstr(v):
+    return ".".join(map(str, v))
+
+
+def run_version(t, folder):
+    """Run the target's version command in folder: the current version as a tuple. Raises ValueError."""
+    try:
+        r = subprocess.run(["/bin/bash", "-lc", t.version], cwd=folder, capture_output=True, text=True, timeout=60)
+    except subprocess.TimeoutExpired:
+        raise ValueError(f"`{t.version}` ran over 60 s")
+    if r.returncode:
+        raise ValueError(f"`{t.version}` exited {r.returncode}: {clip(r.stderr.strip() or r.stdout, 200)}")
+    return parse_version(r.stdout)
+
+
+def bumps(cur):
+    x, y, z = cur
+    return {"patch": (x, y, z + 1), "minor": (x, y + 1, 0), "major": (x + 1, 0, 0)}
+
+
+def pick_version(choice, cur, released):
+    """The version a deploy ships: same, patch, minor, major or an explicit X.Y.Z higher than cur. released is the
+    current version's release tag if it exists: then that version is closed and "same" is refused."""
+    choice = (choice or "").strip() or ("patch" if released else "same")
+    if choice == "same":
+        if released:
+            raise ValueError(APP_STORE.format(tag=released))
+        return cur
+    if choice in ("patch", "minor", "major"):
+        return bumps(cur)[choice]
+    if not re.fullmatch(r"\d+\.\d+\.\d+", choice):
+        raise ValueError(f"version must be same, patch, minor, major or X.Y.Z, not {choice!r}")
+    v = tuple(map(int, choice.split(".")))
+    if v <= cur:
+        raise ValueError(f"{choice} is not higher than the current version {vstr(cur)}")
+    return v
+
+
+def tags(p, t, pattern, merged=None):
+    """Tags matching pattern (a glob) in the target's repos, newest first by creatordate: [{name, commit, date}].
+    merged: a revs string; only tags reachable from it count."""
+    out = []
+    for r, sha in zip(p.parts, merged.split() if merged else [None] * len(p.parts)):
+        if r not in t.parts(p):
+            continue
+        fmt = ("%(refname:short)%09%(if)%(*objectname)%(then)%(*objectname)%(else)%(objectname)%(end)%09"
+               "%(creatordate:unix)%09%(creatordate:iso-strict)")
+        lines = r.git("for-each-ref", "--sort=-creatordate", f"--format={fmt}",
+                      *(["--merged", sha] if merged else []), f"refs/tags/{pattern}", check=False).splitlines()
+        for l in lines:
+            name, commit, ts, date = l.split("\t")
+            if fnmatch.fnmatchcase(name, pattern):  # for-each-ref also takes a plain name as a prefix of a path
+                out.append({"name": name, "commit": commit, "date": date, "ts": int(ts or 0)})
+    return [{k: v for k, v in x.items() if k != "ts"} for x in sorted(out, key=lambda x: -x["ts"])]
+
+
+def peek_version(p, t, revs):
+    """The target's version at commit revs, read in <worktrees>/deploy-peek (no setup there) so the deploy
+    worktree is left alone. Cached per commit; an error is retried after a minute. Raises ValueError."""
+    key = (p.name, t.name, t.version, t.repo, revs)
+    hit = VERSIONS.get(key)
+    if hit and (not isinstance(hit[1], str) or time.time() - hit[0] < 60):
+        if isinstance(hit[1], str):
+            raise ValueError(hit[1])
+        return hit[1]
+    with PEEK_LOCKS.setdefault(p.name, threading.Lock()):
+        path = p.wt / "deploy-peek"
+        try:
+            copy_workspace_files(p, path)
+            for r, sha in p.pairs(revs):
+                checkout_detached(r, r.at(path), sha)
+            v = run_version(t, t.folder(path))
+        except (ValueError, RuntimeError) as e:
+            VERSIONS[key] = (time.time(), str(e))
+            raise ValueError(str(e))
+    if len(VERSIONS) > 500:
+        VERSIONS.clear()
+    VERSIONS[key] = (time.time(), v)
+    return v
+
+
+def checkout_detached(r, wt, sha):
+    """Put repo r's worktree wt at sha, detached, its tracked files exactly as committed. Never `git clean`:
+    untracked and ignored files (a build's output) stay. Makes the worktree if it is missing."""
+    if not wt.exists():
+        r.git("worktree", "prune", check=False)  # a worktree whose folder was deleted is still registered
+        r.git("worktree", "add", "--detach", str(wt), sha)
+        return
+    r.git("checkout", "--force", "--detach", sha, cwd=wt)
+    r.git("reset", "--hard", "-q", cwd=wt)
+
+
+def version_facts(p, t, revs):
+    """The version picker of a target with `version`, at the commit it would deploy."""
+    try:
+        cur = peek_version(p, t, revs)
+    except ValueError as e:
+        return {"error": f"version picking is off: {e}"}
+    v = vstr(cur)
+    released = next(iter(tags(p, t, t.release_tag.replace("{version}", v))), None) if t.release_tag else None
+    latest_release = next(iter(tags(p, t, t.release_tag.replace("{version}", "*"), revs)), None) \
+        if t.release_tag else None
+    latest_build = next(iter(tags(p, t, t.build_tags.replace("{version}", v))), None) if t.build_tags else None
+    reason = APP_STORE.format(tag=released["name"]) if released else None
+    options = [{"key": "same", "version": v, "disabled": bool(released), "reason": reason}]
+    options += [{"key": k, "version": vstr(n), "disabled": False, "reason": None} for k, n in bumps(cur).items()]
+    return {"current": v, "released": released, "latest_release": latest_release, "latest_build": latest_build,
+            "options": options, "default": "patch" if released else "same"}
+
+
+def target_facts(p, t, main, s):
+    """One target as the dashboard shows it: its config, its last deploy, what it would deploy now, and its version
+    picker. Git and the version command: read in the background with the project's other facts."""
+    rec = deploy_record(p, t.name, s)
+    out = {"name": t.name, "repo": t.repo or None, "from": t.from_ or None, "note": t.note or None, "run": t.run,
+           "has_version": bool(t.version), "error": t.error, "blocked": None, "commit": None, "behind": None,
+           "version": None,
+           "last": rec and {"commit": rec.get("commit"), "show": target_show(p, t, rec.get("commit") or ""),
+                            "time": rec.get("time"), "task": rec.get("task"), "version": rec.get("version")}}
+    if t.error:
+        return out
+    try:
+        revs = deploy_input(p, t, main)
+    except ValueError as e:
+        out["blocked"] = str(e)  # "Deploy swish test first."
+        return out
+    pairs = [(r, sha) for r, sha in p.pairs(revs) if r in t.parts(p)]
+    subject = " · ".join((f"{r.sub}: " if r.sub and not t.repo else "") + r.git("log", "-1", "--format=%s", sha)
+                         for r, sha in pairs)
+    commit = target_commit(p, t, revs)
+    out["commit"] = {"sha": commit, "show": target_show(p, t, commit), "subject": subject}
+    if rec and rec.get("revs"):
+        try:
+            out["behind"] = sum(int(r.git("rev-list", "--count", f"{old}..{sha}"))
+                                for (r, sha), old in zip(p.pairs(revs), rec["revs"].split()) if r in t.parts(p))
+        except RuntimeError:
+            pass  # the recorded commit is gone (a rewritten history): how far behind is unknown
+    if t.version:
+        out["version"] = version_facts(p, t, revs)
+    return out
+
+
+def deploy_facts(p, main):
+    s = settings_now()
+    out = []
+    for t in p.deploys:
+        try:
+            out.append(target_facts(p, t, main, s))
+        except Exception as e:  # one target's trouble must not hide the others
+            out.append({"name": t.name, "error": f"could not read it: {e}"})
+    return out
+
+
+def queue_deploy(p, name, version=None, note=None):
+    """Queue a deploy of target name, ahead of ordinary tasks. Only the Deploy button and `opsd.py deploy` call this:
+    no release, worker, checker or chat ever starts a deploy. Refuses what can't be deployed. Returns the task id."""
+    t = p.target(name)
+    if t.error:
+        raise ValueError(f"{name} can't be deployed: its config is wrong ({t.error})")
+    note = (note or "").strip()
+    if t.note and not note:
+        raise ValueError(f"{t.note} is required to deploy {name}")
+    revs = deploy_input(p, t)
+    title, choice = f"Deploy {name}", None
+    if t.version:
+        vf = version_facts(p, t, revs)
+        if vf.get("error"):
+            raise ValueError(f"can't deploy {name}: {vf['error']}")
+        choice = (version or "").strip() or vf["default"]
+        title += " → " + vstr(pick_version(choice, parse_version(vf["current"]),
+                                          vf["released"] and vf["released"]["name"]))
+    body = (f"Run `{t.run}` in {t.folder(p.deploy_wt)} at {target_show(p, t, target_commit(p, t, revs))}"
+            + (f" (what {t.from_} last deployed)" if t.from_ else f" ({p.main})")
+            + (f", version {choice}" if choice else "") + "." + (f"\n\n{t.note or 'Note'}:\n{note}" if note else ""))
+    return add_task(p.name, body, title, priority=100, kind="deploy",
+                    deploy={"target": name, "version": choice, "note": note})
+
+
+def dlog(tid, text):
+    with open(RUNS / str(tid) / "deploy.log", "a") as f:
+        f.write(f"\n==== {time.ctime()} {text}\n")
+
+
+def log_tail(path, n):
+    try:
+        with open(path, "rb") as f:
+            f.seek(max(0, f.seek(0, 2) - n))
+            return f.read().decode(errors="replace")
+    except OSError:
+        return ""
+
+
+def deploy_pipeline(p, tid):
+    """Check out what the target deploys in the deploy worktree, run its command, record what it shipped, and move
+    main to any commits it made. A retry after the command succeeded only moves main again."""
+    t = task(tid)
+    d = json.loads(t["deploy"] or "{}")
+    try:
+        tg = p.target(d.get("target"))
+    except ValueError as e:
+        return fail(p, tid, str(e))
+    if t["start_at"] != "promote" and not deploy_run(p, tid, tg, d):
+        return
+    deploy_land(p, tid, tg)
+
+
+def deploy_run(p, tid, tg, d):
+    """Run the target's command. True if it succeeded and is recorded; else the task has failed or was stopped."""
+    upd(tid, started=task(tid)["started"] or time.time(), error=None, summary=None)
+    (RUNS / str(tid)).mkdir(parents=True, exist_ok=True)
+    if tg.error:
+        fail(p, tid, f"{tg.name} can't be deployed: its config is wrong ({tg.error})")
+        return False
+    try:
+        revs = deploy_input(p, tg)
+    except ValueError as e:
+        fail(p, tid, str(e))
+        return False
+    path = p.deploy_wt
+    upd(tid, base=revs, worktree=str(path), phase=f"checking out {p.show(revs)}")
+    dlog(tid, f"deploy {tg.name}: checking out {p.show(revs, 12)} in {path}")
+    copy_workspace_files(p, path)
+    fresh = not all(r.at(path).exists() for r in p.parts)
+    for r, sha in p.pairs(revs):
+        checkout_detached(r, r.at(path), sha)
+    if fresh:
+        prepare_worktree(p, path, setup=False)  # the clone list; setup runs below, where its output is logged
+    ev(tid, f"deploying {target_show(p, tg, target_commit(p, tg, revs))} in {path}")
+    key = f"deploy_setup:{p.name}"
+    if p.setup and (fresh or setting(key) != revs):  # setup again only when the commit changed
+        for i, cmd in enumerate(p.setup, 1):
+            rc, tail = run_step(tid, f"setup {i}/{len(p.setup)}", cmd, path, "deploy.log",
+                                env=dict(os.environ, OPS_REPO=str(p.repo)))
+            if stopped(tid):
+                return False
+            if rc:
+                fail(p, tid, f"setup `{cmd}` exited {rc}.\n\n{tail[-2000:]}")
+                return False
+        set_setting(key, revs)
+    version = None
+    if tg.version:
+        upd(tid, phase="reading the version")
+        try:
+            cur = run_version(tg, tg.folder(path))
+            released = next(iter(tags(p, tg, tg.release_tag.replace("{version}", vstr(cur)))), None) \
+                if tg.release_tag else None
+            version = vstr(pick_version(d.get("version"), cur, released and released["name"]))
+        except ValueError as e:  # the version moved since you clicked, so your choice no longer holds
+            fail(p, tid, f"can't pick the version: {e}")
+            return False
+        if task(tid)["title"] != f"Deploy {tg.name} → {version}":
+            upd(tid, title=f"Deploy {tg.name} → {version}")
+        dlog(tid, f"version {vstr(cur)} → {version} ({d.get('version')})")
+    rec = deploy_record(p, tg.name)
+    port = p.port_for(tid)
+    note_file = RUNS / str(tid) / "note.txt"
+    note_file.write_text(d.get("note") or "")
+    env = {k: v for k, v in os.environ.items() if not k.startswith("OPS_")}  # only the deploy's own OPS_ variables
+    env.update(OPS_DEPLOY=tg.name, OPS_COMMIT=target_commit(p, tg, revs),
+               OPS_DEPLOYED=(rec or {}).get("commit") or "", OPS_NOTE=d.get("note") or "",
+               OPS_NOTE_FILE=str(note_file), OPS_PORT=str(port), OPS_TASK_ID=str(tid),
+               **{k: str(v).format(port=port) for k, v in p.env.items()})
+    if version:
+        env["OPS_VERSION"] = version
+    rc, tail = run_step(tid, f"deploying {tg.name}" + (f" {version}" if version else ""), tg.run, tg.folder(path),
+                        "deploy.log", env=env)
+    if stopped(tid):
+        return False
+    if rc:
+        fail(p, tid, f"`{tg.run}` exited {rc}. {p.main} and the record of {tg.name} are unchanged; the deploy "
+                     f"worktree {path} is left as it is. Retry starts the deploy over.\n\n{tail[-2000:]}")
+        return False
+    upd(tid, state="merging", phase="recording the deploy")
+    heads = " ".join(r.git("rev-parse", "HEAD", cwd=r.at(path)) for r in p.parts)
+    moved = [(r, a, b) for r, a, b in zip(p.parts, revs.split(), heads.split()) if a != b]
+    for r, _, b in moved:
+        r.git("update-ref", f"refs/ops/deploy-{tid}", b)
+    bad = [f"{r.sub or 'the repo'} at {b[:8]}" for r, a, b in moved if not is_ancestor(r, a, b)]
+    if bad:
+        fail(p, tid, f"`{tg.run}` succeeded, but it left {', '.join(bad)}, which does not descend from the commit "
+                     f"it deployed. The record of {tg.name} and {p.main} are unchanged; its commits are at "
+                     f"refs/ops/deploy-{tid}.")
+        return False
+    set_setting(f"deployed:{p.name}:{tg.name}", json.dumps(
+        {"commit": target_commit(p, tg, heads), "revs": heads, "input": revs, "time": time.time(), "task": tid,
+         "version": version}))
+    d.update(input=revs, heads=heads, shipped=version)
+    upd(tid, deploy=json.dumps(d), start_at="promote")
+    ev(tid, f"deployed {tg.name}" + (f" {version}" if version else "") + f"; recorded {p.show(heads)}"
+       + (f"; its commits are kept at refs/ops/deploy-{tid}" if moved else ""))
+    return True
+
+
+def deploy_moves(p, t):
+    """A deploy's commits that main lacks: [(part, head)] (a deploy that made none has nothing to move)."""
+    d = json.loads(t["deploy"] or "{}")
+    return [(r, b) for r, a, b in zip(p.parts, d["input"].split(), d["heads"].split())
+            if a != b and not is_ancestor(r, b, p.main)]
+
+
+def deploy_in_the_way(p, t):
+    """What still keeps a deploy that needs you from moving main, or None once it can go on."""
+    todo = deploy_moves(p, t)
+    stuck = [r for r, b in todo if not is_ancestor(r, p.main, b)]
+    if stuck:
+        return f"{p.main} moved during the deploy; its commits are at refs/ops/deploy-{t['id']}"
+    if not todo:
+        return None
+    commit = deploy_commit(p, todo)
+    if t["phase"] == WAIT_CHANGES and clashing(p, commit):
+        return "your changes"
+    return promote_blocker(p, commit)
+
+
+def deploy_commit(p, todo):
+    """main with the deploy's new commits: the revs string promote moves main to."""
+    heads = {r.sub: b for r, b in todo}
+    return " ".join(heads.get(r.sub, sha) for r, sha in p.pairs(p.revs(p.main)))
+
+
+def deploy_land(p, tid, tg):
+    """The command succeeded and is recorded: fast-forward main to the commits it made (a build-number bump), with
+    the [app] build and your uncommitted changes handled as a release does. main must not have moved meanwhile."""
+    t = task(tid)
+    answer = t["next_prompt"] if (t["next_prompt"] or "").startswith(ANSWERED) else ""
+    upd(tid, state="merging", next_prompt=None, start_at="promote")
+    todo = deploy_moves(p, t)
+    if not todo:
+        d = json.loads(t["deploy"])
+        return deploy_done(p, tid, f"deployed {tg.name}; " + (f"its commits are already in {p.main}"
+                                   if d["input"] != d["heads"] else f"it made no commits, so {p.main} stays as it is"))
+    if any(not is_ancestor(r, p.main, b) for r, b in todo):
+        return wait_for_you(p, tid, f"{p.main} moved during the deploy; its commits are at refs/ops/deploy-{tid}. "
+                                    f"Merge them into {p.main} yourself and this goes on by itself, or cancel to "
+                                    f"leave {p.main} as it is (the deploy itself is recorded).", WAIT_MAIN)
+    commit = deploy_commit(p, todo)
+    why = promote_blocker(p, commit)
+    if why:
+        return wait_for_you(p, tid, why, WAIT)
+    if clashing(p, commit):  # a worker may carry your uncommitted changes over: in a worktree of its own, never in
+        path = p.wt / f"t{tid}"  # the deploy worktree, whose build output must stay
+        copy_workspace_files(p, path)
+        for r, sha in p.pairs(commit):
+            if not r.at(path).exists():
+                r.git("worktree", "add", "--detach", str(r.at(path)), sha)
+        upd(tid, worktree=str(path))
+    try:
+        err = promote(p, tid, commit, note=answer)
+    except NeedsYou as e:
+        return wait_for_you(p, tid, str(e), WAIT_CHANGES)
+    if stopped(tid):
+        return
+    if err:
+        return fail(p, tid, f"The deploy succeeded and is recorded, but {p.main} could not move to its commits "
+                            f"(kept at refs/ops/deploy-{tid}): {err}\n\nRetry tries moving {p.main} again.")
+    deploy_done(p, tid, f"{p.main} is now {p.show(commit)}, with the deploy's commits")
+
+
+def deploy_done(p, tid, note):
+    t = task(tid)
+    if t["worktree"] and Path(t["worktree"]) != p.deploy_wt:  # the worktree that carried your changes over
+        remove_worktree(p, t["worktree"])
+    upd(tid, state="done", phase="", start_at="claude", worktree=str(p.deploy_wt), finished=time.time())
+    ev(tid, note)
+    notify(f"{p.title}: deployed", f"#{tid}: {t['title']}")
+
 
 
 # ---------------------------------------------------------------- design chats and project chats
@@ -2643,6 +3194,8 @@ def wait_reasons(tasks, s=None):
             why = f"{p.title} is paused"
         elif dep and dep["state"] != "done":
             why = f"waiting for #{dep['id']} to finish (it is {STATE_WORDS.get(dep['state'], dep['state'])})"
+        elif blocker := exclusive_blocker(t):
+            why = f"waiting for {blocker['kind']} #{blocker['id']}"
         elif p.max_parallel and mine.get(p.name, 0) >= p.max_parallel:
             why = f"{p.title} already runs {p.max_parallel} at once, its limit"
         elif free <= 0:
@@ -2857,7 +3410,10 @@ class H(BaseHTTPRequestHandler):
             t["chat_live"] = TASK_CHAT_LIVE.get(tid)
             t["can_chat"] = bool(t["session_id"]) and t["state"] in CHAT_STATES
             t["steer_live"] = tid in STEER_PIPES  # the worker reads a message after its current step
-            t["can_steer"] = t["state"] in STEER_STATES and (t["kind"] != "release" or t["steer_live"])
+            t["can_steer"] = t["state"] in STEER_STATES and (t["kind"] == "task" or t["steer_live"])
+            if t["kind"] == "deploy":  # its command's output
+                t["deploy"] = json.loads(t["deploy"] or "{}")
+                t["log"] = log_tail(RUNS / str(tid) / "deploy.log", 8000)
             return self.send(200, t)
         m = re.fullmatch(r"/api/images/([\w-]+(\.\w+))", path)
         if m and m.group(2) in IMAGE_TYPES.values() and (IMAGES / m.group(1)).is_file():
@@ -2933,6 +3489,11 @@ class H(BaseHTTPRequestHandler):
             out = detect_project(b["path"], b.get("name") or None, create=bool(b.get("create")))
             load_projects()
             return {"name": out.stem, "config": str(out)}
+        if path == "/api/deploys":  # the Deploy button and `opsd.py deploy`: the only ways a deploy starts
+            p = proj(b["project"])
+            tid = queue_deploy(p, b["target"], b.get("version"), b.get("note"))
+            stale_facts(p.name)
+            return {"id": tid}
         if path == "/api/pause-all":
             return pause_all()
         if path == "/api/resume-all":
@@ -3032,7 +3593,9 @@ class H(BaseHTTPRequestHandler):
                 next_prompt=(f"Your previous attempt stopped: {t['error'] or st}. {note} "
                              "Check the worktree state and finish the task; write $OPS_RESULT.")
                 if t["session_id"] else None)
-            ev(tid, "retried" + (f": {note}" if note else ""))
+            ev(tid, "retried" + (f": {note}" if note else "")
+               + ("; moving main again (the deploy itself succeeded)" if t["kind"] == "deploy" and
+                  t["start_at"] == "promote" else "; the deploy starts over" if t["kind"] == "deploy" else ""))
         elif action == "answer":
             if st != "needs_input":
                 raise ValueError(f"task is {st}")
@@ -3118,6 +3681,18 @@ if __name__ == "__main__":
         print(f"wrote {out}. Review it, then reload projects on the dashboard (or restart the service).")
     elif cmd == "add" and len(args) >= 2 and args[0] == "-p":
         post("/api/tasks", {"project": args[1], "body": " ".join(args[2:]) or sys.stdin.read()})
+    elif cmd == "deploy" and len(args) >= 3 and args[0] == "-p":
+        words, opts, rest = [], {}, args[2:]
+        while rest:
+            a = rest.pop(0)
+            if a in ("--version", "--note") and rest:
+                opts[a[2:]] = rest.pop(0)
+            else:
+                words.append(a)
+        try:
+            post("/api/deploys", {"project": args[1], "target": " ".join(words), **opts})
+        except HTTPError as e:
+            sys.exit(json.loads(e.read() or b"{}").get("error") or str(e))
     else:
         print(__doc__)
         sys.exit(2)
