@@ -108,6 +108,13 @@ ul.ahead { margin: 6px 0 0; padding-left: 18px; max-height: 160px; overflow: aut
 .att { display: block; max-width: 260px; max-height: 200px; margin: 6px 0; border-radius: 6px; border: 1px solid var(--line); }
 textarea.dropping { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent); }
 .chathead { color: var(--muted); font-size: 12px; margin: 0 0 12px; }
+.msg.ops { background: none; border-style: dashed; color: var(--muted); font-size: 12px; padding: 6px 12px; }
+#specs > h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: 18px 10px 6px; }
+.spechead { color: var(--ink); font-size: 13px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); padding: 10px 14px; }
+.spechead .row { margin-top: 8px; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.spechead .why { color: var(--muted); margin-top: 4px; }
+.spechead details summary { margin: 6px 0 0; }
+.specdoc { max-width: none; max-height: 40vh; overflow: auto; margin: 6px 0 0; }
 .chathead code { font: 12px var(--mono); background: var(--panel); padding: 1px 4px; border-radius: 4px; user-select: all; }
 .ptag { font-size: 11px; padding: 1px 6px; border-radius: 4px; background: var(--chip); color: var(--muted); }
 .projs { padding: 6px; }
@@ -172,6 +179,7 @@ textarea.dropping { border-color: var(--accent); box-shadow: 0 0 0 2px var(--acc
   <section>
     <button class="primary" id="newchat" style="width:100%;margin-bottom:12px"></button>
     <div id="chats"></div>
+    <div id="specs"></div>
   </section>
   <section id="chat">
     <div id="chathead" class="chathead"></div>
@@ -607,7 +615,7 @@ const KIND = {design: "design", chat: "project"};
 const TABTEXT = {
   design: {button: "New design chat", none: "No design chats yet.",
            say: "Talk through an idea. When you agree on the work, ask Claude to queue it. Drop or paste screenshots to attach them.",
-           intro: "Start a design chat: describe an idea, a problem, or a feature you want. Claude reads the project docs and code, asks questions, and queues tasks when you agree."},
+           intro: "Start a design chat: describe an idea, a problem, or a feature you want. Claude reads the project docs and code, asks questions, and queues tasks when you agree. Or open an OpenSpec change on the left: read it, change it with Claude, and queue it."},
   chat: {button: "New chat", none: "No chats yet.", say: "Ask or tell Claude anything about this project. Drop or paste screenshots to attach them.",
          intro: "Talk to Claude in the project folder, as if you ran claude there. It can read, edit and run commands in your checkout. Actions that would ask for permission are denied, since nobody can answer here."}};
 let tab = "queue", chatSel = null, chatData = null, chatKey = "", chatSels = {};
@@ -652,7 +660,8 @@ function md(src) {
     if (/^\s*([-*]|\d+\.)\s+/.test(l)) {
       const ordered = /^\s*\d+\./.test(l), items = [];
       while (i < lines.length && /^\s*([-*]|\d+\.)\s+/.test(lines[i])) items.push(lines[i++].replace(/^\s*([-*]|\d+\.)\s+/, "")); i--;
-      out.push(`<${ordered ? "ol" : "ul"}>${items.map(x => `<li>${inline(x)}</li>`).join("")}</${ordered ? "ol" : "ul"}>`);
+      const box = x => x.replace(/^\[ \]\s+/, "☐ ").replace(/^\[[xX]\]\s+/, "☑ ");  // tasks.md checklists
+      out.push(`<${ordered ? "ol" : "ul"}>${items.map(x => `<li>${inline(box(x))}</li>`).join("")}</${ordered ? "ol" : "ul"}>`);
       continue;
     }
     if (!l.trim()) continue;
@@ -667,12 +676,64 @@ async function loadDesigns() {
   try { chats = await api("/api/designs"); } catch { return; }
   chats = chats.filter(c => inView(c.project) && (c.kind || "design") === KIND[tab]);
   $("#chats").innerHTML = chats.map(c => `<div class="chatitem ${c.id === chatSel ? "sel" : ""}" data-id="${c.id}">
-    <div>${esc(c.title)}</div><div class="sub">${pf ? "" : `<span class="ptag">${esc(P(c.project).title)}</span> `}${c.state === "thinking" ? '<span class="pulse s-running">replying</span> · ' : ""}${ago(c.updated, Date.now() / 1000)} ago${c.cost ? ` · $${c.cost.toFixed(2)}` : ""}</div></div>`).join("")
+    <div>${esc(c.title)}</div><div class="sub">${pf ? "" : `<span class="ptag">${esc(P(c.project).title)}</span> `}${c.spec ? '<span class="ptag">OpenSpec</span> ' : ""}${c.state === "thinking" ? '<span class="pulse s-running">replying</span> · ' : ""}${ago(c.updated, Date.now() / 1000)} ago${c.cost ? ` · $${c.cost.toFixed(2)}` : ""}</div></div>`).join("")
     || `<div class="muted">${TABTEXT[tab].none}</div>`;
-  document.querySelectorAll(".chatitem").forEach(el => el.onclick = () => { selectChat(+el.dataset.id); });
+  document.querySelectorAll("#chats .chatitem").forEach(el => el.onclick = () => { selectChat(+el.dataset.id); });
+  refreshSpecs();
   if (chatSel) await loadChat(); else renderChat();
 }
 const refreshDesign = single(loadDesigns);
+
+// ---------------------------------------------------------------- OpenSpec changes (Design tab)
+// The projects' openspec/changes/<name>/ folders. Opening one opens its design chat, where Claude can edit the
+// change; the header shows its files and queues it as one task or one task per phase.
+let specs = [], specsAt = 0, specOpen = new Set(), specOpts = {hold: false, release: null};
+async function refreshSpecs(force) {
+  if (tab === "design" && (force || Date.now() - specsAt > 8000)) {
+    specsAt = Date.now();
+    try { specs = await api("/api/openspec"); } catch {}
+  }
+  const list = tab === "design" ? specs.filter(s => inView(s.project)) : [];
+  const html = !list.length ? "" : `<h2>OpenSpec changes</h2>` + list.map(s => `<div class="chatitem ${s.chat && s.chat === chatSel ? "sel" : ""}" data-spec="${esc(s.name)}" data-sub="${esc(s.sub)}" data-project="${esc(s.project)}" title="${esc(s.why)}">
+    <div>${esc(s.title)}</div><div class="sub">${pf ? "" : `<span class="ptag">${esc(P(s.project).title)}</span> `}${s.sub ? `${esc(s.sub)} · ` : ""}${s.has_tasks ? `${s.done}/${s.done + s.open} done` : "no tasks.md"}${s.where === "checkout" ? ' · <span class="s-review">only in your checkout</span>' : ""}</div></div>`).join("");
+  if ($("#specs").dataset.html === html) return;
+  $("#specs").innerHTML = $("#specs").dataset.html = html;
+  document.querySelectorAll("#specs .chatitem").forEach(el => el.onclick = async () => {
+    try {
+      const r = await api("/api/designs", {project: el.dataset.project, sub: el.dataset.sub, spec: el.dataset.spec});
+      specsAt = 0; selectChat(r.id);
+    } catch (e) { $("#chatmsg").textContent = e.message; }
+  });
+}
+const hash = s => { let h = 5381; for (let i = 0; i < s.length; i++) h = (h * 33 ^ s.charCodeAt(i)) | 0; return h; };
+function specHead(d) {
+  const s = d.spec_view;
+  if (s.missing) return `<div class="spechead">The OpenSpec change <code>${esc(s.name)}</code> is no longer on ${esc(P(d.project).dev_branch || "dev")}: it was archived or removed.</div>`;
+  const btn = (plan, label, title) => `<button class="${s.advice === plan ? "primary" : ""}" data-plan="${plan}" title="${esc(title)}">${label}</button>`;
+  const phases = s.groups.length >= 2 ? btn("phases", `Queue ${s.groups.length} tasks, one per phase`,
+    s.groups.map((g, k) => `${k + 1}. ${g.title} (${g.open} open)`).join("\n")) : "";
+  const advice = s.advice === "phases"
+    ? `Recommended: one task per phase. ${s.open} open items in ${s.groups.length} phases is a lot for one worker, and each phase is checked and merged before the next starts.`
+    : `Recommended: one task. Each task costs a worktree, a worker start-up and a full merge check, so a checklist item is far too small for one. The worker can still split a big change itself.`;
+  return `<div class="spechead"><b>${esc(s.title)}</b> · <code>${esc((s.sub ? s.sub + "/" : "") + s.path)}</code>${s.has_tasks ? ` · ${s.done}/${s.done + s.open} done` : ""}
+    ${s.why ? `<div class="why">${esc(s.why)}</div>` : ""}
+    <div class="row">${s.open || !s.has_tasks
+      ? btn("whole", "Queue as one task", "One worker builds the whole change") + phases
+        + `<label><input type="checkbox" id="spechold" ${specOpts.hold ? "checked" : ""}> Hold for review</label><label><input type="checkbox" id="specrel" ${(specOpts.release ?? P(d.project).auto_release) ? "checked" : ""}> Release after merge</label>`
+      : `<span class="muted">Every item in tasks.md is ticked. Ask Claude to queue archiving it when you're happy.</span>`}</div>
+    ${s.open ? `<div class="why">${advice}</div>` : ""}
+    <div>${s.files.map(f => `<details data-file="${esc(f.name)}" ${specOpen.has(f.name) ? "open" : ""}><summary>${esc(f.name)}</summary><div class="msg specdoc">${md(f.text)}</div></details>`).join("")}</div>
+    <div class="why">Claude can edit this change's files. Its edits are saved to ${esc(P(d.project).dev_branch || "dev")} after each reply.</div></div>`;
+}
+async function queueSpec(plan) {
+  const d = chatData;
+  if (d.msgs.some(m => m.tasks.some(t => !["done", "cancelled", "failed"].includes(t.state)))
+      && !confirm("Tasks from this chat are still open. Queue the change again?")) return;
+  try {
+    const r = await api(`/api/designs/${d.id}/queue`, {plan, hold: specOpts.hold, release: specOpts.release});
+    $("#chatmsg").textContent = ""; chatKey = ""; specOpts = {hold: false, release: null}; refreshDesign(); refresh();
+  } catch (e) { $("#chatmsg").textContent = e.message; }
+}
 function selectChat(id) {
   chatSel = id; chatKey = "";
   if (state) renderProjects();
@@ -686,18 +747,24 @@ async function loadChat() {
 function renderChat() {
   const d = chatData && chatSel === chatData.id ? chatData : null;
   const thinking = d && d.state === "thinking";
-  const key = d ? `${d.id}:${d.msgs.length}:${d.state}:${d.live.length}:${JSON.stringify(d.msgs.map(m => m.tasks.map(t => t.state)))}` : "none";
+  const key = d ? `${d.id}:${d.msgs.length}:${d.state}:${d.live.length}:${JSON.stringify(d.msgs.map(m => m.tasks.map(t => t.state)))}:${d.spec_view ? hash(JSON.stringify(d.spec_view)) : ""}` : "none";
   $("#stopchat").classList.toggle("hidden", !thinking);
   $("#send").disabled = !!thinking;
   if (key === chatKey) return;
   chatKey = key;
   const box = $("#msgs"), stick = box.scrollTop + box.clientHeight >= box.scrollHeight - 40;
   $("#chathead").innerHTML = d && d.kind === "project" ? `Runs in <code>${esc(d.cwd)}</code>`
-    + (d.session_id ? ` · continue in a terminal: <code>cd ${esc(d.cwd)} && claude --resume ${esc(d.session_id)}</code>` : "") : "";
+    + (d.session_id ? ` · continue in a terminal: <code>cd ${esc(d.cwd)} && claude --resume ${esc(d.session_id)}</code>` : "")
+    : d && d.spec_view ? specHead(d) : "";
+  $("#chathead").querySelectorAll("[data-plan]").forEach(b => b.onclick = () => queueSpec(b.dataset.plan));
+  $("#chathead").querySelectorAll("details[data-file]").forEach(el => el.ontoggle = () => {
+    el.open ? specOpen.add(el.dataset.file) : specOpen.delete(el.dataset.file); });
+  for (const [id, k] of [["#spechold", "hold"], ["#specrel", "release"]])
+    if ($(id)) $(id).onchange = e => { specOpts[k] = e.target.checked; };
   if (!d) { box.innerHTML = `<div class="muted" style="padding:20px 0">${TABTEXT[tab].intro}</div>`; return; }
   box.innerHTML = d.msgs.map(m => m.role === "user"
       ? `<div class="msg user">${pics(esc(m.text.replace(/^\[ops:[^\n]*\]\n\n/, "")))}</div>`
-      : `<div class="msg">${md(m.text)}${m.tasks.length ? `<div class="chips">${m.tasks.map(t => `<button class="chip" data-task="${t.id}">#${t.id} ${esc(t.title || "")} · ${LABEL[t.state] || t.state}</button>`).join("")}</div>` : ""}</div>`).join("")
+      : `<div class="msg ${m.role === "ops" ? "ops" : ""}">${md(m.text)}${m.tasks.length ? `<div class="chips">${m.tasks.map(t => `<button class="chip" data-task="${t.id}">#${t.id} ${esc(t.title || "")} · ${LABEL[t.state] || t.state}</button>`).join("")}</div>` : ""}</div>`).join("")
     + (thinking ? `<div class="live"><span class="pulse s-running">Claude is thinking</span>${d.live.map(l => `<div>  ${esc(l)}</div>`).join("")}</div>` : "");
   box.querySelectorAll("[data-task]").forEach(b => b.onclick = () => { showTab("queue"); selectTask(+b.dataset.task); refresh(); });
   if (stick || thinking) box.scrollTop = box.scrollHeight;

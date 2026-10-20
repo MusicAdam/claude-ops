@@ -388,8 +388,11 @@ def init_db():
     q("""CREATE TABLE IF NOT EXISTS design_msgs (id INTEGER PRIMARY KEY, design_id INTEGER, role TEXT,
         text TEXT, ts REAL, task_ids TEXT, note TEXT)""")
     q("CREATE INDEX IF NOT EXISTS design_msgs_design ON design_msgs (design_id, id)")
-    if "kind" not in {r["name"] for r in q("PRAGMA table_info(designs)")}:  # databases from before project chats
-        q("ALTER TABLE designs ADD COLUMN kind TEXT DEFAULT 'design'")
+    dcols = {r["name"] for r in q("PRAGMA table_info(designs)")}
+    for col, decl in (("kind", "TEXT DEFAULT 'design'"),  # databases from before project chats
+                      ("spec", "TEXT"), ("spec_sub", "TEXT DEFAULT ''")):  # and before OpenSpec chats
+        if col not in dcols:
+            q(f"ALTER TABLE designs ADD COLUMN {col} {decl}")
     q("UPDATE designs SET state='idle' WHERE state='thinking'")  # a reply cut off by a restart
     q("CREATE TABLE IF NOT EXISTS task_msgs (id INTEGER PRIMARY KEY, task_id INTEGER, role TEXT, text TEXT, ts REAL)")
     q("CREATE INDEX IF NOT EXISTS task_msgs_task ON task_msgs (task_id, id)")
@@ -1793,7 +1796,8 @@ def promote(p, tid, commit):
 
 
 # ---------------------------------------------------------------- design chats and project chats
-# Both live in the designs table. kind 'design': read-only planning in the dev worktree that queues tasks.
+# Both live in the designs table. kind 'design': read-only planning in the dev worktree that queues tasks
+# (one about an OpenSpec change has a worktree of its own and may edit openspec/: see OpenSpec changes below).
 # kind 'project': plain Claude in your checkout, as if you ran `claude` there.
 
 DESIGN_TOOLS = "Read,Grep,Glob,WebSearch,WebFetch,Bash(git log:*),Bash(git show:*),Bash(git diff:*),Bash(ls:*)"
@@ -1816,22 +1820,29 @@ def design_say(did, text):
     threading.Thread(target=design_turn, args=(did, text), daemon=True).start()
 
 
-def ops_note(p, did):
-    """Context the dashboard adds to each user message: the queue, and what the last queue block did."""
+def ops_note(p, did, extra=""):
+    """Context the dashboard adds to each user message: the queue, and what happened since the last one
+    (what the last queue block did, edits saved to dev, tasks queued with the buttons)."""
     live = q("SELECT id,state,title FROM tasks WHERE project=? AND state NOT IN ('done','cancelled') ORDER BY id",
              (p.name,))
     parts = ["queue: " + ("; ".join(f"#{t['id']} {t['state']} {t['title']}" for t in live[:25]) or "empty"),
              "release after merge: " + ("on" if release_default(p) else "off") + " by default for this project"]
-    last = q("SELECT note FROM design_msgs WHERE design_id=? AND role='assistant' ORDER BY id DESC LIMIT 1",
+    prev = q("SELECT id FROM design_msgs WHERE design_id=? AND role='user' ORDER BY id DESC LIMIT 1 OFFSET 1",
              (did,), one=True)
-    if last and last["note"]:
-        parts.append(last["note"])
+    parts += [m["note"] for m in q("SELECT note FROM design_msgs WHERE design_id=? AND role!='user' AND id>? "
+                                   "AND note!='' ORDER BY id", (did, prev["id"] if prev else 0))]
+    parts += [extra] if extra else []
     return "[ops: " + " | ".join(parts) + "]\n\n"
 
 
-def design_system_prompt(p):
+def design_system_prompt(p, d=None, cwd=None):
     notes = f"## Notes for {p.title}\n\n{p.design_notes}\n" if p.design_notes else ""
-    return (CODE / "design_prompt.md").read_text().format(project=p.title, dev_wt=p.dev_wt, dev=p.dev, notes=notes)
+    out = (CODE / "design_prompt.md").read_text().format(project=p.title, dev_wt=cwd or p.dev_wt, dev=p.dev,
+                                                         notes=notes)
+    if d and d["spec"]:
+        out += "\n" + (CODE / "spec_prompt.md").read_text().format(change=d["spec"], path=SPEC_DIR / d["spec"],
+                                                                   dev=p.dev)
+    return out
 
 
 def stream_claude(cmd, cwd, log_dir, live, procs, key, on_session):
@@ -1875,16 +1886,27 @@ def design_turn(did, text):
     p = proj(d["project"])
     DESIGN_LIVE[did] = []
     chat = d["kind"] == "project"
+    cwd, tools, extra = p.repo if chat else p.dev_wt, DESIGN_TOOLS, ""
+    if d["spec"]:  # its own worktree of dev, where Claude may edit openspec/
+        try:
+            cwd, extra = spec_sync(p, d)
+        except Exception as e:
+            q("INSERT INTO design_msgs (design_id, role, text, ts) VALUES (?,?,?,?)",
+              (did, "assistant", f"(chat error: could not prepare the change's worktree: {e})", time.time()))
+            DESIGN_LIVE.pop(did, None)
+            q("UPDATE designs SET state='idle', updated=? WHERE id=?", (time.time(), did))
+            return
+        tools += f",Edit(/{cwd}/openspec/**),Bash(openspec validate:*),Bash(openspec show:*),Bash(openspec list:*)"
     if chat:  # your own settings and MCP servers apply, like the CLI; auto mode stands in for prompts
         cmd = [CLAUDE, "-p", with_images(text), "--output-format", "stream-json", "--verbose",
                "--permission-mode", "auto", "--permission-prompts", "none", "--no-chrome",
                "--name", f"{p.name} chat #{did}", "--settings", guard_settings(None),
                "--append-system-prompt", PROJECT_CHAT_PROMPT]
     else:
-        cmd = [CLAUDE, "-p", ops_note(p, did) + with_images(text), "--output-format", "stream-json", "--verbose",
-               "--permission-mode", "dontAsk", "--permission-prompts", "none", "--allowedTools", DESIGN_TOOLS,
+        cmd = [CLAUDE, "-p", ops_note(p, did, extra) + with_images(text), "--output-format", "stream-json",
+               "--verbose", "--permission-mode", "dontAsk", "--permission-prompts", "none", "--allowedTools", tools,
                "--strict-mcp-config", "--no-chrome", "--name", f"{p.name} design #{did}",
-               "--append-system-prompt", design_system_prompt(p)]
+               "--append-system-prompt", design_system_prompt(p, d, cwd)]
     cmd += ["--add-dir", str(IMAGES)]
     if d["session_id"]:
         cmd += ["--resume", d["session_id"]]
@@ -1897,11 +1919,15 @@ def design_turn(did, text):
 
     cost = 0.0
     try:
-        reply, cost = stream_claude(cmd, p.repo if chat else p.dev_wt, RUNS / f"design-{did}", DESIGN_LIVE[did],
-                                    DESIGN_PROCS, did, on_session)
+        reply, cost = stream_claude(cmd, cwd, RUNS / f"design-{did}", DESIGN_LIVE[did], DESIGN_PROCS, did,
+                                    on_session)
+        saved = spec_land(p, d) if d["spec"] else ""  # before any task it queues starts from dev
         reply, ids, note = (reply, [], "") if chat else queue_from_reply(p, reply, did)
         q("INSERT INTO design_msgs (design_id, role, text, ts, task_ids, note) VALUES (?,?,?,?,?,?)",
           (did, "assistant", reply, time.time(), json.dumps(ids), note))
+        if saved:
+            q("INSERT INTO design_msgs (design_id, role, text, ts, note) VALUES (?,?,?,?,?)",
+              (did, "ops", saved, time.time(), "your last reply's edits: " + saved))
     except Exception as e:
         q("INSERT INTO design_msgs (design_id, role, text, ts) VALUES (?,?,?,?)",
           (did, "assistant", f"(chat error: {e})", time.time()))
@@ -1936,6 +1962,267 @@ def queue_from_reply(p, reply, did):
     if ids:
         notes.append("your last reply queued " + ", ".join(f"#{i}" for i in ids))
     return QUEUE_BLOCK.sub("", reply).strip(), ids, "; ".join(notes)
+
+
+# ---------------------------------------------------------------- OpenSpec changes
+# A design chat can be about one OpenSpec change, openspec/changes/<name>/ in a repo of the project. It runs in its
+# own detached worktree of dev (<worktrees>/spec-<chat id>), where Claude may edit openspec/ and nothing else.
+# After each reply the daemon commits those edits and fast-forwards dev to them, so the next worker sees them.
+# The edits skip the gate: they are docs, and only files under openspec/ are ever committed.
+
+SPEC_DIR = Path("openspec") / "changes"
+SPEC_SMALL = 4  # a tasks.md phase with fewer open items is folded into its neighbour
+SPEC_BIG = (25, 3)  # open items and phases from which one task per phase is the advice
+CHECKBOX = re.compile(r"\s*[-*]\s+\[([ xX])\]\s+(.*)")
+
+
+def spec_part(p, sub):
+    r = next((r for r in p.parts if r.sub == (sub or "")), None)
+    if not r:
+        raise ValueError(f"{p.name} has no repo {sub!r}")
+    return r
+
+
+def spec_phases(text):
+    """tasks.md as phases: its ## sections, each with its open items and how many are done."""
+    phases = []
+    for line in text.splitlines():
+        m = re.match(r"##\s+(.+)", line)
+        if m:
+            phases.append({"title": m.group(1).strip(), "open": [], "done": 0})
+            continue
+        m = CHECKBOX.match(line)
+        if m:
+            if not phases:
+                phases.append({"title": "", "open": [], "done": 0})
+            if m.group(1) == " ":
+                phases[-1]["open"].append(m.group(2).strip())
+            else:
+                phases[-1]["done"] += 1
+    return [ph for ph in phases if ph["open"] or ph["done"]]
+
+
+def spec_groups(phases):
+    """What one task per phase would queue: the phases with open items, small ones folded into a neighbour
+    (a "Tests" or "Docs" phase of two items is no task of its own)."""
+    groups = []
+    for ph in phases:
+        if not ph["open"]:
+            continue
+        if groups and (len(ph["open"]) < SPEC_SMALL or len(groups[-1]["open"]) < SPEC_SMALL):
+            groups[-1]["titles"].append(ph["title"])
+            groups[-1]["open"] += ph["open"]
+        else:
+            groups.append({"titles": [ph["title"]], "open": list(ph["open"])})
+    return groups
+
+
+def spec_info(folder):
+    """A change folder for the dashboard: title, why, progress, and the advice on how to queue it."""
+    def text(f):
+        return (folder / f).read_text(errors="replace") if (folder / f).is_file() else ""
+    prop = text("proposal.md")
+    m = re.search(r"^#\s+(.+)", prop, re.M)
+    title = re.sub(r"^(change|proposal)\s*:\s*", "", m.group(1).strip(), flags=re.I) if m else folder.name
+    why = re.search(r"^##\s+Why\s*\n+(.+?)(?:\n\s*\n|\n#|\Z)", prop, re.M | re.S)
+    phases = spec_phases(text("tasks.md"))
+    groups = spec_groups(phases)
+    n = sum(len(g["open"]) for g in groups)
+    return {"name": folder.name, "title": title, "why": first_words(why.group(1), 200) if why else "",
+            "open": n, "done": sum(ph["done"] for ph in phases), "has_tasks": bool(text("tasks.md")),
+            "groups": [{"title": " + ".join(t for t in g["titles"] if t) or "tasks", "open": len(g["open"])}
+                       for g in groups],
+            "advice": "phases" if n >= SPEC_BIG[0] and len(groups) >= SPEC_BIG[1] else "whole"}
+
+
+def spec_changes(p):
+    """The project's open OpenSpec changes: those on dev, then those only in your checkout."""
+    out, chats = [], {(c["spec_sub"] or "", c["spec"]): c["id"] for c in q(
+        "SELECT id,spec,spec_sub FROM designs WHERE project=? AND spec IS NOT NULL ORDER BY id", (p.name,))}
+    for r in p.parts:
+        seen = set()
+        for where, root in (("dev", r.at(p.dev_wt)), ("checkout", r.src)):
+            d = root / SPEC_DIR
+            for c in sorted(d.iterdir()) if d.is_dir() else []:
+                if c.name in seen or c.name == "archive" or not c.is_dir() or not any(
+                        (c / f).is_file() for f in ("proposal.md", "design.md", "tasks.md")):
+                    continue
+                seen.add(c.name)
+                out.append(dict(spec_info(c), project=p.name, sub=r.sub, where=where,
+                                chat=chats.get((r.sub, c.name))))
+    return out
+
+
+def spec_wt(p, d):
+    """The chat's worktree of the change's repo, made on first use, detached at dev."""
+    r = spec_part(p, d["spec_sub"])
+    path = r.at(p.wt / f"spec-{d['id']}")
+    if not path.exists():
+        r.git("worktree", "add", "--detach", str(path), p.dev)
+    return r, path
+
+
+def spec_commit(r, path, msg):
+    """Commit what changed under openspec/ in the chat's worktree. True if there was something."""
+    r.git("add", "-A", "--", "openspec", cwd=path, check=False)
+    if subprocess.run(["git", "diff", "--cached", "--quiet"], cwd=path).returncode == 0:
+        return False
+    r.git("commit", "-q", "--no-verify", "-m", msg, cwd=path)
+    return True
+
+
+def spec_rebase(p, r, path, did):
+    """Put the chat's commits on top of dev. On a conflict the chat's side of each clash wins; if git still
+    can't replay them, they are saved as a patch and the worktree starts again from dev. Returns that news."""
+    res = subprocess.run(["git", "rebase", "-q", "-X", "theirs", p.dev], cwd=path, capture_output=True, text=True)
+    if not res.returncode:
+        return ""
+    subprocess.run(["git", "rebase", "--abort"], cwd=path, capture_output=True)
+    patch = RUNS / f"design-{did}" / f"set-aside-{time.strftime('%Y%m%d-%H%M%S')}.patch"
+    patch.parent.mkdir(parents=True, exist_ok=True)
+    patch.write_text(r.git("format-patch", "--stdout", f"{p.dev}..HEAD", cwd=path, check=False))
+    r.git("checkout", "-q", "--detach", p.dev, cwd=path)
+    return f"edits that clash with {p.dev} could not be saved; they are set aside in {patch}"
+
+
+def spec_sync(p, d):
+    """Before a turn: keep what a cut-off turn left under openspec/, drop anything else, catch up with dev.
+    Returns (the worktree, news for Claude)."""
+    r, path = spec_wt(p, d)
+    spec_commit(r, path, f"OpenSpec {d['spec']}: edits from design chat #{d['id']}")
+    r.git("reset", "-q", "--hard", cwd=path)
+    r.git("clean", "-fdq", cwd=path)
+    return path, spec_rebase(p, r, path, d["id"])
+
+
+def spec_land(p, d, msg=None):
+    """After a turn: commit the chat's edits under openspec/ and fast-forward dev to them.
+    Returns a line for the owner, or "" when nothing changed."""
+    try:
+        r, path = spec_wt(p, d)
+        spec_commit(r, path, msg or f"OpenSpec {d['spec']}: edits from design chat #{d['id']}")
+        with p.lock:  # merges into dev hold it too
+            lost = spec_rebase(p, r, path, d["id"])
+            files = r.git("diff", "--name-only", f"{p.dev}..HEAD", cwd=path).splitlines()
+            if not files:
+                return lost.capitalize() + "." if lost else ""
+            res = subprocess.run(["git", "merge", "--ff-only", "-q", r.git("rev-parse", "HEAD", cwd=path)],
+                                 cwd=r.at(p.dev_wt), capture_output=True, text=True)
+            if res.returncode:
+                return f"Couldn't save the edits to {p.dev}: {(res.stderr or res.stdout).strip()[-300:]}"
+        pre = f"{SPEC_DIR / d['spec']}/"
+        names = [f[len(pre):] if f.startswith(pre) else f for f in files]
+        return (f"Saved to {p.dev} at {r.rev(p.dev)[:8]}: {', '.join(names[:6])}{' …' if len(names) > 6 else ''}."
+                + (f" {lost.capitalize()}." if lost else ""))
+    except Exception as e:
+        return f"Couldn't save the edits to {p.dev}: {e}"
+
+
+def spec_open(p, sub, name):
+    """The chat about a change: the latest one, or a new one. A change only in your checkout is copied into dev."""
+    r = spec_part(p, sub)
+    if not re.fullmatch(r"[\w.-]+", name or "") or name == "archive":
+        raise ValueError(f"bad change name {name!r}")
+    old = q("SELECT id FROM designs WHERE project=? AND spec=? AND spec_sub=? ORDER BY updated DESC LIMIT 1",
+            (p.name, name, r.sub), one=True)
+    if old:
+        return old["id"]
+    on_dev, own = r.at(p.dev_wt) / SPEC_DIR / name, r.src / SPEC_DIR / name
+    if not on_dev.is_dir() and not own.is_dir():
+        raise ValueError(f"there is no OpenSpec change {name}")
+    did = q("INSERT INTO designs (project, title, created, updated, kind, spec, spec_sub) VALUES (?,?,?,?,?,?,?)",
+            (p.name, spec_info(on_dev if on_dev.is_dir() else own)["title"][:80], time.time(), time.time(),
+             "design", name, r.sub))
+    if not on_dev.is_dir():
+        d = design(did)
+        _, path = spec_wt(p, d)
+        shutil.copytree(own, path / SPEC_DIR / name)
+        saved = spec_land(p, d, f"OpenSpec {name}: copied from {own}")
+        q("INSERT INTO design_msgs (design_id, role, text, ts, note) VALUES (?,?,?,?,?)",
+          (did, "ops", f"Copied `{SPEC_DIR / name}` from your checkout into {p.dev}. {saved} Your checkout keeps "
+                       f"its own copy: if it isn't committed there, delete it when you're done with it, or a "
+                       f"release that brings this change to {p.main} will wait for it.", time.time(),
+           f"the change was copied from the owner's checkout into {p.dev}"))
+    return did
+
+
+def spec_view(p, d):
+    """The change as the chat sees it now, files and all, for the dashboard."""
+    r = spec_part(p, d["spec_sub"])
+    path = r.at(p.wt / f"spec-{d['id']}")
+    folder = (path if path.exists() else r.at(p.dev_wt)) / SPEC_DIR / d["spec"]
+    if not folder.is_dir():
+        return {"name": d["spec"], "sub": r.sub, "missing": True}
+    files = [f for f in ("proposal.md", "design.md", "tasks.md") if (folder / f).is_file()]
+    files += sorted(str(f.relative_to(folder)) for f in folder.rglob("*.md") if str(f.relative_to(folder)) not in
+                    files)
+    return dict(spec_info(folder), sub=r.sub, path=str(SPEC_DIR / d["spec"]),
+                files=[{"name": f, "text": (folder / f).read_text(errors="replace")[:200_000]} for f in files[:40]])
+
+
+def spec_brief(p, r, name, title, group=None, k=0, n=1):
+    """The task body for a whole change, or for one group of its phases."""
+    rel = f"{r.sub}/{SPEC_DIR / name}" if r.sub else str(SPEC_DIR / name)
+    if group:
+        items = "\n".join(f"  - [ ] {i}" for i in group["open"])
+        scope = (f"This task is part {k + 1} of {n}. It covers only these sections of `tasks.md`: "
+                 f"{', '.join(t or '(untitled)' for t in group['titles'])}. Their open items:\n\n{items}\n\n"
+                 + ("Earlier sections were built by the tasks before this one and are on dev. " if k else "")
+                 + ("Later sections are separate tasks queued after this one: leave them alone." if k + 1 < n
+                    else "This is the last part."))
+        split = ""
+    else:
+        scope = "This task covers every open item in `tasks.md`."
+        split = ("- The change is one task on purpose. If it is too big for one worker, split it (status "
+                 "\"split\") by phase or area of `tasks.md`, never one subtask per checklist item.\n")
+    return (f"Implement the OpenSpec change `{name}`: {title}.\n\n"
+            f"The change is the brief. Its files are in `{rel}/`: read `proposal.md` (why, and what is in scope), "
+            f"`design.md` (how), the requirement deltas in `specs/`, and `tasks.md`. {scope}\n\n"
+            f"Rules:\n"
+            f"- Keep to the proposal's scope. If what you build has to differ from `design.md` or a spec delta, "
+            f"update that file to match and say so in your summary.\n"
+            f"- Tick each `tasks.md` box (`- [x]`) as you finish it, in the same commit as the work.\n"
+            f"- Add or update tests for the behaviour in the spec scenarios (`#### Scenario:`).\n"
+            f"- If the `openspec` CLI is installed, `openspec validate {name} --strict` must pass.\n"
+            f"- Don't archive the change (`openspec archive`); that is a separate step the owner asks for.\n"
+            f"{split}\n"
+            f"Done when every box this task covers is ticked, the tests pass, and the change's docs match what "
+            f"you built.")
+
+
+def spec_queue(did, plan, hold=False, release=None):
+    """Queue a chat's change as one task, or one task per phase chained in order. Returns the new ids.
+    release: None takes the project's default; only the last task of a chain releases."""
+    d = design(did)
+    if not d or not d["spec"]:
+        raise ValueError("this chat is not about an OpenSpec change")
+    if d["state"] == "thinking":
+        raise ValueError("wait for Claude's reply first")
+    p = proj(d["project"])
+    r = spec_part(p, d["spec_sub"])
+    folder = r.at(p.dev_wt) / SPEC_DIR / d["spec"]
+    if not folder.is_dir():
+        raise ValueError(f"{p.dev} has no {SPEC_DIR / d['spec']}")
+    info = spec_info(folder)
+    groups = spec_groups(spec_phases((folder / "tasks.md").read_text(errors="replace"))) if info["has_tasks"] else []
+    if info["has_tasks"] and not groups:
+        raise ValueError("every item in tasks.md is ticked: nothing left to queue")
+    parts = [(info["title"], None)] if plan != "phases" or len(groups) < 2 else \
+        [(f"{info['title']}: {' + '.join(t for t in g['titles'] if t) or f'part {k + 1}'}", g)
+         for k, g in enumerate(groups)]
+    ids = []
+    for k, (title, g) in enumerate(parts):
+        tid = add_task(p.name, spec_brief(p, r, d["spec"], info["title"], g, k, len(parts)), title[:120],
+                       hold=bool(hold), depends_on=ids[-1] if ids else None,
+                       auto_release=(None if release is None else bool(release)) if k + 1 == len(parts) else False)
+        ev(tid, f"queued from OpenSpec change {d['spec']} (design chat #{did})")
+        ids.append(tid)
+    what = "the whole change as one task" if len(ids) == 1 else f"{len(ids)} tasks, one per phase, each after the one before"
+    q("INSERT INTO design_msgs (design_id, role, text, ts, task_ids, note) VALUES (?,?,?,?,?,?)",
+      (did, "ops", f"Queued {what}.", time.time(), json.dumps(ids),
+       f"the owner queued this change with the dashboard's buttons: {', '.join(f'#{i}' for i in ids)}"))
+    q("UPDATE designs SET updated=? WHERE id=?", (time.time(), did))
+    return ids
 
 
 # ---------------------------------------------------------------- activity feed
@@ -2352,7 +2639,16 @@ class H(BaseHTTPRequestHandler):
             ctype = next(k for k, v in IMAGE_TYPES.items() if v == m.group(2))
             return self.send(200, (IMAGES / m.group(1)).read_bytes(), ctype)
         if path == "/api/designs":
-            return self.send(200, q("SELECT id,project,title,state,updated,cost,kind FROM designs ORDER BY updated DESC"))
+            return self.send(200, q("SELECT id,project,title,state,updated,cost,kind,spec FROM designs "
+                                    "ORDER BY updated DESC"))
+        if path == "/api/openspec":
+            out = []
+            for p in PROJECTS.values():
+                try:
+                    out += spec_changes(p)
+                except Exception as e:
+                    print(f"project {p.name} openspec: {e}", flush=True)
+            return self.send(200, out)
         m = re.fullmatch(r"/api/designs/(\d+)", path)
         if m:
             did = int(m.group(1))
@@ -2361,6 +2657,9 @@ class H(BaseHTTPRequestHandler):
                 return self.send(404, {"error": "no such chat"})
             p = PROJECTS.get(d["project"])
             d["cwd"] = str((p.repo if d["kind"] == "project" else p.dev_wt) if p else "")
+            if p and d["spec"]:
+                d["cwd"] = str(spec_part(p, d["spec_sub"]).at(p.wt / f"spec-{did}"))
+                d["spec_view"] = spec_view(p, d)
             d["msgs"] = q("SELECT role,text,ts,task_ids FROM design_msgs WHERE design_id=? ORDER BY id", (did,))
             for msg in d["msgs"]:
                 ids = json.loads(msg["task_ids"] or "[]")
@@ -2431,6 +2730,11 @@ class H(BaseHTTPRequestHandler):
             return
         if path == "/api/designs":
             text = (b.get("text") or "").strip()
+            if b.get("spec"):  # open the chat about an OpenSpec change; a message is optional
+                did = spec_open(proj(b["project"]), b.get("sub") or "", b["spec"])
+                if text:
+                    design_say(did, text)
+                return {"id": did}
             if not text:
                 raise ValueError("say something to start the chat")
             proj(b["project"])
@@ -2439,7 +2743,7 @@ class H(BaseHTTPRequestHandler):
                     (b["project"], title_of(text)[:80], time.time(), time.time(), kind))
             design_say(did, text)
             return {"id": did}
-        m = re.fullmatch(r"/api/designs/(\d+)/(say|stop|rename)", path)
+        m = re.fullmatch(r"/api/designs/(\d+)/(say|stop|rename|queue)", path)
         if m:
             did = int(m.group(1))
             if not design(did):
@@ -2448,6 +2752,8 @@ class H(BaseHTTPRequestHandler):
                 design_say(did, b["text"].strip())
             elif m.group(2) == "stop":
                 stop(DESIGN_PROCS.get(did))
+            elif m.group(2) == "queue":
+                return {"ids": spec_queue(did, b.get("plan"), b.get("hold"), b.get("release"))}
             else:
                 q("UPDATE designs SET title=? WHERE id=?", (b["title"][:80], did))
             return

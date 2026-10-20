@@ -86,6 +86,36 @@ dev code but cannot edit anything (`--permission-mode dontAsk` with read-only to
 agree on the work, ask it to queue: it writes self-contained task briefs, and they appear as chips
 under its reply. Each message it gets starts with that project's current queue, so it avoids duplicates.
 
+### OpenSpec changes
+
+If a project uses [OpenSpec](https://github.com/Fission-AI/OpenSpec), the Design tab lists its open changes
+(`openspec/changes/<name>/`, not `archive/`) under the chats, with how many `tasks.md` items are done.
+Click one to open its chat. A change that is only in your checkout is first copied into `dev`.
+
+- **Read it.** The chat's header shows the title, the "Why", and each file (`proposal.md`, `design.md`,
+  `tasks.md`, the spec deltas) folded open on click.
+- **Change it.** Talk it through. This chat may edit files under `openspec/` and nothing else. It works in its
+  own worktree (`<worktrees>/spec-<chat id>`, detached at `dev` and refreshed before each message). After each
+  reply the queue commits its edits there and fast-forwards `dev` to them, so the next worker sees them. The
+  chat shows `Saved to dev at <sha>: <files>`. These commits skip the gate, as they are only docs. If a worker
+  changed the same lines meanwhile, the chat's side wins; if git still can't apply them, they are saved as a
+  patch in `~/.claude-ops/runs/design-<id>/` and the chat says so. A task being checked when `dev` moves runs
+  its gate again.
+- **Queue it.** **Queue as one task**, or **Queue N tasks, one per phase** (the `##` sections of `tasks.md`,
+  chained so each merges before the next starts), with **Hold for review** and **Release after merge** (ticked when
+  the project releases after merge by default; only the last task of a chain releases). You can
+  also ask Claude to queue it. Each task's brief points the worker at the change's folder, names the
+  sections it covers, and tells it to tick the boxes as it goes, keep to the proposal's scope, update
+  `design.md` and the deltas if it has to deviate, and not archive the change.
+- **How big a task is.** One task per change is the default and the recommendation. A checklist item is far too
+  small: every task costs a worktree, a worker start-up and a full gate run, and the worker can still split a
+  big change itself. One task per phase is recommended only for a change with 25 or more open items in three
+  or more phases. A phase with fewer than four open items (often "Tests" or "Docs") is folded into its
+  neighbour. There is never one task per item.
+- Archiving (`openspec archive`) is not automatic: ask the chat to queue it when you are happy.
+- A change copied from your checkout is still there. If it isn't committed there, delete it when you are done:
+  otherwise the release that brings the change to `main` waits for it.
+
 ## Chat mode
 
 The Chat tab is plain Claude in the project folder, as if you ran `claude` there. It works in your
@@ -246,6 +276,7 @@ Nothing claude-ops runs may stop, signal or quit a process it did not start.
 | `launcher.c` | `Claude Ops.app`: starts the daemon so macOS permission prompts name it |
 | `opsd.py` | daemon: HTTP API + dashboard, scheduler, pipeline, promote, design and project chats |
 | `worker_prompt.md`, `release_prompt.md`, `design_prompt.md` | briefs for workers, release checkers and design chats |
+| `spec_prompt.md` | added to a design chat's brief when it is about an OpenSpec change |
 | `dashboard.html` | the page |
 | `~/.claude-ops/projects/*.toml` | one config per project |
 | `~/.claude-ops/ops.db` | SQLite: tasks, events, settings, design chats |
