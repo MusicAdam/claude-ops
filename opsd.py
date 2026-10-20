@@ -50,6 +50,7 @@ RESULT_FILE = ".ops-result.json"
 ACTIVE = ("running", "gating", "merging")
 STOPPED = ("cancelled", "paused")  # set by you; the pipeline stops at its next step and never overrides them
 ENDED = ("done", "failed", "cancelled")
+MERGES = ("task", "senddev")  # kinds that go through the gate into dev: they can release after merge
 RELEASE_LOCK = threading.Lock()  # one release queued at a time, when tasks finish together
 DBL = threading.RLock()
 PROCS = {}  # task id -> current Popen (claude or a gate step), for cancel
@@ -121,6 +122,7 @@ class Project:
         self.deploy_wt = self.wt / "deploy"  # persistent: build output survives from one deploy to the next
         self.deploys = deploy_targets(self, c.get("deploy", []))
         self.lock = threading.Lock()  # merges into dev and promotes
+        self.checkout_lock = threading.Lock()  # moving main in your checkout, and clearing what Send to dev landed
 
     def target(self, name):
         t = next((t for t in self.deploys if t.name == name), None)
@@ -229,7 +231,7 @@ def load_projects():
                     print(f"project {f.name}: deploy target {t.name}: {t.error}", flush=True)
             old = PROJECTS.get(p.name)
             if old:
-                p.lock = old.lock
+                p.lock, p.checkout_lock = old.lock, old.checkout_lock
             found[p.name] = p
         except Exception as e:
             print(f"project {f.name}: {e}", flush=True)
@@ -523,7 +525,8 @@ def init_db():
     for col, decl in (("kind", "TEXT DEFAULT 'task'"), ("base", "TEXT"),  # databases from before releases
                       ("pid_start", "TEXT"), ("paused_by", "TEXT"), ("auto_release", "INTEGER DEFAULT 0"),
                       ("deploy", "TEXT"),  # a deploy's target and choices, as JSON
-                      ("origin", "TEXT")):  # and before peer sends
+                      ("origin", "TEXT"),  # and before peer sends
+                      ("senddev", "TEXT")):  # and before Send to dev: its snapshot and how it went, as JSON
         if col not in cols:
             q(f"ALTER TABLE tasks ADD COLUMN {col} {decl}")
     q("CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY, task_id INTEGER, ts REAL, text TEXT)")
@@ -589,10 +592,11 @@ def ev(tid, text):
 
 
 def add_task(project, body, title="", priority=0, hold=0, depends_on=None, parent=None, kind="task", auto_release=None,
-             deploy=None, origin=None):
+             deploy=None, origin=None, senddev=None):
     """auto_release None takes the project's default ("Release after merge" on the project).
     A deploy (kind "deploy") is made only by queue_deploy: you clicked Deploy, or ran `opsd.py deploy`.
-    origin: the session in another project that sent it (see send_peer)."""
+    origin: the session in another project that sent it (see send_peer).
+    senddev: the snapshot a Send to dev task (kind "senddev", made by queue_senddev) lands on dev."""
     p = proj(project)
     if auto_release is None:
         auto_release = release_default(p)
@@ -601,10 +605,10 @@ def add_task(project, body, title="", priority=0, hold=0, depends_on=None, paren
     if (kind == "deploy") != bool(deploy):
         raise ValueError("a deploy needs its target, and only a deploy has one")
     tid = q("INSERT INTO tasks (project, title, body, priority, hold, depends_on, parent, created, kind, auto_release, "
-            "deploy, origin) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            "deploy, origin, senddev) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (project, title, body, int(priority), int(bool(hold)), depends_on or None, parent, time.time(), kind,
-             int(bool(auto_release) and kind == "task"), json.dumps(deploy) if deploy else None,
-             json.dumps(origin) if origin else None))
+             int(bool(auto_release) and kind in MERGES), json.dumps(deploy) if deploy else None,
+             json.dumps(origin) if origin else None, json.dumps(senddev) if senddev else None))
     ev(tid, "queued" + (f" after #{depends_on}" if depends_on else ""))
     return tid
 
@@ -1210,15 +1214,25 @@ def pipeline(tid):
 def _pipeline(p, tid):
     t = task(tid)
     upd(tid, started=t["started"] or time.time(), error=None)
+    sending = t["kind"] == "senddev"
+    if sending and senddev_of(t).get("landed"):  # merged before a restart, a retry or a cancel: clear now
+        return senddev_landed(p, tid, t["merged"], f"merged into {p.dev} earlier")
     ensure_worktree(p, tid)
     t = task(tid)
     wt = t["worktree"]
-    prompt = t["next_prompt"] or worker_prompt(p, t)
+    prompt = t["next_prompt"] or ("" if sending else worker_prompt(p, t))
     need_claude = t["start_at"] == "claude"
     upd(tid, next_prompt=None, start_at="claude")
+    if sending and need_claude:  # your changes go onto the branch first; a worker runs only for conflicts
+        prompt = senddev_start(p, tid, prompt)
+        if prompt is None:
+            return
+        need_claude = bool(prompt)
 
     while True:
         if need_claude:
+            if sending and not task(tid)["session_id"] and SENDDEV_HEAD not in prompt[:300]:
+                prompt = senddev_brief(p, task(tid)) + "\n\n## Now\n\n" + prompt  # a fresh worker needs the story
             res = run_claude(p, tid, prompt)
             if stopped(tid):
                 return
@@ -1227,19 +1241,22 @@ def _pipeline(p, tid):
                 return fail(p, tid, "worker stopped without writing a result.\n" + err)
             status = res.get("status")
             upd(tid, summary=res.get("summary") or task(tid)["summary"])
+            applying = sending and not senddev_of(task(tid)).get("applied")
             if status == "split":
+                if sending:
+                    return fail(p, tid, "the worker asked to split a Send to dev task, which can't be split")
                 return split(p, tid, res)
-            if status == "needs_input":
-                upd(tid, state="needs_input", phase="", question=res.get("question") or res.get("summary"))
-                ev(tid, "needs your input")
-                tell_sender(tid, "needs the owner: " + (res.get("question") or res.get("summary") or ""))
-                notify(f"{p.title}: task needs input", f"#{tid}: {res.get('question', '')}")
-                return
+            if status == "needs_input" or (applying and status != "done"):  # it can't merge your changes: ask you
+                return ask_owner(p, tid, res.get("question") or res.get("summary") or f"the worker reported {status}")
             if status != "done":
                 return fail(p, tid, res.get("summary") or f"worker reported {status}")
             if pending_steers(tid):  # sent as the worker finished
                 prompt = steered_prompt("as you finished")
                 continue
+            if applying:
+                why = senddev_commit(p, tid)
+                if why:
+                    return ask_owner(p, tid, why)
             for r in p.parts:
                 if r.git("status", "--porcelain", cwd=r.at(wt)):
                     r.git("stash", "push", "-u", "-m", "ops-autostash: uncommitted after worker", cwd=r.at(wt))
@@ -1248,6 +1265,8 @@ def _pipeline(p, tid):
         need_claude = True
 
         if not changed_parts(p, t["branch"]):
+            if sending:  # applying your changes changed nothing: dev has them already
+                return senddev_landed(p, tid, None, f"{p.dev} already had these changes")
             return finish(p, tid, merged=None, note="no code changes")
 
         # Rebase onto the latest dev, gate, then merge (or hold for review).
@@ -1321,8 +1340,20 @@ def _pipeline(p, tid):
                 r.git("merge", "--no-ff", "-m", f"Merge task #{tid}: {t['title']}", t["branch"], cwd=r.at(p.dev_wt))
                 done.append((r, r.rev(p.dev)))
             merged = " ".join(sha for _, sha in done)
+            if sending:  # from here on the work is on dev: a restart or retry goes straight to clearing
+                upd(tid, merged=merged, senddev=json.dumps({**senddev_of(task(tid)), "landed": True}))
         where = ", ".join(f"{r.sub} {sha[:8]}" if r.sub else sha[:8] for r, sha in done)
+        if sending:
+            return senddev_landed(p, tid, merged, f"merged into {p.dev} at {where}")
         return finish(p, tid, merged=merged, note=f"merged into {p.dev} at {where}")
+
+
+def ask_owner(p, tid, question):
+    """The worker (or the queue) needs a decision only you can make: the task waits on you."""
+    upd(tid, state="needs_input", phase="", question=question)
+    ev(tid, "needs your input")
+    tell_sender(tid, "needs the owner: " + question)
+    notify(f"{p.title}: task needs input", f"#{tid}: {question}")
 
 
 def changed_parts(p, ref):
@@ -1418,7 +1449,7 @@ def auto_release(p):
         if q("SELECT id FROM tasks WHERE project=? AND kind='release' AND state NOT IN (?,?,?)",
              (p.name, *ENDED), one=True):
             return None
-        tasks = q("SELECT * FROM tasks WHERE project=? AND kind='task' AND auto_release=1", (p.name,))
+        tasks = q("SELECT * FROM tasks WHERE project=? AND kind IN (?,?) AND auto_release=1", (p.name, *MERGES))
         busy = {root_of(t) for t in tasks if t["state"] not in ENDED}
         ready = [t for t in tasks if t["state"] == "done" and t["merged"] and root_of(t) not in busy
                  and not all(any(is_ancestor(r, sha, p.main) for r in p.parts if r.has(sha))
@@ -1723,7 +1754,7 @@ def pause_task(tid, by=None):
     if t["state"] not in ("queued", *ACTIVE):
         raise ValueError(f"task is {t['state']}")
     kw = {}
-    if t["state"] == "gating" and t["kind"] == "task":
+    if t["state"] == "gating" and t["kind"] in MERGES:
         kw = {"start_at": "integrate"}  # Claude's work is done: rebase and run the gate again
     elif t["state"] == "running" and t["phase"] == "claude working" and t["session_id"]:
         kw = {"start_at": "claude", "next_prompt": RESTART_NOTE if by else PAUSE_NOTE}
@@ -1791,7 +1822,8 @@ def main_info(p, s=None):
             "auto_release": s.get(f"auto_release:{p.name}") == "1",  # release_default(p), from the snapshot
             "gate": [g["name"] for g in p.gate], "release": rel,
             "deploys": deploys, "deploys_loading": bool(p.deploys) and f.get("deploys") is None,
-            "deploy_open": opens[0]["id"] if opens else None, "uncommitted": f.get("uncommitted") or []}
+            "deploy_open": opens[0]["id"] if opens else None, "uncommitted": f.get("uncommitted") or [],
+            "senddev_open": senddev_open(p), "senddev_pending": f.get("senddev") or []}
 
 
 # ---------------------------------------------------------------- project facts for the dashboard
@@ -1824,6 +1856,7 @@ def read_facts(p, deploys=True):
              "running": app_running(p, p.main_wt),
              "has_build": not p.artifact or (p.main_wt / p.artifact).exists()}
         f["deploys"] = deploy_facts(p, f["main"]) if deploys else None  # tags, and version commands
+        f["senddev"] = senddev_pending(p, f["main"])  # sent to dev, not yet back in main
     except Exception as e:
         f = {"error": str(e)}
     f["uncommitted"] = uncommitted(p)
@@ -2120,7 +2153,14 @@ def move_main(p, tid, commit, note="", left=None):
     uncommitted changes stay: ones to files the release changes are merged onto it (by a worker, if they conflict)
     and put back. Every repo is checked first, so a workspace never moves only some of them. Returns an error or
     None; raises NeedsYou if your changes can't be carried over. Fills the list left, if given, with what stayed
-    uncommitted in each checkout on main: (part, sorted paths, sorted paths the plan merged and put back)."""
+    uncommitted in each checkout on main: (part, sorted paths, sorted paths the plan merged and put back). Holds
+    the checkout lock: a Send to dev never clears your checkout while this snapshots it, carries your changes over or
+    puts them back."""
+    with p.checkout_lock:
+        return _move_main(p, tid, commit, note, left)
+
+
+def _move_main(p, tid, commit, note, left):
     for r, sha in p.pairs(commit):
         if not is_ancestor(r, p.main, sha):
             return f"{p.main}{f' of {r.sub}' if r.sub else ''} could not fast-forward: it has commits {p.dev} lacks."
@@ -2303,6 +2343,378 @@ def promote(p, tid, commit, note=""):
     notify(f"{p.title}: {p.main} updated", f"{p.main} is now {p.show(commit)}"
            + (f"; {n} uncommitted {files(n)} {'was' if n == 1 else 'were'} not released" if n else ""))
     return None
+
+
+# ---------------------------------------------------------------- Send to dev (your checkout's uncommitted work -> dev)
+# The card's banner about uncommitted files in your checkout has a Send to dev button. It snapshots that work at the
+# click (refs/ops/senddev-<id> keeps it) and queues a task that applies it onto a branch made from dev, has a worker
+# resolve any conflicts, then goes through the gate into dev like any task. Only once it has merged are the sent files
+# cleared from your checkout, and only those that still match the snapshot: one copy, never none.
+
+SENDDEV_LOCK = threading.Lock()  # one open Send to dev per project; a click finishes its snapshot before it runs
+SENDDEV_HEAD = "started by the claude-ops task queue for Send to dev"  # in a prompt that tells the worker the story
+SENDDEV_LIST = 30  # paths a summary names per list before "and N more"
+EDITED = "you edited these after sending, so they were left in your checkout"
+NEW_COMMIT = "your checkout got a new commit since the snapshot, so your copy was left as it is"
+
+
+def senddev_of(t):
+    """A Send to dev task's record: {"repos": [{sub, repo, branch, head, wip, keep, files, conflicts}], "applied",
+    "landed", "cleared": [{cleared, left, why}] per repo}."""
+    return json.loads((t or {}).get("senddev") or "{}")
+
+
+def senddev_save(tid, d):
+    upd(tid, senddev=json.dumps(d))
+
+
+def part_of(p, sub):
+    return next(r for r in p.parts if r.sub == sub)
+
+
+def senddev_open(p):
+    """The project's Send to dev task that hasn't ended, or None."""
+    o = q("SELECT id FROM tasks WHERE project=? AND kind='senddev' AND state NOT IN (?,?,?) ORDER BY id",
+          (p.name, *ENDED), one=True)
+    return o["id"] if o else None
+
+
+def paths_of(r, *args, cwd=None):
+    """The NUL-separated paths a git command prints with -z, as a list."""
+    out = subprocess.run(["git", *args, "-z"], cwd=cwd or r.src, capture_output=True, text=True)
+    if out.returncode:
+        raise RuntimeError(f"git {' '.join(args)}: {out.stderr.strip()}")
+    return [x for x in out.stdout.split("\0") if x]
+
+
+def diff_status(r, a, b):
+    """[(status, path)] of what differs between trees or commits a and b, renames as a delete and an add."""
+    out = paths_of(r, "diff", "--name-status", "--no-renames", a, b)
+    return list(zip(out[::2], out[1::2]))
+
+
+def name_list(paths, n=SENDDEV_LIST):
+    return ", ".join(paths[:n]) + (f" and {len(paths) - n} more" if len(paths) > n else "")
+
+
+def senddev_keep(r, tid, x, when):
+    """The snapshot as a commit on your HEAD, kept at refs/ops/senddev-<id>. Dated at the click, so making it again
+    (after a crash cut the click off) gives the same commit."""
+    stamp = f"@{int(when)} +0000"
+    res = subprocess.run(["git", "commit-tree", x["wip"], "-p", x["head"], "-m",
+                          f"Uncommitted changes sent to dev by #{tid}"], cwd=r.src, capture_output=True, text=True,
+                         env=dict(os.environ, GIT_AUTHOR_DATE=stamp, GIT_COMMITTER_DATE=stamp))
+    if res.returncode:
+        raise RuntimeError(f"git commit-tree in {r.src}: {res.stderr.strip()}")
+    r.git("update-ref", f"refs/ops/senddev-{tid}", res.stdout.strip())
+    return res.stdout.strip()
+
+
+def queue_senddev(p):
+    """The Send to dev button: snapshot your checkout's uncommitted work now, keep it at refs/ops/senddev-<id>, and
+    queue a task that lands it on dev. With one already open it returns that one. Refuses when there is nothing."""
+    with SENDDEV_LOCK:
+        if o := senddev_open(p):
+            return o
+        repos = []
+        for r in p.parts:
+            head, wip = snapshot(r)
+            if wip == r.rev(f"{head}^{{tree}}"):
+                continue  # nothing uncommitted here
+            repos.append({"sub": r.sub, "repo": str(r.src).replace(str(HOME), "~", 1), "head": head, "wip": wip,
+                          "branch": r.git("branch", "--show-current", check=False),
+                          "files": [f for _, f in diff_status(r, head, wip)]})
+        if not repos:
+            raise ValueError("Your checkout has no uncommitted changes to send.")
+        tid = add_task(p.name, senddev_body(p, repos),
+                       f"Send uncommitted changes in {', '.join(x['repo'] for x in repos)} to {p.dev}",
+                       kind="senddev", senddev={"repos": repos})
+        when = task(tid)["created"]
+        for x in repos:
+            x["keep"] = senddev_keep(part_of(p, x["sub"]), tid, x, when)
+        senddev_save(tid, {"repos": repos})
+    ev(tid, "snapshot of your uncommitted changes: " + "; ".join(
+        f"{len(x['files'])} {files(len(x['files']))} in {x['repo']}, kept as {x['keep'][:8]} at refs/ops/senddev-{tid}"
+        for x in repos))
+    return tid
+
+
+def senddev_body(p, repos):
+    lines = [f"Send to dev, from the banner on the project card. Your checkout's uncommitted work, as it was at the "
+             f"click, lands on {p.dev} as a normal change:", ""]
+    for x in repos:
+        n = len(x["files"])
+        lines.append(f"{x['repo']}" + (f" (on {x['branch']})" if x["branch"] else "") + f": {n} {files(n)}")
+        lines += [f"- {f}" for f in x["files"][:50]] + ([f"- …and {n - 50} more"] if n > 50 else []) + [""]
+    lines.append(f"A copy is kept at refs/ops/senddev-<this task's id>. The queue applies it onto a branch made from "
+                 f"{p.dev} (a worker resolves any conflicts), runs the gate and merges it into {p.dev}, as for any task. "
+                 "Only then are the files that still match the snapshot cleared from your checkout. Stopping or "
+                 "cancelling before the merge leaves your checkout as it is.")
+    return "\n".join(lines)
+
+
+def senddev_start(p, tid, prompt):
+    """Where a Send to dev task's run begins. prompt is the task's next_prompt ("" if none). Returns the prompt for a
+    worker, "" to go straight to the rebase and gate, or None if the task needs you."""
+    with SENDDEV_LOCK:  # the click that queued it may still be writing the snapshot
+        t = task(tid)
+    if senddev_of(t).get("applied"):  # your changes are committed on the branch: on to the gate, or the worker
+        return prompt if t["session_id"] or prompt not in (RESTART_NOTE, PAUSE_NOTE) else ""
+    if t["session_id"]:  # a worker was merging your changes with dev: it carries on
+        return prompt or "Carry on: resolve the conflicts that are left, commit, and write $OPS_RESULT."
+    return senddev_apply(p, tid)
+
+
+def senddev_apply(p, tid):
+    """Apply the snapshot onto the task's branch, reset to the latest dev, in each repo it changes, as merge_wip does
+    for a release. A repo that applies cleanly is committed at once. Returns "" when every repo is, the prompt for a
+    worker to resolve the conflicts, or None if git can't apply it at all (the task then needs you)."""
+    t = task(tid)
+    d = senddev_of(t)
+    upd(tid, phase=f"applying your changes onto {p.dev}")
+    conflicts, made = [], 0
+    for x in d["repos"]:
+        r = part_of(p, x["sub"])
+        wt = r.at(t["worktree"])
+        x["keep"] = x.get("keep") or senddev_keep(r, tid, x, t["created"])
+        for a in (("cherry-pick", "--quit"), ("reset", "--hard", "-q", p.dev), ("clean", "-fdq")):
+            subprocess.run(["git", *a], cwd=wt, capture_output=True)
+        m = subprocess.run(["git", "cherry-pick", "--no-commit", x["keep"]], cwd=wt, capture_output=True, text=True)
+        x["conflicts"] = paths_of(r, "diff", "--name-only", "--diff-filter=U", cwd=wt) if m.returncode else []
+        if m.returncode and not x["conflicts"]:
+            senddev_save(tid, d)
+            ask_owner(p, tid, f"git could not apply your uncommitted changes in {x['repo']} onto {p.dev}: "
+                              + (m.stderr or m.stdout).strip()[-1500:])
+            return None
+        if x["conflicts"]:
+            conflicts.append(x)
+        else:
+            made += senddev_commit_repo(r, wt, x)
+    d["applied"] = not conflicts
+    senddev_save(tid, d)
+    if not conflicts:
+        ev(tid, f"applied your changes onto {p.dev} and committed them" if made else
+                f"applied your changes onto {p.dev}: it has them already, so there is nothing to commit")
+        return ""
+    n = sum(len(x["conflicts"]) for x in conflicts)
+    ev(tid, f"your changes conflict with {p.dev} in {n} {files(n)}; a worker is merging them")
+    upd(tid, session_id=None)
+    return senddev_conflict_prompt(p, task(tid), conflicts)
+
+
+def senddev_message(x):
+    """The commit message for repo x's changes: its subject, and the files as its body."""
+    fs = x["files"]
+    return (f"Your uncommitted changes from {x['repo']}",
+            "\n".join(f"- {f}" for f in fs[:200]) + (f"\n- …and {len(fs) - 200} more" if len(fs) > 200 else ""))
+
+
+def senddev_commit_repo(r, wt, x):
+    """Commit what is staged in wt as your changes from x's repo; nothing if nothing is (dev had them already).
+    Returns whether it made a commit."""
+    made = subprocess.run(["git", "diff", "--cached", "--quiet"], cwd=wt).returncode != 0
+    if made:
+        subject, body = senddev_message(x)
+        r.git("commit", "-q", "--no-verify", "-m", subject, "-m", body, cwd=wt)
+    subprocess.run(["git", "cherry-pick", "--quit"], cwd=wt, capture_output=True)
+    return made
+
+
+def senddev_commit(p, tid):
+    """The worker merging your changes with dev says it is done: check that no conflict is left, and commit its
+    resolution if it didn't. Returns why the task needs you, or None once your changes are on the branch."""
+    t = task(tid)
+    d = senddev_of(t)
+    for x in d["repos"]:
+        if not x.get("conflicts"):
+            continue
+        r = part_of(p, x["sub"])
+        wt = r.at(t["worktree"])
+        left = paths_of(r, "diff", "--name-only", "--diff-filter=U", cwd=wt) or [
+            f for f in x["conflicts"] if (wt / f).is_file() and CONFLICT_MARK.search((wt / f).read_text(errors="replace"))]
+        if left:
+            return (f"The worker said it merged your changes in {x['repo']} with {p.dev}, but conflicts are left in "
+                    f"{name_list(left)}. Say how to combine them and the worker tries again, or cancel to keep them "
+                    "only in your checkout.")
+        if not int(r.git("rev-list", "--count", f"{p.dev}..HEAD", cwd=wt) or 0):  # it resolved but didn't commit
+            r.git("add", "-A", "--", *x["conflicts"], cwd=wt, check=False)
+            senddev_commit_repo(r, wt, x)
+        subprocess.run(["git", "cherry-pick", "--quit"], cwd=wt, capture_output=True)
+    d["applied"] = True
+    senddev_save(tid, d)
+    ev(tid, f"your changes are merged with {p.dev} and committed")
+    return None
+
+
+def senddev_brief(p, t):
+    """What a Send to dev worker needs to know whatever it is asked: the story, the rules, and how to report."""
+    d = senddev_of(t)
+    checks = ", ".join(f"`{g['run']}`" for g in p.gate) or "(none configured)"
+    notes = workspace_note(p, t["branch"]) + (f"## Notes for {p.title}\n\n{p.worker_notes}\n\n" if p.worker_notes else "")
+    sent = "".join(f"- {x['repo']}: {len(x['files'])} {files(len(x['files']))}, kept as commit {x['keep'][:12]} "
+                   f"(`refs/ops/senddev-{t['id']}`) on the user's HEAD {x['head'][:12]}\n" for x in d["repos"])
+    return (f"You are an unattended worker on the {p.title} project, {SENDDEV_HEAD} (task #{t['id']}). Nobody "
+            f"watches this session and nobody can answer you mid-run.\n\n"
+            f"The user's checkout had uncommitted changes: unfinished work on no branch, so workers didn't see it and "
+            f"no release shipped it. The user clicked Send to dev, which lands that work on `{p.dev}` as a normal "
+            f"change:\n\n{sent}\n"
+            f"This worktree ({t['worktree']}) is on branch `{t['branch']}`, made from `{p.dev}`. The queue applied "
+            f"the user's changes here with `git cherry-pick --no-commit` of that commit, and commits them per repo as "
+            f"`Your uncommitted changes from <repo>`, with the files listed. After you, it rebases the branch onto the "
+            f"latest `{p.dev}`, runs the merge check ({checks}) and merges it into `{p.dev}`. Then it clears the sent "
+            f"files from the user's checkout.\n\n"
+            f"Rules: edit and commit only in this worktree. Never touch {p.repo} (the user's checkout), another "
+            f"worktree, or the `{p.dev}` and `{p.main}` branches, and never push. `OPS_PORT` is {p.port_for(t['id'])}; "
+            f"use it for anything that listens. Never post mouse or keyboard events or take focus: the user is using "
+            f"this Mac. {GUARD_RULE} Land the user's work as it is: don't finish or extend it.\n\n{notes}"
+            f"As your last action, write JSON to $OPS_RESULT ({result_path(t)}): "
+            '{"status": "done", "summary": "..."} once everything is committed, or '
+            '{"status": "needs_input", "question": "...", "summary": "..."} if only the user can decide (for '
+            "example, how two changes that truly contradict should combine). The user reads the summary: say in plain "
+            "words what you did, per file.")
+
+
+def senddev_conflict_prompt(p, t, conflicts):
+    checks = ", ".join(f"`{g['run']}`" for g in p.gate) or "(none configured: run whatever tests the repo has)"
+    parts = []
+    for x in conflicts:
+        subject, body = senddev_message(x)
+        where = f"`{x['sub']}/`" if x["sub"] else "this worktree"
+        parts.append(
+            f"In {where} ({x['repo']}), `git cherry-pick --no-commit {x['keep'][:12]}` stopped on conflicts in:\n\n"
+            + "".join(f"- {f}\n" for f in x["conflicts"]) +
+            f"\nThe `{p.dev}` side is checked work that passed the gate: `git diff {x['head'][:12]} HEAD -- <file>` "
+            f"shows what it changed since the user's base. The user's side is their unfinished work being landed: "
+            f"`git diff {x['head'][:12]} {x['keep'][:12]} -- <file>`. Once resolved, `git add` those files and commit "
+            f"everything staged with exactly:\n\n    git commit -m {shlex.quote(subject)} -m {shlex.quote(body)}\n")
+    return (senddev_brief(p, t) + "\n\n## Now: merge the user's changes with " + p.dev + "\n\n" + "\n".join(parts) +
+            f"\nResolve every conflict so both sides survive. Where they truly contradict, keep what the user meant and "
+            f"fit it to `{p.dev}`'s code. Don't abort the cherry-pick, reset, rebase or stash. Then run the checks "
+            f"({checks}). The user's work is unfinished, so they may fail: you may fix what they find, with the "
+            f"smallest change that keeps the user's intent, in a further commit. If you can't merge the two sides "
+            f"without the user, report needs_input and ask them how.")
+
+
+def senddev_landed(p, tid, merged, note):
+    """Your changes are on dev (merged is the merge, or None when dev had them already): clear them from your
+    checkout, sum up what happened, and finish. Never runs before the merge, so a stop before it clears nothing."""
+    d = senddev_of(task(tid))
+    if not d.get("landed"):
+        d["landed"] = True
+        senddev_save(tid, d)
+    if stopped(tid):
+        ev(tid, f"stopped after merging into {p.dev}, so your checkout was left as it is; Retry clears it")
+        return
+    upd(tid, merged=merged, state="merging", phase="clearing your checkout")
+    if "cleared" not in d:  # a retry after clearing only finishes
+        if not p.checkout_lock.acquire(blocking=False):
+            upd(tid, phase=f"waiting for {p.main} to finish moving in your checkout")
+            ev(tid, f"waiting to clear your checkout: a release or deploy is moving {p.main} in it")
+            p.checkout_lock.acquire()
+        try:
+            if stopped(tid):
+                ev(tid, f"stopped after merging into {p.dev}, so your checkout was left as it is; Retry clears it")
+                return
+            upd(tid, phase="clearing your checkout")
+            d["cleared"] = []
+            for x in d["repos"]:
+                try:
+                    c = clear_checkout(part_of(p, x["sub"]), x)
+                except Exception as e:  # say so and leave the rest; nothing is lost, the copy is in dev and the ref
+                    c = {"cleared": [], "left": [], "why": f"clearing failed, so your copy was left as it is ({e})"}
+                d["cleared"].append(c)
+                ev(tid, f"{x['repo']}: " + (c["why"] if c["why"] else
+                        f"cleared {len(c['cleared'])} {files(len(c['cleared']))}"
+                        + (f"; left {len(c['left'])} you edited after sending: {name_list(c['left'], 10)}"
+                           if c["left"] else "")))
+        finally:
+            p.checkout_lock.release()
+        d["summary"] = senddev_summary(p, task(tid), d, merged)
+        senddev_save(tid, d)
+    upd(tid, summary=d.get("summary"))
+    stale_facts(p.name)
+    finish(p, tid, merged=merged, note=note)
+
+
+def clear_checkout(r, x):
+    """Put each file the snapshot x changed back as your HEAD has it (deleted if HEAD lacks it), in the working tree
+    and the index, if the file still matches the snapshot (or HEAD already). Folders left empty go too. A file edited
+    since is left, and nothing at all if HEAD moved. Never a path outside the snapshot's diff.
+    Returns {"cleared": [paths], "left": [paths edited since], "why": why nothing was cleared, or None}."""
+    head, now = snapshot(r)
+    if head != x["head"]:
+        return {"cleared": [], "left": [], "why": NEW_COMMIT}
+    sent = diff_status(r, x["head"], x["wip"])
+    edited = ({f for _, f in diff_status(r, x["wip"], now)}  # differs from the snapshot, and from HEAD too
+              & {f for _, f in diff_status(r, head, now)})
+    back = [(st, f) for st, f in sent if f not in edited]
+    restore, drop = [f for st, f in back if st != "A"], [f for st, f in back if st == "A"]
+
+    def git_paths(*args, paths):
+        subprocess.run(["git", "--literal-pathspecs", *args, "--pathspec-from-file=-", "--pathspec-file-nul"],
+                       input="\0".join(paths), cwd=r.src, capture_output=True, text=True, check=True)
+
+    if restore:
+        git_paths("checkout", head, paths=restore)
+    for f in drop:  # new in the snapshot: HEAD has no copy to put back
+        path = r.src / f
+        if within(path.parent, r.src) and (path.is_symlink() or path.is_file()):
+            path.unlink()
+    if back:
+        git_paths("reset", "-q", head, paths=[f for _, f in back])
+    for f in drop:
+        folder = (r.src / f).parent
+        while folder != r.src and within(folder, r.src):
+            try:
+                folder.rmdir()
+            except OSError:  # not empty, or already gone
+                break
+            folder = folder.parent
+    return {"cleared": [f for _, f in back], "left": [f for _, f in sent if f in edited], "why": None}
+
+
+def senddev_summary(p, t, d, merged):
+    """The task's summary: per repo, what landed on dev, what was cleared, what was left and why, and the copy."""
+    out = []
+    for x, c in zip(d["repos"], d["cleared"]):
+        r = part_of(p, x["sub"])
+        m = p.mine(r, merged) if merged else None
+        landed = paths_of(r, "diff", "--name-only", "--no-renames", f"{m}^1", m) if m else []
+        out += [f"{x['repo']}:",
+                f"- Landed on {p.dev}: {name_list(landed)}." if landed else
+                f"- Nothing new landed on {p.dev}: it already had these changes."]
+        if c["why"]:
+            out.append(f"- Nothing cleared: {c['why']}.")
+        if c["cleared"]:
+            out.append(f"- Cleared from your checkout: {name_list(c['cleared'])}.")
+        if c["left"]:
+            out.append(f"- Left in your checkout: {name_list(c['left'])}. {EDITED[0].upper() + EDITED[1:]}.")
+        out.append(f"- A copy of your changes as they were: refs/ops/senddev-{t['id']} (commit {x['keep'][:8]}).")
+    if merged and any(c["cleared"] for c in d["cleared"]):
+        out.append(f"\nWhat was cleared is on {p.dev}, not in your checkout, until the next Promote brings it back.")
+    worker = (t["summary"] or "").strip()
+    return "\n".join(out) + (f"\n\nThe worker that merged them: {worker}" if worker else "")
+
+
+IN_MAIN = set()  # (repo, sha) known to be in main: main only moves forward, so it stays there
+
+
+def senddev_pending(p, main):
+    """Send to dev tasks whose merge is on dev but not yet in main (a revs string), newest first: the card says
+    Promote to get them back."""
+    out = []
+    for t in q("SELECT id, merged FROM tasks WHERE project=? AND kind='senddev' AND state='done' AND merged IS NOT NULL "
+               "ORDER BY id DESC LIMIT 20", (p.name,)):
+        for sha in t["merged"].split():
+            r = next((r for r in p.parts if r.has(sha)), None)
+            if not r or (r.src, sha) in IN_MAIN:
+                continue
+            if is_ancestor(r, sha, dict(zip(p.parts, main.split()))[r]):
+                IN_MAIN.add((r.src, sha))
+            else:
+                out.append(t["id"])
+                break
+    return out
 
 
 # ---------------------------------------------------------------- deploys
@@ -4017,7 +4429,7 @@ class H(BaseHTTPRequestHandler):
             t["chat_live"] = TASK_CHAT_LIVE.get(tid)
             t["can_chat"] = bool(t["session_id"]) and t["state"] in CHAT_STATES
             t["steer_live"] = tid in STEER_PIPES  # the worker reads a message after its current step
-            t["can_steer"] = t["state"] in STEER_STATES and (t["kind"] == "task" or t["steer_live"])
+            t["can_steer"] = t["state"] in STEER_STATES and (t["kind"] in MERGES or t["steer_live"])
             if t["kind"] == "deploy":  # its command's output
                 t["deploy"] = json.loads(t["deploy"] or "{}")
                 t["log"] = log_tail(RUNS / str(tid) / "deploy.log", 8000)
@@ -4129,9 +4541,13 @@ class H(BaseHTTPRequestHandler):
         m = re.fullmatch(r"/api/projects/([^/]+)/(archive|unarchive)", path)
         if m:  # unarchive names a project that is not loaded, so these come before proj()
             return (archive_project if m.group(2) == "archive" else unarchive_project)(unquote(m.group(1)))
-        m = re.fullmatch(r"/api/projects/([\w-]+)/(promote|play|pause|resume|release)", path)
+        m = re.fullmatch(r"/api/projects/([\w-]+)/(promote|play|pause|resume|release|senddev)", path)
         if m:
             p, act = proj(m.group(1)), m.group(2)
+            if act == "senddev":  # Send to dev, on the banner about your checkout's uncommitted files
+                tid = queue_senddev(p)
+                stale_facts(p.name)
+                return {"id": tid}
             if act == "release":  # the project's "Release after merge" default, for tasks queued from now on
                 set_setting(f"auto_release:{p.name}", "1" if b.get("on") else "0")
             elif act == "promote":
@@ -4203,10 +4619,10 @@ class H(BaseHTTPRequestHandler):
             stop(PROCS.get(tid))
             ev(tid, "cancelled")
             tell_sender(tid, "was cancelled by the owner")
-            if p and t["kind"] == "task" and t["auto_release"]:  # its split's other tasks may be waiting for it
+            if p and t["kind"] in MERGES and t["auto_release"]:  # its split's other tasks may be waiting for it
                 auto_release(p)
         elif action == "release":  # the "Release after merge" toggle
-            if t["kind"] != "task" or st in ENDED:
+            if t["kind"] not in MERGES or st in ENDED:
                 raise ValueError(f"task is {st}" if st in ENDED else "a release releases itself")
             upd(tid, auto_release=int(bool(b.get("on"))))
             ev(tid, "will release after it merges" if b.get("on") else "will not release after it merges")
