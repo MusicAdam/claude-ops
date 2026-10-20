@@ -552,6 +552,7 @@ def init_db():
     if "delivered" not in {r["name"] for r in q("PRAGMA table_info(task_msgs)")}:  # databases from before steering
         q("ALTER TABLE task_msgs ADD COLUMN delivered REAL")
     q("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)")
+    q("CREATE TABLE IF NOT EXISTS session_costs (session_id TEXT PRIMARY KEY, total REAL)")  # see cost_added
     for k, v in {"max_parallel": "3", "paused": "0", "model": "", "usage_brake": "85"}.items():
         q("INSERT OR IGNORE INTO settings VALUES (?,?)", (k, v))
     q("DELETE FROM settings WHERE key='draining'")  # the old restart's stored hold: a crash could leave it set
@@ -583,6 +584,19 @@ def upd(tid, **kw):
       (*kw.values(), tid, *(STOPPED if guard else ())))
     if "phase" in kw:
         PHASE_SINCE[tid] = time.time()
+
+
+def cost_added(sid, total):
+    """The dollars a result event adds. Its total_cost_usd runs for the whole session, and a resumed session
+    carries the earlier total forward, so only the rise since the session's last result is new."""
+    total = total or 0
+    if not sid:
+        return total
+    row = q("SELECT total FROM session_costs WHERE session_id=?", (sid,), one=True)
+    q("INSERT INTO session_costs (session_id, total) VALUES (?,?) "
+      "ON CONFLICT(session_id) DO UPDATE SET total=excluded.total", (sid, total))
+    last = row["total"] if row else 0
+    return total - last if total >= last else total  # lower: a session that started its count over
 
 
 def ev(tid, text):
@@ -981,7 +995,7 @@ def run_claude(p, tid, prompt):
     env = dict(os.environ, OPS_RESULT=str(rp), OPS_TASK_ID=str(tid), OPS_PORT=str(port), OPS_FROM=f"task:{tid}",
                OPS_DAEMON=DAEMON_URL, **{k: str(v).format(port=port) for k, v in p.env.items()})
     upd(tid, phase="claude working")
-    cost0, sid = task(tid)["cost"] or 0, t["session_id"]
+    sid = t["session_id"]
     with open(run_dir / "claude.jsonl", "a") as log, open(run_dir / "claude.err", "a") as err:
         log.write(json.dumps({"type": "ops", "prompt": prompt[:2000], "ts": time.time()}) + "\n")
         proc = subprocess.Popen(cmd, cwd=t["worktree"], env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
@@ -1037,8 +1051,9 @@ def run_claude(p, tid, prompt):
                       (tid, "assistant", "\n\n".join(said), time.time()))
                     acking = False
             elif e.get("type") == "result":
-                # total_cost_usd counts the whole process; a message sent at the very end adds a turn.
-                upd(tid, cost=cost0 + (e.get("total_cost_usd") or 0))
+                # one result per turn; a message sent at the very end adds a turn
+                q("UPDATE tasks SET cost=COALESCE(cost,0)+? WHERE id=?",
+                  (cost_added(e.get("session_id") or sid, e.get("total_cost_usd")), tid))
                 close_steer(tid)  # messages already written still get their turn before claude exits
         close_steer(tid)
         proc.wait()
@@ -3498,7 +3513,7 @@ def stream_claude(cmd, cwd, log_dir, live, procs, key, on_session, env=None):
                         texts.clear()  # text before a tool call is narration; the reply comes after
                         live.append(tool_line(c.get("name"), c.get("input") or {}))
             elif e.get("type") == "result":
-                cost += e.get("total_cost_usd") or 0
+                cost += cost_added(e.get("session_id") or sid, e.get("total_cost_usd"))
         proc.wait()
         err.seek(0)
         err_tail = err.read()[-1200:]
