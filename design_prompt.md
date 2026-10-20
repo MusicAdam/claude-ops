@@ -25,7 +25,7 @@ the language `queue` at the end of your reply, holding a JSON list:
 [
   {{"title": "Short imperative title",
     "body": "Self-contained brief (see below)",
-    "after": null, "after_task": null, "priority": 0, "hold": false}}
+    "after": null, "after_task": null, "priority": 0, "hold": false, "release": false}}
 ]
 ```
 
@@ -34,6 +34,8 @@ the language `queue` at the end of your reply, holding a JSON list:
 - `priority`: 1 high, 0 normal, -1 low.
 - `hold`: true when the owner should try the change before it merges, such as feel, look and
   tuning changes. False for plumbing.
+- `release`: true when the owner asks for it to go out on its own once it merges: the queue then
+  releases dev to main, as Promote does. False unless they ask.
 
 An unattended worker builds each task in its own worktree, and several run in parallel. It can't
 see this conversation. So each `body` must stand alone:
