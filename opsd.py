@@ -2638,8 +2638,7 @@ def queue_senddev(p):
                           "files": [f for _, f in diff_status(r, head, wip)]})
         if not repos:
             raise ValueError("Your checkout has no uncommitted changes to send.")
-        tid = add_task(p.name, senddev_body(p, repos),
-                       f"Send uncommitted changes in {', '.join(x['repo'] for x in repos)} to {p.dev}",
+        tid = add_task(p.name, senddev_body(p, repos), f"Send uncommitted changes in {senddev_where(p, repos)} to {p.dev}",
                        kind="senddev", senddev={"repos": repos})
         when = task(tid)["created"]
         for x in repos:
@@ -2649,6 +2648,14 @@ def queue_senddev(p):
         f"{len(x['files'])} {files(len(x['files']))} in {x['repo']}, kept as {x['keep'][:8]} at refs/ops/senddev-{tid}"
         for x in repos))
     return tid
+
+
+def senddev_where(p, repos):
+    """The repos in a Send to dev title, by folder name, so the list doesn't cut it off: "demo", or
+    "shop (backend, app)" for a workspace."""
+    if not p.repos:
+        return p.repo.name
+    return f"{p.repo.name} ({', '.join(x['sub'] for x in repos)})"
 
 
 def senddev_body(p, repos):
@@ -2885,15 +2892,36 @@ def clear_checkout(r, x):
     return {"cleared": [f for _, f in back], "left": [f for _, f in sent if f in edited], "why": None}
 
 
+def senddev_headline(p, d, landed):
+    """The summary's first line, which the task card shows: what happened, in counts. landed: files per repo."""
+    n = sum(len(f) for f in landed)
+    cleared = sum(len(c["cleared"]) for c in d["cleared"])
+    edited = sum(len(c["left"]) for c in d["cleared"])
+    stuck = [(x, c) for x, c in zip(d["repos"], d["cleared"]) if c["why"]]  # nothing cleared there, and why
+    out = [f"Landed {n} {files(n)} on {p.dev}" if n else f"Nothing new landed on {p.dev}: it already had these changes"]
+    if cleared:
+        out.append(f"cleared {cleared} from your checkout")
+    if edited:
+        out.append(f"left {edited} you edited after sending")
+    if stuck and not cleared and not edited and len({c["why"] for _, c in stuck}) == 1:
+        out.append(f"cleared nothing: {stuck[0][1]['why']}")
+    elif stuck:
+        k = sum(len(x["files"]) for x, _ in stuck)
+        out.append(f"left {k} as {'it was' if k == 1 else 'they were'} (see below)")
+    return "; ".join(out)
+
+
 def senddev_summary(p, t, d, merged):
-    """The task's summary: per repo, what landed on dev, what was cleared, what was left and why, and the copy."""
-    out = []
-    for x, c in zip(d["repos"], d["cleared"]):
+    """The task's summary: a headline in counts, then per repo what landed on dev, what was cleared, what was left
+    and why, and the copy."""
+    out, landed = [], []
+    for x in d["repos"]:
         r = part_of(p, x["sub"])
         m = p.mine(r, merged) if merged else None
-        landed = paths_of(r, "diff", "--name-only", "--no-renames", f"{m}^1", m) if m else []
-        out += [f"{x['repo']}:",
-                f"- Landed on {p.dev}: {name_list(landed)}." if landed else
+        landed.append(paths_of(r, "diff", "--name-only", "--no-renames", f"{m}^1", m) if m else [])
+    for x, c, here in zip(d["repos"], d["cleared"], landed):
+        out += ["", f"{x['repo']}:",
+                f"- Landed on {p.dev}: {name_list(here)}." if here else
                 f"- Nothing new landed on {p.dev}: it already had these changes."]
         if c["why"]:
             out.append(f"- Nothing cleared: {c['why']}.")
@@ -2905,7 +2933,8 @@ def senddev_summary(p, t, d, merged):
     if merged and any(c["cleared"] for c in d["cleared"]):
         out.append(f"\nWhat was cleared is on {p.dev}, not in your checkout, until the next Promote brings it back.")
     worker = (t["summary"] or "").strip()
-    return "\n".join(out) + (f"\n\nThe worker that merged them: {worker}" if worker else "")
+    return (senddev_headline(p, d, landed) + "\n" + "\n".join(out)
+            + (f"\n\nThe worker that merged them: {worker}" if worker else ""))
 
 
 IN_MAIN = set()  # (repo, sha) known to be in main: main only moves forward, so it stays there

@@ -81,7 +81,8 @@ several (see [Workspaces](#workspaces)). Read it, adjust it, then click **Reload
   design chat's `[ops: ...]` line names them. Commit them to dev, or click **Send to dev**, for them to ship.
 - **Send to dev** (a button on that banner) turns the stranded work into a normal queued change on dev, then
   clears it from your checkout, so there is exactly one copy. It queues a task of its own kind, `Send uncommitted
-  changes in <repo> to dev` (marked `send to dev` in the list), with no hold and the project's Release after
+  changes in <repo folder> to dev` (marked `send to dev` in the list; a workspace reads `<workspace folder>
+  (<repo>, <repo>)`, naming the repos that had changes), with no hold and the project's Release after
   merge default. A project has one open at a time: while it is open, the button links to it.
   1. **At the click** it snapshots each repo with uncommitted files (tracked and untracked, not ignored), as
      `snapshot` does for a release, and keeps the snapshot as a commit on your HEAD at `refs/ops/senddev-<id>`.
@@ -97,7 +98,9 @@ several (see [Workspaces](#workspaces)). Read it, adjust it, then click **Reload
      tree and the index; folders left empty are removed. A file you edited after the click stays as it is and is
      named in the summary. Files outside the snapshot are never touched. Clearing waits while a release or deploy
      is moving main in your checkout.
-  5. **The summary** lists the files that landed on dev, the files cleared, any left and why, and the ref.
+  5. **The summary** starts with one line in counts, which the task card shows, such as `Landed 3 files on dev;
+     cleared 3 from your checkout` or `...; left 1 you edited after sending`. Below it, per repo, it lists the
+     files that landed on dev, the files cleared, any left and why, and the ref.
 
   Pausing, stopping or cancelling the task before the merge clears nothing; Retry after a merge clears then. Until
   the next Promote the work is in dev but not in your checkout: the card says `On dev, not released yet. Promote to
