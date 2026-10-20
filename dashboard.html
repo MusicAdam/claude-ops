@@ -52,7 +52,9 @@ label { color: var(--muted); display: inline-flex; gap: 6px; align-items: center
 .task .title { flex: 1; font-weight: 550; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .task .sub { color: var(--muted); font-size: 12px; margin-top: 3px; }
 .task .now { font-size: 12px; margin-top: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.task .now .mono { font-size: 11.5px; }
+.task .now.step { display: flex; align-items: flex-start; white-space: normal; }
+.task .now.step .what { min-width: 0; overflow: hidden; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+.task .now.step > .muted { flex: none; margin-left: 4px; }
 .task .now .say { font-style: italic; }
 .badge { font-size: 11px; padding: 2px 8px; border-radius: 99px; background: var(--chip); white-space: nowrap; }
 .s-running, .s-gating, .s-merging { color: var(--accent); }
@@ -390,9 +392,12 @@ function nowLine(t, now) {
   const s = t.step, e = t.last_event;
   let text = "", h = "", cls = "muted";  // text is the whole line, also the tooltip when it is cut off
   if (t.state === "running" && s) {
-    // The worker's latest tool call or words, and how long since its transcript last moved.
-    text = s.t; cls = "";
-    h = (s.k === "tool" ? `<span class="mono">▸ ${esc(text)}</span>` : `<span class="say">“${esc(text)}”</span>`) + since(s.ts);
+    // What the worker's latest step does, in words, then what it last said, and how long since its
+    // transcript last moved. The step and the time stay in view when its words are cut off.
+    const say = s.k === "say" ? s.t : s.say;
+    text = [s.k === "tool" && `▸ ${s.t}`, say && `“${say}”`].filter(Boolean).join(" ");
+    cls = "step";
+    h = `<span class="what">${s.k === "tool" ? `▸ ${esc(s.t)} ` : ""}${say ? `<span class="say">“${esc(say)}”</span>` : ""}</span>` + since(s.ts);
   } else if (LIVE.includes(t.state)) { text = t.phase || "starting"; h = esc(text) + since(t.phase_since, x => `for ${x}`); cls = "s-running"; }
   else if (t.state === "queued") text = t.wait || "";
   else if (t.state === "paused") { text = e ? e.text : ""; h = text && esc(text) + since(e.ts); }
