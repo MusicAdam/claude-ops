@@ -394,6 +394,11 @@ def set_setting(k, v):
     q("INSERT OR REPLACE INTO settings VALUES (?,?)", (k, str(v)))
 
 
+def release_default(p):
+    """Whether new tasks of p are marked "Release after merge" unless you say otherwise."""
+    return setting(f"auto_release:{p.name}") == "1"
+
+
 def task(tid):
     return q("SELECT * FROM tasks WHERE id=?", (tid,), one=True)
 
@@ -413,8 +418,11 @@ def ev(tid, text):
     print(f"[#{tid}] {text}", flush=True)
 
 
-def add_task(project, body, title="", priority=0, hold=0, depends_on=None, parent=None, kind="task", auto_release=0):
-    proj(project)
+def add_task(project, body, title="", priority=0, hold=0, depends_on=None, parent=None, kind="task", auto_release=None):
+    """auto_release None takes the project's default ("Release after merge" on the project)."""
+    p = proj(project)
+    if auto_release is None:
+        auto_release = release_default(p)
     body = body.strip()
     title = (title or (title_of(body) if body else "untitled")).strip()[:120]
     tid = q("INSERT INTO tasks (project, title, body, priority, hold, depends_on, parent, created, kind, auto_release) "
@@ -1154,7 +1162,7 @@ def remove_worktree(p, path):
             r.git("worktree", "prune", check=False)
 
 
-def add_subtasks(p, tid, items, priority=0, hold=0, auto_release=0):
+def add_subtasks(p, tid, items, priority=0, hold=0, auto_release=None):
     """Queue a worker's task list ({title, body, after}) with tid as parent. Returns the new ids."""
     ids = []
     for sub in items or []:
@@ -1491,7 +1499,7 @@ def main_info(p):
             "has_app": bool(p.build), "can_launch": bool(p.launch),
             "stale": bool(p.build) and built != main, "running": app_running(p, p.main_wt),
             "has_build": bool(p.build) and (not p.artifact or (p.main_wt / p.artifact).exists()),
-            "paused": setting(f"paused:{p.name}") == "1", "gate": [g["name"] for g in p.gate], "release": rel}
+            "paused": setting(f"paused:{p.name}") == "1", "auto_release": release_default(p), "gate": [g["name"] for g in p.gate], "release": rel}
 
 
 def promote_blocker(p, commit):
@@ -1702,7 +1710,8 @@ def ops_note(p, did):
     """Context the dashboard adds to each user message: the queue, and what the last queue block did."""
     live = q("SELECT id,state,title FROM tasks WHERE project=? AND state NOT IN ('done','cancelled') ORDER BY id",
              (p.name,))
-    parts = ["queue: " + ("; ".join(f"#{t['id']} {t['state']} {t['title']}" for t in live[:25]) or "empty")]
+    parts = ["queue: " + ("; ".join(f"#{t['id']} {t['state']} {t['title']}" for t in live[:25]) or "empty"),
+             "release after merge: " + ("on" if release_default(p) else "off") + " by default for this project"]
     last = q("SELECT note FROM design_msgs WHERE design_id=? AND role='assistant' ORDER BY id DESC LIMIT 1",
              (did,), one=True)
     if last and last["note"]:
@@ -1809,7 +1818,7 @@ def queue_from_reply(p, reply, did):
                 dep = int(str(it["after_task"]).lstrip("#"))
             tid = add_task(p.name, it.get("body") or it.get("title", ""), it.get("title", ""),
                            priority=int(it.get("priority") or 0), hold=bool(it.get("hold")), depends_on=dep,
-                           auto_release=bool(it.get("release")))
+                           auto_release=None if it.get("release") is None else bool(it.get("release")))
             ev(tid, f"queued from design chat #{did}")
             local.append(tid)
         ids += local
@@ -2224,7 +2233,7 @@ class H(BaseHTTPRequestHandler):
                 raise ValueError("describe the task")
             dep = int(str(b["depends_on"]).lstrip("#")) if str(b.get("depends_on") or "").strip() else None
             return {"id": add_task(b["project"], b["body"], b.get("title", ""), b.get("priority", 0),
-                                   b.get("hold", 0), dep, auto_release=b.get("release", 0))}
+                                   b.get("hold", 0), dep, auto_release=b.get("release"))}
         if path == "/api/settings":
             for k in ("max_parallel", "paused", "model"):
                 if k in b:
@@ -2244,10 +2253,12 @@ class H(BaseHTTPRequestHandler):
         if path == "/api/projects/reload":
             load_projects()
             return {"projects": list(PROJECTS)}
-        m = re.fullmatch(r"/api/projects/([\w-]+)/(promote|play|pause|resume)", path)
+        m = re.fullmatch(r"/api/projects/([\w-]+)/(promote|play|pause|resume|release)", path)
         if m:
             p, act = proj(m.group(1)), m.group(2)
-            if act == "promote":
+            if act == "release":  # the project's "Release after merge" default, for tasks queued from now on
+                set_setting(f"auto_release:{p.name}", "1" if b.get("on") else "0")
+            elif act == "promote":
                 return {"id": queue_release(p)}
             elif act == "play":
                 launch_app(p, p.main_wt)

@@ -161,7 +161,7 @@ textarea.dropping { border-color: var(--accent); box-shadow: 0 0 0 2px var(--acc
         <label>Priority <select id="prio"><option value="0">normal</option><option value="1">high</option><option value="-1">low</option></select></label>
         <label>After # <input id="after" style="width:60px" placeholder="—"></label>
         <label title="Build it and wait for you to play and approve before merging"><input type="checkbox" id="hold"> Hold for my review</label>
-        <label title="Once it merges into dev, queue a release, as Promote does. Tasks it splits into release together, after the last one merges."><input type="checkbox" id="autorel"> Release after merge</label>
+        <label title="Once it merges into dev, queue a release, as Promote does. Tasks it splits into release together, after the last one merges. Starts as the project's default, set on its card."><input type="checkbox" id="autorel"> Release after merge</label>
       </div>
       <div class="row"><button class="primary" id="submit">Queue task</button> <span class="muted">⌘↩</span><span id="formmsg" class="err"></span></div>
     </div>
@@ -232,7 +232,15 @@ function renderProjects() {
   else if (focus && $("#tproj").dataset.f !== focus) { $("#tproj").value = focus; $("#tproj").dataset.f = focus; }
   $("#tprojwrap").classList.toggle("hidden", !!pf);
   $("#cprojwrap").classList.toggle("hidden", !!pf || !!chatSel);
+  syncRelease();
 }
+// "Release after merge" on the form starts as the project's default. It resets when the project or its default
+// changes, or after you queue, so a box you changed stays as you set it until then.
+function syncRelease() {
+  const name = pf || $("#tproj").value, on = !!P(name).auto_release, k = `${name}:${on}`, el = $("#autorel");
+  if (el.dataset.k !== k) { el.checked = on; el.dataset.k = k; }
+}
+$("#tproj").addEventListener("change", syncRelease);
 
 function renderHeader() {
   const s = state.settings, ts = state.tasks.filter(t => inView(t.project));
@@ -280,6 +288,7 @@ function projStats(g) {
     !g.error && g.ahead.length ? `${g.ahead.length} to promote` : "",
     !g.error && g.has_app && (!g.has_build || (g.stale && g.built)) ? `<span class="s-review">needs build</span>` : "",
     g.running ? `<span class="s-running">${esc(g.main_branch)} running</span>` : "",
+    g.auto_release ? `<span title="New tasks release after they merge">auto release</span>` : "",
   ].filter(Boolean).join(" · ") || (g.error ? "" : "idle");
 }
 function projBody(g) {
@@ -297,6 +306,7 @@ function projBody(g) {
       ${g.can_launch ? `<button class="primary" data-p="${g.name}" data-a="play" ${g.has_build ? "" : "disabled"}>Play ${esc(g.main_branch)}</button>` : ""}
       <button data-p="${g.name}" data-a="promote" title="Queues a release: the gate, then Claude builds and plays ${esc(g.dev_branch)}; if it passes, ${esc(g.main_branch)} moves to it" ${busy || (!g.ahead.length && (!g.has_app || (g.has_build && !g.stale))) ? "disabled" : ""}>${busy ? `Release #${r.id} in progress` : `Promote ${esc(g.dev_branch)} → ${esc(g.main_branch)}`}</button>
       <button data-p="${g.name}" data-a="${g.paused ? "resume" : "pause"}" title="Pause or resume this project's tasks">${g.paused ? "▶ Resume" : "❚❚ Pause"}</button>
+      <label title="New tasks start with &quot;Release after merge&quot; ticked: once one merges into dev, the queue queues a release, as Promote does. You can still untick it on a task. Tasks already queued keep theirs."><input type="checkbox" data-rel="${g.name}" ${g.auto_release ? "checked" : ""}> Release after merge by default</label>
     </div>` + (msg ? `<div class="muted" style="margin-top:8px;white-space:pre-wrap">${msg}</div>` : "");
 }
 function renderMains() {
@@ -323,6 +333,11 @@ function renderMains() {
     api(`/api/projects/${b.dataset.p}/${b.dataset.a}`, {})
       .then(res => { if (res && res.id) selectTask(res.id); refresh(); })
       .catch(e => { mainMsg[b.dataset.p] = `<span class="err">${esc(e.message)}</span>`; renderMains(); });
+  });
+  document.querySelectorAll("#mains [data-rel]").forEach(c => c.onchange = () => {
+    delete mainMsg[c.dataset.rel];
+    api(`/api/projects/${c.dataset.rel}/release`, {on: c.checked ? 1 : 0}).then(refresh)
+      .catch(e => { mainMsg[c.dataset.rel] = `<span class="err">${esc(e.message)}</span>`; refresh(); });
   });
 }
 
@@ -510,7 +525,7 @@ async function submit() {
     const project = pf || $("#tproj").value;
     if (!project) throw new Error("pick a project");
     const r = await api("/api/tasks", {project, body, priority: +$("#prio").value, hold: $("#hold").checked ? 1 : 0, release: $("#autorel").checked ? 1 : 0, depends_on: $("#after").value.trim()});
-    $("#body").value = ""; $("#after").value = ""; $("#formmsg").textContent = ""; sel = r.id; setFocus(project); refresh();
+    $("#body").value = ""; $("#after").value = ""; $("#formmsg").textContent = ""; delete $("#autorel").dataset.k; sel = r.id; setFocus(project); refresh();
   } catch (e) { $("#formmsg").textContent = e.message; }
 }
 $("#submit").onclick = submit;
