@@ -516,16 +516,19 @@ notes = """Project-specific guidance for design chats."""
   - **Chats.** A design chat, project chat or question to a worker that hits the limit replies
     `Usage limit reached. Resets at 3:00 pm.` and sets the same flag. The message is not sent again by itself: send it
     again after the reset.
-  - **The usage brake stops starting tasks before the limit hits**, so the end of each window is left for your own
+  - **The usage brake stops starting Claude sessions before the limit hits**, so the end of each window is left for your own
     design chats, chats and answers. Every Claude stream reports how much of each usage window is used
     (`rate_limit_event`, from 0 to 1, account-wide, so it counts your own Claude use outside claude-ops too). The daemon
     reads it in every stream it parses (workers, release checkers, chats) and keeps the latest reading per window in
     the settings `usage:five_hour` and `usage:seven_day` (`{utilization, resetsAt, ts}`). A reading whose reset has
     passed is stale and counts as 0.
   - **The setting `usage_brake`** is a percent: default 85, 0 turns the brake off. Set it as **Brake %** next to
-    Parallel (`POST /api/settings {"usage_brake": 85}`). While either window is at or above it, the queue starts no
-    new task of any kind (task, release, deploy). Running tasks, gates and merges carry on, and design chats and
-    chats are never blocked. Queued tasks say `Usage at 87% of the 5-hour window · starts again after 3:00 pm`. The
+    Parallel (`POST /api/settings {"usage_brake": 85}`). While either window is at or above it, the queue starts
+    nothing that starts a Claude session: a new task or release, or one resuming its Claude session. Queued work that
+    needs no Claude still starts, since holding it frees no usage: deploys (they only run a command), a release that
+    only promotes, and a task resumed at its gate or merge (its `start_at` is not `claude`). A merge or promote that
+    hits a conflict may still run a worker to resolve it. Running tasks, gates and merges carry on, and design chats
+    and chats are never blocked. Held queued tasks say `Usage at 87% of the 5-hour window · starts again after 3:00 pm`. The
     brake lifts when that window resets or a newer reading is under the brake. You get one notification per window
     per reset: `Usage at 85% of the 5-hour window: no new tasks until 3:00 pm`.
   - **The header meter** shows both windows, `5h 62% · 7d 14%`, with their reset times on hover. It turns amber at

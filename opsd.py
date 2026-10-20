@@ -1835,7 +1835,8 @@ def usage_info(s=None):
 
 
 def usage_braked():
-    """The queue is at the usage brake: start no new task. Notifies once per window per reset period."""
+    """The queue is at the usage brake: start no new Claude session (see starts_claude). Notifies once per window per
+    reset period."""
     s = settings_now()
     b = usage_info(s)["braked"]
     if not b:
@@ -1847,6 +1848,13 @@ def usage_braked():
         notify("Claude usage brake", f"Usage at {b['pct']}% of the {b['label']} window: no new tasks until "
                                      f"{b['resets']}")
     return True
+
+
+def starts_claude(t):
+    """Whether starting queued task t starts a Claude session, so the usage brake holds it. A deploy only runs its
+    command, and a task whose start_at is past 'claude' resumes at its gate, merge or promote; those hold back no
+    usage, so they start while braked (a merge or promote that needs a worker for a conflict still runs one)."""
+    return t["kind"] != "deploy" and t["start_at"] == "claude"
 
 
 # ---------------------------------------------------------------- scheduler
@@ -1868,14 +1876,15 @@ def schedule_once():
     waiting = limited()  # first, so the limit clears and its tasks requeue even while the queue is paused
     if setting("paused") == "1" or STOPPING.is_set() or waiting:
         return
-    if usage_braked():  # running work carries on; nothing new starts until the window resets
-        return
+    braked = usage_braked()  # running work carries on; no new Claude session starts until the window resets
     slots = int(setting("max_parallel") or 1) - len(THREADS)
     for t in q("SELECT * FROM tasks WHERE state='queued' ORDER BY priority DESC, id"):
         if slots <= 0:
             break
         p = PROJECTS.get(t["project"])
         if not p or setting(f"paused:{p.name}") == "1":
+            continue
+        if braked and starts_claude(t):
             continue
         if t["id"] in THREADS:  # resumed before its paused pipeline finished stopping
             continue
@@ -4445,8 +4454,7 @@ def wait_reasons(tasks, s=None):
         return {t["id"]: "the queue is paused" for t in tasks if t["state"] == "queued"}
     if lim := limit_info(s):
         return {t["id"]: lim["words"] for t in tasks if t["state"] == "queued"}
-    if braked := usage_info(s)["braked"]:
-        return {t["id"]: braked["words"] for t in tasks if t["state"] == "queued"}
+    braked = usage_info(s)["braked"]
     by_id = {t["id"]: t for t in tasks}
     find = lambda i: by_id.get(i) or task(i)  # the list holds the newest 500; an older one is read on its own
     free = int(s.get("max_parallel") or 1) - len(THREADS)
@@ -4462,6 +4470,8 @@ def wait_reasons(tasks, s=None):
             why = "its project is not loaded"
         elif s.get(f"paused:{p.name}") == "1":
             why = f"{p.title} is paused"
+        elif braked and starts_claude(t):
+            why = braked["words"]
         elif dep and dep["state"] != "done":
             why = f"waiting for #{dep['id']} to finish (it is {STATE_WORDS.get(dep['state'], dep['state'])})"
         elif blocker := exclusive_blocker(t):
@@ -4634,7 +4644,7 @@ class H(BaseHTTPRequestHandler):
             return self.send(200, (CODE / "dashboard.html").read_bytes(), "text/html; charset=utf-8")
         if path == "/api/state":
             tasks = q("SELECT id,project,title,state,phase,priority,hold,depends_on,parent,created,started,"
-                      "finished,cost,rounds,summary,question,error,merged,branch,kind,auto_release,origin,paused_by FROM tasks "
+                      "finished,cost,rounds,summary,question,error,merged,branch,kind,auto_release,origin,paused_by,start_at FROM tasks "
                       "ORDER BY id DESC LIMIT 500")
             # What each task is doing right now, for the status line under it in the list.
             last = {r["task_id"]: r for r in q(
