@@ -934,8 +934,11 @@ def run_claude(p, tid, prompt):
                 upd(tid, session_id=sid)
             msg = e.get("message")  # a string on some system events, e.g. permission_denied
             content = msg.get("content") if isinstance(msg, dict) else None
+            # content is a list of blocks, or a plain string (user events, and maybe others): read both alike
+            blocks = ([{"type": "text", "text": content}] if isinstance(content, str) else
+                      [c for c in content if isinstance(c, dict)] if isinstance(content, list) else [])
             if e.get("is_api_error_message"):  # e.g. the usage limit: the turn ends here, so say why
-                err.write("".join(c.get("text", "") for c in content or []) + "\n")
+                err.write("".join(c.get("text") or "" for c in blocks) + "\n")
                 err.flush()
             if e.get("type") == "user" and e.get("isReplay") and isinstance(content, str):
                 with STEER_LOCK:
@@ -948,7 +951,7 @@ def run_claude(p, tid, prompt):
                     ev(tid, "the worker got your message")
                     acking = True
             elif e.get("type") == "assistant" and not e.get("parent_tool_use_id") and acking:
-                said = [c["text"].strip() for c in content or [] if c.get("type") == "text" and c.get("text", "").strip()]
+                said = [c["text"].strip() for c in blocks if c.get("type") == "text" and (c.get("text") or "").strip()]
                 if said:  # its first words after your message are its answer to it
                     q("INSERT INTO task_msgs (task_id, role, text, ts) VALUES (?,?,?,?)",
                       (tid, "assistant", "\n\n".join(said), time.time()))
