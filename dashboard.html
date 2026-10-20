@@ -139,6 +139,12 @@ textarea.dropping { border-color: var(--accent); box-shadow: 0 0 0 2px var(--acc
 .specdoc { max-width: none; max-height: 40vh; overflow: auto; margin: 6px 0 0; }
 #specs > h2 { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 #specs > h2 button { font-size: 12px; text-transform: none; letter-spacing: 0; padding: 2px 8px; white-space: nowrap; flex: none; }
+.specline { font-size: 12px; color: var(--muted); padding: 3px 10px; }
+.specline button { font-size: 12px; padding: 0 2px; border: none; background: none; color: var(--accent); cursor: pointer; }
+.specline button:disabled { color: var(--muted); cursor: default; }
+#specbare summary { font-size: 12px; color: var(--muted); padding: 3px 10px; cursor: pointer; }
+#specres { font-size: 12px; padding: 3px 10px; }
+#specrefs .specline { padding-left: 22px; }
 #specform { margin: 0 4px 8px; padding: 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); display: flex; flex-direction: column; gap: 8px; }
 #specform input { width: 100%; }
 #specform .row { margin-top: 0; }
@@ -242,6 +248,10 @@ a[data-task] { color: var(--accent); cursor: pointer; }
         <div class="row"><button class="primary" id="snstart">Start</button><button id="sncancel">Cancel</button><span id="snmsg" class="err"></span></div>
       </div>
       <div id="speclist"></div>
+      <div class="specline" id="specfoot"><button id="specref">Refresh commands</button></div>
+      <div id="specrefs" class="hidden"></div>
+      <div id="specres" class="hidden"></div>
+      <div id="specbare"></div>
     </div>
   </section>
   <section id="chat">
@@ -1069,20 +1079,28 @@ const refreshDesign = single(loadDesigns);
 // ---------------------------------------------------------------- OpenSpec changes (Design tab)
 // The projects' openspec/changes/<name>/ folders. Opening one opens its design chat, where Claude can edit the
 // change; the header shows its files and queues it as one task or one task per phase. The section shows for
-// every project in view with openspec/ on dev, even with no changes, so + New change can draft the first one.
-let specs = {changes: [], repos: [], drafts: [], cli: true}, specsAt = 0, specSig = "", specOpen = new Set(), specOpts = {hold: false, release: null};
+// every project in view with openspec/ on dev, even with no changes, so + New change can draft the first one,
+// and for every one without it, with a Set up line (folded under one toggle in the all-projects view).
+let specs = {changes: [], repos: [], bare: [], drafts: [], cli: true}, specsAt = 0, specSig = "", specOpen = new Set(), specOpts = {hold: false, release: null};
 async function refreshSpecs(force) {
   if (tab === "design" && (force || Date.now() - specsAt > 8000)) {
     specsAt = Date.now();
     try { specs = await api("/api/openspec"); } catch {}
   }
   const repos = tab === "design" ? specs.repos.filter(r => inView(r.project)) : [];
-  $("#specs").classList.toggle("hidden", !repos.length);
-  if (!repos.length) $("#specform").classList.add("hidden");
+  const bare = tab === "design" ? (specs.bare || []).filter(r => inView(r.project)) : [];
+  $("#specs").classList.toggle("hidden", !repos.length && !bare.length);
+  if (!repos.length || !specs.cli) { $("#specform").classList.add("hidden"); $("#specrefs").classList.add("hidden"); }
   const btn = $("#specnew");
   btn.disabled = !specs.cli;
-  btn.title = specs.cli ? "Draft a new OpenSpec change with Claude" : "Install the openspec CLI: npm i -g @fission-ai/openspec";
-  if (!specs.cli) $("#specform").classList.add("hidden");
+  btn.title = specs.cli ? "Draft a new OpenSpec change with Claude" : NO_CLI;
+  btn.classList.toggle("hidden", !repos.length);
+  const ref = $("#specref");
+  $("#specfoot").classList.toggle("hidden", !repos.length);
+  ref.disabled = !specs.cli || !!specBusy;
+  ref.textContent = specBusy.startsWith("update:") ? "Refreshing…" : "Refresh commands";
+  ref.title = !specs.cli ? NO_CLI : `Run openspec update${repos.length > 1 ? " in a repo you pick" : ""} and commit the opsx commands and skills that changed to dev`;
+  specActions(repos, bare);
   const ptag = name => pf ? "" : `<span class="ptag">${esc(P(name).title)}</span> `;
   // A chat that hasn't created its change yet: "<title> · drafting", until a reply makes the folder
   const drafts = (tab === "design" ? specs.drafts : []).filter(c => inView(c.project)).map(c => `<div class="chatitem ${c.id === chatSel ? "sel" : ""}" data-id="${c.id}">
@@ -1090,7 +1108,7 @@ async function refreshSpecs(force) {
   const list = tab === "design" ? specs.changes.filter(s => inView(s.project)) : [];
   const html = drafts.join("") + list.map(s => `<div class="chatitem ${s.chat && s.chat === chatSel ? "sel" : ""}" data-spec="${esc(s.name)}" data-sub="${esc(s.sub)}" data-project="${esc(s.project)}" title="${esc(s.why)}">
     <div>${esc(s.title)}</div><div class="sub">${ptag(s.project)}${s.sub ? `${esc(s.sub)} · ` : ""}${s.has_tasks ? `${s.done}/${s.done + s.open} done` : "no tasks.md"}${s.where === "checkout" ? ' · <span class="s-review">only in your checkout</span>' : ""}</div></div>`).join("")
-    + (!drafts.length && !list.length ? `<div class="muted" style="padding:0 10px">No open changes.</div>` : "");
+    + (repos.length && !drafts.length && !list.length ? `<div class="muted" style="padding:0 10px">No open changes.</div>` : "");
   if (!put($("#speclist"), html)) return;
   document.querySelectorAll("#speclist .chatitem[data-id]").forEach(el => el.onclick = () => selectChat(+el.dataset.id));
   document.querySelectorAll("#speclist .chatitem[data-spec]").forEach(el => el.onclick = async () => {
@@ -1100,6 +1118,46 @@ async function refreshSpecs(force) {
     } catch (e) { $("#chatmsg").textContent = e.message; }
   });
 }
+// Set up (openspec init) and Refresh commands (openspec update): the daemon runs them in a throwaway worktree of
+// dev and commits only openspec/ and .claude/. One at a time; the result shows under the change list.
+const NO_CLI = "Install the openspec CLI: npm i -g @fission-ai/openspec";
+let specBusy = "", specRes = null, bareOpen = false;
+const repoName = r => `${P(r.project).title}${r.sub ? `/${r.sub}` : ""}`;
+function specActions(repos, bare) {
+  const off = !specs.cli || specBusy ? "disabled" : "";
+  const tip = what => esc(!specs.cli ? NO_CLI : what === "init"
+    ? "Run openspec init --tools claude and commit openspec/ and .claude/ to dev"
+    : "Run openspec update and commit the opsx commands and skills that changed to dev");
+  const line = (r, what, text) => `<div class="specline">${esc(repoName(r))}${text} · <button data-run="${what}" data-project="${esc(r.project)}" data-sub="${esc(r.sub)}" title="${tip(what)}" ${off}>${
+    specBusy === `${what}:${r.project}:${r.sub}` ? (what === "init" ? "Setting up…" : "Refreshing…") : (what === "init" ? "Set up" : "Refresh")}</button></div>`;
+  const lines = bare.map(r => line(r, "init", ": not using OpenSpec")).join("");
+  const html = !bare.length ? "" : pf ? lines
+    : `<details id="specbaredet" ${bareOpen || specBusy.startsWith("init:") ? "open" : ""}><summary>Set up OpenSpec…</summary>${lines}</details>`;
+  const res = $("#specres");
+  res.className = specRes ? (specRes.err ? "err" : "muted") : "hidden";
+  res.textContent = specRes ? specRes.text : "";
+  const refs = repos.length > 1 ? repos.map(r => line(r, "update", "")).join("") : "";
+  for (const [el, h] of [[$("#specbare"), html], [$("#specrefs"), refs]]) {
+    if (!put(el, h)) continue;
+    el.querySelectorAll("[data-run]").forEach(b => b.onclick = () => specRun(b.dataset.run, b.dataset.project, b.dataset.sub));
+    if ($("#specbaredet")) $("#specbaredet").ontoggle = e => { bareOpen = e.target.open; };
+  }
+}
+async function specRun(what, project, sub) {
+  specBusy = `${what}:${project}:${sub}`; specRes = null;
+  refreshSpecs();
+  try {
+    const r = await api(`/api/openspec/${what}`, {project, sub});
+    specRes = {text: `${repoName({project, sub})}: ${r.text}`, err: false};
+  } catch (e) { specRes = {text: `${repoName({project, sub})}: ${e.message}`, err: true}; }
+  specBusy = ""; $("#specrefs").classList.add("hidden");
+  refreshSpecs(true);
+}
+$("#specref").onclick = () => {
+  const repos = specs.repos.filter(r => inView(r.project));
+  if (repos.length === 1) return specRun("update", repos[0].project, repos[0].sub);
+  $("#specrefs").classList.toggle("hidden");
+};
 // + New change: pick the project (only when several in view use OpenSpec) and the repo (only when the project has
 // several with openspec/), say in a line what the change should do, Start. That opens a drafting chat.
 function specPickers() {
