@@ -552,7 +552,7 @@ def init_db():
     if "delivered" not in {r["name"] for r in q("PRAGMA table_info(task_msgs)")}:  # databases from before steering
         q("ALTER TABLE task_msgs ADD COLUMN delivered REAL")
     q("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)")
-    for k, v in {"max_parallel": "3", "paused": "0", "model": ""}.items():
+    for k, v in {"max_parallel": "3", "paused": "0", "model": "", "usage_brake": "85"}.items():
         q("INSERT OR IGNORE INTO settings VALUES (?,?)", (k, v))
     q("DELETE FROM settings WHERE key='draining'")  # the old restart's stored hold: a crash could leave it set
 
@@ -1018,6 +1018,8 @@ def run_claude(p, tid, prompt):
                 err.flush()
             if (hit := limit_of(e)) is not None:
                 limit = {**hit, **(limit or {})}  # the first event says when it resets; the result doesn't
+            if (used := usage_of(e)) is not None:
+                usage_seen(used)
             if e.get("type") == "user" and e.get("isReplay") and isinstance(content, str):
                 with STEER_LOCK:
                     sent = INFLIGHT.get(tid, [])
@@ -1760,6 +1762,93 @@ def limit_pause(tid, prompt=None):
         upd(tid, next_prompt=prompt, start_at="claude")
 
 
+# ---------------------------------------------------------------- the usage brake
+# Every Claude stream reports how much of each usage window is used (a rate_limit_event, utilization 0 to 1). The
+# usage is account-wide, so it counts your own Claude use too. The daemon keeps the latest reading per window in
+# settings usage:<window>, and at usage_brake percent (default 85, 0 = off) of either window the scheduler starts no
+# new task until that window resets, which leaves the rest of it for your design chats, chats and answers. Running
+# work carries on, and chats are never held.
+
+USAGE_WINDOWS = {"five_hour": ("5-hour", "5h"), "seven_day": ("7-day", "7d")}
+USAGE_LOCK = threading.Lock()
+
+
+def usage_of(e):
+    """The unifiedWindows of a rate_limit_event ({window: {utilization, resetsAt}}), or None for any other event."""
+    if e.get("type") != "rate_limit_event":
+        return None
+    w = (e.get("rate_limit_info") or {}).get("unifiedWindows")
+    return w if isinstance(w, dict) else None
+
+
+def usage_seen(windows):
+    """Save the latest reading of each window, only when it changed: a stream reports it on every turn."""
+    for k in USAGE_WINDOWS:
+        w = windows.get(k)
+        try:
+            used, resets = float(w["utilization"]), float(w.get("resetsAt") or 0)
+        except (TypeError, KeyError, ValueError):
+            continue
+        with USAGE_LOCK:
+            was = usage_reading(setting(f"usage:{k}"))
+            if was and (was["utilization"], was["resetsAt"]) == (used, resets):
+                continue
+            set_setting(f"usage:{k}", json.dumps({"utilization": used, "resetsAt": resets, "ts": time.time()}))
+
+
+def usage_reading(raw):
+    """A stored reading, {utilization, resetsAt, ts}, or None."""
+    try:
+        r = json.loads(raw or "null")
+        return {k: float(r.get(k) or 0) for k in ("utilization", "resetsAt", "ts")} if isinstance(r, dict) else None
+    except (TypeError, ValueError, AttributeError):
+        return None
+
+
+def usage_brake_pct(s):
+    try:
+        return max(0, int(float(s.get("usage_brake") or 0)))
+    except ValueError:
+        return 0
+
+
+def usage_info(s=None):
+    """The usage windows and the brake, for the scheduler and the dashboard: {brake, windows: [{key, label, short,
+    pct, resetsAt, resets, ts}], braked}. A reading whose reset has passed is stale and counts as 0. braked is the
+    window that holds the queue (the one that resets last, when both do), or None."""
+    s = settings_now() if s is None else s
+    brake, now, wins = usage_brake_pct(s), time.time(), []
+    for k, (label, short) in USAGE_WINDOWS.items():
+        r = usage_reading(s.get(f"usage:{k}"))
+        if not r:
+            continue
+        live = r["resetsAt"] > now
+        pct = round(r["utilization"] * 100, 6) if live else 0  # rounded: 0.29 * 100 is 28.999999999999996
+        wins.append({"key": k, "label": label, "short": short, "pct": round(pct), "exact": pct,
+                     "resetsAt": r["resetsAt"], "resets": clock(r["resetsAt"]) if live else "", "ts": r["ts"]})
+    over = [w for w in wins if brake and w["exact"] >= brake]
+    braked = max(over, key=lambda w: w["resetsAt"]) if over else None
+    if braked:
+        braked = {**braked, "words": f"Usage at {braked['pct']}% of the {braked['label']} window · starts again "
+                                     f"after {braked['resets']}"}
+    return {"brake": brake, "windows": wins, "braked": braked}
+
+
+def usage_braked():
+    """The queue is at the usage brake: start no new task. Notifies once per window per reset period."""
+    s = settings_now()
+    b = usage_info(s)["braked"]
+    if not b:
+        return False
+    key, period = f"usage_noted:{b['key']}", str(b["resetsAt"])
+    if s.get(key) != period:
+        set_setting(key, period)
+        print(f"usage brake: {b['words']}", flush=True)
+        notify("Claude usage brake", f"Usage at {b['pct']}% of the {b['label']} window: no new tasks until "
+                                     f"{b['resets']}")
+    return True
+
+
 # ---------------------------------------------------------------- scheduler
 
 def scheduler():
@@ -1778,6 +1867,8 @@ def scheduler():
 def schedule_once():
     waiting = limited()  # first, so the limit clears and its tasks requeue even while the queue is paused
     if setting("paused") == "1" or STOPPING.is_set() or waiting:
+        return
+    if usage_braked():  # running work carries on; nothing new starts until the window resets
         return
     slots = int(setting("max_parallel") or 1) - len(THREADS)
     for t in q("SELECT * FROM tasks WHERE state='queued' ORDER BY priority DESC, id"):
@@ -3355,6 +3446,8 @@ def stream_claude(cmd, cwd, log_dir, live, procs, key, on_session, env=None):
             if e.get("session_id") and e["session_id"] != sid:  # once, not on each of thousands of lines
                 sid = e["session_id"]
                 on_session(sid)
+            if (used := usage_of(e)) is not None:
+                usage_seen(used)
             if (hit := limit_of(e)) is not None:
                 limit = {**hit, **(limit or {})}
                 if e.get("type") == "assistant":
@@ -4323,6 +4416,8 @@ def wait_reasons(tasks, s=None):
         return {t["id"]: "the queue is paused" for t in tasks if t["state"] == "queued"}
     if lim := limit_info(s):
         return {t["id"]: lim["words"] for t in tasks if t["state"] == "queued"}
+    if braked := usage_info(s)["braked"]:
+        return {t["id"]: braked["words"] for t in tasks if t["state"] == "queued"}
     by_id = {t["id"]: t for t in tasks}
     find = lambda i: by_id.get(i) or task(i)  # the list holds the newest 500; an older one is read on its own
     free = int(s.get("max_parallel") or 1) - len(THREADS)
@@ -4535,7 +4630,8 @@ class H(BaseHTTPRequestHandler):
                     projects.append({"name": p.name, "title": p.title, "error": str(e)})
             return self.send(200, {
                 "tasks": tasks, "now": time.time(), "projects": projects, "archived": archived_projects(),
-                "settings": {k: s.get(k, "") for k in ("max_parallel", "paused", "model")}, "limit": limit_info(s),
+                "settings": {k: s.get(k, "") for k in ("max_parallel", "paused", "model", "usage_brake")},
+                "limit": limit_info(s), "usage": usage_info(s),
                 "active": len(THREADS), "data_dir": str(DATA),
                 "design_cost": (q("SELECT SUM(cost) AS c FROM designs", one=True) or {}).get("c") or 0,
                 "chats": chat_counts()})
@@ -4644,7 +4740,9 @@ class H(BaseHTTPRequestHandler):
             return send_peer(b.get("from"), b["project"], b.get("kind") or "task", b.get("text"), b.get("title") or "",
                              bool(b.get("hold")))
         if path == "/api/settings":
-            for k in ("max_parallel", "paused", "model"):
+            if "usage_brake" in b:
+                b["usage_brake"] = min(100, max(0, int(float(b["usage_brake"] or 0))))
+            for k in ("max_parallel", "paused", "model", "usage_brake"):
                 if k in b:
                     set_setting(k, b[k])
             return
