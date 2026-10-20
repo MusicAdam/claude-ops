@@ -1944,11 +1944,33 @@ def clashing(p, commit):
     for r, sha in p.pairs(commit):
         if r.git("branch", "--show-current", check=False) != p.main:
             continue
-        dirty = set(r.git("diff", "--name-only", "HEAD", check=False).splitlines()
-                    + r.git("ls-files", "--others", "--exclude-standard", check=False).splitlines())
-        if dirty & set(r.git("diff", "--name-only", p.main, sha).splitlines()):
+        if dirty(r) & set(r.git("diff", "--name-only", p.main, sha).splitlines()):
             out.append((r, sha))
     return out
+
+
+def dirty(r):
+    """The paths your checkout has uncommitted: tracked changes and untracked files, not ignored ones."""
+    return set(r.git("diff", "--name-only", "HEAD", check=False).splitlines()
+               + r.git("ls-files", "--others", "--exclude-standard", check=False).splitlines())
+
+
+LEFT_PATHS = 20  # paths a release summary lists per repo
+
+
+def left_note(p, tid, left):
+    """The release summary's section on the uncommitted files main moved under ([(part, paths, carried)]), or ""."""
+    blocks = []
+    for r, paths, carried in left:
+        n = len(paths)
+        b = (f"Not part of this release: {n} uncommitted {files(n)} in {str(r.src).replace(str(HOME), '~', 1)} "
+             f"stayed in your checkout and {'was' if n == 1 else 'were'} not shipped:\n"
+             + "".join(f"- {x}\n" for x in paths[:LEFT_PATHS])
+             + (f"and {n - LEFT_PATHS} more\n" if n > LEFT_PATHS else ""))
+        if carried:
+            b += (f"They were merged onto the new {p.main} and put back (copy at refs/ops/release-{tid}).\n")
+        blocks.append(b)
+    return "\n".join(blocks) + "Use Send to dev on the project card to put them on dev." if blocks else ""
 
 
 def snapshot(r):
@@ -2081,14 +2103,17 @@ def carry_prompt(p, t, r, onto, base, yours, conflicted, note):
             f"The user reads the summary: say in plain words, per file, how you combined the two sides.")
 
 
-def move_main(p, tid, commit, note=""):
+def move_main(p, tid, commit, note="", left=None):
     """Fast-forward main to commit in each repo: in your checkout when it is on main, else the branch alone. Your
     uncommitted changes stay: ones to files the release changes are merged onto it (by a worker, if they conflict)
     and put back. Every repo is checked first, so a workspace never moves only some of them. Returns an error or
-    None; raises NeedsYou if your changes can't be carried over."""
+    None; raises NeedsYou if your changes can't be carried over. Fills the list left, if given, with what stayed
+    uncommitted in each checkout on main: (part, sorted paths, carried by the plan)."""
     for r, sha in p.pairs(commit):
         if not is_ancestor(r, p.main, sha):
             return f"{p.main}{f' of {r.sub}' if r.sub else ''} could not fast-forward: it has commits {p.dev} lacks."
+    kept = [(r, sorted(d)) for r, _ in p.pairs(commit)
+            if r.git("branch", "--show-current", check=False) == p.main and (d := dirty(r))]
     plan = carry(p, tid, commit, note)
     if plan is None:
         return "stopped"
@@ -2107,6 +2132,8 @@ def move_main(p, tid, commit, note=""):
                                  cwd=r.src, capture_output=True, text=True)
         if res.returncode:
             return f"{p.main}{f' of {r.sub}' if r.sub else ''} could not fast-forward:\n" + res.stderr[-1000:]
+    if left is not None:
+        left[:] = [(r, paths, r in carried) for r, paths in kept]
     return None
 
 
@@ -2244,8 +2271,9 @@ def promote(p, tid, commit, note=""):
             undo()
             return f"Build failed; {p.main} and its build are unchanged.\n" + tail[-2000:]
     upd(tid, phase=f"fast-forwarding {p.main}")
+    left = []
     try:
-        err = move_main(p, tid, commit, note)
+        err = move_main(p, tid, commit, note, left)
     except BaseException:
         undo()
         raise
@@ -2255,7 +2283,12 @@ def promote(p, tid, commit, note=""):
     if prev:
         shutil.rmtree(prev, ignore_errors=True)
     set_setting(f"main_built:{p.name}", commit)
-    notify(f"{p.title}: {p.main} updated", f"{p.main} is now {p.show(commit)}")
+    n = sum(len(paths) for _, paths, _ in left)
+    if n and task(tid)["kind"] == "release":  # a deploy's commits are no release: its summary stays as it is
+        before = task(tid)["summary"] or ""
+        upd(tid, summary=(before + "\n\n" if before else "") + left_note(p, tid, left))
+    notify(f"{p.title}: {p.main} updated", f"{p.main} is now {p.show(commit)}"
+           + (f"; {n} uncommitted {files(n)} {'was' if n == 1 else 'were'} not released" if n else ""))
     return None
 
 
