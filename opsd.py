@@ -390,9 +390,12 @@ def init_db():
     q("CREATE INDEX IF NOT EXISTS design_msgs_design ON design_msgs (design_id, id)")
     dcols = {r["name"] for r in q("PRAGMA table_info(designs)")}
     for col, decl in (("kind", "TEXT DEFAULT 'design'"),  # databases from before project chats
-                      ("spec", "TEXT"), ("spec_sub", "TEXT DEFAULT ''")):  # and before OpenSpec chats
+                      ("spec", "TEXT"), ("spec_sub", "TEXT DEFAULT ''"),  # and before OpenSpec chats
+                      ("seen", "REAL DEFAULT 0"), ("ended", "REAL")):  # and before "ready for you" and End chat
         if col not in dcols:
             q(f"ALTER TABLE designs ADD COLUMN {col} {decl}")
+            if col == "seen":  # chats from before count as read, so they don't all show a new reply at once
+                q("UPDATE designs SET seen=updated")
     q("UPDATE designs SET state='idle' WHERE state='thinking'")  # a reply cut off by a restart
     q("CREATE TABLE IF NOT EXISTS task_msgs (id INTEGER PRIMARY KEY, task_id INTEGER, role TEXT, text TEXT, ts REAL)")
     q("CREATE INDEX IF NOT EXISTS task_msgs_task ON task_msgs (task_id, id)")
@@ -2004,13 +2007,27 @@ def design(did):
     return q("SELECT * FROM designs WHERE id=?", (did,), one=True)
 
 
+# A chat is "ready for you" when Claude isn't replying, and has a new reply when its last answer (Claude's, or a
+# note from the queue) came after you last looked at it. Ending a chat takes it out of both until you reopen it.
+CHAT_COLS = ("id,project,title,state,updated,cost,kind,spec,seen,ended,(SELECT MAX(ts) FROM design_msgs m "
+             "WHERE m.design_id=designs.id AND m.role!='user') AS replied")
+
+
+def chat_counts():
+    """Open chats per kind, for the badges on the Design and Chat tabs: how many have a new reply, how many
+    are waiting on Claude. Each project's counts separately, so the dashboard can apply its project filter."""
+    return q(f"SELECT project, kind, SUM(state!='thinking' AND COALESCE(replied,0)>seen) AS unread, "
+             f"SUM(state='thinking') AS replying FROM (SELECT {CHAT_COLS} FROM designs WHERE ended IS NULL) "
+             f"GROUP BY project, kind")
+
+
 def design_say(did, text):
     """Start one design-chat turn in the background."""
     d = design(did)
     if d["state"] == "thinking":
         raise ValueError("Claude is still replying")
     q("INSERT INTO design_msgs (design_id, role, text, ts) VALUES (?,?,?,?)", (did, "user", text, time.time()))
-    q("UPDATE designs SET state='thinking', updated=? WHERE id=?", (time.time(), did))
+    q("UPDATE designs SET state='thinking', updated=?, ended=NULL WHERE id=?", (time.time(), did))  # reopens it
     threading.Thread(target=design_turn, args=(did, text), daemon=True).start()
 
 
@@ -2320,6 +2337,7 @@ def spec_open(p, sub, name):
     old = q("SELECT id FROM designs WHERE project=? AND spec=? AND spec_sub=? ORDER BY updated DESC LIMIT 1",
             (p.name, name, r.sub), one=True)
     if old:
+        q("UPDATE designs SET ended=NULL WHERE id=?", (old["id"],))  # opening an ended change's chat reopens it
         return old["id"]
     on_dev, own = r.at(p.dev_wt) / SPEC_DIR / name, r.src / SPEC_DIR / name
     if not on_dev.is_dir() and not own.is_dir():
@@ -2814,7 +2832,8 @@ class H(BaseHTTPRequestHandler):
                 "tasks": tasks, "now": time.time(), "projects": projects,
                 "settings": {k: s.get(k, "") for k in ("max_parallel", "paused", "model")},
                 "active": len(THREADS), "data_dir": str(DATA),
-                "design_cost": (q("SELECT SUM(cost) AS c FROM designs", one=True) or {}).get("c") or 0})
+                "design_cost": (q("SELECT SUM(cost) AS c FROM designs", one=True) or {}).get("c") or 0,
+                "chats": chat_counts()})
         m = re.fullmatch(r"/api/tasks/(\d+)", path)
         if m:
             tid = int(m.group(1))
@@ -2840,8 +2859,7 @@ class H(BaseHTTPRequestHandler):
             ctype = next(k for k, v in IMAGE_TYPES.items() if v == m.group(2))
             return self.send(200, (IMAGES / m.group(1)).read_bytes(), ctype)
         if path == "/api/designs":
-            return self.send(200, q("SELECT id,project,title,state,updated,cost,kind,spec FROM designs "
-                                    "ORDER BY updated DESC"))
+            return self.send(200, q(f"SELECT {CHAT_COLS} FROM designs ORDER BY updated DESC"))
         if path == "/api/openspec":
             out = []
             for p in PROJECTS.values():
@@ -2862,6 +2880,7 @@ class H(BaseHTTPRequestHandler):
                 d["cwd"] = str(spec_part(p, d["spec_sub"]).at(p.wt / f"spec-{did}"))
                 d["spec_view"] = spec_view(p, d)
             d["msgs"] = q("SELECT role,text,ts,task_ids FROM design_msgs WHERE design_id=? ORDER BY id", (did,))
+            d["replied"] = max([m["ts"] for m in d["msgs"] if m["role"] != "user"], default=None)
             for msg in d["msgs"]:
                 ids = json.loads(msg["task_ids"] or "[]")
                 msg["tasks"] = [{"id": i, "title": t.get("title"), "state": t.get("state")}
@@ -2944,7 +2963,7 @@ class H(BaseHTTPRequestHandler):
                     (b["project"], title_of(text)[:80], time.time(), time.time(), kind))
             design_say(did, text)
             return {"id": did}
-        m = re.fullmatch(r"/api/designs/(\d+)/(say|stop|rename|queue)", path)
+        m = re.fullmatch(r"/api/designs/(\d+)/(say|stop|rename|queue|seen|end|reopen)", path)
         if m:
             did = int(m.group(1))
             if not design(did):
@@ -2955,6 +2974,13 @@ class H(BaseHTTPRequestHandler):
                 stop(DESIGN_PROCS.get(did))
             elif m.group(2) == "queue":
                 return {"ids": spec_queue(did, b.get("plan"), b.get("hold"), b.get("release"))}
+            elif m.group(2) == "seen":  # you looked at its latest reply
+                q("UPDATE designs SET seen=? WHERE id=?", (time.time(), did))
+            elif m.group(2) == "end":  # off the list of chats waiting for you; a reply in progress stops
+                q("UPDATE designs SET ended=?, seen=? WHERE id=?", (time.time(), time.time(), did))
+                stop(DESIGN_PROCS.get(did))
+            elif m.group(2) == "reopen":
+                q("UPDATE designs SET ended=NULL WHERE id=?", (did,))
             else:
                 q("UPDATE designs SET title=? WHERE id=?", (b["title"][:80], did))
             return
