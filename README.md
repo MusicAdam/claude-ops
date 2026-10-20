@@ -257,8 +257,9 @@ shows for every project in view whose `dev` has an `openspec/` folder, even when
 - **What a change's chat can run.** The chat can use skills, subagents and any `openspec` command except
   `init` and `update` (they write outside `openspec/`, which a chat can't save; use **Set up** and
   **Refresh commands** instead), and the ones that change your machine's OpenSpec setup (`config set`, `store setup`, `completion install`, `feedback`, …). It may still edit
-  only `openspec/`, and so may its subagents. The dashboard lists, in the chat's `commands`, the ones that
-  apply to the change:
+  only `openspec/`, and so may its subagents. The change's header shows a button for each command that applies
+  to the change (hover for what it does). A click sends the command as a chat message, as if you typed it; the
+  buttons are disabled while Claude is replying:
 
   | Command | Shown when | What it changes |
   |---|---|---|

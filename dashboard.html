@@ -141,6 +141,7 @@ textarea.dropping { border-color: var(--accent); box-shadow: 0 0 0 2px var(--acc
 .spechead .row { margin-top: 8px; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 .spechead .why { color: var(--muted); margin-top: 4px; }
 .spechead details summary { margin: 6px 0 0; }
+.spechead .cmds button { padding: 2px 10px; font-size: 12px; }
 .specdoc { max-width: none; max-height: 40vh; overflow: auto; margin: 6px 0 0; }
 #specs > h2 { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 #specs > h2 button { font-size: 12px; text-transform: none; letter-spacing: 0; padding: 2px 8px; white-space: nowrap; flex: none; }
@@ -1255,6 +1256,7 @@ function specHead(d) {
         + `<label><input type="checkbox" id="spechold" ${specOpts.hold ? "checked" : ""}> Hold for review</label><label><input type="checkbox" id="specrel" ${(specOpts.release ?? P(d.project).auto_release) ? "checked" : ""}> Release after merge</label>`
       : `<span class="muted">Every item in tasks.md is ticked. Ask Claude to queue archiving it when you're happy.</span>`}</div>
     ${s.open ? `<div class="why">${advice}</div>` : ""}
+    ${s.commands.length ? `<div class="row cmds">${s.commands.map(c => `<button data-cmd="${esc(c.id)}" title="${esc(c.tip)}" ${d.state === "thinking" ? "disabled" : ""}>${esc(c.label)}</button>`).join("")}</div>` : ""}
     <div>${s.files.map(f => `<details data-file="${esc(f.name)}" ${specOpen.has(f.name) ? "open" : ""}><summary>${esc(f.name)}</summary><div class="msg specdoc">${md(f.text)}</div></details>`).join("")}</div>
     <div class="why">Claude can edit this change's files. Its edits are saved to ${esc(P(d.project).dev_branch || "dev")} after each reply.</div></div>`;
 }
@@ -1290,6 +1292,7 @@ function renderChat() {
   const key = d ? `${d.id}:${d.msgs.length}:${d.state}:${d.ended}:${d.live.length}:${JSON.stringify(d.msgs.map(m => m.tasks.map(t => t.state)))}:${d.spec_view ? hash(JSON.stringify(d.spec_view)) : ""}` : "none";
   $("#stopchat").classList.toggle("hidden", !thinking);
   $("#send").disabled = !!thinking;
+  $("#chathead").querySelectorAll("[data-cmd]").forEach(b => b.disabled = !!thinking);
   if (key === chatKey) return;
   chatKey = key;
   const box = $("#msgs"), stick = box.scrollTop + box.clientHeight >= box.scrollHeight - 40;
@@ -1304,6 +1307,8 @@ function renderChat() {
   }
   if (d && d.ended) $("#chathead").insertAdjacentHTML("afterbegin", `<div class="callout">You ended this chat. Send a message or click Reopen to put it back on your list.</div>`);
   $("#chathead").querySelectorAll("[data-plan]").forEach(b => b.onclick = () => queueSpec(b.dataset.plan));
+  $("#chathead").querySelectorAll("[data-cmd]").forEach(b => b.onclick = () => {
+    const c = d.spec_view.commands.find(x => x.id === b.dataset.cmd); if (c) sayChat(c.text); });
   $("#chathead").querySelectorAll("details[data-file]").forEach(el => el.ontoggle = () => {
     el.open ? specOpen.add(el.dataset.file) : specOpen.delete(el.dataset.file); });
   for (const [id, k] of [["#spechold", "hold"], ["#specrel", "release"]])
@@ -1315,6 +1320,12 @@ function renderChat() {
     + (thinking ? `<div class="live"><span class="pulse s-running">Claude is thinking</span>${d.live.map(l => `<div>  ${esc(l)}</div>`).join("")}</div>` : "");
   box.querySelectorAll("[data-task]").forEach(b => b.onclick = () => { showTab("queue"); selectTask(+b.dataset.task); refresh(); });
   if (stick || thinking) box.scrollTop = box.scrollHeight;
+}
+async function sayChat(text) {  // a change's command button: sent as if typed, leaving the message box alone
+  $("#chathead").querySelectorAll("[data-cmd]").forEach(b => b.disabled = true);
+  try { await api(`/api/designs/${chatSel}/say`, {text}); $("#chatmsg").textContent = ""; }
+  catch (e) { $("#chatmsg").textContent = e.message; }
+  chatKey = ""; refreshDesign();
 }
 async function sendChat() {
   const text = $("#say").value.trim();
