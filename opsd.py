@@ -2147,10 +2147,17 @@ def spec_open(p, sub, name):
 
 
 def spec_view(p, d):
-    """The change as the chat sees it now, files and all, for the dashboard."""
+    """The change as the chat sees it now, files and all, for the dashboard. That is dev's copy unless the
+    chat's worktree holds edits dev lacks: a turn's unsaved files, or commits that didn't land. The worktree
+    only catches up with dev before a turn, so once workers tick boxes on dev its copy is stale."""
     r = spec_part(p, d["spec_sub"])
     path = r.at(p.wt / f"spec-{d['id']}")
-    folder = (path if path.exists() else r.at(p.dev_wt)) / SPEC_DIR / d["spec"]
+    own = path.exists() and (
+        subprocess.run(["git", "merge-base", "--is-ancestor", "HEAD", p.dev], cwd=path,
+                       capture_output=True).returncode != 0
+        or bool(r.git("status", "--porcelain", "--untracked-files=all", "--", str(SPEC_DIR), cwd=path,
+                      check=False)))
+    folder = (path if own else r.at(p.dev_wt)) / SPEC_DIR / d["spec"]
     if not folder.is_dir():
         return {"name": d["spec"], "sub": r.sub, "missing": True}
     files = [f for f in ("proposal.md", "design.md", "tasks.md") if (folder / f).is_file()]
