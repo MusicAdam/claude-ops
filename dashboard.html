@@ -126,6 +126,7 @@ textarea.dropping { border-color: var(--accent); box-shadow: 0 0 0 2px var(--acc
 .spechead details summary { margin: 6px 0 0; }
 .specdoc { max-width: none; max-height: 40vh; overflow: auto; margin: 6px 0 0; }
 .chathead code { font: 12px var(--mono); background: var(--panel); padding: 1px 4px; border-radius: 4px; user-select: all; }
+a.origin { color: var(--accent); cursor: pointer; text-decoration: underline; }
 .ptag { font-size: 11px; padding: 1px 6px; border-radius: 4px; background: var(--chip); color: var(--muted); }
 .projs { padding: 6px; }
 .projs > h2 { margin: 6px 8px 6px; }
@@ -451,6 +452,7 @@ function renderList() {
         t.depends_on ? `after #${t.depends_on}` : "",
         t.kind === "release" || t.kind === "deploy" ? t.kind : "",
         t.parent ? `from #${t.parent}` : "",
+        t.origin ? `sent by ${esc(t.origin.words)}` : "",
         t.hold ? "hold for review" : "",
         t.auto_release ? "release after merge" : "",
         t.priority > 0 ? "high priority" : t.priority < 0 ? "low priority" : "",
@@ -520,6 +522,7 @@ async function loadDetail(id, fresh) {
   const html = `
     <h2>#${t.id} · <span class="s-${t.state}">${LABEL[t.state] || t.state}</span>${live && t.phase ? ` · ${esc(t.phase)}` : ""}</h2>
     <div style="font-weight:600;font-size:15px">${esc(t.title)}</div>
+    ${originLine(t.origin, "Sent by")}
     <div class="muted mono" style="margin:4px 0">${esc(P(t.project).title)} · ${esc(t.branch || "")}${t.merged ? ` → ${esc(t.kind === "release" ? P(t.project).main_branch || "main" : P(t.project).dev_branch || "dev")} ${esc(t.merged_show || shas(t.merged))}` : ""}${t.kind === "release" && t.base && !t.merged ? `checking ${esc(t.base_show || shas(t.base))}` : ""}${t.kind === "deploy" && t.base ? `deploying ${esc(t.base_show || shas(t.base))}` : ""}${t.rounds ? ` · fix rounds: ${t.rounds}` : ""}</div>
     ${t.question ? `<div class="callout"><b>Question:</b> ${esc(t.question)}</div>
       <textarea id="answer" placeholder="Your answer (drop or paste screenshots to attach them)" style="min-height:70px"></textarea>
@@ -563,8 +566,19 @@ async function loadDetail(id, fresh) {
     el.scrollTop = !was || was[2] ? el.scrollHeight : was[1];
   }
   document.querySelectorAll("#detail [data-act]").forEach(b => b.onclick = () => act(t.id, b.dataset.act));
+  box.querySelectorAll("a.origin").forEach(a => a.onclick = () => openOrigin(t.origin));
   document.querySelectorAll("#detail textarea").forEach(el => { el.onfocus = () => typing = true; el.onblur = () => typing = !!el.value; });
   const ask = $("#ask"); if (ask) ask.onkeydown = e => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) act(t.id, t.can_steer && !(t.state === "paused" && t.can_chat) ? "steer" : "ask"); };
+}
+
+// A task or chat another project's session sent: who sent it, as a link to that task or chat.
+function originLine(o, verb) {
+  return o ? `<div class="muted" style="margin:4px 0">${verb} <a class="origin">${esc(o.words)}</a>${o.title ? ` · ${esc(o.title)}` : ""}</div>` : "";
+}
+function openOrigin(o) {
+  if (o.ref.startsWith("task:")) { showTab("queue"); selectTask(o.id); refresh(); return; }
+  if (!inView(o.project)) { setFilter(o.project); renderProjects(); renderHeader(); renderMains(); }
+  showTab(o.kind === "project" ? "chat" : "design"); selectChat(o.id);
 }
 
 // Where a message to a working worker stands. One that waits goes to the worker's next turn, and nothing merges first.
@@ -705,7 +719,7 @@ async function loadDesigns() {
   chats = chatList = chats.filter(c => inView(c.project) && (c.kind || "design") === KIND[tab]);
   const now = Date.now() / 1000;
   const item = c => `<div class="chatitem ${c.id === chatSel ? "sel" : ""} ${!c.ended && unread(c) ? "unread" : ""}" data-id="${c.id}">
-    <div>${esc(c.title)}</div><div class="sub">${pf ? "" : `<span class="ptag">${esc(P(c.project).title)}</span> `}${c.spec ? '<span class="ptag">OpenSpec</span> ' : ""}${c.state === "thinking" ? '<span class="pulse s-running">replying</span> · ' : !c.ended && unread(c) ? '<span class="s-review">new reply</span> · ' : ""}${ago(c.ended || c.updated, now)} ago${c.cost ? ` · $${c.cost.toFixed(2)}` : ""}</div>
+    <div>${esc(c.title)}</div><div class="sub">${pf ? "" : `<span class="ptag">${esc(P(c.project).title)}</span> `}${c.spec ? '<span class="ptag">OpenSpec</span> ' : ""}${c.origin ? `sent by ${esc(c.origin.words)} · ` : ""}${c.state === "thinking" ? '<span class="pulse s-running">replying</span> · ' : !c.ended && unread(c) ? '<span class="s-review">new reply</span> · ' : ""}${ago(c.ended || c.updated, now)} ago${c.cost ? ` · $${c.cost.toFixed(2)}` : ""}</div>
     ${c.ended ? "" : `<button class="end" data-end="${c.id}" title="End chat: take it off your list">×</button>`}</div>`;
   const ready = chats.filter(c => !c.ended && c.state !== "thinking"), busy = chats.filter(c => !c.ended && c.state === "thinking");
   const ended = chats.filter(c => c.ended).sort((a, b) => b.ended - a.ended);
@@ -805,6 +819,10 @@ function renderChat() {
   $("#chathead").innerHTML = d && d.kind === "project" ? `Runs in <code>${esc(d.cwd)}</code>`
     + (d.session_id ? ` · continue in a terminal: <code>cd ${esc(d.cwd)} && claude --resume ${esc(d.session_id)}</code>` : "")
     : d && d.spec_view ? specHead(d) : "";
+  if (d && d.origin) {
+    $("#chathead").insertAdjacentHTML("afterbegin", originLine(d.origin, "Started by"));
+    $("#chathead").querySelector("a.origin").onclick = () => openOrigin(d.origin);
+  }
   if (d && d.ended) $("#chathead").insertAdjacentHTML("afterbegin", `<div class="callout">You ended this chat. Send a message or click Reopen to put it back on your list.</div>`);
   $("#chathead").querySelectorAll("[data-plan]").forEach(b => b.onclick = () => queueSpec(b.dataset.plan));
   $("#chathead").querySelectorAll("details[data-file]").forEach(el => el.ontoggle = () => {
