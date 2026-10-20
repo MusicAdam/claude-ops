@@ -1970,7 +1970,7 @@ def left_note(p, tid, left):
         if carried:
             b += (f"They were merged onto the new {p.main} and put back (copy at refs/ops/release-{tid}).\n")
         blocks.append(b)
-    return "\n".join(blocks) + "Use Send to dev on the project card to put them on dev." if blocks else ""
+    return "\n".join(blocks) + "Commit them to dev for them to ship." if blocks else ""
 
 
 def snapshot(r):
