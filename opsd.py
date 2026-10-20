@@ -958,12 +958,16 @@ def run_claude(p, tid, prompt):
         if t["state"] == "paused":  # paused before Claude got this prompt: resume with it
             upd(tid, next_prompt=prompt, start_at="claude")
         return None
+    if limited():  # it would hit the usage limit at once: wait for the reset with this prompt
+        limit_pause(tid, prompt)
+        return None
     run_dir = RUNS / str(tid)
     run_dir.mkdir(parents=True, exist_ok=True)
     rp = result_path(t)
     rp.unlink(missing_ok=True)
-    prompt = with_images(prompt)
+    asked, prompt = prompt, with_images(prompt)
     acking = False  # a message was just read: its reply is the next thing the worker says
+    limit = None  # rate_limit_info once the turn hits the usage limit
     cmd = ["caffeinate", "-i", CLAUDE, "-p", "--input-format", "stream-json", "--replay-user-messages",
            "--output-format", "stream-json", "--verbose",
            "--permission-mode", "auto", "--permission-prompts", "none", "--strict-mcp-config",
@@ -1012,6 +1016,8 @@ def run_claude(p, tid, prompt):
             if e.get("is_api_error_message"):  # e.g. the usage limit: the turn ends here, so say why
                 err.write("".join(c.get("text") or "" for c in blocks) + "\n")
                 err.flush()
+            if (hit := limit_of(e)) is not None:
+                limit = {**hit, **(limit or {})}  # the first event says when it resets; the result doesn't
             if e.get("type") == "user" and e.get("isReplay") and isinstance(content, str):
                 with STEER_LOCK:
                     sent = INFLIGHT.get(tid, [])
@@ -1038,6 +1044,12 @@ def run_claude(p, tid, prompt):
         with STEER_LOCK:
             INFLIGHT.pop(tid, None)  # written but never read: still pending, so the next turn gets them
     kill_app(p, t["worktree"])
+    if limit is not None:
+        until = limit_hit(limit)
+        if not rp.exists():  # cut off mid-turn: wait for the reset, then resume the session
+            ev(tid, f"hit the Claude usage limit; resumes after {clock(until)}")
+            limit_pause(tid, None if task(tid)["session_id"] else asked)
+            return None
     if rp.exists():
         try:
             return json.loads(rp.read_text())
@@ -1642,6 +1654,112 @@ def restart_self(tid):
                      stdout=open(RUNS / str(tid) / "restart.log", "a"), stderr=subprocess.STDOUT)
 
 
+# ---------------------------------------------------------------- the Claude usage limit
+# When Claude's usage limit hits, its turn ends with an event saying so (api_error "usage_limit_reached") and when it
+# resets. The queue waits it out instead of failing work: it saves when the limit resets (settings limited_until and
+# limited_kind, so a restart keeps them), pauses each task whose worker hit it (paused_by 'limit'), starts nothing
+# until then, and a minute after the reset requeues those tasks. Tasks you paused stay paused.
+
+LIMIT_LOCK = threading.Lock()
+LIMIT_GRACE = 60  # seconds after the reset before the queue tries again
+LIMIT_UNKNOWN = 15 * 60  # how long to wait when Claude doesn't say when it resets
+LIMIT_KINDS = {"five_hour": "5-hour", "seven_day": "7-day", "seven_day_opus": "7-day Opus",
+               "seven_day_sonnet": "7-day Sonnet"}
+LIMIT_NOTE = ("The Claude usage limit stopped you mid-turn, and the queue waited for it to reset. Any command you "
+              "were running was stopped. Check `git status` and `git log` in this worktree, finish the task, and "
+              "write $OPS_RESULT.")
+
+
+def limit_of(e):
+    """The rate_limit_info of a stream-json event that says the usage limit hit ({} if it doesn't say more), or None
+    for any other event."""
+    if e.get("api_error") != "usage_limit_reached":
+        return None
+    info = (e.get("api_error_params") or {}).get("rate_limit_info")
+    return info if isinstance(info, dict) else {}
+
+
+def clock(ts):
+    """3:00 pm, or Thu 3:00 pm when it isn't today."""
+    lt = time.localtime(ts)
+    words = time.strftime("%I:%M %p", lt).lstrip("0").lower()
+    return words if lt[:3] == time.localtime()[:3] else time.strftime("%a ", lt) + words
+
+
+def limit_hit(info):
+    """A Claude session hit the usage limit: save until when, so the queue starts nothing before then. Notifies once
+    per limit, not once per worker that runs into it. Returns the reset time."""
+    try:
+        until = float(info.get("resetsAt") or 0)
+    except (TypeError, ValueError):
+        until = 0
+    known = until > time.time()
+    if not known:  # missing, or already past: try again in a while
+        until = time.time() + LIMIT_UNKNOWN
+    kind = str(info.get("rateLimitType") or "")
+    with LIMIT_LOCK:
+        s = settings_now()
+        try:
+            was = float(s.get("limited_until") or 0)
+        except ValueError:
+            was = 0
+        if was > time.time() and (until <= was or not known):  # already waiting for this one (or a later one)
+            return was
+        set_setting("limited_until", until)
+        set_setting("limited_kind", kind)
+    print(f"usage limit ({kind or 'unknown'}): waiting until {clock(until)}", flush=True)
+    notify("Claude usage limit", f"the queue resumes at {clock(until)}")
+    return until
+
+
+def limit_info(s=None):
+    """The usage limit the queue is waiting out, for the dashboard: {until, kind, label, resumes, words}; or None."""
+    s = settings_now() if s is None else s
+    try:
+        until = float(s.get("limited_until") or 0)
+    except ValueError:
+        return None
+    if not until:
+        return None
+    kind = s.get("limited_kind") or ""
+    label = f"Usage limit ({LIMIT_KINDS.get(kind, kind.replace('_', ' '))})" if kind else "Usage limit"
+    return {"until": until, "kind": kind, "label": label, "resumes": clock(until),
+            "words": f"{label} · resumes {clock(until)}"}
+
+
+def limited():
+    """The queue is waiting out the usage limit: start no Claude session. Clears the limit a minute after its reset."""
+    lim = limit_info()
+    if lim and time.time() >= lim["until"] + LIMIT_GRACE:
+        limit_clear("the usage limit reset")
+        return False
+    return bool(lim)
+
+
+def limit_clear(why):
+    """Stop waiting (the limit reset, or you clicked Try now) and requeue the tasks the limit paused. Returns their ids."""
+    with LIMIT_LOCK:
+        q("DELETE FROM settings WHERE key IN ('limited_until','limited_kind')")
+    ids = [r["id"] for r in q("UPDATE tasks SET state='queued', paused_by=NULL WHERE state='paused' AND "
+                              "paused_by='limit' RETURNING id")]
+    for tid in ids:
+        ev(tid, f"resumed: {why}")
+    print(f"usage limit cleared ({why}); requeued {ids}", flush=True)
+    return {"resumed": ids}
+
+
+def limit_pause(tid, prompt=None):
+    """The usage limit stopped this task's Claude turn: pause it until the reset. prompt: what the next turn should
+    send instead of LIMIT_NOTE, when Claude never got it (or has no session to resume)."""
+    t = task(tid)
+    try:
+        pause_task(tid, by="limit")
+    except ValueError:
+        return  # you paused or cancelled it meanwhile
+    if prompt is not None and t["state"] == "running":  # a merge's step (carrying your changes) starts over anyway
+        upd(tid, next_prompt=prompt, start_at="claude")
+
+
 # ---------------------------------------------------------------- scheduler
 
 def scheduler():
@@ -1658,7 +1776,8 @@ def scheduler():
 
 
 def schedule_once():
-    if setting("paused") == "1" or STOPPING.is_set():
+    waiting = limited()  # first, so the limit clears and its tasks requeue even while the queue is paused
+    if setting("paused") == "1" or STOPPING.is_set() or waiting:
         return
     slots = int(setting("max_parallel") or 1) - len(THREADS)
     for t in q("SELECT * FROM tasks WHERE state='queued' ORDER BY priority DESC, id"):
@@ -1713,7 +1832,8 @@ PAUSE_NOTE = ("The user paused this task while you were working and has now resu
 
 def recover():
     """On start: resume the tasks the last daemon paused as it stopped, and requeue any it left mid-flight
-    (it crashed or was killed) so they resume their Claude session. Tasks you paused stay paused.
+    (it crashed or was killed) so they resume their Claude session. Tasks you paused stay paused, and so do tasks
+    the usage limit paused: limit_clear requeues them once it resets (limited_until is in settings, so it survives).
     A deploy cut off while its command ran is not run again by itself (it publishes things): it fails, and Retry
     starts it over. One whose command had finished goes on moving main."""
     for t in q(f"SELECT id FROM tasks WHERE kind='deploy' AND start_at!='promote' AND (state IN "
@@ -1747,9 +1867,10 @@ def shutdown():
 
 def pause_task(tid, by=None):
     """Stop a task now and keep its place: a worker resumes its Claude session, a gate starts over.
-    by='restart': the daemon is stopping, and the next one resumes the task."""
+    by='restart': the daemon is stopping, and the next one resumes the task.
+    by='limit': its worker hit the usage limit, and the queue resumes it after the reset (see limit_clear)."""
     t = task(tid)
-    if t["state"] == "merging":
+    if t["state"] == "merging" and by != "limit":  # the limit stops a merge only in a Claude step, before main moves
         raise ValueError("it is merging; that can't be paused, and it is nearly done")
     if t["state"] not in ("queued", *ACTIVE):
         raise ValueError(f"task is {t['state']}")
@@ -1757,14 +1878,14 @@ def pause_task(tid, by=None):
     if t["state"] == "gating" and t["kind"] in MERGES:
         kw = {"start_at": "integrate"}  # Claude's work is done: rebase and run the gate again
     elif t["state"] == "running" and t["phase"] == "claude working" and t["session_id"]:
-        kw = {"start_at": "claude", "next_prompt": RESTART_NOTE if by else PAUSE_NOTE}
+        kw = {"start_at": "claude", "next_prompt": {"restart": RESTART_NOTE, "limit": LIMIT_NOTE}.get(by, PAUSE_NOTE)}
     # Otherwise Claude has not had its prompt yet, and run_claude keeps it for the resume.
     was = t["state"]
     upd(tid, state="paused", phase="", paused_by=by, **kw)
     stop(PROCS.get(tid))
     if was != "queued" and t["worktree"]:
         kill_app(PROJECTS.get(t["project"]), t["worktree"])
-    ev(tid, ("paused for a restart" if by else "paused")
+    ev(tid, {"restart": "paused for a restart", "limit": "paused: usage limit"}.get(by, "paused")
         + (f" while {t['phase']}" if was != "queued" and t["phase"] else ""))
 
 
@@ -2459,7 +2580,7 @@ def senddev_start(p, tid, prompt):
     with SENDDEV_LOCK:  # the click that queued it may still be writing the snapshot
         t = task(tid)
     if senddev_of(t).get("applied"):  # your changes are committed on the branch: on to the gate, or the worker
-        return prompt if t["session_id"] or prompt not in (RESTART_NOTE, PAUSE_NOTE) else ""
+        return prompt if t["session_id"] or prompt not in (RESTART_NOTE, PAUSE_NOTE, LIMIT_NOTE) else ""
     if t["session_id"]:  # a worker was merging your changes with dev: it carries on
         return prompt or "Carry on: resolve the conflicts that are left, commit, and write $OPS_RESULT."
     return senddev_apply(p, tid)
@@ -3218,7 +3339,7 @@ def design_system_prompt(p, d=None, cwd=None):
 
 def stream_claude(cmd, cwd, log_dir, live, procs, key, on_session, env=None):
     """Run one chat turn of claude -p, tool lines into live. Returns (reply text, cost)."""
-    texts, cost, sid = [], 0.0, None
+    texts, cost, sid, limit = [], 0.0, None, None
     log_dir.mkdir(parents=True, exist_ok=True)
     with open(log_dir / "claude.jsonl", "a") as log, open(log_dir / "claude.err", "a+") as err:
         proc = subprocess.Popen(cmd, cwd=cwd, env=env, stdout=subprocess.PIPE, stderr=err, text=True,
@@ -3234,6 +3355,10 @@ def stream_claude(cmd, cwd, log_dir, live, procs, key, on_session, env=None):
             if e.get("session_id") and e["session_id"] != sid:  # once, not on each of thousands of lines
                 sid = e["session_id"]
                 on_session(sid)
+            if (hit := limit_of(e)) is not None:
+                limit = {**hit, **(limit or {})}
+                if e.get("type") == "assistant":
+                    continue  # its text is Claude's own words on the limit, not a reply
             if e.get("type") == "assistant" and not e.get("parent_tool_use_id"):
                 for c in e.get("message", {}).get("content", []):
                     if c.get("type") == "text" and c.get("text", "").strip():
@@ -3246,6 +3371,8 @@ def stream_claude(cmd, cwd, log_dir, live, procs, key, on_session, env=None):
         proc.wait()
         err.seek(0)
         err_tail = err.read()[-1200:]
+    if limit is not None:  # the queue waits it out too; the message is not sent again by itself
+        return f"Usage limit reached. Resets at {clock(limit_hit(limit))}.", cost
     reply = "\n\n".join(texts)
     if not reply:
         reply = f"(no reply; claude exited {proc.returncode})\n{err_tail.strip()}".strip()
@@ -4194,6 +4321,8 @@ def wait_reasons(tasks, s=None):
         return {t["id"]: "waiting for claude-ops to restart" for t in tasks if t["state"] == "queued"}
     if s.get("paused") == "1":
         return {t["id"]: "the queue is paused" for t in tasks if t["state"] == "queued"}
+    if lim := limit_info(s):
+        return {t["id"]: lim["words"] for t in tasks if t["state"] == "queued"}
     by_id = {t["id"]: t for t in tasks}
     find = lambda i: by_id.get(i) or task(i)  # the list holds the newest 500; an older one is read on its own
     free = int(s.get("max_parallel") or 1) - len(THREADS)
@@ -4381,7 +4510,7 @@ class H(BaseHTTPRequestHandler):
             return self.send(200, (CODE / "dashboard.html").read_bytes(), "text/html; charset=utf-8")
         if path == "/api/state":
             tasks = q("SELECT id,project,title,state,phase,priority,hold,depends_on,parent,created,started,"
-                      "finished,cost,rounds,summary,question,error,merged,branch,kind,auto_release,origin FROM tasks "
+                      "finished,cost,rounds,summary,question,error,merged,branch,kind,auto_release,origin,paused_by FROM tasks "
                       "ORDER BY id DESC LIMIT 500")
             # What each task is doing right now, for the status line under it in the list.
             last = {r["task_id"]: r for r in q(
@@ -4406,7 +4535,7 @@ class H(BaseHTTPRequestHandler):
                     projects.append({"name": p.name, "title": p.title, "error": str(e)})
             return self.send(200, {
                 "tasks": tasks, "now": time.time(), "projects": projects, "archived": archived_projects(),
-                "settings": {k: s.get(k, "") for k in ("max_parallel", "paused", "model")},
+                "settings": {k: s.get(k, "") for k in ("max_parallel", "paused", "model")}, "limit": limit_info(s),
                 "active": len(THREADS), "data_dir": str(DATA),
                 "design_cost": (q("SELECT SUM(cost) AS c FROM designs", one=True) or {}).get("c") or 0,
                 "chats": chat_counts()})
@@ -4535,6 +4664,8 @@ class H(BaseHTTPRequestHandler):
             return pause_all()
         if path == "/api/resume-all":
             return resume_all()
+        if path == "/api/limit/clear":  # Try now: stop waiting out the usage limit
+            return limit_clear("you clicked Try now")
         if path == "/api/projects/reload":
             load_projects()
             return {"projects": list(PROJECTS)}
