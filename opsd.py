@@ -932,7 +932,11 @@ def run_claude(p, tid, prompt):
             if e.get("session_id") and e["session_id"] != sid:  # compared here: a turn streams thousands of lines
                 sid = e["session_id"]
                 upd(tid, session_id=sid)
-            content = e.get("message", {}).get("content")
+            msg = e.get("message")  # a string on some system events, e.g. permission_denied
+            content = msg.get("content") if isinstance(msg, dict) else None
+            if e.get("is_api_error_message"):  # e.g. the usage limit: the turn ends here, so say why
+                err.write("".join(c.get("text", "") for c in content or []) + "\n")
+                err.flush()
             if e.get("type") == "user" and e.get("isReplay") and isinstance(content, str):
                 with STEER_LOCK:
                     sent = INFLIGHT.get(tid, [])
