@@ -449,7 +449,7 @@ function renderList() {
       const sub = [
         pf ? "" : `<span class="ptag">${esc(P(t.project).title)}</span>`,
         t.depends_on ? `after #${t.depends_on}` : "",
-        t.kind === "release" ? "release" : "",
+        t.kind === "release" || t.kind === "deploy" ? t.kind : "",
         t.parent ? `from #${t.parent}` : "",
         t.hold ? "hold for review" : "",
         t.auto_release ? "release after merge" : "",
@@ -520,7 +520,7 @@ async function loadDetail(id, fresh) {
   const html = `
     <h2>#${t.id} · <span class="s-${t.state}">${LABEL[t.state] || t.state}</span>${live && t.phase ? ` · ${esc(t.phase)}` : ""}</h2>
     <div style="font-weight:600;font-size:15px">${esc(t.title)}</div>
-    <div class="muted mono" style="margin:4px 0">${esc(P(t.project).title)} · ${esc(t.branch || "")}${t.merged ? ` → ${esc(t.kind === "release" ? P(t.project).main_branch || "main" : P(t.project).dev_branch || "dev")} ${esc(t.merged_show || shas(t.merged))}` : ""}${t.kind === "release" && t.base && !t.merged ? `checking ${esc(t.base_show || shas(t.base))}` : ""}${t.rounds ? ` · fix rounds: ${t.rounds}` : ""}</div>
+    <div class="muted mono" style="margin:4px 0">${esc(P(t.project).title)} · ${esc(t.branch || "")}${t.merged ? ` → ${esc(t.kind === "release" ? P(t.project).main_branch || "main" : P(t.project).dev_branch || "dev")} ${esc(t.merged_show || shas(t.merged))}` : ""}${t.kind === "release" && t.base && !t.merged ? `checking ${esc(t.base_show || shas(t.base))}` : ""}${t.kind === "deploy" && t.base ? `deploying ${esc(t.base_show || shas(t.base))}` : ""}${t.rounds ? ` · fix rounds: ${t.rounds}` : ""}</div>
     ${t.question ? `<div class="callout"><b>Question:</b> ${esc(t.question)}</div>
       <textarea id="answer" placeholder="Your answer (drop or paste screenshots to attach them)" style="min-height:70px"></textarea>
       <div class="row">${btn("answer", "Send answer", "primary")}</div>` : ""}
@@ -542,6 +542,7 @@ async function loadDetail(id, fresh) {
     <details data-k="body" ${t.state === "queued" ? "open" : ""}><summary>Task description</summary><pre>${pics(esc(t.body))}</pre></details>
     <details data-k="feed" open><summary>Worker activity</summary>
       <div class="feed" id="feed">${t.activity.map(a => `<div class="${a.k}">${a.k === "tool" ? "  " : ""}${esc(a.t)}</div>`).join("") || '<span class="muted">nothing yet</span>'}</div></details>
+    ${t.log ? `<details data-k="dlog" open><summary>Deploy log</summary><pre class="mono">${esc(t.log)}</pre></details>` : ""}
     ${t.diffstat ? `<details data-k="files"><summary>Files changed</summary><pre class="mono">${esc(t.diffstat)}</pre></details>` : ""}
     <details data-k="log"><summary>Queue log</summary><div class="mono">${t.events.map(e => `<div><span class="muted">${new Date(e.ts * 1000).toLocaleString()}</span> ${esc(e.text)}</div>`).join("")}</div></details>
     <div id="actmsg" class="err"></div>`;

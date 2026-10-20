@@ -14,6 +14,7 @@ the golden version: it changes only when you promote.
 ./opsctl pause | resume              # pause every running task now / resume every paused one
 ./opsd.py add-project ~/dev/myrepo   # or "+ Project" on the dashboard
 ./opsd.py add -p myrepo "Fix the crash when the save file is empty"
+./opsd.py deploy -p myrepo "store test" --version patch --note "Fixes the crash"   # see Deploys
 ```
 
 On the dashboard you can type a full path or just a name. A name like `mygame` means a folder next to
@@ -49,7 +50,8 @@ several (see [Workspaces](#workspaces)). Read it, adjust it, then click **Reload
 ## main is the golden version
 
 - **dev** gets every task that passes the gate. It is the newest version.
-- **main** moves only when a **release** passes, and its build (`<worktrees>/main`) always matches it.
+- **main** moves only when a **release** passes, and its build (`<worktrees>/main`) always matches it. The one
+  exception: commits a successful [deploy](#deploys) makes itself, such as a build-number bump, move main too.
 - **Promote** queues a release task ahead of other work. It takes a snapshot of dev, runs the gate,
   then a Claude release checker (`release_prompt.md`) builds the app and plays it the way a player
   would. If the checker passes it, main moves to exactly that snapshot; anything merged into dev
@@ -83,7 +85,83 @@ several (see [Workspaces](#workspaces)). Read it, adjust it, then click **Reload
   conflict with dev, a worker merges them in the release's worktree, resolves the conflicts and runs the checks;
   dev moves to that merge, and the release checks it as usual. Retry starts the merge over.
 - If the build fails, main and its build stay as they were.
-- Nothing is ever pushed. Push main yourself when you want to.
+- Nothing is ever pushed to git. Push main yourself when you want to. A [deploy](#deploys) does publish
+  things (a store build, a backend), but only when you click it.
+
+## Deploys
+
+A project can list deploy targets: a store test build, a store release, a backend's prod deploy. claude-ops knows
+nothing about stores or servers. Each target is a shell command of the project's own (`bin/swish release`), and the
+daemon runs it for you.
+
+```toml
+[[deploy]]
+name = "swish test"                 # required, unique in the project
+repo = "ballup-swish"               # workspace only: the repo it deploys; it runs in that folder
+run = "bin/swish build && bin/swish upload"   # required; non-zero exit fails the deploy
+note = "What's new"                 # optional: then a note is required, passed as OPS_NOTE and OPS_NOTE_FILE
+version = "node -p \"require('./package.json').version\""   # optional: prints the current version, X.Y[.Z]
+release_tag = "v{version}"          # optional, needs version: the tag that marks a version as released
+build_tags = "build/*/{version}+*"  # optional, needs version: the tags its builds leave
+
+[[deploy]]
+name = "swish distribute"
+repo = "ballup-swish"
+from = "swish test"                 # deploys what "swish test" last deployed, not main
+run = "bin/swish release"
+```
+
+- **Only on your click.** A deploy starts only from the dashboard, `POST /api/deploys`, or
+  `./opsd.py deploy -p <project> <target> [--version …] [--note …]`. Never from a release, Release after merge, a
+  release checker, a worker or a design chat, and nothing that queues follow-ups can make one.
+- **Like a release, it goes ahead of other work.** Its title reads `Deploy swish test → 3.5.0`. The task page shows
+  its step, its events and `deploy.log`. You get notified when it needs you, fails or succeeds.
+- **One at a time.** A project runs one deploy at a time; a later click queues behind it. A release and a deploy of the
+  same project never run at once: the one that waits says `waiting for deploy #N` or `waiting for release #N`.
+- **The deploy worktree.** Each project has one, `<worktrees>/deploy`, made on first use like a task worktree
+  (workspace files, the clone list, setup). Before each deploy every repo in it is put at the commit to deploy
+  (`git checkout --force --detach`, then `git reset --hard`). It is **never cleaned**: untracked and ignored files
+  stay, because a later target uploads what an earlier one built (swish's release uploads the builds its test build
+  left in `ios/build` and `android/app/build`). Setup runs again only when the commit changed since the last setup.
+- **Which commit.** main, in every repo. A target with `from` deploys the commit that target last deployed
+  successfully, in its repo (other repos sit at main); before that target's first deploy it refuses with
+  "Deploy swish test first."
+- **Versions.** A target with `version` runs it in its folder at the commit to deploy. You pick:
+  - **same**: the current version. Refused once `release_tag` for it exists: the App Store closes a version once
+    approved.
+  - **patch**, **minor**, **major**: the next one (3.5.0 → 3.5.1, 3.6.0, 4.0.0).
+  - an explicit **X.Y.Z**, higher than the current one.
+
+  The default is patch when the current version is released, else same. If the command fails or prints something
+  that isn't a version, the dashboard says why and that target can't deploy until it is fixed.
+- **Environment.** The command runs in the target's folder (`<worktrees>/deploy/<repo>`, or the worktree root
+  without `repo`) with the project's `[worker] env` ({port} filled as for workers) and:
+
+  | Variable | Value |
+  |---|---|
+  | `OPS_DEPLOY` | the target's name |
+  | `OPS_COMMIT` | the commit being deployed: its repo's sha, or without `repo` one sha per repo, space-separated |
+  | `OPS_DEPLOYED` | the commit its last successful deploy recorded, same form; empty the first time |
+  | `OPS_VERSION` | the chosen version (the current one for "same"); unset without `version` |
+  | `OPS_NOTE`, `OPS_NOTE_FILE` | your note, and a file holding it (in the task's runs folder) |
+  | `OPS_PORT`, `OPS_TASK_ID` | the task's own port and id |
+
+  The daemon runs the command itself, as it runs the gate, so the Bash guard that watches Claude doesn't apply.
+- **Failure** (non-zero exit): the task fails and shows the end of the log. The target's record, main and the
+  worktree stay as they are, so you can look around in it. **Retry** starts the deploy over, resetting the worktree.
+  A deploy cut off by a restart of claude-ops fails the same way rather than run again by itself.
+- **Success:** the target records what it shipped: the worktree's commit after the command (so a build-number bump
+  the command made is what `from` targets deploy next), the time, the task and the version. If the command made
+  commits, they are kept at `refs/ops/deploy-<id>` and main fast-forwards to them as a release would move it (the
+  `[app]` build, your uncommitted changes carried over). If main moved during the deploy, the task needs you: merge
+  `refs/ops/deploy-<id>` into main yourself and it goes on by itself, or cancel it to leave main alone. Tags the
+  command made are already in your repo. dev picks the commits up at the next release, which merges commits made
+  straight to main into dev. If the deploy succeeded but main couldn't move (say the build failed), Retry only
+  moves main.
+- **On the dashboard.** Each project's `deploys` (in `/api/state`) lists every target: its config and any config
+  error, the last deploy (commit, time, task, version), how many commits it is behind, the commit it would deploy
+  now with its subject, and for a target with `version` the current version, its release tag if any, the newest
+  release and build tags, and the version options. `deploy_open` is the deploy task now open, if any.
 
 ## Design mode
 
@@ -200,6 +278,12 @@ artifact = "Builds/macOS/MyGame.app"           # must exist after build; kept as
 env = { GAME_PORT = "{port}" }     # extra env; {port} is the worker's own free port ($OPS_PORT)
 notes = """Project-specific guidance added to every worker brief."""
 
+[[deploy]]                         # zero or more; see Deploys. Runs only when you click Deploy
+name = "store test"
+run = "bin/release test"           # in <worktrees>/deploy (or its repo folder); gets OPS_DEPLOY, OPS_COMMIT, ...
+# repo = "app"  from = "other target"  note = "What's new"
+# version = "cat VERSION"  release_tag = "v{version}"  build_tags = "build/*/{version}+*"
+
 [design]
 notes = """Project-specific guidance for design chats."""
 ```
@@ -300,7 +384,7 @@ Nothing claude-ops runs may stop, signal or quit a process it did not start.
 | `dashboard.html` | the page |
 | `~/.claude-ops/projects/*.toml` | one config per project |
 | `~/.claude-ops/ops.db` | SQLite: tasks, events, settings, design chats |
-| `~/.claude-ops/runs/<id>/` | `claude.jsonl` (full transcript), `claude.err`, `gate.log` |
+| `~/.claude-ops/runs/<id>/` | `claude.jsonl` (full transcript), `claude.err`, `gate.log`; a deploy's `deploy.log`, `note.txt` |
 | `~/.claude-ops/images/` | screenshots attached to messages |
 | `~/.claude-ops/opsd.log` | daemon log |
 | `~/.claude-ops/opsd.pid` | the running daemon's pid |
