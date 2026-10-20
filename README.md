@@ -55,9 +55,12 @@ several (see [Workspaces](#workspaces)). Read it, adjust it, then click **Reload
   would. If the checker passes it, main moves to exactly that snapshot; anything merged into dev
   meanwhile waits for the next release. The checker never changes code: problems it finds are queued
   as ordinary tasks, and a blocked release leaves main as it was.
-- Promote refuses while a release is already open, while the main build is running, or while your
-  checkout is off main or has uncommitted changes. It checks again before moving main. If something
-  blocks it then, fix it and click **Retry**: that promotes without checking again.
+- Promote never refuses: it always queues a release (or points at the one already open). Anything in the way
+  of moving main is checked only when the release gets there, and the release waits (with a notification)
+  until you clear it: quit the main build, or commit or stash uncommitted changes to files the release
+  changes. Other uncommitted changes stay as they are. If your checkout is on another branch, main moves as
+  a branch and your checkout is left alone. If main gets new commits during the release, it starts over
+  with them.
 - With nothing new on dev, Promote only rebuilds main (no gate, no checker).
 - Promoting claude-ops itself restarts the daemon to load the new code (`opsctl restart`: running
   tasks pause and resume).
@@ -84,8 +87,8 @@ settings, `CLAUDE.md` and MCP servers. Each chat keeps one Claude session across
   prompt are denied, and Claude tells you what it couldn't do.
 - The chat header shows `cd <repo> && claude --resume <id>`. Run it to carry on in a terminal, where
   you can answer prompts. Don't send from both places at once.
-- Edits land in your checkout and nothing else. Promote refuses while the checkout has uncommitted
-  changes, so commit or discard them first.
+- Edits land in your checkout and nothing else. A release waits to move main while the checkout has
+  uncommitted changes to files it changes, so commit or discard them.
 
 ## Workspaces
 
