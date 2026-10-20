@@ -200,6 +200,12 @@ notes = """Project-specific guidance for design chats."""
   text. The message shows it, and Claude (started with `--add-dir` on that folder) is told to read it.
   PNG, JPEG, GIF or WebP, up to 20 MB.
 - **Notifications.** macOS notifications when a task needs you, fails, or finishes.
+- **Speed.** The dashboard polls every 3 seconds, so the daemon answers a poll without waiting on git or the
+  process table. Each project's branches, "to promote" list and whether its build is running are read in the
+  background and kept for 5 seconds; any task event rereads its project at once. A task page reads only the
+  part of the transcript that is new since the last poll, and runs `git diff --stat` only when the branch
+  moved. The page sends one poll at a time, none from a hidden tab, and redraws a click at once instead of
+  waiting for the daemon.
 - **macOS permissions.** launchd starts the daemon through `~/.claude-ops/Claude Ops.app` (built from
   `launcher.c` by `opsctl start`), so privacy prompts (App Management, folder access) name **Claude Ops**,
   not python3. A grant then covers the daemon, its workers and their builds, and not every Python script.

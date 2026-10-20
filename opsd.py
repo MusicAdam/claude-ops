@@ -51,6 +51,9 @@ PHASE_SINCE = {}  # task id -> when its phase last changed, so the dashboard can
 
 # ---------------------------------------------------------------- projects
 
+HAS = set()  # (repo, sha) of commits known to be in that repo
+
+
 class Part:
     """One git repo of a project: the project itself, or one folder of a workspace."""
 
@@ -69,8 +72,13 @@ class Part:
         return self.git("rev-parse", ref)
 
     def has(self, sha):
-        return subprocess.run(["git", "cat-file", "-e", f"{sha}^{{commit}}"], cwd=self.src,
-                              capture_output=True).returncode == 0
+        if (self.src, sha) in HAS:
+            return True
+        ok = subprocess.run(["git", "cat-file", "-e", f"{sha}^{{commit}}"], cwd=self.src,
+                            capture_output=True).returncode == 0
+        if ok:  # a commit stays in its repo; one that is missing may still arrive, so only a yes is kept
+            HAS.add((self.src, sha))
+        return ok
 
 
 class Project:
@@ -149,11 +157,16 @@ def load_projects():
             print(f"project {f.name}: {e}", flush=True)
     PROJECTS.clear()
     PROJECTS.update(found)
+    with FACTS_LOCK:
+        FACTS.clear()
     for p in PROJECTS.values():
         try:
             bootstrap(p)
         except Exception as e:
             print(f"project {p.name} bootstrap: {e}", flush=True)
+    with FACTS_LOCK:
+        for p in found.values():  # read them now, so the first dashboard request doesn't wait on git
+            refresh_facts(p)
 
 
 def proj(name):
@@ -369,14 +382,17 @@ def init_db():
         if col not in cols:
             q(f"ALTER TABLE tasks ADD COLUMN {col} {decl}")
     q("CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY, task_id INTEGER, ts REAL, text TEXT)")
+    q("CREATE INDEX IF NOT EXISTS events_task ON events (task_id, id)")  # a task's log, and the latest per task
     q("""CREATE TABLE IF NOT EXISTS designs (id INTEGER PRIMARY KEY, project TEXT, title TEXT, session_id TEXT,
         state TEXT DEFAULT 'idle', created REAL, updated REAL, cost REAL DEFAULT 0)""")
     q("""CREATE TABLE IF NOT EXISTS design_msgs (id INTEGER PRIMARY KEY, design_id INTEGER, role TEXT,
         text TEXT, ts REAL, task_ids TEXT, note TEXT)""")
+    q("CREATE INDEX IF NOT EXISTS design_msgs_design ON design_msgs (design_id, id)")
     if "kind" not in {r["name"] for r in q("PRAGMA table_info(designs)")}:  # databases from before project chats
         q("ALTER TABLE designs ADD COLUMN kind TEXT DEFAULT 'design'")
     q("UPDATE designs SET state='idle' WHERE state='thinking'")  # a reply cut off by a restart
     q("CREATE TABLE IF NOT EXISTS task_msgs (id INTEGER PRIMARY KEY, task_id INTEGER, role TEXT, text TEXT, ts REAL)")
+    q("CREATE INDEX IF NOT EXISTS task_msgs_task ON task_msgs (task_id, id)")
     if "delivered" not in {r["name"] for r in q("PRAGMA table_info(task_msgs)")}:  # databases from before steering
         q("ALTER TABLE task_msgs ADD COLUMN delivered REAL")
     q("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)")
@@ -416,6 +432,7 @@ def upd(tid, **kw):
 def ev(tid, text):
     q("INSERT INTO events (task_id, ts, text) VALUES (?,?,?)", (tid, time.time(), text))
     print(f"[#{tid}] {text}", flush=True)
+    stale_facts((task(tid) or {}).get("project"))  # a step that may have moved dev or main, or quit the build
 
 
 def add_task(project, body, title="", priority=0, hold=0, depends_on=None, parent=None, kind="task", auto_release=None):
@@ -455,9 +472,24 @@ def within(path, root):
     return path == root or path.startswith(root.rstrip("/") + "/")
 
 
+def proc_cwds(pids):
+    """pid -> working directory, for many pids in one lsof call. One call per pid took 50 ms each, and
+    a Mac has dozens of processes started by a relative path: the dashboard waited seconds on it."""
+    if not pids:
+        return {}
+    out = subprocess.run(["lsof", "-a", "-d", "cwd", "-Fpn", "-p", ",".join(map(str, pids))],
+                         capture_output=True, text=True).stdout
+    cwds, pid = {}, None
+    for l in out.splitlines():
+        if l.startswith("p"):
+            pid = int(l[1:])
+        elif l.startswith("n") and pid is not None:
+            cwds[pid] = l[1:]
+    return cwds
+
+
 def proc_cwd(pid):
-    out = subprocess.run(["lsof", "-a", "-p", str(pid), "-d", "cwd", "-Fn"], capture_output=True, text=True).stdout
-    return next((l[1:] for l in out.splitlines() if l.startswith("n")), "")
+    return proc_cwds([pid]).get(pid, "")
 
 
 def app_pids(p, path):
@@ -469,18 +501,20 @@ def app_pids(p, path):
     app = os.path.realpath(Path(path) / p.process)
     if not within(app, path):  # an absolute or ../ process would reach outside the worktree
         return []
-    out = []
+    found, relative = [], []
     ps = subprocess.run(["ps", "-axo", "pid=,uid=,comm="], capture_output=True, text=True).stdout
     for line in ps.splitlines():
         pid, uid, exe = line.split(None, 2)
         pid = int(pid)
         if int(uid) != os.getuid() or pid == os.getpid():
             continue
-        if not exe.startswith("/"):  # started by a relative path: ps shows it as given
-            exe = os.path.join(proc_cwd(pid) or "/nonexistent", exe)
-        if within(exe, app):
-            out.append(pid)
-    return out
+        if exe.startswith("/"):
+            found.append((pid, exe))
+        else:  # started by a relative path: ps shows it as given, so it is relative to the process's cwd
+            relative.append((pid, exe))
+    cwds = proc_cwds([pid for pid, _ in relative])
+    found += [(pid, os.path.join(cwds.get(pid) or "/nonexistent", exe)) for pid, exe in relative]
+    return [pid for pid, exe in found if within(exe, app)]
 
 
 def kill_app(p, path):
@@ -779,7 +813,7 @@ def run_claude(p, tid, prompt):
     env = dict(os.environ, OPS_RESULT=str(rp), OPS_TASK_ID=str(tid), OPS_PORT=str(port),
                **{k: str(v).format(port=port) for k, v in p.env.items()})
     upd(tid, phase="claude working")
-    cost0 = task(tid)["cost"] or 0
+    cost0, sid = task(tid)["cost"] or 0, t["session_id"]
     with open(run_dir / "claude.jsonl", "a") as log, open(run_dir / "claude.err", "a") as err:
         log.write(json.dumps({"type": "ops", "prompt": prompt[:2000], "ts": time.time()}) + "\n")
         proc = subprocess.Popen(cmd, cwd=t["worktree"], env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
@@ -803,8 +837,9 @@ def run_claude(p, tid, prompt):
                 e = json.loads(line)
             except ValueError:
                 continue
-            if e.get("session_id") and e.get("session_id") != task(tid)["session_id"]:
-                upd(tid, session_id=e["session_id"])
+            if e.get("session_id") and e["session_id"] != sid:  # compared here: a turn streams thousands of lines
+                sid = e["session_id"]
+                upd(tid, session_id=sid)
             content = e.get("message", {}).get("content")
             if e.get("type") == "user" and e.get("isReplay") and isinstance(content, str):
                 with STEER_LOCK:
@@ -1487,19 +1522,94 @@ def resume_all():
 
 # ---------------------------------------------------------------- main (the golden version)
 
-def main_info(p):
-    built = setting(f"main_built:{p.name}")
-    main, dev = p.revs(p.main), p.revs(p.dev)
-    ahead = [f"{r.sub + ': ' if r.sub else ''}{l}" for r in p.parts
-             for l in r.git("log", "--first-parent", "--format=%h %s", f"{p.main}..{p.dev}").splitlines()][:30]
+def settings_now():
+    """Every setting in one query, for code that reads many of them at once."""
+    return {r["key"]: r["value"] for r in q("SELECT key, value FROM settings")}
+
+
+def main_info(p, s=None):
+    s = settings_now() if s is None else s
+    f = facts(p)
+    if f.get("error"):
+        raise RuntimeError(f["error"])
+    built = s.get(f"main_built:{p.name}", "")
     rel = q("SELECT id,state,phase,error FROM tasks WHERE project=? AND kind='release' ORDER BY id DESC LIMIT 1",
             (p.name,), one=True)
     return {"name": p.name, "title": p.title, "main_branch": p.main, "dev_branch": p.dev,
-            "main": p.show(main), "built": p.show(built), "dev": p.show(dev), "ahead": ahead,
+            "main": p.show(f["main"]), "built": p.show(built), "dev": p.show(f["dev"]), "ahead": f["ahead"],
             "has_app": bool(p.build), "can_launch": bool(p.launch),
-            "stale": bool(p.build) and built != main, "running": app_running(p, p.main_wt),
-            "has_build": bool(p.build) and (not p.artifact or (p.main_wt / p.artifact).exists()),
-            "paused": setting(f"paused:{p.name}") == "1", "auto_release": release_default(p), "gate": [g["name"] for g in p.gate], "release": rel}
+            "stale": bool(p.build) and built != f["main"], "running": f["running"],
+            "has_build": bool(p.build) and f["has_build"],
+            "paused": s.get(f"paused:{p.name}") == "1",
+            "auto_release": s.get(f"auto_release:{p.name}") == "1",  # release_default(p), from the snapshot
+            "gate": [g["name"] for g in p.gate], "release": rel}
+
+
+# ---------------------------------------------------------------- project facts for the dashboard
+# Git and the process table are slow next to the database: a git call takes 10-20 ms and a scan for a running
+# app 0.2-0.4 s, and every open dashboard tab asks for /api/state every few seconds. So /api/state answers from
+# FACTS at once and rereads an entry older than FACTS_TTL behind the request: what it shows is at most a poll old.
+# Every task event marks its project's entry stale and rereads it, so a merge or promote shows on the next poll.
+
+FACTS = {}  # project name -> {"at": when read, "main", "dev": revs, "ahead": [lines], "running", "has_build"}
+FACTS_TTL = 5
+FACTS_BUSY = set()  # projects being reread now, so a burst of requests starts one reread, not one each
+FACTS_LOCK = threading.Lock()
+AHEAD = {}  # (repo, main sha, dev sha) -> dev's first-parent log since main; a pair of shas never changes
+
+
+def read_facts(p):
+    try:
+        main, dev, ahead = [], [], []
+        for r in p.parts:
+            m, d = r.git("rev-parse", p.main, p.dev).split()
+            main.append(m)
+            dev.append(d)
+            key = (str(r.src), m, d)
+            if key not in AHEAD:
+                if len(AHEAD) > 500:
+                    AHEAD.clear()
+                AHEAD[key] = r.git("log", "--first-parent", "--format=%h %s", f"{m}..{d}").splitlines()
+            ahead += [f"{r.sub + ': ' if r.sub else ''}{l}" for l in AHEAD[key]]
+        f = {"main": " ".join(main), "dev": " ".join(dev), "ahead": ahead[:30],
+             "running": app_running(p, p.main_wt),
+             "has_build": not p.artifact or (p.main_wt / p.artifact).exists()}
+    except Exception as e:
+        f = {"error": str(e)}
+    f["at"] = time.time()
+    with FACTS_LOCK:
+        FACTS[p.name] = f
+        FACTS_BUSY.discard(p.name)
+    return f
+
+
+def facts(p):
+    """What git and the process table say about a project: from FACTS, reread behind the request when stale."""
+    with FACTS_LOCK:
+        f = FACTS.get(p.name)
+        if f and time.time() - f["at"] < FACTS_TTL:
+            return f
+        if f:
+            refresh_facts(p)
+            return f
+    return read_facts(p)  # the first request after a start or reload waits for it
+
+
+def refresh_facts(p):
+    """Reread a project's facts in the background. Call with FACTS_LOCK held."""
+    if p.name in FACTS_BUSY:
+        return
+    FACTS_BUSY.add(p.name)
+    threading.Thread(target=read_facts, args=(p,), daemon=True).start()
+
+
+def stale_facts(name):
+    """Something happened in project name (a merge, a promote, a build): reread its facts now."""
+    p = PROJECTS.get(name)
+    with FACTS_LOCK:
+        if p and p.name in FACTS:
+            FACTS[p.name]["at"] = 0
+            refresh_facts(p)
 
 
 def promote_blocker(p, commit):
@@ -1726,7 +1836,7 @@ def design_system_prompt(p):
 
 def stream_claude(cmd, cwd, log_dir, live, procs, key, on_session):
     """Run one chat turn of claude -p, tool lines into live. Returns (reply text, cost)."""
-    texts, cost = [], 0.0
+    texts, cost, sid = [], 0.0, None
     log_dir.mkdir(parents=True, exist_ok=True)
     with open(log_dir / "claude.jsonl", "a") as log, open(log_dir / "claude.err", "a+") as err:
         proc = subprocess.Popen(cmd, cwd=cwd, stdout=subprocess.PIPE, stderr=err, text=True,
@@ -1739,8 +1849,9 @@ def stream_claude(cmd, cwd, log_dir, live, procs, key, on_session):
                 e = json.loads(line)
             except ValueError:
                 continue
-            if e.get("session_id"):
-                on_session(e["session_id"])
+            if e.get("session_id") and e["session_id"] != sid:  # once, not on each of thousands of lines
+                sid = e["session_id"]
+                on_session(sid)
             if e.get("type") == "assistant" and not e.get("parent_tool_use_id"):
                 for c in e.get("message", {}).get("content", []):
                     if c.get("type") == "text" and c.get("text", "").strip():
@@ -1898,30 +2009,55 @@ def task_chat_turn(tid, text):
     TASK_CHAT_LIVE.pop(tid, None)
 
 
+# A task page asks for its worker's transcript every few seconds, and a transcript grows to megabytes. It only
+# ever grows, so each read starts where the last one stopped.
+FEEDS = {}  # task id -> (bytes read, the newest activity entries)
+STEPS = {}  # task id -> ((size, mtime) of the transcript, last_step's answer)
+FEEDS_LOCK = threading.Lock()
+
+
 def activity(tid, limit=120):
     f = RUNS / str(tid) / "claude.jsonl"
+    with FEEDS_LOCK:
+        pos, items = FEEDS.get(tid, (0, []))
+        try:
+            with open(f, "rb") as fh:
+                size = fh.seek(0, 2)
+                if size < pos:  # a new file in its place: start over
+                    pos, items = 0, []
+                fh.seek(pos)
+                data = fh.read(size - pos)
+        except OSError:
+            return []
+        end = data.rfind(b"\n") + 1  # a line still being written is read next time
+        if end:
+            items = (items + activity_of(data[:end].decode(errors="replace").splitlines()))[-limit:]
+            FEEDS[tid] = (pos + end, items)
+        return items
+
+
+def activity_of(lines):
     out = []
-    if f.exists():
-        for line in f.read_text(errors="replace").splitlines()[-1500:]:
-            try:
-                e = json.loads(line)
-            except ValueError:
-                continue
-            ty = e.get("type")
-            if ty == "ops":
-                out.append({"k": "ops", "t": "▶ new turn: " + e.get("prompt", "")[:240]})
-            elif ty == "user" and str(e.get("message", {}).get("content")).startswith(STEER_NOTE):
-                out.append({"k": "you", "t": "✉ you: " + e["message"]["content"][len(STEER_NOTE):][:1200]})
-            elif ty == "assistant" and not e.get("parent_tool_use_id"):
-                for c in e.get("message", {}).get("content", []):
-                    if c.get("type") == "text" and c.get("text", "").strip():
-                        out.append({"k": "say", "t": c["text"].strip()[:1200]})
-                    elif c.get("type") == "tool_use":
-                        out.append({"k": "tool", "t": tool_line(c.get("name"), c.get("input") or {})})
-            elif ty == "result":
-                out.append({"k": "ops", "t": f"■ turn ended ({e.get('num_turns', '?')} steps, "
-                                             f"${e.get('total_cost_usd') or 0:.2f})"})
-    return out[-limit:]
+    for line in lines:
+        try:
+            e = json.loads(line)
+        except ValueError:
+            continue
+        ty = e.get("type")
+        if ty == "ops":
+            out.append({"k": "ops", "t": "▶ new turn: " + e.get("prompt", "")[:240]})
+        elif ty == "user" and str(e.get("message", {}).get("content")).startswith(STEER_NOTE):
+            out.append({"k": "you", "t": "✉ you: " + e["message"]["content"][len(STEER_NOTE):][:1200]})
+        elif ty == "assistant" and not e.get("parent_tool_use_id"):
+            for c in e.get("message", {}).get("content", []):
+                if c.get("type") == "text" and c.get("text", "").strip():
+                    out.append({"k": "say", "t": c["text"].strip()[:1200]})
+                elif c.get("type") == "tool_use":
+                    out.append({"k": "tool", "t": tool_line(c.get("name"), c.get("input") or {})})
+        elif ty == "result":
+            out.append({"k": "ops", "t": f"■ turn ended ({e.get('num_turns', '?')} steps, "
+                                         f"${e.get('total_cost_usd') or 0:.2f})"})
+    return out
 
 
 def last_step(tid):
@@ -1931,12 +2067,19 @@ def last_step(tid):
     long command, how long it has been running."""
     f = RUNS / str(tid) / "claude.jsonl"
     try:
+        st = os.stat(f)
+        if STEPS.get(tid, (None,))[0] == (st.st_size, st.st_mtime):
+            return STEPS[tid][1]  # the transcript has not moved since the last poll
         with open(f, "rb") as fh:
             fh.seek(max(0, fh.seek(0, 2) - (256 << 10)))
             lines = fh.read().decode(errors="replace").splitlines()
-        ts = f.stat().st_mtime
     except OSError:
         return None
+    STEPS[tid] = ((st.st_size, st.st_mtime), step_of(lines, st.st_mtime))
+    return STEPS[tid][1]
+
+
+def step_of(lines, ts):
     step, calls = None, 0
     for line in reversed(lines):
         if '"assistant"' not in line:
@@ -1965,24 +2108,27 @@ def last_step(tid):
 STATE_WORDS = {"running": "working", "gating": "checking", "needs_input": "needs you"}
 
 
-def wait_reasons(tasks):
+def wait_reasons(tasks, s=None):
     """Why each queued task has not started yet, in the scheduler's own order of checks."""
+    s = settings_now() if s is None else s
     if STOPPING.is_set():
         return {t["id"]: "waiting for claude-ops to restart" for t in tasks if t["state"] == "queued"}
-    if setting("paused") == "1":
+    if s.get("paused") == "1":
         return {t["id"]: "the queue is paused" for t in tasks if t["state"] == "queued"}
-    free = int(setting("max_parallel") or 1) - len(THREADS)
+    by_id = {t["id"]: t for t in tasks}
+    find = lambda i: by_id.get(i) or task(i)  # the list holds the newest 500; an older one is read on its own
+    free = int(s.get("max_parallel") or 1) - len(THREADS)
     mine = {}
     for i in list(THREADS):
-        name = (task(i) or {}).get("project")
+        name = (find(i) or {}).get("project")
         mine[name] = mine.get(name, 0) + 1
     out = {}
     for t in sorted((t for t in tasks if t["state"] == "queued"), key=lambda t: (-t["priority"], t["id"])):
         p = PROJECTS.get(t["project"])
-        dep = task(t["depends_on"]) if t["depends_on"] else None
+        dep = find(t["depends_on"]) if t["depends_on"] else None
         if not p:
             why = "its project is not loaded"
-        elif setting(f"paused:{p.name}") == "1":
+        elif s.get(f"paused:{p.name}") == "1":
             why = f"{p.title} is paused"
         elif dep and dep["state"] != "done":
             why = f"waiting for #{dep['id']} to finish (it is {STATE_WORDS.get(dep['state'], dep['state'])})"
@@ -2055,6 +2201,31 @@ def first_words(text, n=240):
         return t
     cut = max(t.rfind(". ", 0, n), t.rfind("? ", 0, n), t.rfind("! ", 0, n))
     return t[:cut + 1] if cut > n // 3 else t[:n - 1].rstrip() + "…"
+
+
+DIFFSTATS = {}  # task id -> (what the diff depends on, its --stat), so a task page polls git only when that moves
+
+
+def diffstat(p, t):
+    """The files a task changed, as git diff --stat per repo."""
+    tips = "" if t["state"] == "done" else " ".join(  # a done task's branch no longer moves
+        r.git("rev-parse", "--verify", "-q", t["branch"], check=False) for r in p.parts)
+    key = (t["merged"], t["branch"], tips)
+    hit = DIFFSTATS.get(t["id"])
+    if hit and hit[0] == key:
+        return hit[1]
+    stats = []
+    for r in p.parts:
+        sha = p.mine(r, t["merged"]) if p.repos else t["merged"]
+        if t["merged"] and not sha:
+            continue  # a workspace repo this task did not change
+        base = f"{sha}^1" if sha else p.dev
+        st = r.git("diff", "--stat", f"{base}...{t['branch']}", check=False)
+        if st:
+            stats.append(f"{r.sub}/\n{st}" if r.sub else st)
+    out = "\n\n".join(stats)[-3000:]
+    DIFFSTATS[t["id"]] = (key, out)
+    return out
 
 
 # ---------------------------------------------------------------- images
@@ -2135,8 +2306,11 @@ class H(BaseHTTPRequestHandler):
             last = {r["task_id"]: r for r in q(
                 "SELECT e.task_id, e.text, e.ts FROM events e JOIN (SELECT MAX(id) AS m FROM events "
                 "GROUP BY task_id) x ON e.id = x.m")}
-            waits = wait_reasons(tasks)
+            s = settings_now()
+            waits = wait_reasons(tasks, s)
             for t in tasks:
+                for k in ("summary", "question", "error"):  # the list shows a first line; the task page has the rest
+                    t[k] = clip(t[k], 400) or None
                 ev_ = last.get(t["id"])
                 t["last_event"] = {"text": ev_["text"], "ts": ev_["ts"]} if ev_ else None
                 t["phase_since"] = PHASE_SINCE.get(t["id"]) if t["state"] in ACTIVE else None
@@ -2145,12 +2319,12 @@ class H(BaseHTTPRequestHandler):
             projects = []
             for p in PROJECTS.values():
                 try:
-                    projects.append(main_info(p))
+                    projects.append(main_info(p, s))
                 except Exception as e:
                     projects.append({"name": p.name, "title": p.title, "error": str(e)})
             return self.send(200, {
                 "tasks": tasks, "now": time.time(), "projects": projects,
-                "settings": {k: setting(k) for k in ("max_parallel", "paused", "model")},
+                "settings": {k: s.get(k, "") for k in ("max_parallel", "paused", "model")},
                 "active": len(THREADS), "data_dir": str(DATA),
                 "design_cost": (q("SELECT SUM(cost) AS c FROM designs", one=True) or {}).get("c") or 0})
         m = re.fullmatch(r"/api/tasks/(\d+)", path)
@@ -2161,19 +2335,8 @@ class H(BaseHTTPRequestHandler):
                 return self.send(404, {"error": "no such task"})
             t["events"] = q("SELECT ts,text FROM events WHERE task_id=? ORDER BY id", (tid,))
             t["activity"] = activity(tid)
-            t["diffstat"] = ""
             p = PROJECTS.get(t["project"])
-            if p and t["branch"]:
-                stats = []
-                for r in p.parts:
-                    sha = p.mine(r, t["merged"]) if p.repos else t["merged"]
-                    if t["merged"] and not sha:
-                        continue  # a workspace repo this task did not change
-                    base = f"{sha}^1" if sha else p.dev
-                    st = r.git("diff", "--stat", f"{base}...{t['branch']}", check=False)
-                    if st:
-                        stats.append(f"{r.sub}/\n{st}" if r.sub else st)
-                t["diffstat"] = "\n\n".join(stats)[-3000:]
+            t["diffstat"] = diffstat(p, t) if p and t["branch"] else ""
             if p:  # the commits with their repo names, for the line under the title
                 t["merged_show"] = p.label(t["merged"])
                 t["base_show"] = p.label(t["base"])
@@ -2201,8 +2364,8 @@ class H(BaseHTTPRequestHandler):
             d["msgs"] = q("SELECT role,text,ts,task_ids FROM design_msgs WHERE design_id=? ORDER BY id", (did,))
             for msg in d["msgs"]:
                 ids = json.loads(msg["task_ids"] or "[]")
-                msg["tasks"] = [{"id": i, "title": (task(i) or {}).get("title"), "state": (task(i) or {}).get("state")}
-                                for i in ids]
+                msg["tasks"] = [{"id": i, "title": t.get("title"), "state": t.get("state")}
+                                for i in ids for t in [task(i) or {}]]
             d["live"] = DESIGN_LIVE.get(did, [])[-12:]
             return self.send(200, d)
         self.send(404, {"error": "not found"})
@@ -2262,6 +2425,7 @@ class H(BaseHTTPRequestHandler):
                 return {"id": queue_release(p)}
             elif act == "play":
                 launch_app(p, p.main_wt)
+                stale_facts(p.name)
             else:
                 set_setting(f"paused:{p.name}", "1" if act == "pause" else "0")
             return
