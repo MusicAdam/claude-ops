@@ -293,8 +293,10 @@ shows for every project in view whose `dev` has an `openspec/` folder, even when
   `init` and `update` (they write outside `openspec/`, which a chat can't save; use **Set up** and
   **Refresh commands** instead), and the ones that change your machine's OpenSpec setup (`config set`, `store setup`, `completion install`, `feedback`, …). It may still edit
   only `openspec/`, and so may its subagents. The reader's header shows a button for each command that applies
-  to the change (hover for what it does). A click sends the command as a chat message, as if you typed it; the
-  buttons are disabled while Claude is replying:
+  to the change, in this order (hover for what it does). A click sends the command as a chat message, through
+  the same path as **Send**, so it shows in the chat as if you typed it. The buttons are disabled while Claude is
+  replying. **Archive** asks first: `Archive <name>? This moves it to openspec/changes/archive and merges its
+  spec deltas into openspec/specs. Saved to dev after the reply.`
 
   | Command | Shown when | What it changes |
   |---|---|---|
@@ -304,11 +306,18 @@ shows for every project in view whose `dev` has an `openspec/` folder, even when
   | `/opsx:archive` | the repo has the opsx command or skill | merges the deltas and moves the change to `openspec/changes/archive/` |
   | `/tk:openspec:audit` | you have the tk command | nothing: it reports gaps and drift |
   | `/tk:openspec:review` | you have the tk command | nothing: read-only review agents report |
-  | `/tk:openspec:deviation-check` | you have the tk command | nothing: it compares the plan with the code |
+  | `/tk:openspec:deviation-check` | you have the tk command and at least one item is ticked | nothing: it compares the plan with the code |
 
   The opsx commands come from `openspec init` in the repo (`.claude/commands/opsx/`, or as skills such as
   `openspec-explore` in `.claude/skills/` in newer versions; the dashboard sends whichever exists). Apply,
-  implement and propose are never listed: the first two change code, so queue the change instead.
+  implement and propose are never listed: the first two change code, so queue the change instead. When the
+  repo has no opsx commands and you don't have the tk ones, only Validate is listed, with a muted hint: `Run Set
+  up OpenSpec or Refresh OpenSpec commands to add the opsx commands.`
+- **`/` autocomplete.** In a change's chat, type `/` as the first character of the message box and a list of the
+  same commands opens just above it, each by its label and the exact text it sends. Typing more filters it, by
+  label or text. **Up** and **Down** move, **Enter** or **Tab** puts the command's text in the box for you to
+  send (plain-text commands such as Validate insert their text too), and **Esc** closes the list. Other chats
+  show no list for now.
 - **How big a task is.** One task per change is the default and the recommendation. A checklist item is far too
   small: every task costs a worktree, a worker start-up and a full gate run, and the worker can still split a
   big change itself. One task per phase is recommended only for a change with 25 or more open items in three
