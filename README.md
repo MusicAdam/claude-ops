@@ -15,6 +15,7 @@ the golden version: it changes only when you promote.
 ./opsd.py add-project ~/dev/myrepo   # or "+ Project" on the dashboard
 ./opsd.py add -p myrepo "Fix the crash when the save file is empty"
 ./opsd.py deploy -p myrepo "store test" --version patch --note "Fixes the crash"   # see Deploys
+./opsd.py send myrepo --design "How does the save format work?"   # what a worker or chat runs to ask a peer project
 ```
 
 On the dashboard you can type a full path or just a name. A name like `mygame` means a folder next to
@@ -227,6 +228,35 @@ settings, `CLAUDE.md` and MCP servers. Each chat keeps one Claude session across
 - Edits land in your checkout and nothing else. Uncommitted ones survive a release: it merges them onto the
   new main and puts them back.
 
+## Projects hand work to each other
+
+A worker or chat in one project can start work in another, the way one Claude session messages a peer. Each
+worker, design chat and project chat is told about the other projects and the command:
+
+```bash
+opsd.py send <project> "<message>"            # a task in that project's queue
+opsd.py send <project> --design "<message>"   # a design chat there: ask how something works, talk an idea through
+opsd.py send <project> --chat "<message>"     # a project chat there, in its checkout (it can edit files)
+        ... --title "..." --hold              # name it; hold a task for your review before it merges
+```
+
+- **It shows like everything else.** A sent task is queued in the other project and goes through its gate as
+  usual. A sent chat appears in its tab under **Ready for you** once it has replied. Both say **Sent by** (or
+  **Started by**) with a link to the task or chat that sent them, and the lists tag them `sent by …`.
+- **Context comes along.** The message starts with a line naming the sender, its title and where it works (its
+  worktree and branch, or the folder a chat runs in), so the other session can read its files. The sender is told
+  to make the message stand alone, like a design chat's task brief.
+- **Word comes back.** The sender's task logs "Sent task #71 to diskgame", and later how it ended: done with its
+  summary, failed, cancelled, or waiting on you. A sent chat's first reply goes back too. In a chat that sent
+  something these show as notes, and Claude reads them with your next message.
+- **Limits.** A design chat stays read-only: it can send a task or a design chat, not a project chat. Work passed
+  on three times (A sends to B, which sends on, and so on) is refused, and so is an eleventh send from one task or
+  chat: both stop two projects keeping each other busy. Workers are told to send only what their task needs and
+  never to edit another project's files themselves. Chats send only when you ask or agree.
+- The daemon gives each session `OPS_FROM` (`task:12` or `chat:3`) and `OPS_DAEMON` (its own URL), which `send`
+  reads. Run from a terminal without them, it still reaches the live daemon; the task then says it came from
+  outside the queue.
+
 ## Workspaces
 
 A workspace is a folder of separate git repos that work together, such as `~/dev/ballup-monorepo` with a
@@ -389,7 +419,7 @@ Nothing claude-ops runs may stop, signal or quit a process it did not start.
 | `~/.claude-ops/opsd.log` | daemon log |
 | `~/.claude-ops/opsd.pid` | the running daemon's pid |
 
-Env overrides: `OPS_PORT` (8788), `OPS_HOST` (127.0.0.1), `OPS_DATA` (~/.claude-ops),
+Env overrides: `OPS_DAEMON` (where `opsd.py send` goes), `OPS_PORT` (8788), `OPS_HOST` (127.0.0.1), `OPS_DATA` (~/.claude-ops),
 `OPS_ALLOWED_HOSTS` (extra host names the API answers, comma-separated).
 The API answers only requests addressed to `127.0.0.1`, `localhost`, `OPS_HOST` or a `*.ts.net` name, so a
 web page can't reach it by re-pointing its own domain at 127.0.0.1 (DNS rebinding).
@@ -407,6 +437,9 @@ d=$(mktemp -d); OPS_DATA="$d" OPS_PORT=8799 /opt/homebrew/bin/python3 opsd.py se
 # ... try it ...
 kill "$(cat "$d/opsd.pid")"        # or kill $! from the same shell
 ```
+
+`opsd.py send` goes to `OPS_DAEMON`, which a claude-ops worker has set to the live daemon. To try `send` against
+your scratch daemon, set `OPS_DAEMON=http://127.0.0.1:8799` (its port) on the command.
 
 Never use `pkill -f 'opsd.py serve' …` or `lsof -ti :PORT | xargs kill`. On macOS, `pkill` stops
 reading options at the first pattern, so `pkill -f 'opsd.py serve' -U $(id -u) -n` treats `-U`, your

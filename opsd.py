@@ -5,6 +5,8 @@
   opsd.py add-project PATH [NAME]      detect PATH and write ~/.claude-ops/projects/NAME.toml
   opsd.py add -p NAME "text..."        queue a task through the running daemon
   opsd.py deploy -p NAME TARGET [--version same|patch|minor|major|X.Y.Z] [--note TEXT]   deploy a [[deploy]] target
+  opsd.py send NAME [--design|--chat] [--title T] [--hold] "text..."
+                                       from a session the queue started: a task (or chat) in another project
   opsd.py pause-all | resume-all       pause every running task (it stops now, resumable) / resume every paused one
   opsd.py guard --daemon PID [--root DIR]   PreToolUse hook: refuse Bash commands that stop processes the session did not start
 
@@ -23,6 +25,7 @@ import base64, fnmatch, json, os, re, secrets, shlex, shutil, signal, sqlite3, s
 import xml.etree.ElementTree as ET
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
+from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
@@ -37,6 +40,7 @@ IMAGES = DATA / "images"  # screenshots dropped or pasted into a message box
 DB = DATA / "ops.db"
 HOST = os.environ.get("OPS_HOST", "127.0.0.1")
 PORT = int(os.environ.get("OPS_PORT", "8788"))
+DAEMON_URL = f"http://{'127.0.0.1' if HOST in ('', '0.0.0.0', '::') else HOST}:{PORT}"  # for `opsd.py send`
 CLAUDE = os.environ.get("OPS_CLAUDE") or shutil.which("claude") or str(HOME / ".local/bin/claude")
 MAX_FIX_ROUNDS = 3  # times a worker is sent back after a conflict or failed gate
 RESULT_FILE = ".ops-result.json"
@@ -451,7 +455,8 @@ def init_db():
     cols = {r["name"] for r in q("PRAGMA table_info(tasks)")}
     for col, decl in (("kind", "TEXT DEFAULT 'task'"), ("base", "TEXT"),  # databases from before releases
                       ("pid_start", "TEXT"), ("paused_by", "TEXT"), ("auto_release", "INTEGER DEFAULT 0"),
-                      ("deploy", "TEXT")):  # a deploy's target and choices, as JSON
+                      ("deploy", "TEXT"),  # a deploy's target and choices, as JSON
+                      ("origin", "TEXT")):  # and before peer sends
         if col not in cols:
             q(f"ALTER TABLE tasks ADD COLUMN {col} {decl}")
     q("CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY, task_id INTEGER, ts REAL, text TEXT)")
@@ -464,7 +469,8 @@ def init_db():
     dcols = {r["name"] for r in q("PRAGMA table_info(designs)")}
     for col, decl in (("kind", "TEXT DEFAULT 'design'"),  # databases from before project chats
                       ("spec", "TEXT"), ("spec_sub", "TEXT DEFAULT ''"),  # and before OpenSpec chats
-                      ("seen", "REAL DEFAULT 0"), ("ended", "REAL")):  # and before "ready for you" and End chat
+                      ("seen", "REAL DEFAULT 0"), ("ended", "REAL"),  # and before "ready for you" and End chat
+                      ("origin", "TEXT")):  # and before peer sends
         if col not in dcols:
             q(f"ALTER TABLE designs ADD COLUMN {col} {decl}")
             if col == "seen":  # chats from before count as read, so they don't all show a new reply at once
@@ -515,9 +521,10 @@ def ev(tid, text):
 
 
 def add_task(project, body, title="", priority=0, hold=0, depends_on=None, parent=None, kind="task", auto_release=None,
-             deploy=None):
+             deploy=None, origin=None):
     """auto_release None takes the project's default ("Release after merge" on the project).
-    A deploy (kind "deploy") is made only by queue_deploy: you clicked Deploy, or ran `opsd.py deploy`."""
+    A deploy (kind "deploy") is made only by queue_deploy: you clicked Deploy, or ran `opsd.py deploy`.
+    origin: the session in another project that sent it (see send_peer)."""
     p = proj(project)
     if auto_release is None:
         auto_release = release_default(p)
@@ -526,9 +533,10 @@ def add_task(project, body, title="", priority=0, hold=0, depends_on=None, paren
     if (kind == "deploy") != bool(deploy):
         raise ValueError("a deploy needs its target, and only a deploy has one")
     tid = q("INSERT INTO tasks (project, title, body, priority, hold, depends_on, parent, created, kind, auto_release, "
-            "deploy) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            "deploy, origin) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
             (project, title, body, int(priority), int(bool(hold)), depends_on or None, parent, time.time(), kind,
-             int(bool(auto_release) and kind == "task"), json.dumps(deploy) if deploy else None))
+             int(bool(auto_release) and kind == "task"), json.dumps(deploy) if deploy else None,
+             json.dumps(origin) if origin else None))
     ev(tid, "queued" + (f" after #{depends_on}" if depends_on else ""))
     return tid
 
@@ -841,6 +849,7 @@ def worker_prompt(p, t):
     tpl = (CODE / "worker_prompt.md").read_text()
     checks = ", ".join(f"`{g['run']}`" for g in p.gate) or "(none configured: run whatever tests the repo has)"
     notes = workspace_note(p, t["branch"]) + (f"## Notes for {p.title}\n\n{p.worker_notes}\n" if p.worker_notes else "")
+    notes += peer_brief(p, "task")
     return tpl.format(id=t["id"], title=t["title"], body=t["body"], project=p.title, worktree=t["worktree"],
                       branch=t["branch"], repo=p.repo, dev=p.dev, main=p.main, port=p.port_for(t["id"]),
                       result=result_path(t), checks=checks, notes=notes)
@@ -893,8 +902,8 @@ def run_claude(p, tid, prompt):
     if setting("model"):
         cmd += ["--model", setting("model")]
     port = p.port_for(tid)
-    env = dict(os.environ, OPS_RESULT=str(rp), OPS_TASK_ID=str(tid), OPS_PORT=str(port),
-               **{k: str(v).format(port=port) for k, v in p.env.items()})
+    env = dict(os.environ, OPS_RESULT=str(rp), OPS_TASK_ID=str(tid), OPS_PORT=str(port), OPS_FROM=f"task:{tid}",
+               OPS_DAEMON=DAEMON_URL, **{k: str(v).format(port=port) for k, v in p.env.items()})
     upd(tid, phase="claude working")
     cost0, sid = task(tid)["cost"] or 0, t["session_id"]
     with open(run_dir / "claude.jsonl", "a") as log, open(run_dir / "claude.err", "a") as err:
@@ -1148,6 +1157,7 @@ def _pipeline(p, tid):
             if status == "needs_input":
                 upd(tid, state="needs_input", phase="", question=res.get("question") or res.get("summary"))
                 ev(tid, "needs your input")
+                tell_sender(tid, "needs the owner: " + (res.get("question") or res.get("summary") or ""))
                 notify(f"{p.title}: task needs input", f"#{tid}: {res.get('question', '')}")
                 return
             if status != "done":
@@ -1259,6 +1269,7 @@ def fail(p, tid, why):
     upd(tid, state="failed", phase="", error=why, finished=time.time())
     ev(tid, "failed: " + why.splitlines()[0][:200])
     notify(f"{p.title}: task failed", f"#{tid}: {why[:120]}")
+    tell_sender(tid, "failed: " + why)
 
 
 def finish(p, tid, merged, note):
@@ -1269,6 +1280,7 @@ def finish(p, tid, merged, note):
         kill_app(p, t["worktree"])
         remove_worktree(p, t["worktree"])
     notify(f"{p.title}: task done", f"#{tid}: {t['title']}")
+    tell_sender(tid, f"is done ({note}): " + (task(tid)["summary"] or "no summary"))
     if merged:  # a task marked "Release after merge", or a release that ends with more of them in dev
         auto_release(p)
 
@@ -2589,30 +2601,35 @@ def ops_note(p, did, extra=""):
              (p.name,))
     parts = ["queue: " + ("; ".join(f"#{t['id']} {t['state']} {t['title']}" for t in live[:25]) or "empty"),
              "release after merge: " + ("on" if release_default(p) else "off") + " by default for this project"]
+    parts += news(did) + ([extra] if extra else [])
+    return "[ops: " + " | ".join(parts) + "]\n\n"
+
+
+def news(did):
+    """The notes left in a chat since your last message: what its queue block did, edits saved, word from a
+    project it sent something to."""
     prev = q("SELECT id FROM design_msgs WHERE design_id=? AND role='user' ORDER BY id DESC LIMIT 1 OFFSET 1",
              (did,), one=True)
-    parts += [m["note"] for m in q("SELECT note FROM design_msgs WHERE design_id=? AND role!='user' AND id>? "
-                                   "AND note!='' ORDER BY id", (did, prev["id"] if prev else 0))]
-    parts += [extra] if extra else []
-    return "[ops: " + " | ".join(parts) + "]\n\n"
+    return [m["note"] for m in q("SELECT note FROM design_msgs WHERE design_id=? AND role!='user' AND id>? "
+                                 "AND note!='' ORDER BY id", (did, prev["id"] if prev else 0))]
 
 
 def design_system_prompt(p, d=None, cwd=None):
     notes = f"## Notes for {p.title}\n\n{p.design_notes}\n" if p.design_notes else ""
     out = (CODE / "design_prompt.md").read_text().format(project=p.title, dev_wt=cwd or p.dev_wt, dev=p.dev,
-                                                         notes=notes)
+                                                         notes=notes + peer_brief(p, "design"))
     if d and d["spec"]:
         out += "\n" + (CODE / "spec_prompt.md").read_text().format(change=d["spec"], path=SPEC_DIR / d["spec"],
                                                                    dev=p.dev)
     return out
 
 
-def stream_claude(cmd, cwd, log_dir, live, procs, key, on_session):
+def stream_claude(cmd, cwd, log_dir, live, procs, key, on_session, env=None):
     """Run one chat turn of claude -p, tool lines into live. Returns (reply text, cost)."""
     texts, cost, sid = [], 0.0, None
     log_dir.mkdir(parents=True, exist_ok=True)
     with open(log_dir / "claude.jsonl", "a") as log, open(log_dir / "claude.err", "a+") as err:
-        proc = subprocess.Popen(cmd, cwd=cwd, stdout=subprocess.PIPE, stderr=err, text=True,
+        proc = subprocess.Popen(cmd, cwd=cwd, env=env, stdout=subprocess.PIPE, stderr=err, text=True,
                                 start_new_session=True)
         procs[key] = proc
         for line in proc.stdout:
@@ -2659,11 +2676,14 @@ def design_turn(did, text):
             q("UPDATE designs SET state='idle', updated=? WHERE id=?", (time.time(), did))
             return
         tools += f",Edit(/{cwd}/openspec/**),Bash(openspec validate:*),Bash(openspec show:*),Bash(openspec list:*)"
+    tools += f",Bash({SEND_CMD}:*)"  # read-only still: it only asks another project to do something
     if chat:  # your own settings and MCP servers apply, like the CLI; auto mode stands in for prompts
-        cmd = [CLAUDE, "-p", with_images(text), "--output-format", "stream-json", "--verbose",
+        said = news(did)  # word from a project it sent something to; a design chat gets it in ops_note
+        cmd = [CLAUDE, "-p", ("[ops: " + " | ".join(said) + "]\n\n" if said else "") + with_images(text),
+               "--output-format", "stream-json", "--verbose",
                "--permission-mode", "auto", "--permission-prompts", "none", "--no-chrome",
                "--name", f"{p.name} chat #{did}", "--settings", guard_settings(None),
-               "--append-system-prompt", PROJECT_CHAT_PROMPT]
+               "--append-system-prompt", PROJECT_CHAT_PROMPT + "\n\n" + peer_brief(p, "chat")]
     else:
         cmd = [CLAUDE, "-p", ops_note(p, did, extra) + with_images(text), "--output-format", "stream-json",
                "--verbose", "--permission-mode", "dontAsk", "--permission-prompts", "none", "--allowedTools", tools,
@@ -2682,13 +2702,17 @@ def design_turn(did, text):
     cost = 0.0
     try:
         reply, cost = stream_claude(cmd, cwd, RUNS / f"design-{did}", DESIGN_LIVE[did], DESIGN_PROCS, did,
-                                    on_session)
+                                    on_session, env=dict(os.environ, OPS_FROM=f"chat:{did}", OPS_DAEMON=DAEMON_URL))
         if design(did)["ended"] and reply.startswith("(no reply;"):  # End stopped it; say so, not the exit code
             reply = "You ended the chat; the reply was stopped."
         saved = spec_land(p, d) if d["spec"] else ""  # before any task it queues starts from dev
         reply, ids, note = (reply, [], "") if chat else queue_from_reply(p, reply, did)
+        first = not q("SELECT id FROM design_msgs WHERE design_id=? AND role='assistant' LIMIT 1", (did,))
         q("INSERT INTO design_msgs (design_id, role, text, ts, task_ids, note) VALUES (?,?,?,?,?,?)",
           (did, "assistant", reply, time.time(), json.dumps(ids), note))
+        if first and d["origin"]:  # a peer's question: its answer goes back, as a reply to a message would
+            tell_origin(json.loads(d["origin"]), f"{origin_words(origin_of(f'chat:{did}'))}, which you started, "
+                                                 f"replied:\n\n{gist(reply, 1500)}")
         if saved:
             q("INSERT INTO design_msgs (design_id, role, text, ts, note) VALUES (?,?,?,?,?)",
               (did, "ops", saved, time.time(), "your last reply's edits: " + saved))
@@ -3071,6 +3095,162 @@ def task_chat_turn(tid, text):
     TASK_CHAT_LIVE.pop(tid, None)
 
 
+# ---------------------------------------------------------------- peers (one project asks another)
+# A worker or chat can hand work to another project, as one Claude session messages a peer: `opsd.py send` (the
+# daemon gives each session OPS_FROM, naming its task or chat, and OPS_DAEMON) starts a task, a design chat or a
+# project chat there. The new task or chat says who sent it and where that session works, and shows on the
+# dashboard like any other. How it ends (a task) or its first reply (a chat) goes back to the sender: an event on
+# a task, a note in a chat, which a design chat's next turn reads.
+
+SEND_CMD = f"{shlex.quote(sys.executable)} {shlex.quote(str(CODE / 'opsd.py'))} send"
+PEER_KINDS = {"task": "task", "design": "design chat", "chat": "chat"}  # what `send` starts -> words
+PEER_HOPS = 3  # a send passed on this many times is refused, so two projects can't keep each other busy
+PEER_MAX = 10  # sends one task or chat may make
+
+
+def gist(text, n):
+    """text cut to n characters, keeping its lines."""
+    t = str(text or "").strip()
+    return t if len(t) <= n else t[:n - 1].rstrip() + "…"
+
+
+def origin_of(ref):
+    """The task or chat an OPS_FROM value ("task:12", "chat:3") names, as stored on what it sends. None for a
+    send from outside the queue (someone at a terminal)."""
+    m = re.fullmatch(r"(task|chat):(\d+)", ref or "")
+    row = m and (task if m.group(1) == "task" else design)(int(m.group(2)))
+    if not row:
+        return None
+    up = json.loads(row["origin"] or "null") or {}
+    return {"ref": ref, "kind": row["kind"], "id": row["id"],  # task or release; design or project (a chat)
+            "project": row["project"], "title": row["title"], "hops": up.get("hops", 0) + 1}
+
+
+def origin_words(o):
+    """"claude-ops task #12", "diskgame design chat #3"."""
+    p = PROJECTS.get(o["project"])
+    what = {"design": "design chat", "project": "chat"}.get(o["kind"], o["kind"])  # or task, release, deploy
+    return f"{p.title if p else o['project']} {what} #{o['id']}"
+
+
+def origin_view(raw):
+    """A stored origin for the dashboard's "Sent by" line, or None."""
+    o = json.loads(raw or "null")
+    return o and {**o, "words": origin_words(o)}
+
+
+def origin_place(o):
+    """Where the sending session works, so the receiver can read its files."""
+    if o["ref"].startswith("task:"):
+        t = task(o["id"])
+        return f"It works in {t['worktree']}" + (f" (branch {t['branch']})" if t["branch"] else "") \
+            if t and t["worktree"] else ""
+    d, p = design(o["id"]), PROJECTS.get(o["project"])
+    if not p or not d:
+        return ""
+    if d["spec"]:
+        return f"It works in {spec_part(p, d['spec_sub']).at(p.wt / ('spec-' + str(d['id'])))}"
+    return f"It works in {p.repo if o['kind'] == 'project' else p.dev_wt}"
+
+
+def tell_origin(o, text, ids=()):
+    """Pass word back to the session that sent something: an event on its task, a note in its chat."""
+    try:
+        if o["ref"].startswith("task:"):
+            if task(o["id"]):
+                ev(o["id"], text)
+        elif design(o["id"]):
+            q("INSERT INTO design_msgs (design_id, role, text, ts, task_ids, note) VALUES (?,?,?,?,?,?)",
+              (o["id"], "ops", text, time.time(), json.dumps(list(ids)), " ".join(text.split())[:1500]))
+    except Exception as e:  # the sender's side is a courtesy: never fail the task that ended over it
+        print(f"tell {o.get('ref')}: {e}", flush=True)
+
+
+def tell_sender(tid, how):
+    """A task another project sent has ended, or needs the owner: tell the sender."""
+    t = task(tid)
+    if t and t["origin"]:
+        p = PROJECTS.get(t["project"])
+        tell_origin(json.loads(t["origin"]), f"{p.title if p else t['project']} task #{tid} ({t['title']}), "
+                                             f"which you sent, {gist(how, 1500)}", [tid])
+
+
+def send_peer(ref, project, kind, text, title="", hold=False):
+    """Start a task or chat in project for the session ref names. Returns {kind, id, project, said}."""
+    p, text = proj(project), (text or "").strip()
+    if kind not in PEER_KINDS:
+        raise ValueError(f"kind is one of {', '.join(PEER_KINDS)}")
+    if not text:
+        raise ValueError("say what the other project should do")
+    o = origin_of(ref)
+    if o:
+        if o["hops"] > PEER_HOPS:
+            raise ValueError(f"this work was already passed between projects {PEER_HOPS} times; ask the owner")
+        sent = sum(q(f"SELECT COUNT(*) AS n FROM {tb} WHERE json_extract(origin, '$.ref')=?", (ref,), one=True)["n"]
+                   for tb in ("tasks", "designs"))
+        if sent >= PEER_MAX:
+            raise ValueError(f"{origin_words(o)} already sent {PEER_MAX} things to other projects; ask the owner")
+        if o["kind"] == "design" and kind == "chat":
+            raise ValueError("a design chat can't change files, so it can't start a chat that does; send a task")
+    who = f"{origin_words(o)} (\"{o['title']}\")" if o else "someone outside the queue"
+    title = (title or title_of(text)).strip()  # from the message: the header would name every send alike
+    place = (origin_place(o) if o else "").replace("\n", " ")
+    if kind == "task":
+        head = (f"[ops: sent by {who}, a Claude session in the claude-ops queue, not typed by the owner. "
+                f"{place + '. ' if place else ''}You may read its files; change only your own worktree. "
+                "When this task ends, the queue tells the sender how it went.]")
+        tid = add_task(p.name, f"{head}\n\n{text}", title, hold=hold, origin=o)
+        ev(tid, f"sent by {who}")
+        if o:
+            tell_origin(o, f"Sent task #{tid} to {p.title}: {task(tid)['title']}", [tid])
+        return {"kind": "task", "id": tid, "project": p.name,
+                "said": f"Queued task #{tid} in {p.title} ({p.name}). It shows on the dashboard"
+                        + ("; the queue tells you here when it ends." if o else ".")}
+    head = (f"[ops: this chat was started by {who}, a Claude session in the claude-ops queue, not by the owner. "
+            f"{place + '. ' if place else ''}Your first reply goes back to it. The owner sees this chat on the "
+            "dashboard and may join in.]")
+    did = q("INSERT INTO designs (project, title, created, updated, kind, origin) VALUES (?,?,?,?,?,?)",
+            (p.name, title[:80], time.time(), time.time(),
+             "project" if kind == "chat" else "design", json.dumps(o) if o else None))
+    design_say(did, f"{head}\n\n{text}")
+    if o:
+        tell_origin(o, f"Started {PEER_KINDS[kind]} #{did} in {p.title}: {title[:80]}")
+    return {"kind": kind, "id": did, "project": p.name,
+            "said": f"Started {PEER_KINDS[kind]} #{did} in {p.title} ({p.name}). It shows on the dashboard"
+                    + ("; its first reply comes back to you here." if o else ".")}
+
+
+def peer_brief(p, who):
+    """The part of a brief that says how to hand work to another project. who: task, design or chat."""
+    others = [o for o in PROJECTS.values() if o.name != p.name]
+    if not others:
+        return ""
+    names = ", ".join(f"`{o.name}` ({o.title}, {o.repo})" if o.title != o.name else f"`{o.name}` ({o.repo})"
+                      for o in others)
+    when = {"task": "Send only what this task truly needs from that project; never edit its files yourself.",
+            "design": "Send only when the owner asks you to or agrees, as with queueing. You can start a task or "
+                      "a design chat there, not a chat.",
+            "chat": "Send only when the owner asks you to or agrees."}[who]
+    back = ("how it ends is logged on this task" if who == "task"
+            else "how it ends (or the chat's first reply) reaches you in an `[ops: ...]` line")
+    return f"""## Other projects
+
+The claude-ops queue also runs {names}. To hand work to one of them, as you would message a peer:
+
+    {SEND_CMD} <project> "<message>"
+
+- Default: a task in that project's queue. An unattended worker does it in its own worktree.
+- `--design`: a design chat there instead, to ask how something works or talk an idea through.
+- `--chat`: a chat in that project's checkout, which can edit files there.
+- `--title "..."` names it; `--hold` has the owner try a task before it merges.
+
+The other session can't see this conversation, so the message must stand alone: the goal and why, exactly what
+to do, and how to tell it is done. The queue adds who sent it and where you work. The command prints the new
+task's or chat's id, and {back}. {when}
+
+"""
+
+
 # A task page asks for its worker's transcript every few seconds, and a transcript grows to megabytes. It only
 # ever grows, so each read starts where the last one stopped.
 FEEDS = {}  # task id -> (bytes read, the newest activity entries)
@@ -3364,7 +3544,7 @@ class H(BaseHTTPRequestHandler):
             return self.send(200, (CODE / "dashboard.html").read_bytes(), "text/html; charset=utf-8")
         if path == "/api/state":
             tasks = q("SELECT id,project,title,state,phase,priority,hold,depends_on,parent,created,started,"
-                      "finished,cost,rounds,summary,question,error,merged,branch,kind,auto_release FROM tasks "
+                      "finished,cost,rounds,summary,question,error,merged,branch,kind,auto_release,origin FROM tasks "
                       "ORDER BY id DESC LIMIT 500")
             # What each task is doing right now, for the status line under it in the list.
             last = {r["task_id"]: r for r in q(
@@ -3380,6 +3560,7 @@ class H(BaseHTTPRequestHandler):
                 t["phase_since"] = PHASE_SINCE.get(t["id"]) if t["state"] in ACTIVE else None
                 t["step"] = last_step(t["id"]) if t["state"] == "running" and t["phase"] == "claude working" else None
                 t["wait"] = waits.get(t["id"])
+                t["origin"] = origin_view(t["origin"])
             projects = []
             for p in PROJECTS.values():
                 try:
@@ -3399,6 +3580,7 @@ class H(BaseHTTPRequestHandler):
             if not t:
                 return self.send(404, {"error": "no such task"})
             t["events"] = q("SELECT ts,text FROM events WHERE task_id=? ORDER BY id", (tid,))
+            t["origin"] = origin_view(t["origin"])
             t["activity"] = activity(tid)
             p = PROJECTS.get(t["project"])
             t["diffstat"] = diffstat(p, t) if p and t["branch"] else ""
@@ -3420,7 +3602,10 @@ class H(BaseHTTPRequestHandler):
             ctype = next(k for k, v in IMAGE_TYPES.items() if v == m.group(2))
             return self.send(200, (IMAGES / m.group(1)).read_bytes(), ctype)
         if path == "/api/designs":
-            return self.send(200, q(f"SELECT {CHAT_COLS} FROM designs ORDER BY updated DESC"))
+            chats = q(f"SELECT {CHAT_COLS},origin FROM designs ORDER BY updated DESC")
+            for c in chats:
+                c["origin"] = origin_view(c["origin"])
+            return self.send(200, chats)
         if path == "/api/openspec":
             out = []
             for p in PROJECTS.values():
@@ -3440,6 +3625,7 @@ class H(BaseHTTPRequestHandler):
             if p and d["spec"]:
                 d["cwd"] = str(spec_part(p, d["spec_sub"]).at(p.wt / f"spec-{did}"))
                 d["spec_view"] = spec_view(p, d)
+            d["origin"] = origin_view(d["origin"])
             d["msgs"] = q("SELECT role,text,ts,task_ids FROM design_msgs WHERE design_id=? ORDER BY id", (did,))
             d["replied"] = max([m["ts"] for m in d["msgs"] if m["role"] != "user"], default=None)
             for msg in d["msgs"]:
@@ -3477,6 +3663,9 @@ class H(BaseHTTPRequestHandler):
             dep = int(str(b["depends_on"]).lstrip("#")) if str(b.get("depends_on") or "").strip() else None
             return {"id": add_task(b["project"], b["body"], b.get("title", ""), b.get("priority", 0),
                                    b.get("hold", 0), dep, auto_release=b.get("release"))}
+        if path == "/api/send":  # opsd.py send, from a session the queue started
+            return send_peer(b.get("from"), b["project"], b.get("kind") or "task", b.get("text"), b.get("title") or "",
+                             bool(b.get("hold")))
         if path == "/api/settings":
             for k in ("max_parallel", "paused", "model"):
                 if k in b:
@@ -3574,6 +3763,7 @@ class H(BaseHTTPRequestHandler):
             upd(tid, state="cancelled", phase="", finished=time.time())
             stop(PROCS.get(tid))
             ev(tid, "cancelled")
+            tell_sender(tid, "was cancelled by the owner")
             if p and t["kind"] == "task" and t["auto_release"]:  # its split's other tasks may be waiting for it
                 auto_release(p)
         elif action == "release":  # the "Release after merge" toggle
@@ -3666,6 +3856,30 @@ def post(path, body):
     print(urlopen(req).read().decode())
 
 
+def send_cli(argv):
+    """opsd.py send PROJECT [--design|--chat] [--title T] [--hold] [TEXT...]; TEXT from stdin when not given."""
+    body, words, it = {"project": argv[0], "kind": "task", "from": os.environ.get("OPS_FROM", "")}, [], iter(argv[1:])
+    for a in it:
+        if a in ("--task", "--design", "--chat"):
+            body["kind"] = a[2:]
+        elif a == "--title":
+            body["title"] = next(it, "")
+        elif a == "--hold":
+            body["hold"] = True
+        else:
+            words.append(a)
+    body["text"] = " ".join(words) if words else sys.stdin.read()
+    url = os.environ.get("OPS_DAEMON") or DAEMON_URL
+    req = Request(f"{url}/api/send", data=json.dumps(body).encode(),
+                  headers={"Content-Type": "application/json", "X-Ops": "1"})
+    try:
+        print(json.loads(urlopen(req, timeout=60).read())["said"])
+    except HTTPError as e:
+        sys.exit(f"not sent: {json.loads(e.read() or b'{}').get('error', e)}")
+    except URLError as e:
+        sys.exit(f"not sent: the claude-ops daemon at {url} did not answer ({e.reason})")
+
+
 if __name__ == "__main__":
     args = sys.argv[1:]
     cmd = args.pop(0) if args else "serve"
@@ -3679,6 +3893,8 @@ if __name__ == "__main__":
         PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
         out = detect_project(str(Path(args[0]).expanduser().absolute()), args[1] if len(args) > 1 else None)
         print(f"wrote {out}. Review it, then reload projects on the dashboard (or restart the service).")
+    elif cmd == "send" and args and not args[0].startswith("-"):
+        send_cli(args)
     elif cmd == "add" and len(args) >= 2 and args[0] == "-p":
         post("/api/tasks", {"project": args[1], "body": " ".join(args[2:]) or sys.stdin.read()})
     elif cmd == "deploy" and len(args) >= 3 and args[0] == "-p":
