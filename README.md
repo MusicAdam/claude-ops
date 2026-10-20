@@ -72,8 +72,8 @@ several (see [Workspaces](#workspaces)). Read it, adjust it, then click **Reload
   you: answer with how to combine them and it tries again, or commit or stash them and it goes on by itself.
   Either way main and its build stay as they were until it moves. They are not part of the release, and the
   release's summary says so: under **Not part of this release** it lists, per repo, the uncommitted files that
-  stayed in your checkout (the first 20), whether they were carried over (and the ref of the copy), and points
-  you to Send to dev on the project card. The notification says how many were not released.
+  stayed in your checkout (the first 20), whether they were carried over (and the ref of the copy), and says
+  to commit them to dev for them to ship. The notification says how many were not released.
 - **Carried changes are kept safe, not shipped.** Uncommitted work in your checkout is never part of a release,
   and workers don't see it: they start from dev. While the checkout (any repo of a workspace) has uncommitted
   files, the project card shows a banner with how many, where, and the date of the oldest change; expand it for
