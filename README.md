@@ -67,6 +67,10 @@ several (see [Workspaces](#workspaces)). Read it, adjust it, then click **Reload
   already open, the task waits for it and the next release takes it. A task that splits passes the box to
   its subtasks, and they release together after the last one merges (or is cancelled). In a design chat,
   ask for it and the task's `release` is set.
+- **Release after merge by default** (a checkbox on the project's card) ticks that box for every task the
+  project gets from then on: from the form, `opsd.py add`, a design chat, and the follow-ups a release checker
+  queues. You can still untick it on a task. Tasks already queued keep what they have. It is off until you
+  turn it on.
 - Promoting claude-ops itself restarts the daemon to load the new code (`opsctl restart`: running
   tasks pause and resume).
 - Commits made straight to main are merged into dev when the release takes its snapshot (no gate). If they
