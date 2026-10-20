@@ -90,6 +90,8 @@ ul.ahead { margin: 6px 0 0; padding-left: 18px; max-height: 160px; overflow: aut
 .tabs button { background: none; border-color: transparent; color: var(--muted); }
 .tabs button.on { background: var(--chip); border-color: var(--line); color: var(--ink); font-weight: 600; }
 .hidden { display: none !important; }
+#limitbar { flex-basis: 100%; display: flex; gap: 12px; align-items: center; padding: 6px 12px; border-radius: 8px;
+            border: 1px solid var(--warn); color: var(--warn); font-weight: 600; }
 #designview { display: grid; grid-template-columns: 260px 1fr; gap: 20px; padding: 20px; max-width: 1500px; margin: 0 auto; }
 @media (max-width: 900px) { #designview { grid-template-columns: 1fr; padding: 16px; } }
 .chatitem { padding: 8px 10px; border-radius: 6px; cursor: pointer; border: 1px solid transparent; }
@@ -315,6 +317,8 @@ a[data-task] { color: var(--accent); cursor: pointer; }
   <button id="pause" title="Hold queued tasks; running ones carry on"></button>
   <button id="pauseall" class="hidden" title="Stop every running task now; each resumes from where it was"></button>
   <button id="resumeall" class="primary hidden" title="Put every paused task, in every project, back in the queue"></button>
+  <div id="limitbar" class="hidden"><span id="limitwords"></span>
+    <button id="trynow" title="Stop waiting for the reset: resume the tasks the usage limit paused and start queued ones">Try now</button></div>
 </header>
 <main id="queueview">
   <section id="left">
@@ -495,6 +499,9 @@ function renderHeader() {
   $("#pauseall").textContent = `❚❚ Pause running (${running})`;
   $("#resumeall").classList.toggle("hidden", !paused);
   $("#resumeall").textContent = `▶ Resume all (${paused})`;
+  // The Claude usage limit hit: the queue starts nothing until it resets, then resumes what it paused.
+  $("#limitbar").classList.toggle("hidden", !state.limit);
+  if (state.limit) $("#limitwords").textContent = state.limit.words;
   renderTabCounts();
 }
 // The Design and Chat tabs show how many open chats have a new reply for you, and ● while Claude is replying in one.
@@ -846,6 +853,7 @@ function nowLine(t, now) {
     h = `<span class="what">${s.k === "tool" ? `▸ ${esc(s.t)} ` : ""}${say ? `<span class="say">“${esc(say)}”</span>` : ""}</span>` + since(s.ts);
   } else if (LIVE.includes(t.state)) { text = t.phase || "starting"; h = esc(text) + since(t.phase_since, x => `for ${x}`); cls = "s-running"; }
   else if (t.state === "queued") text = archivedP(t.project) ? "archived project: restore it to run this" : t.wait || "";
+  else if (t.state === "paused" && t.paused_by === "limit") text = "paused: usage limit" + (state.limit ? ` · resumes ${state.limit.resumes}` : "");
   else if (t.state === "paused") { text = e ? e.text : ""; h = text && esc(text) + since(e.ts); }
   else if (t.state === "needs_input") { text = first(t.question); h = text && `<b>Question:</b> ${esc(text)}`; cls = ""; }
   else if (t.state === "review") { text = first(t.summary) || "waiting for your review"; cls = ""; }
@@ -999,6 +1007,7 @@ $("#body").onkeydown = e => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey))
 $("#pause").onclick = () => api("/api/settings", {paused: state.settings.paused === "1" ? "0" : "1"}).then(refresh);
 $("#pauseall").onclick = () => api("/api/pause-all", {}).then(refresh);
 $("#resumeall").onclick = () => api("/api/resume-all", {}).then(refresh);
+$("#trynow").onclick = () => api("/api/limit/clear", {}).then(refresh);
 $("#par").onchange = () => api("/api/settings", {max_parallel: Math.max(1, +$("#par").value || 1)}).then(refresh);
 $("#model").onchange = () => api("/api/settings", {model: $("#model").value}).then(refresh);
 $("#proj").onchange = () => {

@@ -492,10 +492,29 @@ notes = """Project-specific guidance for design chats."""
   runs the gate again from the start. A task that is merging can't be paused. Paused tasks stay paused
   across restarts: click **▶ Resume** on a task, or **▶ Resume all** in the header (`./opsctl resume`),
   to queue them again. **Resume all** shows whenever a task is paused, even while others run. **Pause queue** is
-  different: it holds tasks that haven't started and lets running ones finish.
+  different: it holds tasks that haven't started and lets running ones finish. A task records who paused it
+  (`paused_by`): empty for you, `restart` for a restart, `limit` for the Claude usage limit (see Usage limits).
+- **Usage limits.** When Claude's usage limit hits, work waits for the reset instead of failing.
+  - **The worker that hits it is paused, not failed** (`paused_by` `limit`). When it resumes, its Claude session is
+    told the limit stopped it mid-turn and to check `git status` and `git log`, finish, and write its result. This
+    covers every Claude step: workers, release checkers, and the workers that carry your changes over or merge main
+    into dev. Other running workers carry on, and are paused the same way if they hit it. Gates and merges don't use
+    Claude and carry on.
+  - **The queue starts nothing until the reset.** The reset time and the limit's kind are saved as the settings
+    `limited_until` and `limited_kind`, so a restart keeps them (if Claude doesn't say when it resets, or names a time
+    already past, the queue waits 15 minutes). A worker about to start a new turn in that time pauses at once, keeping its prompt. Queued tasks say
+    `Usage limit (5-hour) · resumes 3:00 pm`.
+  - **A minute after the reset** the flag clears and every task with `paused_by` `limit` is queued again. Tasks you
+    paused stay paused. If a resumed task hits the limit again, the same happens with the new reset time.
+  - **On the dashboard** a header banner says `Usage limit (5-hour) · resumes 3:00 pm`, with **Try now** to stop
+    waiting and resume those tasks at once (`POST /api/limit/clear`). A paused task's line says
+    `paused: usage limit · resumes 3:00 pm`. You get one notification per limit: `the queue resumes at 3:00 pm`.
+  - **Chats.** A design chat, project chat or question to a worker that hits the limit replies
+    `Usage limit reached. Resets at 3:00 pm.` and sets the same flag. The message is not sent again by itself: send it
+    again after the reset.
 - **Restarts.** Whenever the daemon stops (`./opsctl restart` or `stop`, a promote of claude-ops, launchd, a
   `kill`), it pauses every running task the same way, lets a merge finish, and exits. The next daemon resumes
-  those tasks on its own; tasks you paused stay paused. Nothing about a restart is saved that could hold the
+  those tasks on its own; tasks you paused stay paused, and so do tasks the usage limit paused, until it resets. Nothing about a restart is saved that could hold the
   queue: if the daemon crashes instead, the next one requeues whatever was running.
 - **Questions.** A worker that needs a decision stops with a question. Answer it on the dashboard
   and the same Claude session resumes.
