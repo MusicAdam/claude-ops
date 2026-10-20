@@ -1263,6 +1263,40 @@ def auto_release(p):
     return rid
 
 
+ANSWERED = "The user answered your question:"  # how an answer reaches a task's next turn
+WAIT = "waiting on you"  # the phase of a release that needs you because something is in the way of moving main
+WAIT_CHANGES = "waiting on your changes"  # ... because your uncommitted changes could not be carried over
+
+
+class NeedsYou(Exception):
+    """Only you can settle this: the release waits for you (needs_input) rather than failing."""
+
+
+def wait_for_you(p, tid, why, phase):
+    """The release needs you. It goes on by itself once the way is clear (see unblock_releases), or when you
+    answer."""
+    upd(tid, state="needs_input", phase=phase, question=why)
+    ev(tid, "needs you: " + why)
+    notify(f"{p.title}: release needs you", f"#{tid}: {why}")
+
+
+def unblock_releases():
+    """Requeue each release that needs you once you've cleared its way: quit the build, switched the worktree off
+    main, or (for changes that could not be carried over) committed or stashed them."""
+    for t in q("SELECT * FROM tasks WHERE kind='release' AND state='needs_input' AND phase IN (?,?)",
+               (WAIT, WAIT_CHANGES)):
+        p = PROJECTS.get(t["project"])
+        try:
+            if not p or promote_blocker(p, t["base"]) or (t["phase"] == WAIT_CHANGES and clashing(p, t["base"])):
+                continue
+        except Exception as e:  # one project's git trouble must not stop the others' checks
+            print(f"unblock #{t['id']}:", e, flush=True)
+            continue
+        if q("UPDATE tasks SET state='queued', phase='', question=NULL WHERE id=? AND state='needs_input' "
+             "RETURNING id", (t["id"],)):  # unless you answered or cancelled it just now
+            ev(t["id"], "the way is clear; going on")
+
+
 def release_prompt(p, t):
     log = [(r, l) for r, sha in p.pairs(t["base"])
            for l in r.git("log", "--first-parent", "--format=%H %h %s", f"{p.main}..{sha}").splitlines()]
@@ -1347,27 +1381,22 @@ def release_pipeline(p, tid):
         ev(tid, "release check passed")
 
     upd(tid, start_at="promote")  # a retry, a resume or a restart continues here
-    waiting = None
-    while True:  # what's in the way is yours to clear: wait for it rather than fail
-        if stopped(tid):
-            return
-        t = task(tid)
-        if not all(is_ancestor(r, p.main, sha) for r, sha in p.pairs(t["base"])):  # main moved: check again
-            ev(tid, f"{p.main} moved during the release; checking again with its new commits")
-            upd(tid, base=None, session_id=None, start_at="claude", phase="")
-            return release_pipeline(p, tid)
-        why = promote_blocker(p, t["base"])
-        if not why:
-            break
-        if why != waiting:
-            upd(tid, phase="waiting: " + why)
-            ev(tid, "waiting: " + why)
-            notify(f"{p.title}: release waiting for you", f"#{tid}: {why}")
-            waiting = why
-        time.sleep(5)
+    if stopped(tid):
+        return
+    t = task(tid)
+    if not all(is_ancestor(r, p.main, sha) for r, sha in p.pairs(t["base"])):  # main moved: check again
+        ev(tid, f"{p.main} moved during the release; checking again with its new commits")
+        upd(tid, base=None, session_id=None, start_at="claude", phase="")
+        return release_pipeline(p, tid)
+    why = promote_blocker(p, t["base"])
+    if why:
+        return wait_for_you(p, tid, why, WAIT)
     upd(tid, state="merging")
     before = p.revs(p.main)
-    err = promote(p, tid, task(tid)["base"])
+    try:  # your answer, when the release needed you, guides the worker that carries your changes over
+        err = promote(p, tid, t["base"], note=resume if resume and resume.startswith(ANSWERED) else "")
+    except NeedsYou as e:
+        return wait_for_you(p, tid, str(e), WAIT_CHANGES)
     if stopped(tid):
         return
     if err:
@@ -1403,11 +1432,15 @@ def restart_self(tid):
 # ---------------------------------------------------------------- scheduler
 
 def scheduler():
+    n = 0
     while True:
         try:
             schedule_once()
+            if n % 3 == 0:  # every 6 s: a scan for a running build takes up to 0.4 s
+                unblock_releases()
         except Exception as e:
             print("scheduler error:", e, flush=True)
+        n += 1
         time.sleep(2)
 
 
@@ -1616,22 +1649,18 @@ def stale_facts(name):
 
 
 def promote_blocker(p, commit):
-    """What only you can clear before main moves to commit, or None. A release waits while there is one."""
+    """What only you can clear before main moves to commit, or None. The release needs you while there is one.
+    Your uncommitted changes are not one: move_main carries them over."""
     if app_running(p, p.main_wt):
-        return f"Quit the {p.main} build: it is rebuilt in {p.main_wt}."
+        return (f"Quit the {p.main} build: it is rebuilt in {p.main_wt}. The release goes on by itself once it "
+                "has quit.")
     for r, sha in p.pairs(commit):
         if r.git("branch", "--show-current", check=False) != p.main:  # main moves as a branch; your checkout stays
             wt = r.git("worktree", "list", "--porcelain", check=False).split("\n\n")
             held = [w.split("\n")[0][9:] for w in wt if f"branch refs/heads/{p.main}" in w.split("\n")]
             if held:
-                return f"{p.main} is checked out in {held[0]}. Switch that one off it."
-            continue
-        dirty = set(r.git("diff", "--name-only", "HEAD", check=False).splitlines()
-                    + r.git("ls-files", "--others", "--exclude-standard", check=False).splitlines())
-        clash = sorted(dirty & set(r.git("diff", "--name-only", p.main, sha).splitlines()))
-        if clash:
-            return (f"Your checkout {r.src} has uncommitted changes to files this release changes: "
-                    f"{', '.join(clash[:5])}{' …' if len(clash) > 5 else ''}. Commit or stash them.")
+                return (f"{p.main} is checked out in {held[0]}. Switch that one off it, and the release goes on "
+                        "by itself.")
     return None
 
 
@@ -1639,14 +1668,168 @@ def is_ancestor(r, a, b):
     return subprocess.run(["git", "merge-base", "--is-ancestor", a, b], cwd=r.src, capture_output=True).returncode == 0
 
 
-def move_main(p, commit):
-    """Fast-forward main to commit in each repo: in your checkout when it is on main (other uncommitted changes
-    stay), else the branch alone. Every repo is checked first, so a workspace never moves only some of them.
-    Returns an error or None."""
+def clashing(p, commit):
+    """The repos whose checkout is on main with uncommitted changes to files commit changes: [(part, sha)]."""
+    out = []
+    for r, sha in p.pairs(commit):
+        if r.git("branch", "--show-current", check=False) != p.main:
+            continue
+        dirty = set(r.git("diff", "--name-only", "HEAD", check=False).splitlines()
+                    + r.git("ls-files", "--others", "--exclude-standard", check=False).splitlines())
+        if dirty & set(r.git("diff", "--name-only", p.main, sha).splitlines()):
+            out.append((r, sha))
+    return out
+
+
+def snapshot(r):
+    """Your checkout's working tree, uncommitted and untracked files alike (not ignored ones), as (HEAD, tree).
+    It is made in a copy of the index, so the checkout and its index are left as they are."""
+    index = Path(r.git("rev-parse", "--path-format=absolute", "--git-path", "index"))
+    tmp = RUNS / f"index-{secrets.token_hex(6)}"
+    RUNS.mkdir(parents=True, exist_ok=True)
+    try:
+        if index.exists():
+            shutil.copyfile(index, tmp)  # with its stat cache, git reads only the files that changed
+        env = dict(os.environ, GIT_INDEX_FILE=str(tmp))
+        head = r.rev("HEAD")
+        for cmd in (("add", "-A"), ("write-tree",)):
+            res = subprocess.run(["git", *cmd], cwd=r.src, env=env, capture_output=True, text=True)
+            if res.returncode:
+                raise RuntimeError(f"git {' '.join(cmd)} in {r.src}: {res.stderr.strip()}")
+        return head, res.stdout.strip()
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+CONFLICT_MARK = re.compile(r"^(<<<<<<<|>>>>>>>)( |$)", re.M)
+
+
+def merge_wip(p, tid, r, onto, base, wip, note=""):
+    """Apply your changes (commit base to tree wip) on top of commit onto, in the release's worktree. A worker
+    resolves any conflicts. Returns the result as a tree, or None if you stopped the task; raises NeedsYou if
+    the worker can't resolve them."""
+    wt = r.at(task(tid)["worktree"])
+    for a in (("cherry-pick", "--quit"), ("reset", "--hard", "-q"), ("clean", "-fdq")):
+        subprocess.run(["git", *a], cwd=wt, capture_output=True)
+    r.git("checkout", "-q", "--detach", onto, cwd=wt)
+    yours = r.git("commit-tree", wip, "-p", base, "-m", "Your uncommitted changes")
+    m = subprocess.run(["git", "cherry-pick", "--no-commit", yours], cwd=wt, capture_output=True, text=True)
+    if m.returncode:
+        conflicted = r.git("diff", "--name-only", "--diff-filter=U", cwd=wt).splitlines()
+        if not conflicted:
+            raise NeedsYou(f"git could not apply your uncommitted changes in {r.src} on top of the release: "
+                           + (m.stderr or m.stdout).strip()[-1500:])
+        ev(tid, f"your uncommitted changes in {r.src} conflict with the release in {len(conflicted)} file(s); "
+                "a worker is merging them")
+        upd(tid, session_id=None)
+        res = run_claude(p, tid, carry_prompt(p, task(tid), r, onto, base, yours, conflicted, note))
+        if stopped(tid):
+            return None
+        if not res or res.get("status") != "done":
+            why = (res or {}).get("summary") or "the worker stopped without writing a result"
+            raise NeedsYou(f"Your uncommitted changes in {r.src} conflict with the release, and the worker could "
+                           f"not merge them: {why}\n\nSay how to combine them and the worker tries again, or commit "
+                           "or stash them and the release goes on by itself.")
+        left = [f for f in conflicted
+                if (wt / f).is_file() and CONFLICT_MARK.search((wt / f).read_text(errors="replace"))]
+        if left:
+            raise NeedsYou(f"The worker merging your uncommitted changes in {r.src} left conflict markers in "
+                           f"{', '.join(left)}. Say how to combine them and the worker tries again, or commit or "
+                           "stash them and the release goes on by itself.")
+        r.git("add", "-A", "--", *conflicted, cwd=wt)  # only these: the cherry-pick staged everything else
+        ev(tid, "merged your uncommitted changes: " + (res.get("summary") or "done"))
+    return r.git("write-tree", cwd=wt)
+
+
+def carry(p, tid, commit, note=""):
+    """Your uncommitted changes to files the release changes, merged onto it, ready to put back once main moves:
+    [(part, sha, head, wip tree, merged tree)]. Changes that touch none of those files need none of this: the
+    fast-forward keeps them. Returns None if you stopped the task; raises NeedsYou if a worker can't merge them."""
+    plan = []
+    for r, sha in clashing(p, commit):
+        head, wip = snapshot(r)
+        merged = merge_wip(p, tid, r, sha, head, wip, note)
+        for _ in range(5):  # you kept editing while it merged: apply your newer edits on top, the same way
+            if merged is None:
+                return None
+            now_head, now = snapshot(r)
+            if now_head != head:
+                raise NeedsYou(f"Your checkout {r.src} got a new commit while the release merged your uncommitted "
+                               f"changes. Answer anything, and the release checks {p.main} again.")
+            if now == wip:
+                break
+            merged = merge_wip(p, tid, r, r.git("commit-tree", merged, "-p", sha, "-m", "merged"),
+                               r.git("commit-tree", wip, "-p", head, "-m", "before"), now, note)
+            wip = now
+        else:
+            raise NeedsYou(f"Your checkout {r.src} kept changing while the release merged your uncommitted changes "
+                           "into it. Answer anything when you've paused, and it tries again.")
+        plan.append((r, sha, head, wip, merged))
+    return plan
+
+
+def put_back(r, tid, sha, head, wip, merged):
+    """Move main in your checkout from head to sha, and leave your changes (tree wip, merged onto sha as tree
+    merged) in the working tree, uncommitted. Only files that differ between wip and merged are written."""
+    keep = r.git("commit-tree", wip, "-p", head, "-m", f"Uncommitted changes before release #{tid}")
+    r.git("update-ref", f"refs/ops/release-{tid}", keep)
+    out = subprocess.run(["git", "diff", "--name-status", "--no-renames", "-z", wip, merged], cwd=r.src,
+                         capture_output=True, text=True, check=True).stdout.split("\0")[:-1]
+    write, gone = [], []
+    for st, path in zip(out[::2], out[1::2]):
+        (gone if st == "D" else write).append(path)
+    if write:
+        subprocess.run(["git", "--literal-pathspecs", "checkout", merged, "--pathspec-from-file=-",
+                        "--pathspec-file-nul"], input="\0".join(write), cwd=r.src, capture_output=True, text=True,
+                       check=True)
+    for path in gone:
+        (r.src / path).unlink(missing_ok=True)
+    r.git("reset", "-q", sha, "--")  # main and the index move; the working tree keeps what was just written
+    return keep
+
+
+def carry_prompt(p, t, r, onto, base, yours, conflicted, note):
+    notes = f"## Notes for {p.title}\n\n{p.worker_notes}\n\n" if p.worker_notes else ""
+    said = f"## What the user said when the queue asked them\n\n{note}\n\n" if note else ""
+    return (f"You are an unattended worker on the {p.title} project, started by the claude-ops task queue. "
+            f"Nobody watches this session.\n\n"
+            f"Release #{t['id']} passed, and `{p.main}` is about to move to it. The user's checkout ({r.src}) is on "
+            f"`{p.main}` with uncommitted changes, a work in progress, and some of them touch files the release "
+            f"changes too. The queue carries them over: the user gets them back, still uncommitted, on top of the "
+            f"new `{p.main}`. This worktree ({r.at(t['worktree'])}) is detached at {onto[:12]}, with the user's "
+            f"changes applied by `git cherry-pick --no-commit {yours[:12]}`, stopped on conflicts in:\n\n"
+            + "".join(f"- {f}\n" for f in conflicted) +
+            f"\nResolve every conflict so both sides' changes survive. The release side is finished, checked work: "
+            f"`git diff {base[:12]} {onto[:12]} -- <file>` shows what it changed. The other side is the user's: "
+            f"`git diff {base[:12]} {yours[:12]} -- <file>`. Where they truly contradict, keep what the user meant "
+            f"and fit it to the release's code. Only the files listed count: edits anywhere else are thrown away. "
+            f"Don't commit, abort, reset or stash, and don't touch other worktrees, branches or {r.src}. Don't build "
+            f"or run the tests: a work in progress may not build yet, and that's fine.\n\n{said}{notes}"
+            f"As your last action, write JSON to $OPS_RESULT ({result_path(t)}): "
+            f'{{"status": "done", "summary": "..."}} once no conflict is left, or '
+            f'{{"status": "failed", "summary": "why"}} if only the user can decide how the two sides combine. '
+            f"The user reads the summary: say in plain words, per file, how you combined the two sides.")
+
+
+def move_main(p, tid, commit, note=""):
+    """Fast-forward main to commit in each repo: in your checkout when it is on main, else the branch alone. Your
+    uncommitted changes stay: ones to files the release changes are merged onto it (by a worker, if they conflict)
+    and put back. Every repo is checked first, so a workspace never moves only some of them. Returns an error or
+    None; raises NeedsYou if your changes can't be carried over."""
     for r, sha in p.pairs(commit):
         if not is_ancestor(r, p.main, sha):
             return f"{p.main}{f' of {r.sub}' if r.sub else ''} could not fast-forward: it has commits {p.dev} lacks."
+    plan = carry(p, tid, commit, note)
+    if plan is None:
+        return "stopped"
+    for r, sha, head, wip, merged in plan:
+        keep = put_back(r, tid, sha, head, wip, merged)
+        ev(tid, f"your uncommitted changes in {r.src} are back on top of the new {p.main}, unstaged "
+                f"(a copy of them as they were: commit {keep[:8]}, ref refs/ops/release-{tid})")
+    carried = [r for r, *_ in plan]
     for r, sha in p.pairs(commit):
+        if r in carried:
+            continue
         if r.git("branch", "--show-current", check=False) == p.main:
             res = subprocess.run(["git", "merge", "--ff-only", sha], cwd=r.src, capture_output=True, text=True)
         else:
@@ -1761,9 +1944,19 @@ def resolve_prompt(p, t, conflict):
             f"The user reads the summary: say in plain words how you combined the two sides.")
 
 
-def promote(p, tid, commit):
-    """Build commit (a revs string) in <worktrees>/main, then fast-forward main to it. Returns an error or None;
-    on an error main and its build are unchanged."""
+def promote(p, tid, commit, note=""):
+    """Build commit (a revs string) in <worktrees>/main, then fast-forward main to it. Returns an error or None, and
+    raises NeedsYou if your uncommitted changes can't be carried over; either way main and its build are unchanged.
+    note is your answer to the last question, for the worker carrying your changes over."""
+    old, art, prev = [], None, None
+
+    def undo():
+        for r, sha in old:
+            r.git("checkout", "--detach", sha, cwd=r.at(p.main_wt), check=False)
+        if prev and prev.exists():
+            shutil.rmtree(art, ignore_errors=True)
+            prev.rename(art)
+
     if p.build:
         art = p.main_wt / p.artifact if p.artifact else None
         if art and (not within(art, p.main_wt) or within(p.main_wt, art)):  # it gets deleted and replaced
@@ -1778,18 +1971,19 @@ def promote(p, tid, commit):
             r.git("checkout", "--detach", sha, cwd=r.at(p.main_wt))
         rc, tail = run_step(tid, f"building {p.main} at {p.show(commit)}", p.build, p.main_wt, "build.log")
         if rc or (art and not art.exists()):
-            for r, sha in old:
-                r.git("checkout", "--detach", sha, cwd=r.at(p.main_wt), check=False)
-            if prev and prev.exists():
-                shutil.rmtree(art, ignore_errors=True)
-                prev.rename(art)
+            undo()
             return f"Build failed; {p.main} and its build are unchanged.\n" + tail[-2000:]
-        if prev:
-            shutil.rmtree(prev, ignore_errors=True)
     upd(tid, phase=f"fast-forwarding {p.main}")
-    err = move_main(p, commit)
+    try:
+        err = move_main(p, tid, commit, note)
+    except BaseException:
+        undo()
+        raise
     if err:
+        undo()
         return err
+    if prev:
+        shutil.rmtree(prev, ignore_errors=True)
     set_setting(f"main_built:{p.name}", commit)
     notify(f"{p.title}: {p.main} updated", f"{p.main} is now {p.show(commit)}")
     return None
@@ -2812,7 +3006,7 @@ class H(BaseHTTPRequestHandler):
             if st != "needs_input":
                 raise ValueError(f"task is {st}")
             upd(tid, state="queued", question=None,
-                next_prompt=f"The user answered your question:\n\n{b['answer']}\n\nContinue the task and write $OPS_RESULT.")
+                next_prompt=f"{ANSWERED}\n\n{b['answer']}\n\nContinue the task and write $OPS_RESULT.")
             ev(tid, "answered: " + b["answer"][:200])
         elif action == "approve":
             if st != "review":

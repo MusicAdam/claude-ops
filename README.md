@@ -56,11 +56,17 @@ several (see [Workspaces](#workspaces)). Read it, adjust it, then click **Reload
   meanwhile waits for the next release. The checker never changes code: problems it finds are queued
   as ordinary tasks, and a blocked release leaves main as it was.
 - Promote never refuses: it always queues a release (or points at the one already open). Anything in the way
-  of moving main is checked only when the release gets there, and the release waits (with a notification)
-  until you clear it: quit the main build, or commit or stash uncommitted changes to files the release
-  changes. Other uncommitted changes stay as they are. If your checkout is on another branch, main moves as
-  a branch and your checkout is left alone. If main gets new commits during the release, it starts over
-  with them.
+  of moving main is checked only when the release gets there. If only you can clear it (quit the main build,
+  or switch another worktree off main), the release **needs you**: it shows under Needs you, with a
+  notification, and goes on by itself once you've cleared it. If your checkout is on another branch, main
+  moves as a branch and your checkout is left alone. If main gets new commits during the release, it starts
+  over with them.
+- **Your uncommitted changes come along.** When your checkout is on main, uncommitted changes to files the
+  release doesn't touch simply stay. Changes to files it does touch are merged onto the release in its
+  worktree (a worker resolves any conflicts) and put back in your checkout, unstaged, once main moves. A copy
+  of them as they were is kept at `refs/ops/release-<id>`. If the worker can't merge them, the release needs
+  you: answer with how to combine them and it tries again, or commit or stash them and it goes on by itself.
+  Either way main and its build stay as they were until it moves.
 - With nothing new on dev, Promote only rebuilds main (no gate, no checker).
 - **Release after merge** (a checkbox on a new task, and on its page until it finishes) promotes for you:
   once the task merges into dev, the queue queues a release, the same one Promote makes. If a release is
@@ -126,8 +132,8 @@ settings, `CLAUDE.md` and MCP servers. Each chat keeps one Claude session across
   prompt are denied, and Claude tells you what it couldn't do.
 - The chat header shows `cd <repo> && claude --resume <id>`. Run it to carry on in a terminal, where
   you can answer prompts. Don't send from both places at once.
-- Edits land in your checkout and nothing else. A release waits to move main while the checkout has
-  uncommitted changes to files it changes, so commit or discard them.
+- Edits land in your checkout and nothing else. Uncommitted ones survive a release: it merges them onto the
+  new main and puts them back.
 
 ## Workspaces
 
@@ -144,8 +150,8 @@ gitignored `.env` files each repo has, to clone into new worktrees.
   workspace's own files in its folder yourself.
 - **Merging.** The queue rebases every repo's task branch onto that repo's `dev` and runs the gate from the
   worktree root. It merges each repo the task committed to; a repo with no commits is left alone.
-- **Promote.** A release snapshots `dev` in every repo and checks them together. Every checkout must be on
-  `main` and clean. `main` moves in all repos or in none.
+- **Promote.** A release snapshots `dev` in every repo and checks them together. Each checkout is handled
+  as in a plain project, uncommitted changes included. `main` moves in all repos or in none.
 - Commits show as one id per repo, such as `ballup-dunk 1a2b3c4d, ballup-swish 5e6f7a8b`.
 
 ## Project config: `~/.claude-ops/projects/<name>.toml`
