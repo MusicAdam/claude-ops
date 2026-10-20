@@ -2682,7 +2682,7 @@ def design_turn(did, text):
             DESIGN_LIVE.pop(did, None)
             q("UPDATE designs SET state='idle', updated=? WHERE id=?", (time.time(), did))
             return
-        tools += f",Edit(/{cwd}/openspec/**),Bash(openspec validate:*),Bash(openspec show:*),Bash(openspec list:*)"
+        tools += spec_tools(cwd)
     tools += f",Bash({SEND_CMD}:*)"  # read-only still: it only asks another project to do something
     if chat:  # your own settings and MCP servers apply, like the CLI; auto mode stands in for prompts
         said = news(did)  # word from a project it sent something to; a design chat gets it in ops_note
@@ -2692,10 +2692,16 @@ def design_turn(did, text):
                "--name", f"{p.name} chat #{did}", "--settings", guard_settings(None),
                "--append-system-prompt", PROJECT_CHAT_PROMPT + "\n\n" + peer_brief(p, "chat")]
     else:
-        cmd = [CLAUDE, "-p", ops_note(p, did, extra) + with_images(text), "--output-format", "stream-json",
+        note, system = ops_note(p, did, extra), design_system_prompt(p, d, cwd)
+        if text.strip().startswith("/"):  # the CLI runs a slash command only from the start of the prompt
+            system = system.rstrip() + "\n\n## Dashboard note for this turn\n\n" + note.strip()
+            text, note = text.strip(), ""
+        cmd = [CLAUDE, "-p", note + with_images(text), "--output-format", "stream-json",
                "--verbose", "--permission-mode", "dontAsk", "--permission-prompts", "none", "--allowedTools", tools,
                "--strict-mcp-config", "--no-chrome", "--name", f"{p.name} design #{did}",
-               "--append-system-prompt", design_system_prompt(p, d, cwd)]
+               "--append-system-prompt", system]
+        if d["spec"]:  # deny rules win over the allowed-tools a command's own frontmatter grants
+            cmd += ["--disallowedTools", SPEC_DENY]
     cmd += ["--add-dir", str(IMAGES)]
     if d["session_id"]:
         cmd += ["--resume", d["session_id"]]
@@ -2772,6 +2778,75 @@ SPEC_DIR = Path("openspec") / "changes"
 SPEC_SMALL = 4  # a tasks.md phase with fewer open items is folded into its neighbour
 SPEC_BIG = (25, 3)  # open items and phases from which one task per phase is the advice
 CHECKBOX = re.compile(r"\s*[-*]\s+\[([ xX])\]\s+(.*)")
+
+# A change's chat may run any openspec command but those that write outside openspec/ (init, update: a chat can't
+# save them) or change this machine's OpenSpec setup. Deny rules also beat a slash command's own allowed-tools.
+SPEC_DENY = ",".join(f"Bash(openspec {c}:*)" for c in (
+    "init", "update", "feedback", "completion install", "completion uninstall", "config set", "config unset",
+    "config reset", "config edit", "config profile", "store setup", "store register", "store unregister",
+    "store remove", "workset create", "workset open", "workset remove"))
+# The opsx commands `openspec init` installs in a repo, or the skills newer versions install instead
+OPSX_SKILLS = {"explore": "openspec-explore", "sync": "openspec-sync-specs", "archive": "openspec-archive-change",
+               "propose": "openspec-propose", "apply": "openspec-apply-change"}
+TK_OPENSPEC = Path.home() / ".claude" / "commands" / "tk" / "openspec"
+SPEC_COMMANDS = (  # (id, label, tip): what the chat's buttons may send. Never apply or implement: those are tasks.
+    ("validate", "Validate", "Checks the change's format with openspec validate --strict. Changes nothing."),
+    ("explore", "Explore", "Thinks the change through with you: questions, options, risks. Edits only if you agree."),
+    ("audit", "Audit", "Checks the change's files agree with each other and with the code. Reports; changes nothing."),
+    ("review", "Review", "Several read-only expert agents review the proposal and report findings. Changes nothing."),
+    ("deviation-check", "Deviation check", "Compares the plan with the code on dev and lists where they differ. "
+                                           "Changes nothing."),
+    ("sync", "Sync specs", "Merges the change's spec deltas into openspec/specs/. The change stays open; the edits "
+                           "are saved to dev."),
+    ("archive", "Archive", "Merges the spec deltas into openspec/specs/ and moves the change to "
+                           "openspec/changes/archive/. Saved to dev; do it once the work is merged."))
+
+
+def spec_tools(cwd):
+    """What a change's chat may use on top of a design chat's tools: skills, subagents, openspec, and edits under
+    openspec/ only. Subagents get the same rules. No mkdir or mv: an archive moves the change with openspec
+    archive, which spec_prompt.md points it to."""
+    return f",Skill,Agent,Edit(/{cwd}/openspec/**),Bash(openspec:*)"
+
+
+def opsx_invocation(roots, cid):
+    """How to run opsx's `cid` in a repo: /opsx:<cid> if a root has the command, /<skill> if it has the skill
+    newer OpenSpec versions install instead, else None. roots: the repo's folders to look in."""
+    for root in roots:
+        if (root / ".claude" / "commands" / "opsx" / f"{cid}.md").is_file():
+            return f"/opsx:{cid}"
+    for root in roots:
+        if cid in OPSX_SKILLS and (root / ".claude" / "skills" / OPSX_SKILLS[cid] / "SKILL.md").is_file():
+            return f"/{OPSX_SKILLS[cid]}"
+    return None
+
+
+def spec_propose(p, sub=""):
+    """The slash command that proposes a new change in this repo's dev, or None if opsx isn't installed there."""
+    return opsx_invocation([spec_part(p, sub).at(p.dev_wt)], "propose")
+
+
+def spec_commands(roots, name):
+    """The commands a change's chat can run for it, as {id, label, text, tip}; text is the exact message to send."""
+    out = []
+    for cid, label, tip in SPEC_COMMANDS:
+        if cid == "validate":
+            text = shutil.which("openspec") and f"Run `openspec validate {name} --strict` and report the result."
+        elif cid in OPSX_SKILLS:
+            text = (opsx_invocation(roots, cid) or "") and f"{opsx_invocation(roots, cid)} {name}"
+        else:
+            text = (TK_OPENSPEC / f"{cid}.md").is_file() and f"/tk:openspec:{cid} {name}"
+        if text:
+            out.append({"id": cid, "label": label, "text": text, "tip": tip})
+    return out
+
+
+def spec_archived(root, name):
+    """Where the change went if it was archived (openspec/changes/archive/<date>-<name>), relative to root."""
+    d = root / SPEC_DIR / "archive"
+    hits = sorted(f for f in d.iterdir() if f.is_dir() and re.fullmatch(
+        rf"(\d{{4}}-\d{{2}}-\d{{2}}-)?{re.escape(name)}", f.name)) if d.is_dir() else []
+    return str(hits[-1].relative_to(root)) if hits else None
 
 
 def spec_part(p, sub):
@@ -2954,15 +3029,19 @@ def spec_view(p, d):
     own = path.exists() and (
         subprocess.run(["git", "merge-base", "--is-ancestor", "HEAD", p.dev], cwd=path,
                        capture_output=True).returncode != 0
-        or bool(r.git("status", "--porcelain", "--untracked-files=all", "--", str(SPEC_DIR), cwd=path,
-                      check=False)))
-    folder = (path if own else r.at(p.dev_wt)) / SPEC_DIR / d["spec"]
-    if not folder.is_dir():
-        return {"name": d["spec"], "sub": r.sub, "missing": True}
+        or bool(r.git("--no-optional-locks", "status", "--porcelain", "--untracked-files=all", "--",  # the
+                      str(SPEC_DIR), cwd=path, check=False)))  # dashboard polls this while a turn resets the index
+    root = path if own else r.at(p.dev_wt)
+    folder = root / SPEC_DIR / d["spec"]
+    if not folder.is_dir():  # archived (by /opsx:archive or openspec archive in the chat), or removed
+        gone = spec_archived(root, d["spec"])
+        return {"name": d["spec"], "sub": r.sub, "missing": True, "archived": bool(gone), "archive": gone,
+                "commands": []}
     files = [f for f in ("proposal.md", "design.md", "tasks.md") if (folder / f).is_file()]
     files += sorted(str(f.relative_to(folder)) for f in folder.rglob("*.md") if str(f.relative_to(folder)) not in
                     files)
     return dict(spec_info(folder), sub=r.sub, path=str(SPEC_DIR / d["spec"]),
+                commands=spec_commands([x for x in (path, r.at(p.dev_wt)) if x.exists()], d["spec"]),
                 files=[{"name": f, "text": (folder / f).read_text(errors="replace")[:200_000]} for f in files[:40]])
 
 
@@ -2991,7 +3070,9 @@ def spec_brief(p, r, name, title, group=None, k=0, n=1):
             f"- Add or update tests for the behaviour in the spec scenarios (`#### Scenario:`).\n"
             f"- If the `openspec` CLI is installed, `openspec validate {name} --strict` must pass.\n"
             f"- Don't archive the change (`openspec archive`); that is a separate step the owner asks for.\n"
-            f"{split}\n"
+            + (f"- Work through the items with `/tk:openspec:implement {name}` (the Skill tool), still within "
+               f"this task's scope and these rules.\n" if (TK_OPENSPEC / "implement.md").is_file() else "")
+            + f"{split}\n"
             f"Done when every box this task covers is ticked, the tests pass, and the change's docs match what "
             f"you built.")
 

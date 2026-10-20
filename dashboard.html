@@ -897,7 +897,9 @@ async function refreshSpecs(force) {
 const hash = s => { let h = 5381; for (let i = 0; i < s.length; i++) h = (h * 33 ^ s.charCodeAt(i)) | 0; return h; };
 function specHead(d) {
   const s = d.spec_view;
-  if (s.missing) return `<div class="spechead">The OpenSpec change <code>${esc(s.name)}</code> is no longer on ${esc(P(d.project).dev_branch || "dev")}: it was archived or removed.</div>`;
+  const dev = esc(P(d.project).dev_branch || "dev");
+  if (s.archived) return `<div class="spechead">The OpenSpec change <code>${esc(s.name)}</code> was archived on ${dev}: it is now in <code>${esc((s.sub ? s.sub + "/" : "") + s.archive)}/</code>.</div>`;
+  if (s.missing) return `<div class="spechead">The OpenSpec change <code>${esc(s.name)}</code> is no longer on ${dev}: it was removed.</div>`;
   const btn = (plan, label, title) => `<button class="${s.advice === plan ? "primary" : ""}" data-plan="${plan}" title="${esc(title)}">${label}</button>`;
   const phases = s.groups.length >= 2 ? btn("phases", `Queue ${s.groups.length} tasks, one per phase`,
     s.groups.map((g, k) => `${k + 1}. ${g.title} (${g.open} open)`).join("\n")) : "";

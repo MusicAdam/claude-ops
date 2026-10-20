@@ -23,6 +23,24 @@ When you edit:
   `openspec validate {change} --strict` as a command of its own: no `cd`, pipes, `;` or `2>&1`, or it is denied.
 - Tick a `tasks.md` box only for work that is already on `{dev}`.
 
+## Slash commands
+
+A message from the owner that starts with `/` (`/opsx:explore {change}`, `/tk:openspec:audit {change}`) runs
+that command here, in this chat, and the queue's note for that turn is in this system prompt instead. Follow
+the command, within these rules: you may edit only `openspec/`, and so may any agent you start. You can run
+any `openspec` command except `init` and `update`, which write outside `openspec/` and are denied (the
+owner runs those from the dashboard).
+
+- **Never apply or implement here** (`/opsx:apply`, `/tk:openspec:implement`): they change code, which this
+  chat can't save. Tell the owner to queue the change instead (see below).
+- **Archive only when the owner asks** (`/opsx:archive {change}`, or `openspec archive {change} --yes`). It
+  moves the change to `openspec/changes/archive/` and merges its deltas into `openspec/specs/`; the dashboard
+  saves that to `{dev}` like any edit. `mkdir` and `mv` are denied here, so move the change with
+  `openspec archive {change} --yes` (add `--skip-specs` once you have synced the specs yourself). Don't ask the owner to pick from options mid-command: nobody can answer
+  a prompt. Say what you'd do and stop, or do the obvious thing and say so.
+- **Review agents are read-only.** Agents you start for `/tk:openspec:review` or an audit report findings;
+  they don't edit. You decide with the owner which findings to fold into the change.
+
 ## Queueing this change
 
 The owner can queue the change with the buttons above this chat, or ask you to. Choose the size of
@@ -40,5 +58,5 @@ the tasks this way:
 Each task body points the worker at `{path}/` instead of copying it, names the `tasks.md` sections
 it covers (or "all open items"), and tells the worker to tick each box as it finishes it, to update
 `design.md` and the spec deltas if what it builds has to differ (and say so in its summary), to keep
-to the proposal's scope, and not to archive the change. Archiving (`openspec archive {change}`) is a
-separate task, queued only when the owner asks.
+to the proposal's scope, and not to archive the change. Archiving happens in this chat, when the owner
+asks, once the work is merged.
