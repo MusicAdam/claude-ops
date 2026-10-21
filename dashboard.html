@@ -573,7 +573,9 @@ function projStats(g) {
     busy ? `<span class="s-running">release #${r.id}</span>` : r && r.state === "failed" ? `<span class="err">release failed</span>` : "",
     !g.error && g.ahead.length ? `${g.ahead.length} to promote` : "",
     !g.error && g.has_app && (!g.has_build || (g.stale && g.built)) ? `<span class="s-review">needs build</span>` : "",
-    g.running ? `<span class="s-running">${esc(g.main_branch)} running</span>` : "",
+    g.running ? `<span class="s-running">running: ${esc(g.main_branch)}</span>` : "",
+    g.dev_running ? `<span class="s-running">running: ${esc(g.dev_branch)}</span>` : "",
+    g.play && g.play.phase ? `<span class="s-running">${esc(g.play.phase)}</span>` : "",
     g.auto_release ? `<span title="New tasks release after they merge">auto release</span>` : "",
     dirtyCount(g) ? `<span class="s-review" title="Files in your checkout that are not on ${esc(g.dev_branch)}">${files(dirtyCount(g))} uncommitted</span>` : "",
   ].filter(Boolean).join(" · ") || (g.error ? "" : "idle");
@@ -581,16 +583,19 @@ function projStats(g) {
 function projBody(g) {
   if (g.error) return `<div class="err">${esc(g.error)}</div><div class="row">${archiveBtn(g)}</div>${archiveAskHtml(g)}`;
   const r = g.release, busy = r && !["done", "failed", "cancelled"].includes(r.state);
-  const msg = mainMsg[g.name] || (!r ? "" : busy ? `Release #${r.id}: ${esc(r.phase || LABEL[r.state] || r.state)}`
+  const pl = g.play, playing = !!(pl && pl.phase);
+  const msg = mainMsg[g.name] || (pl && pl.error ? `<span class="err">Play ${esc(pl.where === "dev" ? g.dev_branch : g.main_branch)} failed: ${esc(pl.error)}</span>` : "") || (!r ? "" : busy ? `Release #${r.id}: ${esc(r.phase || LABEL[r.state] || r.state)}`
     : r.state === "failed" ? `<span class="err">Release #${r.id} failed: ${esc((r.error || "").split("\n")[0])}</span>` : "");
   return dirtyHtml(g) + sentHtml(g) + `<div>${esc(g.main_branch)} (golden): <span class="mono">${esc(g.main)}</span>${g.running ? ' · <span class="s-running">running now</span>' : ""}</div>` +
     (g.has_app && g.stale && g.built ? `<div class="s-review">The build is of ${esc(g.built)}, older than ${esc(g.main_branch)}. Promote to rebuild.</div>` : "") +
     (g.has_app && !g.has_build ? `<div class="s-review">Not built yet. Promote to build it.</div>` : "") +
-    `<div>${esc(g.dev_branch)}: <span class="mono">${esc(g.dev)}</span> · ${g.ahead.length ? `${g.ahead.length} merge(s) waiting to promote` : "nothing waiting"}</div>` +
+    `<div>${esc(g.dev_branch)}: <span class="mono">${esc(g.dev)}</span> · ${g.ahead.length ? `${g.ahead.length} merge(s) waiting to promote` : "nothing waiting"}${g.dev_running ? ' · <span class="s-running">running now</span>' : ""}</div>` +
+    (g.can_launch && g.dev_stale ? `<div class="s-review">${esc(g.dev_branch)} needs build: it moved since its last build. Play ${esc(g.dev_branch)} builds it first.</div>` : "") +
     (g.ahead.length ? `<details data-k="ahead"><summary>What would be promoted</summary><ul class="ahead mono">${g.ahead.map(l => `<li>${esc(l)}</li>`).join("")}</ul></details>` : "") +
     `<div class="muted" style="font-size:12px;margin-top:4px">gate: ${g.gate.length ? esc(g.gate.join(", ")) : "none configured"}</div>
     <div class="row">
-      ${g.can_launch ? `<button class="primary" data-p="${g.name}" data-a="play" ${g.has_build ? "" : "disabled"}>Play ${esc(g.main_branch)}</button>` : ""}
+      ${g.can_launch ? `<button class="primary" data-p="${g.name}" data-a="play" ${g.has_build && !playing ? "" : "disabled"}>Play ${esc(g.main_branch)}</button>` : ""}
+      ${g.can_launch ? `<button data-p="${g.name}" data-a="play" data-where="dev" title="Run ${esc(g.dev_branch)} in its worktree, to try it before you promote${g.has_app ? `. Builds it first if it moved since its last build` : ""}" ${playing ? "disabled" : ""}>Play ${esc(g.dev_branch)}</button>` : ""}
       <button data-p="${g.name}" data-a="promote" title="Queues a release: the gate, then Claude builds and plays ${esc(g.dev_branch)}; if it passes, ${esc(g.main_branch)} moves to it" ${busy || (!g.ahead.length && (!g.has_app || (g.has_build && !g.stale))) ? "disabled" : ""}>${busy ? `Release #${r.id} in progress` : `Promote ${esc(g.dev_branch)} → ${esc(g.main_branch)}`}</button>
       <button data-p="${g.name}" data-a="${g.paused ? "resume" : "pause"}" title="Pause or resume this project's tasks">${g.paused ? "▶ Resume" : "❚❚ Pause"}</button>
       <label title="New tasks start with &quot;Release after merge&quot; ticked: once one merges into dev, the queue queues a release, as Promote does. You can still untick it on a task. Tasks already queued keep theirs."><input type="checkbox" data-rel="${g.name}" ${g.auto_release ? "checked" : ""}> Release after merge by default</label>
@@ -771,7 +776,7 @@ function renderMains() {
   });
   document.querySelectorAll("#mains [data-a]").forEach(b => b.onclick = () => {
     delete mainMsg[b.dataset.p];
-    api(`/api/projects/${b.dataset.p}/${b.dataset.a}`, {})
+    api(`/api/projects/${b.dataset.p}/${b.dataset.a}`, b.dataset.where ? {where: b.dataset.where} : {})
       .then(res => { if (res && res.id) selectTask(res.id); refresh(); })
       .catch(e => { mainMsg[b.dataset.p] = `<span class="err">${esc(e.message)}</span>`; renderMains(); });
   });

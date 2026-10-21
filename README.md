@@ -463,6 +463,8 @@ build = "scripts/unity.sh build"
 launch = "open -n 'Builds/macOS/MyGame.app'"   # run from the worktree for Play / Try
 process = "Builds/macOS/MyGame.app"            # the app's executable or its folder, inside the worktree
 artifact = "Builds/macOS/MyGame.app"           # must exist after build; kept as a backup on promote
+# running = "scripts/app-running.sh"   # optional, server-style apps: exit 0 = the app runs from this worktree
+# stop = "scripts/app-stop.sh"         # optional: stops the app if it runs from this worktree
 
 [worker]
 env = { GAME_PORT = "{port}" }     # extra env; {port} is the worker's own free port ($OPS_PORT)
@@ -485,6 +487,20 @@ notes = """Project-specific guidance for design chats."""
   project filter in the header, so only its tasks and chats show; click it again to see every
   project. Tasks are on the right. Clicking a
   task opens it on the left and focuses its project, and new tasks default to that project.
+- **Play main and Play dev.** A project with `[app] launch` has both buttons on its card. Play main
+  runs `launch` in `<worktrees>/main`: the last Promote's build, or, with no `[app] build`, `main` as it
+  is now. Play dev runs it in `<worktrees>/dev`, so you can try `dev` before you promote. The first Play
+  dev runs the `[worktree]` clone and `setup` there; after that, if the project has a build and `dev`
+  moved since its last one, Play dev builds first (the card says "dev needs build"; the log is in
+  `runs/play-<project>/build.log`). The card shows which one runs ("running: main", "running: dev").
+  Merges into `dev` go on while you play it; Promote waits while `main` runs, as before.
+- **Server-style apps.** When the app is a set of local servers rather than one built file, set
+  `[app] running` and `stop`. Both run as shell commands in the worktree (`$OPS_REPO` is your checkout).
+  `running` exits 0 when the app runs *from that worktree*; it replaces the process-table match of
+  `process`. `stop` stops the app there; it replaces SIGTERM to the matched processes, and runs only where
+  `running` says the app runs (always, if `running` is unset). Such an app holds fixed ports, so before
+  any Play (main, dev or a task's Try) launches it, the queue runs `stop` in the other worktrees: main,
+  dev and each unfinished task's. Without these keys nothing changes.
 - **Status at a glance.** Each task in the list has a line saying what is happening now. A working
   task says, in words, what the worker's current step does and what it last said, not the command
   it runs (`▸ Run the tests “The parser is fixed; checking it.” · 40s ago`). The full command is
@@ -605,7 +621,8 @@ Nothing claude-ops runs may stop, signal or quit a process it did not start.
   runs. After a restart it trusts a saved pid only if the process start time still matches.
   **Quit the app** (Approve, Send back, a pause, the end of a worker turn) stops only your processes whose
   executable lies in that worktree's `[app] process` path. It matches the path exactly, never as a pattern,
-  so a terminal or editor that merely names the path is spared.
+  so a terminal or editor that merely names the path is spared. With `[app] stop` set, it runs that command
+  in the worktree instead, and your script decides what to stop.
 - **Workers, release checkers and project chats** run each Bash command past `opsd.py guard` first (a
   `PreToolUse` hook passed with `--settings`). It refuses:
   - `pkill`, `killall`, `xargs kill`, and `kill` of pids found by `pgrep`, `lsof`, `ps` or `pidof`
