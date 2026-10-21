@@ -14,6 +14,7 @@ the golden version: it changes only when you promote.
 ./opsctl pause | resume              # pause every running task now / resume every paused one
 ./opsd.py add-project ~/dev/myrepo   # or "+ Project" on the dashboard
 ./opsd.py add -p myrepo "Fix the crash when the save file is empty"
+./opsd.py add -p myrepo --model sonnet "Rename the config key"   # its worker runs on Sonnet (see Models)
 ./opsd.py deploy -p myrepo "store test" --version patch --note "Fixes the crash"   # see Deploys
 ./opsd.py send myrepo --design "How does the save format work?"   # what a worker or chat runs to ask a peer project
 ./opsd.py archive-project myrepo     # take it off the queue; unarchive-project brings it back (see Archiving)
@@ -377,6 +378,7 @@ opsd.py send <project> "<message>"            # a task in that project's queue
 opsd.py send <project> --design "<message>"   # a design chat there: ask how something works, talk an idea through
 opsd.py send <project> --chat "<message>"     # a project chat there, in its checkout (it can edit files)
         ... --title "..." --hold              # name it; hold a task for your review before it merges
+        ... --model sonnet                    # a task's model (see Models); not for chats
 ```
 
 - **It shows like everything else.** A sent task is queued in the other project and goes through its gate as
@@ -493,6 +495,24 @@ notes = """Project-specific guidance for design chats."""
 - **Parallelism.** "Parallel" on the dashboard is the global limit (default 3; setting `max_parallel`). Workers
   also split big tasks into subtasks (with "after" ordering) and use subagents inside a task. "Brake %" next to it
   is the usage brake (setting `usage_brake`, default 85; see Usage limits).
+- **Models.** Each kind of work picks its Claude model. "Model" in the header is the global setting (`model`);
+  **per kind** next to it sets `model:task` (task workers and Send to dev), `model:release` (release checkers,
+  default `sonnet`: they build, run and summarise), `model:design` (design and OpenSpec chats) and `model:chat`
+  (the Chat tab). Each is an alias (`opus`, `sonnet`, `haiku`), a full model id, or empty for the global setting,
+  whose empty value is Claude Code's own default.
+  - **Per task.** A task's own model beats its kind's setting: the Model dropdown on New task, `"model"` in a
+    design chat's queue block (see `design_prompt.md`), `opsd.py add -p NAME --model sonnet "..."`, or
+    `opsd.py send NAME --model sonnet "..."`. Subtasks from a split take their parent's model. Empty means the
+    `model:task` setting at the moment the worker starts.
+  - **A session keeps its model.** The prompt cache belongs to one model, so resuming an Opus session on Sonnet
+    would rewrite the whole context and cost more than staying on Opus. The model is picked when a session
+    starts, and the one it actually started on (from the stream's init event) is stored as `session_model` on the
+    task or chat. Every resume passes it to `--model`, whatever the settings say now: answers, gate fixes, rebase
+    conflicts, retries, pauses, usage-limit waits and Ask the worker. Only a new session picks again: a
+    release's checker after a worker merged main into dev, or a worker that merges your uncommitted changes. Sessions from before this ran on the global model and
+    keep it.
+  - **On the dashboard** the task page shows the model its session runs on, and the task list tags tasks that
+    are not on Opus, so you can compare a trial of Sonnet tasks later.
 - **Pausing.** **❚❚ Pause** on a task, or **Pause running** in the header (`./opsctl pause`), stops it
   now and keeps its place. A worker's Claude session resumes where it was; a command it was running
   (a test run, a build) is stopped and it is told to check and carry on. A task paused during its gate

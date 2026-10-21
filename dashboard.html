@@ -303,6 +303,13 @@ a[data-task] { color: var(--accent); cursor: pointer; }
 #dlg .vopt input[type=text] { width: 110px; padding: 2px 6px; }
 #dlg .notebox { display: block; color: var(--ink); margin-top: 12px; }
 #dlg .notebox textarea { min-height: 90px; margin-top: 4px; }
+#models { position: relative; }
+#models summary { cursor: pointer; color: var(--muted); font-size: 13px; }
+#models .pop { position: absolute; right: 0; top: 24px; z-index: 5; background: var(--panel); border: 1px solid var(--line);
+  border-radius: 8px; padding: 10px 12px; width: 280px; box-shadow: 0 4px 16px rgba(0, 0, 0, .15); }
+#models .pop label { display: flex; justify-content: space-between; align-items: center; padding: 3px 0; }
+#models .pop .muted { font-size: 12px; margin-top: 6px; }
+.mtag { font-size: 11px; padding: 0 6px; border-radius: 4px; border: 1px solid var(--muted); color: var(--muted); }
 </style>
 </head>
 <body>
@@ -316,9 +323,15 @@ a[data-task] { color: var(--accent); cursor: pointer; }
   <span style="flex:1"></span>
   <label>Parallel <input id="par" type="number" min="1" max="8" style="width:58px"></label>
   <label title="Usage brake: at this percent of the 5-hour or 7-day usage window, start no new task that needs Claude until it resets (0 = off). Deploys, promotes and gates still start; chats are never held.">Brake <input id="brake" type="number" min="0" max="100" step="5" style="width:58px">%</label>
-  <label>Model <select id="model">
+  <label title="The model every kind of work starts on, unless its own setting under Per kind says otherwise">Model <select id="model">
     <option value="">default</option><option value="opus">opus</option>
-    <option value="sonnet">sonnet</option><option value="fable">fable</option></select></label>
+    <option value="sonnet">sonnet</option><option value="haiku">haiku</option><option value="fable">fable</option></select></label>
+  <details id="models"><summary title="Pick a model per kind of work">per kind</summary><div class="pop">
+    <label title="Workers on tasks, and on Send to dev">Tasks <select data-model="task"></select></label>
+    <label title="Release checkers: build, run, summarise">Releases <select data-model="release"></select></label>
+    <label title="Design chats, including OpenSpec chats">Design chats <select data-model="design"></select></label>
+    <label title="Chat tab: Claude in your checkout">Chats <select data-model="chat"></select></label>
+    <div class="muted">“same as Model” uses the Model setting. A session keeps the model it started with: a change applies to new tasks and chats, not to ones already under way.</div></div></details>
   <button id="pause" title="Hold queued tasks; running ones carry on"></button>
   <button id="pauseall" class="hidden" title="Stop every running task now; each resumes from where it was"></button>
   <button id="resumeall" class="primary hidden" title="Put every paused task, in every project, back in the queue"></button>
@@ -345,6 +358,7 @@ a[data-task] { color: var(--accent); cursor: pointer; }
         <label id="tprojwrap">Project <select id="tproj"></select></label>
         <label>Priority <select id="prio"><option value="0">normal</option><option value="1">high</option><option value="-1">low</option></select></label>
         <label>After # <input id="after" style="width:60px" placeholder="—"></label>
+        <label title="The model its worker starts on. Default: the Tasks model setting (per kind, in the header)">Model <select id="tmodel"><option value="">Default</option><option value="opus">Opus</option><option value="sonnet">Sonnet</option><option value="haiku">Haiku</option></select></label>
         <label title="Build it and wait for you to play and approve before merging"><input type="checkbox" id="hold"> Hold for my review</label>
         <label title="Once it merges into dev, queue a release, as Promote does. Tasks it splits into release together, after the last one merges. Starts as the project's default, set on its card."><input type="checkbox" id="autorel"> Release after merge</label>
       </div>
@@ -493,7 +507,8 @@ function renderHeader() {
     `<b>${n(["needs_input","review","failed"])}</b> need you · ` +
     (n(["paused"]) ? `<b>${n(["paused"])}</b> paused · ` : "") + `$${cost.toFixed(2)} spent`;
   if (document.activeElement !== $("#par")) $("#par").value = s.max_parallel;
-  $("#model").value = s.model;
+  modelSelect($("#model"), s.model, "default");
+  document.querySelectorAll("#models select").forEach(el => modelSelect(el, s["model:" + el.dataset.model], "same as Model"));
   $("#pause").textContent = s.paused === "1" ? "▶ Resume queue" : "❚❚ Pause queue";
   $("#pause").className = s.paused === "1" ? "primary" : "";
   // Pause all running tasks (e.g. before a restart), and resume every paused one. Across all projects.
@@ -836,6 +851,7 @@ function renderList() {
         pf ? "" : `<span class="ptag">${esc(P(t.project).title)}${archivedP(t.project) ? " (archived)" : ""}</span>`,
         t.depends_on ? `after #${t.depends_on}` : "",
         t.kind === "release" || t.kind === "deploy" ? `<span class="ktag">${t.kind}</span>` : t.kind === "senddev" ? `<span class="ktag">send to dev</span>` : "",
+        modelTag(t),
         t.parent ? `from #${t.parent}` : "",
         t.origin ? `sent by ${esc(t.origin.words)}` : "",
         t.hold ? "hold for review" : "",
@@ -853,6 +869,12 @@ function renderList() {
   }).join("") || `<div class="muted">No tasks yet.</div>`;
   if (!put($("#list"), html)) return;
   document.querySelectorAll(".task").forEach(el => el.onclick = () => selectTask(+el.dataset.id));
+}
+
+// A small tag when the task runs, or will run, on something other than Opus: so a trial of Sonnet tasks stands out.
+function modelTag(t) {
+  const m = modelShort(t.session_model || t.model);
+  return m && m !== "opus" ? `<span class="mtag" title="${esc(t.session_model ? `runs on ${t.session_model}` : `starts on ${t.model}`)}">${esc(m)}</span>` : "";
 }
 
 // One line under a task in the list: what it is doing right now, what it waits for, or how it ended.
@@ -911,7 +933,7 @@ async function loadDetail(id, fresh) {
     <div style="font-weight:600;font-size:15px">${esc(t.title)}</div>
     ${originLine(t.origin, "Sent by")}
     ${timeLine(t, live)}
-    <div class="muted mono" style="margin:4px 0">${esc(P(t.project).title)} · ${esc(t.branch || "")}${t.merged ? ` → ${esc(t.kind === "release" ? P(t.project).main_branch || "main" : P(t.project).dev_branch || "dev")} ${esc(t.merged_show || shas(t.merged))}` : ""}${t.kind === "release" && t.base && !t.merged ? `checking ${esc(t.base_show || shas(t.base))}` : ""}${t.kind === "deploy" && t.base ? `deploying ${esc(t.base_show || shas(t.base))}` : ""}${t.rounds ? ` · fix rounds: ${t.rounds}` : ""}</div>
+    <div class="muted mono" style="margin:4px 0">${esc(P(t.project).title)} · ${esc(t.branch || "")}${t.merged ? ` → ${esc(t.kind === "release" ? P(t.project).main_branch || "main" : P(t.project).dev_branch || "dev")} ${esc(t.merged_show || shas(t.merged))}` : ""}${t.kind === "release" && t.base && !t.merged ? `checking ${esc(t.base_show || shas(t.base))}` : ""}${t.kind === "deploy" && t.base ? `deploying ${esc(t.base_show || shas(t.base))}` : ""}${t.rounds ? ` · fix rounds: ${t.rounds}` : ""}${t.session_model ? ` · model: ${esc(t.session_model)}` : t.model ? ` · model: ${esc(t.model)} (not started)` : ""}</div>
     ${t.question ? `<div class="callout"><b>Question:</b> ${esc(t.question)}</div>
       <textarea id="answer" placeholder="Your answer (drop or paste screenshots to attach them)" style="min-height:70px"></textarea>
       <div class="row">${btn("answer", "Send answer", "primary")}</div>` : ""}
@@ -1015,8 +1037,8 @@ async function submit() {
   try {
     const project = pf || $("#tproj").value;
     if (!project) throw new Error("pick a project");
-    const r = await api("/api/tasks", {project, body, priority: +$("#prio").value, hold: $("#hold").checked ? 1 : 0, release: $("#autorel").checked ? 1 : 0, depends_on: $("#after").value.trim()});
-    $("#body").value = ""; $("#after").value = ""; $("#formmsg").textContent = ""; delete $("#autorel").dataset.k; sel = r.id; setFocus(project); refresh();
+    const r = await api("/api/tasks", {project, body, priority: +$("#prio").value, hold: $("#hold").checked ? 1 : 0, release: $("#autorel").checked ? 1 : 0, depends_on: $("#after").value.trim(), model: $("#tmodel").value});
+    $("#body").value = ""; $("#after").value = ""; $("#tmodel").value = ""; $("#formmsg").textContent = ""; delete $("#autorel").dataset.k; sel = r.id; setFocus(project); refresh();
   } catch (e) { $("#formmsg").textContent = e.message; }
 }
 $("#submit").onclick = submit;
@@ -1028,6 +1050,20 @@ $("#trynow").onclick = () => api("/api/limit/clear", {}).then(refresh);
 $("#brake").onchange = () => api("/api/settings", {usage_brake: Math.min(100, Math.max(0, +$("#brake").value || 0))}).then(refresh);
 $("#par").onchange = () => api("/api/settings", {max_parallel: Math.max(1, +$("#par").value || 1)}).then(refresh);
 $("#model").onchange = () => api("/api/settings", {model: $("#model").value}).then(refresh);
+document.querySelectorAll("#models select").forEach(el =>
+  el.onchange = () => api("/api/settings", {["model:" + el.dataset.model]: el.value}).then(refresh));
+// A model setting's dropdown: the aliases, plus the current value when it is a full model id set elsewhere.
+const MODELS = ["opus", "sonnet", "haiku", "fable"];
+function modelSelect(el, v, none) {
+  v = v || "";
+  if (document.activeElement === el) return;
+  const opts = ["", ...MODELS, ...(v && !MODELS.includes(v) ? [v] : [])];
+  const html = opts.map(o => `<option value="${esc(o)}">${esc(o || none)}</option>`).join("");
+  if (el.dataset.opts !== html) { el.innerHTML = html; el.dataset.opts = html; }
+  el.value = v;
+}
+// The model a task's session runs on, short: "sonnet" for claude-sonnet-4-5-20250929. Opus is the usual one.
+function modelShort(m) { const k = MODELS.find(a => String(m || "").toLowerCase().includes(a)); return k || m || ""; }
 $("#proj").onchange = () => {
   setFilter($("#proj").value); if (state) render(); refresh(); if (tab !== "queue") refreshDesign();
 };
