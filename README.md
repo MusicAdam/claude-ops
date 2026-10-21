@@ -138,6 +138,13 @@ several (see [Workspaces](#workspaces)). Read it, adjust it, then click **Reload
   "claude-ops is starting up" and refuses actions. `opsctl start` and `restart` wait up to 30 s for it to
   answer, and print the end of `opsd.log` if it doesn't. A new main worktree gets its `[worktree]` setup on
   first use (Promote's build, or Play main), not at startup. `scripts/startup-smoke.sh` checks this.
+- `[worktree]` setup must succeed before anything else runs in the worktree. Each command's output goes to
+  `runs/<id>/setup.log` (`runs/play-<project>/setup.log` for Play). A command that exits non-zero, or runs
+  past `setup_timeout` minutes (default 15), fails the task before any gate runs, with the command and the end
+  of its output; Play dev and Play main show the same error on the card. The worktree is marked prepared only
+  when every command succeeded, so a retry or resume runs setup again. Each command runs in its own process
+  group: pause, cancel, a timeout and a daemon restart send it SIGTERM, then SIGKILL after 5 s (`npm ci` can
+  ignore SIGTERM), and setup first stops anything an earlier attempt left running in that worktree.
 - Commits made straight to main are merged into dev when the release takes its snapshot (no gate). If they
   conflict with dev, a worker merges them in the release's worktree, resolves the conflicts and runs the checks;
   dev moves to that merge, and the release checks it as usual. Retry starts the merge over.
@@ -471,6 +478,7 @@ max_parallel = 0                   # per-project cap; 0 = only the global "Paral
 [worktree]
 clone = ["Library"]                # APFS-cloned into each new worktree (warm caches)
 setup = ["npm ci --silent"]        # run in each new worktree; $OPS_REPO is your checkout
+setup_timeout = 15                 # minutes each setup command may run (default 15); then it is stopped
 
 [[gate]]                           # run in order; any non-zero exit fails the gate
 name = "test"
