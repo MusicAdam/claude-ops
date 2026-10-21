@@ -531,6 +531,14 @@ notes = """Project-specific guidance for design chats."""
   dashboard draws that tooltip itself, so it shows at once and survives the 3-second redraw.
 - **Settings tab.** Parallel, Release wait, Usage brake, Model, Effort and the model per kind of work, each
   with what it does written next to it, and **Spent**: what Claude has cost, priced at API rates.
+- **Analyze tab.** Run times and costs of the tasks created in the last day, 7 days, 30 days or all time, for
+  the project picked in the header or every project (`GET /api/analyze?period=1|7|30|all&project=<name>`).
+  Medians, p90s and totals; spend per day; per project; by kind, model, effort, gate-fix rounds, Claude turns and
+  outcome; what the fix rounds fixed; the dearest and slowest tasks; and **How to improve**: plain rules over the
+  same data (fix rounds, Opus on releases, turns that started after the 1-hour cache expired, failed and cancelled
+  spend, tiny tasks, queue waits, high effort), each with a rough saving. Run time leaves out the time a task
+  waited on your answer or review, a pause or the usage limit. The rules' constants come from
+  `docs/usage-analysis.md`.
 - **Tasks tab.** New task and the task list are on the left; the task page is on the right. The project
   picker in the header filters the list. Clicking a task opens it on the right and focuses its project,
   and new tasks default to that project.

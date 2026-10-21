@@ -334,6 +334,29 @@ a[data-task] { color: var(--accent); cursor: pointer; }
 #spent .big { font-size: 22px; font-weight: 600; font-variant-numeric: tabular-nums; }
 #spent table { border-collapse: collapse; margin-top: 8px; font-variant-numeric: tabular-nums; }
 #spent td { padding: 2px 16px 2px 0; } #spent td:last-child { text-align: right; }
+#analyzeview { grid-template-columns: 1fr; max-width: 1200px; }
+#analyzeview .grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(440px, 1fr)); gap: 0 20px; }
+.periods { display: flex; gap: 4px; align-items: center; flex-wrap: wrap; }
+.periods button.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin-top: 14px; }
+.tile .v { font-size: 22px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.tile .k { color: var(--muted); font-size: 12px; }
+.tile .s { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+.tile.bad .v { color: var(--bad); }
+.atable { border-collapse: collapse; width: 100%; font-size: 13px; font-variant-numeric: tabular-nums; }
+.atable th { text-align: right; font-weight: 600; color: var(--muted); font-size: 12px; padding: 4px 8px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+.atable td { text-align: right; padding: 4px 8px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+.atable th:first-child, .atable td:first-child { text-align: left; width: 30%; }
+.atable td.t { text-align: left; white-space: normal; }
+.atable tr:last-child td { border-bottom: 0; }
+.atable .sbar { display: inline-block; width: 70px; height: 8px; border-radius: 4px; background: var(--line); overflow: hidden; vertical-align: middle; margin-left: 6px; }
+.atable .sbar i { display: block; height: 100%; background: var(--accent); }
+.atable h3, #analyzeview h3 { font-size: 13px; color: var(--muted); margin: 16px 0 6px; font-weight: 600; }
+.tips { margin: 0; padding-left: 20px; } .tips li { margin: 0 0 8px; line-height: 1.45; }
+.tips .save { color: var(--ok); font-weight: 600; white-space: nowrap; }
+.daily svg { width: 100%; height: auto; max-height: 180px; display: block; }
+.daily rect { fill: var(--accent); } .daily rect:hover { fill: var(--warn); }
+.daily text { fill: var(--muted); font-size: 10px; }
 /* Our own tooltip: the header redraws every few seconds, and a native title tooltip dies with the element it was on */
 #tip { position: fixed; z-index: 20; max-width: 340px; padding: 8px 10px; border-radius: 8px; font-size: 12px; white-space: pre-line;
        background: var(--panel); color: var(--ink); border: 1px solid var(--line); box-shadow: 0 4px 16px rgba(0, 0, 0, .2); pointer-events: none; }
@@ -351,7 +374,7 @@ a[data-task] { color: var(--accent); cursor: pointer; }
   <h1>Claude Ops</h1>
   <select id="proj" title="Project"></select>
   <button id="addproj" title="Add a git repository, or a folder of git repos, as a project">+ Project</button>
-  <div class="tabs"><button id="tab-projects" title="Every project: branches, Promote, Play, Deploys, Archive, and its tasks">Projects</button><button id="tab-tasks">Tasks</button><button id="tab-design" title="Plan work with Claude">Design</button><button id="tab-chat" title="Talk to Claude in the project folder, as in a terminal">Chat</button><button id="tab-settings" title="Parallel, release wait, usage brake, models, effort, and what Claude has cost">Settings</button></div>
+  <div class="tabs"><button id="tab-projects" title="Every project: branches, Promote, Play, Deploys, Archive, and its tasks">Projects</button><button id="tab-tasks">Tasks</button><button id="tab-design" title="Plan work with Claude">Design</button><button id="tab-chat" title="Talk to Claude in the project folder, as in a terminal">Chat</button><button id="tab-analyze" title="Where time and money went: run times and costs of tasks, and how to make them cheaper and faster">Analyze</button><button id="tab-settings" title="Parallel, release wait, usage brake, models, effort, and what Claude has cost">Settings</button></div>
   <span class="grow" style="flex:1"></span>
   <span class="stats" id="hdr"></span>
   <span class="stats hidden" id="usage"></span>
@@ -396,6 +419,18 @@ a[data-task] { color: var(--accent); cursor: pointer; }
       <h2>Spent</h2>
       <div id="spent"></div>
     </div>
+  </section>
+</main>
+<main id="analyzeview" class="hidden">
+  <section>
+    <div class="card">
+      <h2>Analyze</h2>
+      <div class="periods"><span class="muted" style="margin-right:6px">Tasks created in the last</span>
+        <button data-period="1">1 day</button><button data-period="7">7 days</button><button data-period="30">30 days</button><button data-period="all">All time</button>
+        <span id="ascope" class="muted" style="margin-left:8px"></span></div>
+      <div id="atiles"></div>
+    </div>
+    <div id="abody"><div class="card muted">Loading…</div></div>
   </section>
 </main>
 <main id="projectsview" class="hidden">
@@ -546,6 +581,7 @@ function render() {
   const st = sel && state.tasks.find(t => t.id === sel);
   if (st && !inView(st.project)) clearSelection();
   renderProjects(); renderHeader(); renderMains(); renderList();
+  if (tab === "analyze" && (anaKey !== `${anaPeriod}|${pf}` || Date.now() - anaAt > 60000)) refreshAnalyze();
 }
 
 function renderProjects() {
@@ -595,7 +631,7 @@ function renderHeader() {
         : "Nothing waits on you: no question, review or failure."),
     n(["paused"]) ? chip("", `<b>${n(["paused"])}</b> paused`, `${plural(n(["paused"]), "task is", "tasks are")} paused. Resume to put them back in the queue.`) : "",
   ].join(""));
-  put($("#spent"), `<div class="big">$${(tcost + dcost).toFixed(2)}</div><div class="muted">Claude usage, priced at API rates.</div>
+  put($("#spent"), `<div class="big">$${(tcost + dcost).toFixed(2)}</div><div class="muted">Claude usage, priced at API rates. The Analyze tab shows where it went.</div>
     <table><tr><td>Tasks${pf ? ` in ${esc(P(pf).title || pf)}` : ", every project"}</td><td>$${tcost.toFixed(2)}</td></tr>
     <tr><td>Design chats and chats, every project</td><td>$${dcost.toFixed(2)}</td></tr></table>`);
   if (document.activeElement !== $("#par")) $("#par").value = s.max_parallel;
@@ -1245,6 +1281,93 @@ async function addProject(create) {
   } catch (e) { $("#pmsg").innerHTML = `<span class="err">${esc(e.message)}</span>`; }
 }
 
+// ---------------------------------------------------------------- analyze tab
+// Run times and costs of the tasks created in a period, from /api/analyze, for the header's project filter.
+// Drawn with plain HTML and one inline SVG; refetched when the period or filter changes, and each minute.
+let anaPeriod = "7", anaKey = "", anaAt = 0;
+try { anaPeriod = localStorage.getItem("ops-ana-period") || "7"; } catch {}
+const money = x => x == null ? "–" : x >= 100 ? `$${Math.round(x)}` : `$${x.toFixed(2)}`;
+const dur = s => s == null ? "–" : s < 60 ? `${Math.round(s)}s` : s < 3600 ? `${Math.round(s / 60)}m`
+  : s < 86400 ? `${(s / 3600).toFixed(1)}h` : `${(s / 86400).toFixed(1)}d`;
+const KINDWORD = {task: "Tasks", release: "Releases", deploy: "Deploys", senddev: "Send to dev"};
+
+const refreshAnalyze = single(async () => {
+  const key = `${anaPeriod}|${pf}`;
+  document.querySelectorAll(".periods button").forEach(b => b.classList.toggle("on", b.dataset.period === anaPeriod));
+  let a;
+  try { a = await api(`/api/analyze?period=${anaPeriod}&project=${encodeURIComponent(pf)}`); }
+  catch (e) { put($("#abody"), `<div class="card err">${esc(e.message)}</div>`); return; }
+  anaKey = key; anaAt = Date.now();
+  if (key === `${anaPeriod}|${pf}`) renderAnalyze(a);
+});
+document.querySelectorAll(".periods button").forEach(b => b.onclick = () => {
+  anaPeriod = b.dataset.period; try { localStorage.setItem("ops-ana-period", anaPeriod); } catch {}
+  refreshAnalyze();
+});
+
+function renderAnalyze(a) {
+  const s = a.summary, tile = (k, v, sub, cls = "", tip = "") =>
+    `<div class="tile ${cls}"${tip ? ` data-tip="${esc(tip)}"` : ""}><div class="k">${k}</div><div class="v">${v}</div><div class="s">${sub || "&nbsp;"}</div></div>`;
+  put($("#ascope"), pf ? `· ${esc(P(pf).title || pf)} only (the project menu in the header)` : "· every project");
+  put($("#atiles"), `<div class="tiles">${[
+    tile("Spent on tasks", money(s.cost), `+ ${money(s.chat_cost)} in chats`, "",
+      "What Claude cost for the tasks created in this period, priced at API rates. Chats are design and project chats active in it."),
+    tile("Tasks", s.n, `${money(s.cost / Math.max(1, a.days) * 7)} a week`, "", "Tasks, releases, deploys and Send to dev runs created in this period."),
+    tile("Cost per task", money(s.cost_med), `p90 ${money(s.cost_p90)}`, "", "Median cost of one task, and the 90th percentile: 1 in 10 costs more."),
+    tile("Run time", dur(s.ran_med), `p90 ${dur(s.ran_p90)} · total ${dur(s.ran_total)}`, "",
+      "From its start to its end, less the time it waited on your answer or review, a pause or the usage limit."),
+    tile("Queued", dur(s.queued_med), `p90 ${dur(s.queued_p90)}`, "", "How long a task waited for a free worker before it started (median)."),
+    tile("Waited on you", dur(s.waited_total), "answers, reviews, pauses, limit", "", "Total time tasks sat idle after they started: on a question, a review, a pause or the usage limit."),
+    tile("Wasted", money(s.wasted), `${s.wasted_n} failed or cancelled`, s.wasted > 0.1 * s.cost && s.wasted > 1 ? "bad" : "",
+      "What failed and cancelled tasks cost: spend that merged nothing."),
+  ].join("")}</div>`);
+  if (!s.n) { put($("#abody"), `<div class="card muted">No tasks were created in this period.</div>`); return; }
+  const tips = a.suggestions.length ? `<ol class="tips">${a.suggestions.map(x =>
+      `<li>${esc(x.text)}${x.save > 0.05 ? ` <span class="save" data-tip="A rough estimate of what acting on this would have saved over the period shown.">up to ≈ ${money(x.save)}</span>` : ""}</li>`).join("")}</ol>`
+    : `<div class="muted">Nothing stands out: no rule found a clear saving in this period.</div>`;
+  const maxShare = rows => Math.max(...rows.map(r => r.share), 0.0001);
+  const table = (title, rows, word = k => esc(k)) => {
+    const m = maxShare(rows);
+    return `<h3>${title}</h3><table class="atable"><tr><th></th><th>Tasks</th><th>Cost</th><th>Share</th><th>Median $</th><th>p90 $</th><th>Median run</th><th>p90 run</th></tr>${
+      rows.map(r => `<tr><td>${word(r.key)}</td><td>${r.n}</td><td>${money(r.cost)}</td><td>${Math.round(r.share * 100)}%<span class="sbar"><i style="width:${r.share / m * 100}%"></i></span></td><td>${money(r.cost_med)}</td><td>${money(r.cost_p90)}</td><td>${dur(r.ran_med)}</td><td>${dur(r.ran_p90)}</td></tr>`).join("")}</table>`;
+  };
+  const list = (title, rows, what) => `<h3>${title}</h3><table class="atable"><tr><th>Task</th><th>Cost</th><th>Run</th><th>Fix rounds</th><th>Turns</th><th>Model</th></tr>${
+    rows.map(t => `<tr><td class="t"><a data-task="${t.id}">#${t.id}</a> ${esc(t.title)} <span class="muted">${pf ? "" : esc(P(t.project).title || t.project) + " · "}${esc(t.kind)} · ${esc(LABEL[t.state] || t.state)}</span></td><td>${money(t.cost)}</td><td>${dur(t.ran)}</td><td>${t.fixes}</td><td>${t.turns}</td><td>${esc(t.model)}</td></tr>`).join("")
+    || `<tr><td class="muted">None</td></tr>`}</table>`;
+  const projects = a.per_project.length > 1 && !pf ? `<div class="card"><h2>Per project</h2><table class="atable"><tr><th></th><th>Tasks</th><th>Cost</th><th>Median $</th><th>p90 $</th><th>Median run</th><th>Queued (median)</th><th>Wasted</th><th>Chats</th></tr>${
+    a.per_project.map(p => `<tr><td>${esc(p.title)}</td><td>${p.n}</td><td>${money(p.cost)}</td><td>${money(p.cost_med)}</td><td>${money(p.cost_p90)}</td><td>${dur(p.ran_med)}</td><td>${dur(p.queued_med)}</td><td>${money(p.wasted)}</td><td>${money(p.chat_cost)}</td></tr>`).join("")}</table></div>` : "";
+  const causes = a.gate_causes.length ? `<h3>What the gate-fix rounds fixed</h3><table class="atable"><tr><th>Cause</th><th>Rounds</th><th>Tasks</th></tr>${
+    a.gate_causes.map(c => `<tr><td class="t mono">${esc(c.cause)}</td><td>${c.n}</td><td>${c.tasks.slice(0, 6).map(id => `<a data-task="${id}">#${id}</a>`).join(" ")}${c.tasks.length > 6 ? " …" : ""}</td></tr>`).join("")}</table>` : "";
+  put($("#abody"), `
+    <div class="card"><h2>How to improve</h2>${tips}</div>
+    <div class="card daily"><h2>Spend per day</h2>${dailyChart(a.daily)}</div>
+    ${projects}
+    <div class="card"><h2>Where it went</h2><div>
+      <div>${table("By kind", a.by_kind, k => esc(KINDWORD[k] || k))}${table("By model", a.by_model)}${table("By effort", a.by_effort)}</div>
+      <div>${table("By gate-fix rounds", a.by_fixes, k => k === "0" ? "none" : esc(k))}${table("By Claude turns (first turn, fixes, answers, retries, resumes)", a.by_turns)}${table("By outcome", a.by_state, k => esc(LABEL[k] || k))}${causes}</div>
+    </div></div>
+    <div class="card"><h2>Dearest and slowest</h2><div class="grid2"><div>${list("Most expensive", a.dearest)}</div><div>${list("Slowest (run time)", a.slowest)}</div></div></div>`);
+}
+
+// One bar per day of spend, in an SVG that scales to its card. Hover a bar for its day, cost and task count.
+function dailyChart(days) {
+  if (!days.length) return `<div class="muted">No spend.</div>`;
+  const all = [], step = 86400000, last = new Date(days[days.length - 1].day + "T12:00");
+  const byDay = Object.fromEntries(days.map(d => [d.day, d]));
+  for (let t = new Date(days[0].day + "T12:00"); t <= last && all.length < 400; t = new Date(t.getTime() + step)) {
+    const k = `${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, "0")}-${String(t.getDate()).padStart(2, "0")}`;
+    all.push(byDay[k] || {day: k, cost: 0, n: 0});
+  }
+  const W = 800, H = 140, top = 14, bottom = 18, max = Math.max(...all.map(d => d.cost), 0.01), bw = W / all.length;
+  const bars = all.map((d, i) => {
+    const h = d.cost / max * (H - top - bottom);
+    return `<rect x="${i * bw + bw * 0.12}" y="${H - bottom - h}" width="${Math.max(1, bw * 0.76)}" height="${Math.max(h, d.cost ? 1 : 0)}" data-tip="${esc(`${d.day}: ${money(d.cost)}, ${d.n} ${d.n === 1 ? "task" : "tasks"}`)}"></rect>`;
+  }).join("");
+  const every = Math.ceil(all.length / 8);
+  const labels = all.map((d, i) => i % every ? "" : `<text x="${i * bw + bw / 2}" y="${H - 4}" text-anchor="middle">${d.day.slice(5)}</text>`).join("");
+  return `<svg viewBox="0 0 ${W} ${H}"><text x="0" y="10">${money(max)}</text>${bars}${labels}</svg>`;
+}
+
 // ---------------------------------------------------------------- design and chat tabs
 // Both show chats from /api/designs: the Design tab those of kind "design", the Chat tab those of kind "project".
 const KIND = {design: "design", chat: "project"};
@@ -1256,14 +1379,14 @@ const TABTEXT = {
          intro: "Talk to Claude in the project folder, as if you ran claude there. It can read, edit and run commands in your checkout. Actions that would ask for permission are denied, since nobody can answer here."}};
 let tab = "projects", chatSel = null, chatData = null, chatKey = "", chatSels = {};
 try { tab = localStorage.getItem("ops-tab") || "projects"; chatSels = JSON.parse(localStorage.getItem("ops-chats") || "{}"); } catch {}
-if (["#tasks", "#projects", "#design", "#queue", "#chat", "#settings"].includes(location.hash)) tab = location.hash.slice(1);
-if (!["tasks", "projects", "design", "chat", "settings"].includes(tab)) tab = "tasks";  // "queue", the old name of Tasks
+if (["#tasks", "#projects", "#design", "#queue", "#chat", "#analyze", "#settings"].includes(location.hash)) tab = location.hash.slice(1);
+if (!["tasks", "projects", "design", "chat", "analyze", "settings"].includes(tab)) tab = "tasks";  // "queue", the old name of Tasks
 const chatTab = () => tab === "design" || tab === "chat";
 
 function showTab(t) {
   tab = t;
   try { localStorage.setItem("ops-tab", t); } catch {}
-  for (const k of ["tasks", "projects", "design", "chat", "settings"]) $(`#tab-${k}`).className = t === k ? "on" : "";
+  for (const k of ["tasks", "projects", "design", "chat", "analyze", "settings"]) $(`#tab-${k}`).className = t === k ? "on" : "";
   // On a phone the tabs scroll sideways: bring the chosen one into view, without scrolling the page.
   const bar = $("header > .tabs"), on = $(`#tab-${t}`);
   if (on && bar.scrollWidth > bar.clientWidth) {
@@ -1274,6 +1397,8 @@ function showTab(t) {
   $("#tasksview").classList.toggle("hidden", t !== "tasks");
   $("#projectsview").classList.toggle("hidden", t !== "projects");
   $("#settingsview").classList.toggle("hidden", t !== "settings");
+  $("#analyzeview").classList.toggle("hidden", t !== "analyze");
+  if (t === "analyze") refreshAnalyze();
   $("#designview").classList.toggle("hidden", !chatTab());
   if (!chatTab()) return;
   chatSel = chatSels[t] || null; chatData = null; chatKey = "";
@@ -1287,6 +1412,7 @@ $("#tab-projects").onclick = () => showTab("projects");
 $("#tab-design").onclick = () => showTab("design");
 $("#tab-chat").onclick = () => showTab("chat");
 $("#tab-settings").onclick = () => showTab("settings");
+$("#tab-analyze").onclick = () => showTab("analyze");
 
 // Markdown for chat replies and OpenSpec files, in house. The source is HTML-escaped first, so raw HTML never
 // renders and every pattern below matches escaped text (a quote's ">" is "&gt;"). With idPrefix each heading gets
