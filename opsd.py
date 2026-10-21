@@ -2706,8 +2706,8 @@ def promote(p, tid, commit, note=""):
             shutil.rmtree(art, ignore_errors=True)
             prev.rename(art)
 
-    if p.build or p.launch:  # Play main plays its worktree, so it follows main even with nothing to build
-        art = p.main_wt / p.artifact if p.artifact and p.build else None
+    if p.build:
+        art = p.main_wt / p.artifact if p.artifact else None
         if art and (not within(art, p.main_wt) or within(p.main_wt, art)):  # it gets deleted and replaced
             return f"[app] artifact must be a path inside the worktree, not {p.artifact!r}."
         prev = art.with_name(art.name + ".previous") if art else None
@@ -2718,8 +2718,7 @@ def promote(p, tid, commit, note=""):
         old = [(r, r.git("rev-parse", "HEAD", cwd=r.at(p.main_wt))) for r in p.parts]
         for r, sha in p.pairs(commit):
             r.git("checkout", "--detach", sha, cwd=r.at(p.main_wt))
-        rc, tail = run_step(tid, f"building {p.main} at {p.show(commit)}", p.build, p.main_wt,
-                            "build.log") if p.build else (0, "")
+        rc, tail = run_step(tid, f"building {p.main} at {p.show(commit)}", p.build, p.main_wt, "build.log")
         if rc or (art and not art.exists()):
             undo()
             return f"Build failed; {p.main} and its build are unchanged.\n" + tail[-2000:]
