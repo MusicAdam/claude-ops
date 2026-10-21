@@ -51,8 +51,10 @@ CLAUDE = os.environ.get("OPS_CLAUDE") or shutil.which("claude") or str(HOME / ".
 MAX_FIX_ROUNDS = 3  # times a worker is sent back after a conflict or failed gate
 # A worker's next turn starts a fresh session, with a handoff note, instead of resuming one whose
 # prompt cache has expired (it lasts an hour) or whose context makes every call dear. docs/usage-analysis.md Q2, Q3.
+# A chat's next turn does the same above FRESH_ABOVE (see chat_stale). Every call rereads the whole context, so cache
+# reads are most of the tokens used: a 90k limit about halves the dearest calls for the price of a ~10k-token note.
 FRESH_AFTER = 55 * 60  # seconds since the session's last call
-FRESH_ABOVE = 155_000  # tokens of context at its last call
+FRESH_ABOVE = 90_000  # tokens of context at its last call
 HANDOFF_CHARS = 40_000  # about 10k tokens of handoff note
 RESULT_FILE = ".ops-result.json"
 
@@ -151,6 +153,7 @@ class Project:
         self.port_base = int(wk.get("port_base", 47900))
         self.worker_notes = wk.get("notes", "").strip()
         self.design_notes = c.get("design", {}).get("notes", "").strip()
+        self.chat_mcp = [str(n) for n in c.get("chat_mcp", [])]  # MCP servers a project chat loads (see mcp_servers)
         self.dev_wt = self.wt / "dev"
         self.main_wt = self.wt / "main"
         self.deploy_wt = self.wt / "deploy"  # persistent: build output survives from one deploy to the next
@@ -666,7 +669,8 @@ def init_db():
                       ("seen", "REAL DEFAULT 0"), ("ended", "REAL"),  # and before "ready for you" and End chat
                       ("origin", "TEXT"),  # and before peer sends
                       ("spec_draft", "INTEGER DEFAULT 0"),  # and before New change: drafting, no change yet
-                      ("session_model", "TEXT")):  # and before models per kind: the model its session started on
+                      ("session_model", "TEXT"),  # and before models per kind: the model its session started on
+                      ("last_call", "REAL"), ("ctx_tokens", "INTEGER")):  # its session's last call (see chat_stale)
         if col not in dcols:
             q(f"ALTER TABLE designs ADD COLUMN {col} {decl}")
             if col == "seen":  # chats from before count as read, so they don't all show a new reply at once
@@ -4063,6 +4067,54 @@ def stream_claude(cmd, cwd, log_dir, live, procs, key, on_session, env=None, on_
     return reply, cost
 
 
+def chat_stale(d):
+    """Why chat d's next turn should start a fresh session, as (words for the note, words for the chat), or None to
+    resume it: its context at its last call was over FRESH_ABOVE, so every call rereads too much. Unlike a task, an
+    expired cache alone doesn't start over: a chat's history is the conversation, and the note keeps only its text."""
+    ctx = d["ctx_tokens"] or 0
+    if not d["session_id"] or ctx <= FRESH_ABOVE:
+        return None
+    return f"its context reached {ctx:,} tokens", f"this chat's context reached {ctx // 1000}k tokens"
+
+
+def chat_handoff(did, why):
+    """The conversation so far, for a chat's fresh session: every message but the one being answered now, oldest
+    first, each cut at 4000 characters, the oldest dropped to keep it under HANDOFF_CHARS. No Claude call."""
+    who = {"user": "The owner", "assistant": "You", "ops": "The dashboard"}
+    msgs = q("SELECT role,text FROM design_msgs WHERE design_id=? ORDER BY id", (did,))
+    if msgs and msgs[-1]["role"] == "user":
+        msgs = msgs[:-1]  # this turn's message: it follows the note as "Now"
+    said = "\n\n".join(f"{who.get(m['role'], m['role'])}: {(m['text'] or '')[:4000]}" for m in msgs) or "(none)"
+    head = (f"## Handoff from your earlier session\n\nYour earlier session of this chat ended (reason: {why}). "
+            "This is a fresh session. Files you changed or read are as they were; re-read what you need. "
+            "The conversation so far, oldest first:\n\n")
+    room = HANDOFF_CHARS - len(head)
+    if len(said) > room:
+        said = "… (earlier messages cut)\n\n" + said[len(said) - room + 40:]
+    return head + said
+
+
+def mcp_servers(p):
+    """The MCP servers p's project chats load: the chat_mcp names, defined in your local, project (.mcp.json) or
+    user scope, in Claude's order. Returns (the --mcp-config JSON, names not found). claude.ai connectors can't be
+    listed: --strict-mcp-config drops them and only claude.ai can define them."""
+    found = {}
+    try:
+        cfg = json.loads((HOME / ".claude.json").read_text())
+    except (OSError, ValueError):
+        cfg = {}
+    try:
+        shared = json.loads((p.repo / ".mcp.json").read_text()).get("mcpServers") or {}
+    except (OSError, ValueError, AttributeError):
+        shared = {}
+    for scope in ((cfg.get("projects") or {}).get(str(p.repo), {}).get("mcpServers") or {}, shared,
+                  cfg.get("mcpServers") or {}):
+        for name in p.chat_mcp:
+            if name not in found and isinstance(scope.get(name), dict):
+                found[name] = scope[name]
+    return json.dumps({"mcpServers": found}), [n for n in p.chat_mcp if n not in found]
+
+
 def design_turn(did, text):
     d = design(did)
     p = proj(d["project"])
@@ -4082,17 +4134,39 @@ def design_turn(did, text):
             return
         tools += spec_tools(cwd)
     tools += f",Bash({SEND_CMD}:*)"  # read-only still: it only asks another project to do something
-    if chat:  # your own settings and MCP servers apply, like the CLI; auto mode stands in for prompts
+    kept, handoff = None, ""
+    if why := chat_stale(d):  # cheaper to start over than to resume: a handoff note, then this turn
+        kept, handoff = session_model(d, d["kind"]), chat_handoff(did, why[0])  # the fresh one keeps its model
+        q("UPDATE designs SET session_id=NULL, last_call=NULL, ctx_tokens=NULL WHERE id=?", (did,))
+        q("INSERT INTO design_msgs (design_id, role, text, ts) VALUES (?,?,?,?)",
+          (did, "ops", f"Started a fresh session: {why[1]}, and every reply rereads all of it. The new session "
+                       "gets a copy of this conversation so far (the oldest messages cut if it is long).",
+           time.time()))
+        d = design(did)
+    slash = text.strip().startswith("/")  # the CLI runs a slash command only from the start of the prompt
+    if handoff and not slash:
+        text = handoff + "\n\n## Now\n\n" + text
+    if chat:  # your own settings apply, like the CLI; auto mode stands in for prompts
         said = news(did)  # word from a project it sent something to; a design chat gets it in ops_note
+        mcp, missing = mcp_servers(p)
+        if missing and not d["session_id"]:  # once per session, as that is when servers load
+            q("INSERT INTO design_msgs (design_id, role, text, ts) VALUES (?,?,?,?)",
+              (did, "ops", f"chat_mcp in {p.name}.toml names MCP servers Claude has no definition for, so this "
+                           f"chat runs without them: {', '.join(missing)}.", time.time()))
+        system = PROJECT_CHAT_PROMPT + "\n\n" + peer_brief(p, "chat")
+        if handoff and slash:
+            system += "\n\n" + handoff
         cmd = [CLAUDE, "-p", ("[ops: " + " | ".join(said) + "]\n\n" if said else "") + with_images(text),
                "--output-format", "stream-json", "--verbose",
                "--permission-mode", "auto", "--permission-prompts", "none", "--no-chrome",
+               "--mcp-config", mcp, "--strict-mcp-config",  # only chat_mcp: every tool rides on every call
                "--name", f"{p.name} chat #{did}", "--settings", guard_settings(None),
-               "--append-system-prompt", PROJECT_CHAT_PROMPT + "\n\n" + peer_brief(p, "chat")]
+               "--append-system-prompt", system]
     else:
         note, system = ops_note(p, did, extra), design_system_prompt(p, d, cwd)
-        if text.strip().startswith("/"):  # the CLI runs a slash command only from the start of the prompt
+        if slash:
             system = system.rstrip() + "\n\n## Dashboard note for this turn\n\n" + note.strip()
+            system += "\n\n" + handoff if handoff else ""
             text, note = text.strip(), ""
         cmd = [CLAUDE, "-p", note + with_images(text), "--output-format", "stream-json",
                "--verbose", "--permission-mode", "dontAsk", "--permission-prompts", "none", "--allowedTools", tools,
@@ -4104,8 +4178,8 @@ def design_turn(did, text):
     if d["session_id"]:
         cmd += ["--resume", d["session_id"]]
     else:  # a new session: what it starts on, until its init event names the model exactly
-        q("UPDATE designs SET session_model=? WHERE id=?", (session_model(d, d["kind"]), did))
-    cmd += model_args(session_model(d, d["kind"])) + effort_args(effort_for())
+        q("UPDATE designs SET session_model=? WHERE id=?", (kept or session_model(d, d["kind"]), did))
+    cmd += model_args(kept or session_model(d, d["kind"])) + effort_args(effort_for())
 
     def on_session(sid):
         if sid != design(did)["session_id"]:
@@ -4118,7 +4192,9 @@ def design_turn(did, text):
     try:
         reply, cost = stream_claude(cmd, cwd, RUNS / f"design-{did}", DESIGN_LIVE[did], DESIGN_PROCS, did,
                                     on_session, env=dict(os.environ, OPS_FROM=f"chat:{did}", OPS_DAEMON=DAEMON_URL),
-                                    on_model=on_model)
+                                    on_model=on_model, on_call=lambda ctx: q(
+                                        "UPDATE designs SET last_call=?, ctx_tokens=? WHERE id=?",
+                                        (time.time(), ctx, did)))
         if design(did)["ended"] and reply.startswith("(no reply;"):  # End stopped it; say so, not the exit code
             reply = "You ended the chat; the reply was stopped."
         attached = spec_attach(p, d, before) if before is not None else None  # (text, note) or None

@@ -378,10 +378,25 @@ This applies to both the Design and the Chat tab.
 
 The Chat tab is plain Claude in the project folder, as if you ran `claude` there. It works in your
 checkout (`repo`), not a worktree, so it can read, edit, commit and run commands there, with your own
-settings, `CLAUDE.md` and MCP servers. Each chat keeps one Claude session across messages.
+settings and `CLAUDE.md`. Each chat keeps one Claude session across messages, until its context grows too big
+(see **Fresh sessions in chats** below).
+
+- **MCP servers.** A project chat loads only the MCP servers named in the project's `chat_mcp` list, none by
+  default. Every server's tool definitions ride on every call, so each one you add makes every reply dearer.
+  Name servers you defined with `claude mcp add` in any scope (user, local, or the repo's `.mcp.json`):
+  `chat_mcp = ["ballup-app"]` in `~/.claude-ops/projects/<name>.toml`. claude.ai connectors (Gmail, Google
+  Sheets, Docs …) never load in a project chat: the chat runs with `--strict-mcp-config`, which drops them, and
+  only claude.ai can define them. A name with no definition is skipped, and the chat says so.
 
 - Nobody can answer permission prompts on the dashboard, so it runs in auto mode: actions that would
   prompt are denied, and Claude tells you what it couldn't do.
+- **Fresh sessions in chats.** Design and project chats track the context of each call. When the last call of a
+  chat's session was over 90k tokens, your next message starts a fresh session on the same model, and the chat
+  shows "Started a fresh session: this chat's context reached 95k tokens …". The new session gets a handoff
+  note first: the conversation so far, oldest first, each message cut at 4000 characters, about 10k tokens in
+  all with the oldest cut. Files and the change's folder are as they were. The old session id stops working in
+  the header's `claude --resume` line; the new one replaces it. Unlike a task, a chat does not start over just
+  because its cache expired.
 - The chat header shows `cd <repo> && claude --resume <id>`. Run it to carry on in a terminal, where
   you can answer prompts. Don't send from both places at once.
 - Edits land in your checkout and nothing else. Uncommitted ones survive a release: it merges them onto the
@@ -470,6 +485,7 @@ dev_branch = "dev"                 # created from main if missing; add-project p
 worktrees = "/Users/you/dev/mygame-wt"   # default: <repo>-wt
 # repos = ["backend", "app"]       # a workspace: repo is a folder and these folders in it are the git repos
 max_parallel = 0                   # per-project cap; 0 = only the global "Parallel" limit
+chat_mcp = []                      # MCP servers a project chat loads, by name (see Chat mode); default none
 
 [worktree]
 clone = ["Library"]                # APFS-cloned into each new worktree (warm caches)
@@ -616,15 +632,16 @@ notes = """Project-specific guidance for design chats."""
 - **Fresh sessions.** Before a worker resumes its Claude session (an answer, a gate fix, a
   rebase conflict, a retry, a pause, a restart, a usage-limit wait), the daemon checks the session's last call.
   If it was over 55 minutes ago (the prompt cache lasts an hour, and a cold resume rewrites the whole context at
-  about 40 times the price of rereading it) or its context was over 155k tokens (every call rereads it), the
+  about 40 times the price of rereading it) or its context was over 90k tokens (every call rereads it), the
   turn starts a new session instead, on the same model. It is sent the task's first-turn brief, then a handoff
   note, then the turn's own prompt. The daemon writes the note itself, with no Claude call: why the old session
   ended, `git log --oneline <dev>..HEAD`, `git diff --stat <dev>...HEAD` and `git status --short` from the
   worktree, the last summary, your messages and answers so far, and the last question. It is capped at about
   10k tokens, cutting the diff stat first. The task log says "started a fresh session: last call 3 h ago (cache
-  expired)" or "…: context 170k". Each task keeps `last_call` and `ctx_tokens` from its worker's stream (Ask the
+  expired)" or "…: context 120k". Each task keeps `last_call` and `ctx_tokens` from its worker's stream (Ask the
   worker updates them too). The thresholds are `FRESH_AFTER` and `FRESH_ABOVE` in `opsd.py`, from
-  `docs/usage-analysis.md` Q2 and Q3. Chats and Ask the worker always resume.
+  `docs/usage-analysis.md` Q2 and Q3, with the context limit lowered from 155k to 90k later, as cache reads were
+  most of all tokens used. Ask the worker always resumes; chats start over on context only (see Chat mode).
 - **Talk to a working worker.** While a task is queued, working or being checked, the task page has
   a "Talk to the worker" box. A message goes straight to the running worker, which reads it after its
   current step, answers in a line or two, and changes course. Where your message and the task
