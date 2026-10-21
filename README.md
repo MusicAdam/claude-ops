@@ -542,12 +542,13 @@ notes = """Project-specific guidance for design chats."""
     task or chat. Every resume passes it to `--model`, whatever the settings say now: answers, gate fixes, rebase
     conflicts, retries, pauses, usage-limit waits and Ask the worker. Only a new session picks again: a
     release's checker after a worker merged main into dev, or a worker that merges your uncommitted changes. Sessions from before this ran on the global model and
-    keep it.
+    keep it. A fresh session that replaces a cold or oversized one (see **Fresh sessions**) keeps it too.
   - **On the dashboard** the task page shows the model its session runs on, and the task list tags tasks that
     are not on Opus, so you can compare a trial of Sonnet tasks later.
 - **Pausing.** **❚❚ Pause** on a task, or **Pause running** in the header (`./opsctl pause`), stops it
-  now and keeps its place. A worker's Claude session resumes where it was; a command it was running
-  (a test run, a build) is stopped and it is told to check and carry on. A task paused during its gate
+  now and keeps its place. A worker's Claude session resumes where it was, unless it waited over 55 minutes
+  (see **Fresh sessions**); a command it was running (a test run, a build) is stopped and it is told to check
+  and carry on. A task paused during its gate
   runs the gate again from the start. A task that is merging can't be paused. Paused tasks stay paused
   across restarts: click **▶ Resume** on a task, or **▶ Resume all** in the header (`./opsctl resume`),
   to queue them again. **Resume all** shows whenever a task is paused, even while others run. **Pause queue** is
@@ -558,7 +559,8 @@ notes = """Project-specific guidance for design chats."""
     told the limit stopped it mid-turn and to check `git status` and `git log`, finish, and write its result. This
     covers every Claude step: workers, release checkers, and the workers that carry your changes over or merge main
     into dev. Other running workers carry on, and are paused the same way if they hit it. Gates and merges don't use
-    Claude and carry on.
+    Claude and carry on. A wait of over 55 minutes outlives the prompt cache, so a worker or release checker
+    resumes in a fresh session with a handoff note (see **Fresh sessions**).
   - **The queue starts nothing until the reset.** The reset time and the limit's kind are saved as the settings
     `limited_until` and `limited_kind`, so a restart keeps them (if Claude doesn't say when it resets, or names a time
     already past, the queue waits 15 minutes). A worker about to start a new turn in that time pauses at once, keeping its prompt. Queued tasks say
@@ -590,10 +592,23 @@ notes = """Project-specific guidance for design chats."""
     or above the brake, and red while the queue waits out the usage limit itself.
 - **Restarts.** Whenever the daemon stops (`./opsctl restart` or `stop`, a promote of claude-ops, launchd, a
   `kill`), it pauses every running task the same way, lets a merge finish, and exits. The next daemon resumes
-  those tasks on its own; tasks you paused stay paused, and so do tasks the usage limit paused, until it resets. Nothing about a restart is saved that could hold the
+  those tasks on its own, each in the same Claude session (or a fresh one after a long wait: see **Fresh
+  sessions**); tasks you paused stay paused, and so do tasks the usage limit paused, until it resets. Nothing about a restart is saved that could hold the
   queue: if the daemon crashes instead, the next one requeues whatever was running.
 - **Questions.** A worker that needs a decision stops with a question. Answer it on the dashboard
-  and the same Claude session resumes.
+  and the same Claude session resumes, or a fresh one if you answer after the cache expired.
+- **Fresh sessions.** Before a worker or release checker resumes its Claude session (an answer, a gate fix, a
+  rebase conflict, a retry, a pause, a restart, a usage-limit wait), the daemon checks the session's last call.
+  If it was over 55 minutes ago (the prompt cache lasts an hour, and a cold resume rewrites the whole context at
+  about 40 times the price of rereading it) or its context was over 155k tokens (every call rereads it), the
+  turn starts a new session instead, on the same model. It is sent the task's first-turn brief, then a handoff
+  note, then the turn's own prompt. The daemon writes the note itself, with no Claude call: why the old session
+  ended, `git log --oneline <dev>..HEAD`, `git diff --stat <dev>...HEAD` and `git status --short` from the
+  worktree, the last summary, your messages and answers so far, and the last question. It is capped at about
+  10k tokens, cutting the diff stat first. The task log says "started a fresh session: last call 3 h ago (cache
+  expired)" or "…: context 170k". Each task keeps `last_call` and `ctx_tokens` from its worker's stream (Ask the
+  worker updates them too). The thresholds are `FRESH_AFTER` and `FRESH_ABOVE` in `opsd.py`, from
+  `docs/usage-analysis.md` Q2 and Q3. Chats and Ask the worker always resume.
 - **Talk to a working worker.** While a task is queued, working or being checked, the task page has
   a "Talk to the worker" box. A message goes straight to the running worker, which reads it after its
   current step, answers in a line or two, and changes course. Where your message and the task

@@ -46,6 +46,11 @@ PORT = int(os.environ.get("OPS_PORT", "8788"))
 DAEMON_URL = f"http://{'127.0.0.1' if HOST in ('', '0.0.0.0', '::') else HOST}:{PORT}"  # for `opsd.py send`
 CLAUDE = os.environ.get("OPS_CLAUDE") or shutil.which("claude") or str(HOME / ".local/bin/claude")
 MAX_FIX_ROUNDS = 3  # times a worker is sent back after a conflict or failed gate
+# A worker or release checker's next turn starts a fresh session, with a handoff note, instead of resuming one whose
+# prompt cache has expired (it lasts an hour) or whose context makes every call dear. docs/usage-analysis.md Q2, Q3.
+FRESH_AFTER = 55 * 60  # seconds since the session's last call
+FRESH_ABOVE = 155_000  # tokens of context at its last call
+HANDOFF_CHARS = 40_000  # about 10k tokens of handoff note
 RESULT_FILE = ".ops-result.json"
 
 ACTIVE = ("running", "gating", "merging")
@@ -534,7 +539,8 @@ def init_db():
                       ("origin", "TEXT"),  # and before peer sends
                       ("senddev", "TEXT"),  # and before Send to dev: its snapshot and how it went, as JSON
                       ("model", "TEXT"),  # and before models per task: null takes model:<kind> (see model_for)
-                      ("session_model", "TEXT")):  # the model its session started on; every resume keeps it
+                      ("session_model", "TEXT"),  # the model its session started on; every resume keeps it
+                      ("last_call", "REAL"), ("ctx_tokens", "INTEGER")):  # its session's last call (see stale_session)
         if col not in cols:
             q(f"ALTER TABLE tasks ADD COLUMN {col} {decl}")
     q("CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY, task_id INTEGER, ts REAL, text TEXT)")
@@ -1129,6 +1135,102 @@ def result_path(t):
     return Path(t["worktree"]) / RESULT_FILE  # inside the worktree, where auto mode lets workers write
 
 
+def main_call(e):
+    """The context of a main-agent call, in tokens (input, cache writes and cache reads), from its assistant event.
+    0 for any other event, a subagent's, or one that never reached the API (an error message has no usage)."""
+    msg = e.get("message")
+    if e.get("type") != "assistant" or e.get("parent_tool_use_id") or not isinstance(msg, dict):
+        return 0
+    u = msg.get("usage") if isinstance(msg.get("usage"), dict) else {}
+    return sum(n for k in ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens")
+               if isinstance(n := u.get(k), int))
+
+
+def span(s):
+    return f"{round(s / 60)} min" if s < 7200 else f"{s / 3600:.0f} h"
+
+
+def stale_session(t):
+    """Why t's session should not be resumed, as (words for the note, words for the event), or None to resume it.
+    Its prompt cache has expired, so a resume writes the whole context again at 40 times the price of rereading it,
+    or its context is so large that every call is dear. Tasks from before last_call was kept always resume."""
+    if not t["session_id"] or not t["last_call"]:
+        return None
+    gap, ctx = time.time() - t["last_call"], t["ctx_tokens"] or 0
+    if gap > FRESH_AFTER:
+        return f"the cache expired after {span(gap)}", f"last call {span(gap)} ago (cache expired)"
+    if ctx > FRESH_ABOVE:
+        return f"the context reached {ctx:,} tokens", f"context {ctx // 1000}k"
+    return None
+
+
+def first_brief(p, t):
+    """The brief t's first turn sent, built again for a fresh session."""
+    if t["kind"] == "release":
+        return release_prompt(p, t)
+    if t["kind"] == "senddev":
+        return senddev_brief(p, t)
+    return worker_prompt(p, t)
+
+
+def handoff_note(p, t, why):
+    """What a fresh session needs from the one it replaces, built by the daemon with no Claude call: the branch, the
+    last summary, your messages and answers so far, and the last question. At most HANDOFF_CHARS: the diff stat is
+    cut first, then the oldest messages."""
+    wt = t["worktree"]
+
+    def git(*a):
+        out = []
+        for r in p.parts:
+            try:
+                got = r.git(*a, cwd=r.at(wt), check=False)
+            except OSError:
+                got = ""
+            out.append((f"{r.sub}/:\n" if r.sub else "") + (got or "(none)"))
+        return "\n".join(out)
+
+    said = [(m["ts"], {"steer": "The user, by message", "user": "The user, asking about the task",
+                       "assistant": "You replied"}.get(m["role"], m["role"]) + f": {m['text'][:2000]}")
+            for m in q("SELECT role,text,ts FROM task_msgs WHERE task_id=? ORDER BY id", (t["id"],))]
+    try:
+        with open(RUNS / str(t["id"]) / "claude.jsonl", errors="replace") as f:
+            for line in f:  # each turn's prompt is kept there; an answer is one
+                if '"type": "ops"' in line:
+                    o = json.loads(line)
+                    turn = o.get("turn") or o.get("prompt") or ""
+                    if turn.startswith(ANSWERED):
+                        said.append((o.get("ts") or 0, "The user answered your question: "
+                                     + turn[len(ANSWERED):].strip().removesuffix(ANSWER_TAIL).strip()[:2000]))
+    except (OSError, ValueError):
+        pass
+    said = "\n\n".join(s for _, s in sorted(said, key=lambda x: x[0])) or "(none)"
+    asked = t["question"] or next((e["text"].split(": ", 1)[1] for e in q(
+        "SELECT text FROM events WHERE task_id=? AND text LIKE 'needs your input: %' ORDER BY id DESC LIMIT 1",
+        (t["id"],))), "(none)")
+    stat = git("diff", "--stat", f"{p.dev}...HEAD")
+
+    def note(stat, said):
+        return (f"## Handoff from your earlier session\n\nYour earlier session on this task ended (reason: {why}). "
+                f"This is a fresh session; the work so far is on your branch.\n\n"
+                f"Commits (`git log --oneline {p.dev}..HEAD`):\n```\n{log}\n```\n\n"
+                f"Files changed (`git diff --stat {p.dev}...HEAD`):\n```\n{stat}\n```\n\n"
+                f"Uncommitted (`git status --short`):\n```\n{status}\n```\n\n"
+                f"Your last summary:\n{t['summary'] or '(none)'}\n\n"
+                f"The user's messages and answers so far, oldest first:\n{said}\n\n"
+                f"The last question you asked:\n{asked}")
+
+    log, status = git("log", "--oneline", f"{p.dev}..HEAD"), git("status", "--short")
+    over = len(note(stat, said)) - HANDOFF_CHARS
+    if over > 0:  # the diff stat first, keeping its total line, then the oldest messages
+        last = stat.rsplit("\n", 1)[-1]
+        keep = max(0, len(stat) - over - len(last) - 20)
+        stat = stat[:keep].rstrip() + "\n… (cut)\n" + last if keep else "(cut: too long)"
+        over = len(note(stat, said)) - HANDOFF_CHARS
+    if over > 0:
+        said = "… (earlier ones cut)\n" + said[over + 30:]
+    return note(stat, said)[:HANDOFF_CHARS]
+
+
 def stopped(tid):
     """You paused or cancelled the task: its pipeline returns at the next check."""
     return task(tid)["state"] in STOPPED
@@ -1149,6 +1251,15 @@ def run_claude(p, tid, prompt):
     run_dir.mkdir(parents=True, exist_ok=True)
     rp = result_path(t)
     rp.unlink(missing_ok=True)
+    turn, kept = prompt, None
+    if why := stale_session(t):  # cheaper to start over than to resume: brief, handoff note, then this turn
+        kept = session_model(t, t["kind"])  # the fresh session stays on the model the old one ran
+        brief = first_brief(p, t)
+        prompt = "\n\n".join(x for x in (brief, handoff_note(p, t, why[0]),
+                                         "## Now\n\n" + turn if turn and turn != brief else "") if x)
+        upd(tid, session_id=None)
+        ev(tid, f"started a fresh session: {why[1]}")
+        t = task(tid)
     asked, prompt = prompt, with_images(prompt)
     acking = False  # a message was just read: its reply is the next thing the worker says
     limit = None  # rate_limit_info once the turn hits the usage limit
@@ -1159,16 +1270,19 @@ def run_claude(p, tid, prompt):
            "--settings", guard_settings(t["worktree"])]
     if t["session_id"]:
         cmd += ["--resume", t["session_id"]]
+        model = session_model(t, t["kind"])
     else:  # a new session: what it starts on, until its init event names the model exactly
-        upd(tid, session_model=session_model(t, t["kind"]))
-    cmd += model_args(session_model(t, t["kind"]))
+        model = session_model(t, t["kind"]) if kept is None else kept
+        upd(tid, session_model=model, last_call=None, ctx_tokens=None)
+    cmd += model_args(model)
     port = p.port_for(tid)
     env = dict(os.environ, OPS_RESULT=str(rp), OPS_TASK_ID=str(tid), OPS_PORT=str(port), OPS_FROM=f"task:{tid}",
                OPS_DAEMON=DAEMON_URL, **{k: str(v).format(port=port) for k, v in p.env.items()})
     upd(tid, phase="claude working")
     sid = t["session_id"]
     with open(run_dir / "claude.jsonl", "a") as log, open(run_dir / "claude.err", "a") as err:
-        log.write(json.dumps({"type": "ops", "prompt": prompt[:2000], "ts": time.time()}) + "\n")
+        log.write(json.dumps({"type": "ops", "prompt": prompt[:2000], "ts": time.time(),
+                              **({"turn": turn[:4000]} if kept is not None else {})}) + "\n")  # see handoff_note
         proc = subprocess.Popen(cmd, cwd=t["worktree"], env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                 stderr=err, text=True, start_new_session=True)
         track(tid, proc)
@@ -1207,6 +1321,8 @@ def run_claude(p, tid, prompt):
                 limit = {**hit, **(limit or {})}  # the first event says when it resets; the result doesn't
             if (used := usage_of(e)) is not None:
                 usage_seen(used)
+            if ctx := main_call(e):
+                upd(tid, last_call=time.time(), ctx_tokens=ctx)
             if e.get("type") == "user" and e.get("isReplay") and isinstance(content, str):
                 with STEER_LOCK:
                     sent = INFLIGHT.get(tid, [])
@@ -1553,7 +1669,7 @@ def _pipeline(p, tid):
 def ask_owner(p, tid, question):
     """The worker (or the queue) needs a decision only you can make: the task waits on you."""
     upd(tid, state="needs_input", phase="", question=question)
-    ev(tid, "needs your input")
+    ev(tid, f"needs your input: {question[:1000]}")  # kept for a fresh session's handoff note after you answer
     tell_sender(tid, "needs the owner: " + question)
     notify(f"{p.title}: task needs input", f"#{tid}: {question}")
 
@@ -1696,6 +1812,7 @@ def release_trains():
 
 
 ANSWERED = "The user answered your question:"  # how an answer reaches a task's next turn
+ANSWER_TAIL = "Continue the task and write $OPS_RESULT."  # and what follows it
 WAIT = "waiting on you"  # the phase of a release that needs you because something is in the way of moving main
 WAIT_CHANGES = "waiting on your changes"  # ... because your uncommitted changes could not be carried over
 WAIT_MAIN = "waiting on main"  # a deploy's commits can't fast-forward main: it moved during the deploy
@@ -1840,7 +1957,7 @@ def release_pipeline(p, tid):
             status = res.get("status")
             if status == "needs_input":
                 upd(tid, state="needs_input", phase="", question=res.get("question") or res.get("summary"))
-                ev(tid, "needs your input")
+                ev(tid, f"needs your input: {(res.get('question') or res.get('summary') or '')[:1000]}")
                 notify(f"{p.title}: release needs input", f"#{tid}: {res.get('question', '')}")
                 return
             if status != "done":
@@ -3722,9 +3839,9 @@ def design_system_prompt(p, d=None, cwd=None):
     return out
 
 
-def stream_claude(cmd, cwd, log_dir, live, procs, key, on_session, env=None, on_model=None):
+def stream_claude(cmd, cwd, log_dir, live, procs, key, on_session, env=None, on_model=None, on_call=None):
     """Run one chat turn of claude -p, tool lines into live. Returns (reply text, cost).
-    on_model gets the model the session runs on, from its init event."""
+    on_model gets the model the session runs on, from its init event; on_call the context of each main-agent call."""
     texts, cost, sid, limit = [], 0.0, None, None
     log_dir.mkdir(parents=True, exist_ok=True)
     with open(log_dir / "claude.jsonl", "a") as log, open(log_dir / "claude.err", "a+") as err:
@@ -3743,6 +3860,8 @@ def stream_claude(cmd, cwd, log_dir, live, procs, key, on_session, env=None, on_
                 on_session(sid)
             if on_model and (m := init_model(e)) is not None:
                 on_model(m)
+            if on_call and (ctx := main_call(e)):
+                on_call(ctx)
             if (used := usage_of(e)) is not None:
                 usage_seen(used)
             if (hit := limit_of(e)) is not None:
@@ -4449,7 +4568,8 @@ def task_chat_turn(tid, text):
         if made:
             cwd.mkdir(parents=True)
         reply, cost = stream_claude(cmd, cwd, RUNS / str(tid) / "chat", TASK_CHAT_LIVE[tid], TASK_CHAT_PROCS,
-                                    tid, on_session)
+                                    tid, on_session,  # its calls warm the worker's cache: see stale_session
+                                    on_call=lambda ctx: upd(tid, last_call=time.time(), ctx_tokens=ctx))
         upd(tid, cost=(task(tid)["cost"] or 0) + cost)
     except Exception as e:
         reply = f"(chat error: {e})"
@@ -5210,7 +5330,7 @@ class H(BaseHTTPRequestHandler):
             if st != "needs_input":
                 raise ValueError(f"task is {st}")
             upd(tid, state="queued", question=None,
-                next_prompt=f"{ANSWERED}\n\n{b['answer']}\n\nContinue the task and write $OPS_RESULT.")
+                next_prompt=f"{ANSWERED}\n\n{b['answer']}\n\n{ANSWER_TAIL}")
             ev(tid, "answered: " + b["answer"][:200])
         elif action == "approve":
             if st != "review":
