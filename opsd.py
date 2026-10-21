@@ -2168,6 +2168,8 @@ def release_pipeline(p, tid):
     if err:
         return fail(p, tid, err)
     upd(tid, start_at="claude")
+    if p.revs(p.main) != before:  # the main changelog of a project that never deployed starts here
+        set_setting(f"promoted_from:{p.name}", before)
     finish(p, tid, merged=t["base"], note=f"{p.main} is now {p.show(t['base'])}")  # and releases what merged since
     if Path(p.repo).resolve() == CODE and p.revs(p.main) != before:
         restart_self(tid)
@@ -2602,7 +2604,29 @@ def main_info(p, s=None):
             "gate": [g["name"] for g in p.gate], "release": rel,
             "deploys": deploys, "deploys_loading": bool(p.deploys) and f.get("deploys") is None,
             "deploy_open": opens[0]["id"] if opens else None, "uncommitted": f.get("uncommitted") or [],
-            "senddev_open": senddev_open(p), "senddev_pending": f.get("senddev") or []}
+            "senddev_open": senddev_open(p), "senddev_pending": f.get("senddev") or [],
+            "dev_log": titled(p, f.get("dev_log") or []), "main_log": titled(p, f.get("main_log") or []),
+            "main_since": p.show(f["main_since"]) if f.get("main_since") else None,
+            "main_since_kind": f.get("main_since_kind")}
+
+
+def titled(p, log):
+    """A changelog for the dashboard: one row per task, with its title from the tasks table, and one per commit no
+    task made, with its subject. [{"task": id or None, "title", "at": merge time, "sha", "repo"}], newest first."""
+    ids = {int(m.group(1)) for _, _, _, subj in log if (m := MERGE_SUBJECT.match(subj))}
+    titles = {t["id"]: t["title"] for t in q(f"SELECT id,title FROM tasks WHERE project=? AND id IN "
+                                             f"({','.join('?' * len(ids))})", (p.name, *ids))} if ids else {}
+    out, seen = [], set()
+    for repo, sha, at, subj in log:
+        m = MERGE_SUBJECT.match(subj)
+        tid = int(m.group(1)) if m else None
+        if tid in seen:  # a task of a workspace merges in each repo it changed
+            continue
+        if tid:
+            seen.add(tid)
+        out.append({"task": tid, "title": titles.get(tid) or (subj[m.end():] if m else subj), "at": at,
+                    "sha": sha, "repo": repo})
+    return out
 
 
 # ---------------------------------------------------------------- project facts for the dashboard
@@ -2611,12 +2635,50 @@ def main_info(p, s=None):
 # FACTS at once and rereads an entry older than FACTS_TTL behind the request: what it shows is at most a poll old.
 # Every task event marks its project's entry stale and rereads it, so a merge or promote shows on the next poll.
 
-FACTS = {}  # project name -> {"at": when read, "main", "dev": revs, "ahead": [lines], "running", "dev_running",
-#   "has_build", "dev_has_build", "deploys"}
+FACTS = {}  # project name -> {"at": when read, "main", "dev": revs, "ahead": [lines], "dev_log", "main_log":
+#   [changelog entries], "main_since", "main_since_kind", "running", "dev_running", "has_build", "dev_has_build",
+#   "deploys"}
 FACTS_TTL = 5
 FACTS_BUSY = set()  # projects being reread now, so a burst of requests starts one reread, not one each
 FACTS_LOCK = threading.Lock()
-AHEAD = {}  # (repo, main sha, dev sha) -> dev's first-parent log since main; a pair of shas never changes
+LOGS = {}  # (repo, from sha, to sha) -> [(short sha, commit time, subject)]: to's first-parent log since from; a
+#   pair of shas never changes
+MERGE_SUBJECT = re.compile(r"Merge task #(\d+): ")
+CHANGES = 200  # commits a changelog reads per repo
+
+
+def first_parent_log(r, a, b):
+    """b's first-parent commits that a lacks, newest first: on dev, one merge commit per task."""
+    key = (str(r.src), a, b)
+    if key not in LOGS:
+        if len(LOGS) > 500:
+            LOGS.clear()
+        out = r.git("log", "--first-parent", f"-n{CHANGES}", "--format=%h%x09%ct%x09%s", f"{a}..{b}")
+        LOGS[key] = [(x[0], int(x[1]), x[2]) for x in (l.split("\t", 2) for l in out.splitlines()) if len(x) == 3]
+    return LOGS[key]
+
+
+def main_since(p, s):
+    """Where the main changelog starts: (revs, "deploy" or "promote"), or (None, None) when nothing is recorded.
+    The last deploy of main (a target without `from`) when there is one, else main before the last promote."""
+    recs = [deploy_record(p, t.name, s) for t in p.deploys if not t.from_]
+    recs = [x for x in recs if x and len((x.get("revs") or "").split()) == len(p.parts)]
+    if recs:
+        return max(recs, key=lambda x: x.get("time") or 0)["revs"], "deploy"
+    before = s.get(f"promoted_from:{p.name}", "")
+    return (before, "promote") if len(before.split()) == len(p.parts) else (None, None)
+
+
+def changelog(p, revs_from, revs_to):
+    """[[repo or "", short sha, time, subject]] of revs_to's first-parent history since revs_from, newest first.
+    A repo where git can't compare them (a sha gone) adds nothing rather than failing the facts."""
+    out = []
+    for (r, a), b in zip(p.pairs(revs_from), revs_to.split()):
+        try:
+            out += [[r.sub, *c] for c in first_parent_log(r, a, b)]
+        except Exception:
+            pass
+    return sorted(out, key=lambda c: -c[2])
 
 
 def read_facts(p, deploys=True):
@@ -2626,14 +2688,13 @@ def read_facts(p, deploys=True):
             m, d = r.git("rev-parse", p.main, p.dev).split()
             main.append(m)
             dev.append(d)
-            key = (str(r.src), m, d)
-            if key not in AHEAD:
-                if len(AHEAD) > 500:
-                    AHEAD.clear()
-                AHEAD[key] = r.git("log", "--first-parent", "--format=%h %s", f"{m}..{d}").splitlines()
-            ahead += [f"{r.sub + ': ' if r.sub else ''}{l}" for l in AHEAD[key]]
+            ahead += [f"{r.sub + ': ' if r.sub else ''}{h} {subj}" for h, _, subj in first_parent_log(r, m, d)]
         exes = my_exes() if p.process and not p.running_cmd else None  # one read of the process table for both
+        since, since_kind = main_since(p, settings_now())
         f = {"main": " ".join(main), "dev": " ".join(dev), "ahead": ahead[:30],
+             "dev_log": changelog(p, " ".join(main), " ".join(dev)),  # on dev, not yet on main
+             "main_log": changelog(p, since, " ".join(main)) if since else [],  # on main since the last deploy
+             "main_since": since, "main_since_kind": since_kind,
              "running": app_running(p, p.main_wt, exes),
              "dev_running": bool(p.launch) and app_running(p, p.dev_wt, exes),
              "has_build": not p.artifact or (p.main_wt / p.artifact).exists(),
