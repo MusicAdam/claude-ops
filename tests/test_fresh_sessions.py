@@ -159,5 +159,86 @@ class ChatMcp(Base):
         self.assertTrue(any("nowhere" in m["text"] for m in msgs))
 
 
+class TaskChat(Base):
+    """A chat with a stopped task: full tools in its worktree, read-only once it is merged."""
+    def task(self, state, wt=True):
+        tid = opsd.add_task("demo", "do a thing", title="thing")
+        path = Path(DATA) / f"wt{tid}"
+        if wt:
+            path.mkdir()
+        opsd.upd(tid, state=state, session_id="worker-sid", worktree=str(path), branch=f"task/{tid}")
+        return tid, path
+
+    def turn(self, tid, text="hello"):
+        self.args.unlink(missing_ok=True)
+        opsd.TASK_CHAT_LIVE[tid] = []
+        opsd.task_chat_turn(tid, text)
+        self.assertNotIn(tid, opsd.TASK_CHAT_LIVE)
+        return self.args.read_text().split("\n")
+
+    def test_stopped_task_gets_full_tools(self):
+        for state in ("review", "needs_input", "failed", "cancelled", "paused"):
+            tid, path = self.task(state)
+            self.assertTrue(opsd.chat_full(opsd.task(tid)))
+            args = self.turn(tid)
+            self.assertEqual(args[args.index("--permission-mode") + 1], "auto")
+            self.assertNotIn("--allowedTools", args)
+            self.assertIn("--settings", args)
+            self.assertEqual(args[args.index("--resume") + 1], "worker-sid")
+            self.assertIn("full tools", args[args.index("-p") + 1])
+            self.assertEqual(opsd.q("SELECT text FROM task_msgs WHERE task_id=? ORDER BY id DESC LIMIT 1", (tid,),
+                                    one=True)["text"], "hi back")
+
+    def test_merged_task_is_read_only(self):
+        tid, path = self.task("done", wt=False)
+        self.assertFalse(opsd.chat_full(opsd.task(tid)))
+        args = self.turn(tid)
+        self.assertEqual(args[args.index("--permission-mode") + 1], "dontAsk")
+        self.assertIn(f"Bash({opsd.SEND_CMD}:*)", args[args.index("--allowedTools") + 1])
+        self.assertIn("follow-up task", args[args.index("-p") + 1])
+        self.assertFalse(path.exists())  # the stand-in dir for --resume is gone again
+
+    def test_result_file_from_a_chat_is_dropped(self):
+        tid, path = self.task("review")
+        os.environ["FAKE_RESULT"] = str(path / opsd.RESULT_FILE)
+        try:
+            opsd.CLAUDE_WAS, opsd.CLAUDE = opsd.CLAUDE, str(Path(DATA) / "fake-writes")
+            Path(opsd.CLAUDE).write_text(FAKE.replace("#!/bin/sh\n", "#!/bin/sh\necho '{}' > \"$FAKE_RESULT\"\n"))
+            Path(opsd.CLAUDE).chmod(0o755)
+            self.turn(tid)
+        finally:
+            opsd.CLAUDE = opsd.CLAUDE_WAS
+        self.assertFalse((path / opsd.RESULT_FILE).exists())
+
+    def test_ask_refuses_while_worker_runs(self):
+        tid, _ = self.task("running")
+        with self.assertRaises(ValueError):
+            opsd.task_ask(tid, "hi")
+        tid, _ = self.task("review")
+        opsd.THREADS[tid] = object()
+        try:
+            with self.assertRaises(ValueError):
+                opsd.task_ask(tid, "hi")
+        finally:
+            opsd.THREADS.pop(tid)
+
+    def test_scheduler_waits_for_a_chat(self):
+        tid, _ = self.task("queued")
+        opsd.TASK_CHAT_LIVE[tid] = []
+        started = []
+        was = opsd.threading.Thread
+        opsd.threading.Thread = lambda target, args, daemon: started.append(args) or type("T", (), {"start": lambda s: None})()
+        try:
+            opsd.schedule_once()
+            self.assertEqual(opsd.task(tid)["state"], "queued")
+        finally:
+            opsd.threading.Thread = was
+            opsd.TASK_CHAT_LIVE.pop(tid, None)
+            opsd.upd(tid, state="cancelled")
+            for a in started:
+                opsd.THREADS.pop(a[0], None)
+                opsd.upd(a[0], state="cancelled")
+
+
 if __name__ == "__main__":
     unittest.main()

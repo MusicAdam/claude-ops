@@ -1064,16 +1064,16 @@ async function loadDetail(id, fresh) {
     ${t.summary ? `<div class="callout ok">${esc(t.summary)}</div>` : ""}
     ${t.error ? `<div class="callout bad"><pre class="mono">${esc(t.error)}</pre></div>` : ""}
     <div class="row">${actions}</div>
-    ${t.can_steer || t.can_chat || t.chat.length ? `<details data-k="chat" open><summary>${t.can_steer ? "Talk to the worker" : "Ask the worker"}</summary>
+    ${t.can_steer || t.can_chat || t.chat.length ? `<details data-k="chat" open><summary>${t.can_steer || t.chat_full ? "Talk to the worker" : "Ask the worker"}</summary>
       <div class="tchat">${t.chat.map(m => m.role === "assistant" ? `<div class="msg">${md(m.text)}</div>`
           : `<div class="msg user">${pics(esc(m.text))}${m.role === "steer" ? `<div class="note">${steerNote(t, m)}</div>` : ""}</div>`).join("")}
         ${t.chat_live ? `<div class="live"><span class="pulse s-running">Claude is thinking</span>${t.chat_live.map(l => `<div>  ${esc(l)}</div>`).join("")}</div>` : ""}</div>
-      ${t.state === "paused" && t.can_chat ? `<textarea id="ask" placeholder="Ask about this work now (read-only), or send a message the worker gets when you resume the task. Drop or paste screenshots to attach them. (⌘↩ asks)" style="min-height:60px"></textarea>
-        <div class="row">${t.chat_live ? btn("stopask", "Stop") : btn("ask", "Ask", "primary")}${btn("steer", "Send when it resumes")}</div>`
+      ${t.state === "paused" && t.can_chat ? `<textarea id="ask" placeholder="${t.chat_full ? "Chat with the worker now: ask, or have it change things in its worktree (it commits on the task's branch)" : "Ask about this work now (read-only)"}, or send a message the worker gets when you resume the task. Drop or paste screenshots to attach them. (⌘↩ chats now)" style="min-height:60px"></textarea>
+        <div class="row">${t.chat_live ? btn("stopask", "Stop") : btn("ask", t.chat_full ? "Chat now" : "Ask", "primary")}${btn("steer", "Send when it resumes")}</div>`
       : t.can_steer ? `<textarea id="ask" placeholder="Steer the worker: change direction, add a requirement, or ask what it is doing. It reads your message after its current step. Drop or paste screenshots to attach them. (⌘↩ sends)" style="min-height:60px"></textarea>
         <div class="row">${btn("steer", "Send", "primary")}</div>`
-      : t.can_chat ? `<textarea id="ask" placeholder="Ask about this work: why it did something, how it works, what it tested. Claude can read the code but not change it. Drop or paste screenshots to attach them. (⌘↩ sends)" style="min-height:60px"></textarea>
-        <div class="row">${t.chat_live ? btn("stopask", "Stop") : btn("ask", "Ask", "primary")}</div>` : ""}</details>` : ""}
+      : t.can_chat ? `<textarea id="ask" placeholder="${t.chat_full ? "Chat with the worker: ask why it did something, or have it fix, test or change things. It works in the task's worktree with its full tools and commits on the task's branch. " + ({review: "Approve merges it.", needs_input: "Send answer resumes the task.", failed: "Retry runs the task again.", cancelled: "Retry runs the task again.", paused: "Resume continues the task."}[t.state] || "") : "Ask about this work: why it did something, how it works, what it tested. This task is finished and its worktree is gone, so Claude reads the code, and can queue a follow-up task for a change."} Drop or paste screenshots to attach them. (⌘↩ sends)" style="min-height:60px"></textarea>
+        <div class="row">${t.chat_live ? btn("stopask", "Stop") : btn("ask", t.chat_full ? "Send" : "Ask", "primary")}</div>` : ""}</details>` : ""}
     <details data-k="body" ${t.state === "queued" ? "open" : ""}><summary>Task description</summary><pre>${pics(esc(t.body))}</pre></details>
     ${t.kind === "deploy" ? "" : `<details data-k="feed" open><summary>Worker activity</summary>
       <div class="feed" id="feed">${t.activity.map(a => `<div class="${a.k}">${a.k === "tool" ? "  " : ""}${esc(a.t)}</div>`).join("") || '<span class="muted">nothing yet</span>'}</div></details>`}
