@@ -1408,7 +1408,7 @@ def run_claude(p, tid, prompt):
             return None
     if rp.exists():
         try:
-            return json.loads(rp.read_text())
+            return json.loads(rp.read_text(), strict=False)  # workers often put raw newlines in the summary
         except ValueError:
             return {"status": "failed", "summary": f"{RESULT_FILE} was not valid JSON"}
     return None
