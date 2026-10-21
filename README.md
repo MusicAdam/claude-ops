@@ -394,6 +394,7 @@ opsd.py send <project> --design "<message>"   # a design chat there: ask how som
 opsd.py send <project> --chat "<message>"     # a project chat there, in its checkout (it can edit files)
         ... --title "..." --hold              # name it; hold a task for your review before it merges
         ... --model sonnet                    # a task's model (see Models); not for chats
+        ... --effort high                     # a task's effort (see Effort); not for chats
 ```
 
 - **It shows like everything else.** A sent task is queued in the other project and goes through its gate as
@@ -545,6 +546,12 @@ notes = """Project-specific guidance for design chats."""
     keep it. A fresh session that replaces a cold or oversized one (see **Fresh sessions**) keeps it too.
   - **On the dashboard** the task page shows the model its session runs on, and the task list tags tasks that
     are not on Opus, so you can compare a trial of Sonnet tasks later.
+- **Effort.** How hard Claude thinks, passed as `--effort` (`low`, `medium`, `high`, `xhigh`, `max`). "Effort" in
+  the header is the setting `effort`, default `medium`, for every task, release and chat; empty leaves it to
+  Claude Code (`effortLevel` in your `~/.claude/settings.json`). A task's own effort beats it: the Effort dropdown
+  on New task, `"effort"` in a design chat's queue block, or `--effort high` on `opsd.py add` and `opsd.py send`.
+  Subtasks from a split take their parent's effort. Unlike the model, effort is read again on every turn: a
+  change to the setting reaches tasks already under way at their next turn.
 - **Pausing.** **❚❚ Pause** on a task, or **Pause running** in the header (`./opsctl pause`), stops it
   now and keeps its place. A worker's Claude session resumes where it was, unless it waited over 55 minutes
   (see **Fresh sessions**); a command it was running (a test run, a build) is stopped and it is told to check

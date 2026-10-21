@@ -328,6 +328,9 @@ a[data-task] { color: var(--accent); cursor: pointer; }
   <label title="The model every kind of work starts on, unless its own setting under Per kind says otherwise">Model <select id="model">
     <option value="">default</option><option value="opus">opus</option>
     <option value="sonnet">sonnet</option><option value="haiku">haiku</option><option value="fable">fable</option></select></label>
+  <label title="How hard Claude thinks (--effort), for every task, release and chat. A task's own effort beats it. default: Claude Code's effortLevel setting. A change reaches running tasks at their next turn.">Effort <select id="effort">
+    <option value="">default</option><option value="low">low</option><option value="medium">medium</option>
+    <option value="high">high</option><option value="xhigh">xhigh</option><option value="max">max</option></select></label>
   <details id="models"><summary title="Pick a model per kind of work">per kind</summary><div class="pop">
     <label title="Workers on tasks, and on Send to dev">Tasks <select data-model="task"></select></label>
     <label title="Release checkers: build, run, summarise">Releases <select data-model="release"></select></label>
@@ -361,6 +364,7 @@ a[data-task] { color: var(--accent); cursor: pointer; }
         <label>Priority <select id="prio"><option value="0">normal</option><option value="1">high</option><option value="-1">low</option></select></label>
         <label>After # <input id="after" style="width:60px" placeholder="—"></label>
         <label title="The model its worker starts on. Default: the Tasks model setting (per kind, in the header)">Model <select id="tmodel"><option value="">Default</option><option value="opus">Opus</option><option value="sonnet">Sonnet</option><option value="haiku">Haiku</option></select></label>
+        <label title="How hard its worker thinks (--effort). Default: the Effort setting in the header">Effort <select id="teffort"><option value="">Default</option><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option><option value="xhigh">Extra high</option><option value="max">Max</option></select></label>
         <label title="Build it and wait for you to play and approve before merging"><input type="checkbox" id="hold"> Hold for my review</label>
         <label title="Once it merges into dev, queue a release, as Promote does. Tasks it splits into release together, after the last one merges. Starts as the project's default, set on its card."><input type="checkbox" id="autorel"> Release after merge</label>
       </div>
@@ -511,6 +515,7 @@ function renderHeader() {
   if (document.activeElement !== $("#par")) $("#par").value = s.max_parallel;
   if (document.activeElement !== $("#relwait")) $("#relwait").value = s.release_wait;
   modelSelect($("#model"), s.model, "default");
+  if (document.activeElement !== $("#effort")) $("#effort").value = s.effort || "";
   document.querySelectorAll("#models select").forEach(el => modelSelect(el, s["model:" + el.dataset.model], "same as Model"));
   $("#pause").textContent = s.paused === "1" ? "▶ Resume queue" : "❚❚ Pause queue";
   $("#pause").className = s.paused === "1" ? "primary" : "";
@@ -955,7 +960,7 @@ async function loadDetail(id, fresh) {
     <div style="font-weight:600;font-size:15px">${esc(t.title)}</div>
     ${originLine(t.origin, "Sent by")}
     ${timeLine(t, live)}
-    <div class="muted mono" style="margin:4px 0">${esc(P(t.project).title)} · ${esc(t.branch || "")}${t.merged ? ` → ${esc(t.kind === "release" ? P(t.project).main_branch || "main" : P(t.project).dev_branch || "dev")} ${esc(t.merged_show || shas(t.merged))}` : ""}${t.kind === "release" && t.base && !t.merged ? `checking ${esc(t.base_show || shas(t.base))}` : ""}${t.kind === "deploy" && t.base ? `deploying ${esc(t.base_show || shas(t.base))}` : ""}${t.rounds ? ` · fix rounds: ${t.rounds}` : ""}${t.session_model ? ` · model: ${esc(t.session_model)}` : t.model ? ` · model: ${esc(t.model)} (not started)` : ""}</div>
+    <div class="muted mono" style="margin:4px 0">${esc(P(t.project).title)} · ${esc(t.branch || "")}${t.merged ? ` → ${esc(t.kind === "release" ? P(t.project).main_branch || "main" : P(t.project).dev_branch || "dev")} ${esc(t.merged_show || shas(t.merged))}` : ""}${t.kind === "release" && t.base && !t.merged ? `checking ${esc(t.base_show || shas(t.base))}` : ""}${t.kind === "deploy" && t.base ? `deploying ${esc(t.base_show || shas(t.base))}` : ""}${t.rounds ? ` · fix rounds: ${t.rounds}` : ""}${t.session_model ? ` · model: ${esc(t.session_model)}` : t.model ? ` · model: ${esc(t.model)} (not started)` : ""}${t.effort ? ` · effort: ${esc(t.effort)}` : ""}</div>
     ${t.question ? `<div class="callout"><b>Question:</b> ${esc(t.question)}</div>
       <textarea id="answer" placeholder="Your answer (drop or paste screenshots to attach them)" style="min-height:70px"></textarea>
       <div class="row">${btn("answer", "Send answer", "primary")}</div>` : ""}
@@ -1059,8 +1064,8 @@ async function submit() {
   try {
     const project = pf || $("#tproj").value;
     if (!project) throw new Error("pick a project");
-    const r = await api("/api/tasks", {project, body, priority: +$("#prio").value, hold: $("#hold").checked ? 1 : 0, release: $("#autorel").checked ? 1 : 0, depends_on: $("#after").value.trim(), model: $("#tmodel").value});
-    $("#body").value = ""; $("#after").value = ""; $("#tmodel").value = ""; $("#formmsg").textContent = ""; delete $("#autorel").dataset.k; sel = r.id; setFocus(project); refresh();
+    const r = await api("/api/tasks", {project, body, priority: +$("#prio").value, hold: $("#hold").checked ? 1 : 0, release: $("#autorel").checked ? 1 : 0, depends_on: $("#after").value.trim(), model: $("#tmodel").value, effort: $("#teffort").value});
+    $("#body").value = ""; $("#after").value = ""; $("#tmodel").value = ""; $("#teffort").value = ""; $("#formmsg").textContent = ""; delete $("#autorel").dataset.k; sel = r.id; setFocus(project); refresh();
   } catch (e) { $("#formmsg").textContent = e.message; }
 }
 $("#submit").onclick = submit;
@@ -1073,6 +1078,7 @@ $("#brake").onchange = () => api("/api/settings", {usage_brake: Math.min(100, Ma
 $("#par").onchange = () => api("/api/settings", {max_parallel: Math.max(1, +$("#par").value || 1)}).then(refresh);
 $("#relwait").onchange = () => api("/api/settings", {release_wait: Math.max(0, +$("#relwait").value || 0)}).then(refresh);
 $("#model").onchange = () => api("/api/settings", {model: $("#model").value}).then(refresh);
+$("#effort").onchange = () => api("/api/settings", {effort: $("#effort").value}).then(refresh);
 document.querySelectorAll("#models select").forEach(el =>
   el.onchange = () => api("/api/settings", {["model:" + el.dataset.model]: el.value}).then(refresh));
 // The popover hangs off the summary's right edge, but when the header wraps the summary lands at the

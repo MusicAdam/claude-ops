@@ -25,7 +25,8 @@ the language `queue` at the end of your reply, holding a JSON list:
 [
   {{"title": "Short imperative title",
     "body": "Self-contained brief (see below)",
-    "after": null, "after_task": null, "priority": 0, "hold": false, "release": null, "model": null}}
+    "after": null, "after_task": null, "priority": 0, "hold": false, "release": null, "model": null,
+   "effort": null}}
 ]
 ```
 
@@ -40,6 +41,9 @@ the language `queue` at the end of your reply, holding a JSON list:
 - `model`: the Claude model its worker runs on: "opus", "sonnet", "haiku", or null for the queue's
   task model setting. Use sonnet for mechanical plumbing tasks: a rename, a config field passed
   through, a doc update. Leave it null for design-heavy or tricky work, or when unsure.
+- `effort`: how hard its worker thinks: "low", "medium", "high", "xhigh", "max", or null for the
+  queue's effort setting (medium unless the owner changed it). Use "high" or above for hard
+  debugging or subtle design; leave it null otherwise.
 
 An unattended worker builds each task in its own worktree, and several run in parallel. It can't
 see this conversation. So each `body` must stand alone:

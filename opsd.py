@@ -3,10 +3,11 @@
 
   opsd.py serve                        run the dashboard + scheduler (http://127.0.0.1:8788)
   opsd.py add-project PATH [NAME]      detect PATH and write ~/.claude-ops/projects/NAME.toml
-  opsd.py add -p NAME [--model M] "text..."   queue a task through the running daemon; --model opus, sonnet,
-                                       haiku or a full model id (else the setting model:task, then model)
+  opsd.py add -p NAME [--model M] [--effort E] "text..."   queue a task through the running daemon; --model opus,
+                                       sonnet, haiku or a full model id (else the setting model:task, then model);
+                                       --effort low, medium, high, xhigh or max (else the setting effort)
   opsd.py deploy -p NAME TARGET [--version same|patch|minor|major|X.Y.Z] [--note TEXT]   deploy a [[deploy]] target
-  opsd.py send NAME [--design|--chat] [--title T] [--hold] [--model M] "text..."
+  opsd.py send NAME [--design|--chat] [--title T] [--hold] [--model M] [--effort E] "text..."
                                        from a session the queue started: a task (or chat) in another project
   opsd.py pause-all | resume-all       pause every running task (it stops now, resumable) / resume every paused one
   opsd.py archive-project NAME         take a project off the queue: its config moves to projects/archived/
@@ -558,6 +559,7 @@ def init_db():
                       ("senddev", "TEXT"),  # and before Send to dev: its snapshot and how it went, as JSON
                       ("model", "TEXT"),  # and before models per task: null takes model:<kind> (see model_for)
                       ("session_model", "TEXT"),  # the model its session started on; every resume keeps it
+                      ("effort", "TEXT"),  # and before effort per task: null takes the setting effort (see effort_for)
                       ("last_call", "REAL"), ("ctx_tokens", "INTEGER")):  # its session's last call (see stale_session)
         if col not in cols:
             q(f"ALTER TABLE tasks ADD COLUMN {col} {decl}")
@@ -587,7 +589,7 @@ def init_db():
     q("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)")
     q("CREATE TABLE IF NOT EXISTS session_costs (session_id TEXT PRIMARY KEY, total REAL)")  # see cost_added
     for k, v in {"max_parallel": "3", "paused": "0", "model": "", "usage_brake": "85", "model:release": "sonnet",
-                 "release_wait": "180"}.items():
+                 "release_wait": "180", "effort": "medium"}.items():
         q("INSERT OR IGNORE INTO settings VALUES (?,?)", (k, v))
     q("DELETE FROM settings WHERE key='draining'")  # the old restart's stored hold: a crash could leave it set
 
@@ -610,7 +612,7 @@ def set_setting(k, v):
 # goes to --model on every resume, whatever the settings say now.
 
 MODEL_KINDS = ("task", "release", "design", "chat")
-SETTING_KEYS = ("max_parallel", "paused", "model", "usage_brake", "release_wait",  # the dashboard's
+SETTING_KEYS = ("max_parallel", "paused", "model", "usage_brake", "release_wait", "effort",  # the dashboard's
                 *(f"model:{k}" for k in MODEL_KINDS))
 MODEL_OF_KIND = {"senddev": "task", "deploy": "task", "project": "chat"}  # a project chat is the Chat tab
 
@@ -640,6 +642,33 @@ def session_model(row, kind):
 
 def model_args(m):
     return ["--model", m] if m else []
+
+
+# ---------------------------------------------------------------- effort
+# How hard Claude thinks: --effort low, medium, high, xhigh or max. The setting effort (medium unless you change it)
+# covers every session; "" leaves it to Claude Code (effortLevel in your settings.json). A task's own effort column
+# beats the setting. Effort goes on every turn, resumes included: --effort lasts one process, not the session.
+
+EFFORTS = ("low", "medium", "high", "xhigh", "max")
+
+
+def effort_name(e):
+    """An effort as typed: "" or None for the default, else one of EFFORTS. Raises on anything else."""
+    e = (e or "").strip().lower()
+    if e in ("", "default", "none"):
+        return None
+    if e not in EFFORTS:
+        raise ValueError(f"effort is one of {', '.join(EFFORTS)}, not {e!r}")
+    return e
+
+
+def effort_for(row=None):
+    """The --effort for a turn of row (a task, or None for a chat): its own effort, else the setting effort."""
+    return (row or {}).get("effort") or setting("effort")
+
+
+def effort_args(e):
+    return ["--effort", e] if e else []
 
 
 def init_model(e):
@@ -702,14 +731,15 @@ def ev(tid, text):
 
 
 def add_task(project, body, title="", priority=0, hold=0, depends_on=None, parent=None, kind="task", auto_release=None,
-             deploy=None, origin=None, senddev=None, model=None):
+             deploy=None, origin=None, senddev=None, model=None, effort=None):
     """auto_release None takes the project's default ("Release after merge" on the project).
     A deploy (kind "deploy") is made only by queue_deploy: you clicked Deploy, or ran `opsd.py deploy`.
     origin: the session in another project that sent it (see send_peer).
     senddev: the snapshot a Send to dev task (kind "senddev", made by queue_senddev) lands on dev.
-    model: the model its worker starts on; None takes model:<kind> when it starts (see model_for)."""
+    model: the model its worker starts on; None takes model:<kind> when it starts (see model_for).
+    effort: its --effort; None takes the setting effort on each turn (see effort_for)."""
     p = proj(project)
-    model = model_name(model)
+    model, effort = model_name(model), effort_name(effort)
     if auto_release is None:
         auto_release = release_default(p)
     body = body.strip()
@@ -717,11 +747,12 @@ def add_task(project, body, title="", priority=0, hold=0, depends_on=None, paren
     if (kind == "deploy") != bool(deploy):
         raise ValueError("a deploy needs its target, and only a deploy has one")
     tid = q("INSERT INTO tasks (project, title, body, priority, hold, depends_on, parent, created, kind, auto_release, "
-            "deploy, origin, senddev, model) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "deploy, origin, senddev, model, effort) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (project, title, body, int(priority), int(bool(hold)), depends_on or None, parent, time.time(), kind,
              int(bool(auto_release) and kind in MERGES), json.dumps(deploy) if deploy else None,
-             json.dumps(origin) if origin else None, json.dumps(senddev) if senddev else None, model))
-    ev(tid, "queued" + (f" after #{depends_on}" if depends_on else "") + (f" on {model}" if model else ""))
+             json.dumps(origin) if origin else None, json.dumps(senddev) if senddev else None, model, effort))
+    ev(tid, "queued" + (f" after #{depends_on}" if depends_on else "") + (f" on {model}" if model else "")
+       + (f" at {effort} effort" if effort else ""))
     return tid
 
 
@@ -1293,7 +1324,7 @@ def run_claude(p, tid, prompt):
     else:  # a new session: what it starts on, until its init event names the model exactly
         model = session_model(t, t["kind"]) if kept is None else kept
         upd(tid, session_model=model, last_call=None, ctx_tokens=None)
-    cmd += model_args(model)
+    cmd += model_args(model) + effort_args(effort_for(t))
     port = p.port_for(tid)
     env = dict(os.environ, OPS_RESULT=str(rp), OPS_TASK_ID=str(tid), OPS_PORT=str(port), OPS_FROM=f"task:{tid}",
                OPS_DAEMON=DAEMON_URL, **{k: str(v).format(port=port) for k, v in p.env.items()})
@@ -1737,7 +1768,7 @@ def remove_worktree(p, path):
             r.git("worktree", "prune", check=False)
 
 
-def add_subtasks(p, tid, items, priority=0, hold=0, auto_release=None, model=None):
+def add_subtasks(p, tid, items, priority=0, hold=0, auto_release=None, model=None, effort=None):
     """Queue a worker's task list ({title, body, after}) with tid as parent. Returns the new ids."""
     ids = []
     for sub in items or []:
@@ -1745,13 +1776,14 @@ def add_subtasks(p, tid, items, priority=0, hold=0, auto_release=None, model=Non
         dep = ids[after] if isinstance(after, int) and 0 <= after < len(ids) else None
         ids.append(add_task(p.name, sub.get("body") or sub.get("title", ""), sub.get("title", ""),
                             priority=priority, hold=hold, depends_on=dep, parent=tid, auto_release=auto_release,
-                            model=model))
+                            model=model, effort=effort))
     return ids
 
 
 def split(p, tid, res):
     t = task(tid)
-    ids = add_subtasks(p, tid, res.get("tasks"), t["priority"], t["hold"], t["auto_release"], t["model"])
+    ids = add_subtasks(p, tid, res.get("tasks"), t["priority"], t["hold"], t["auto_release"], t["model"],
+                        t["effort"])
     finish(p, tid, merged=None, note="split into " + ", ".join(f"#{i}" for i in ids))
 
 
@@ -3949,7 +3981,7 @@ def design_turn(did, text):
         cmd += ["--resume", d["session_id"]]
     else:  # a new session: what it starts on, until its init event names the model exactly
         q("UPDATE designs SET session_model=? WHERE id=?", (session_model(d, d["kind"]), did))
-    cmd += model_args(session_model(d, d["kind"]))
+    cmd += model_args(session_model(d, d["kind"])) + effort_args(effort_for())
 
     def on_session(sid):
         if sid != design(did)["session_id"]:
@@ -4012,10 +4044,15 @@ def queue_from_reply(p, reply, did):
             except ValueError as e:  # queue it anyway, on its kind's model
                 model = None
                 notes.append(f"{e}; that task starts on the task model setting")
+            try:
+                effort = effort_name(it.get("effort"))
+            except ValueError as e:  # queue it anyway, at the effort setting
+                effort = None
+                notes.append(f"{e}; that task runs at the effort setting")
             tid = add_task(p.name, it.get("body") or it.get("title", ""), it.get("title", ""),
                            priority=int(it.get("priority") or 0), hold=bool(it.get("hold")), depends_on=dep,
                            auto_release=None if it.get("release") is None else bool(it.get("release")),
-                           model=model)
+                           model=model, effort=effort)
             ev(tid, f"queued from design chat #{did}")
             local.append(tid)
         ids += local
@@ -4577,7 +4614,7 @@ def task_chat_turn(tid, text):
            "--strict-mcp-config", "--no-chrome", "--resume", t["session_id"], "--add-dir", str(IMAGES)]
     if made:
         cmd += ["--add-dir", str(p.dev_wt)]
-    cmd += model_args(session_model(t, t["kind"]))  # the worker's own session: the model it started on
+    cmd += model_args(session_model(t, t["kind"])) + effort_args(effort_for(t))  # the worker's own session: its model
 
     def on_session(sid):
         if sid != task(tid)["session_id"]:
@@ -4694,15 +4731,18 @@ def tell_sender(tid, how):
                                              f"which you sent, {gist(how, 1500)}", [tid])
 
 
-def send_peer(ref, project, kind, text, title="", hold=False, model=None):
+def send_peer(ref, project, kind, text, title="", hold=False, model=None, effort=None):
     """Start a task or chat in project for the session ref names. Returns {kind, id, project, said}.
-    model: the task's model, as add_task takes it; a chat starts on its kind's setting."""
+    model, effort: the task's, as add_task takes them; a chat starts on its kind's model, at the effort setting."""
     p, text = proj(project), (text or "").strip()
     if kind not in PEER_KINDS:
         raise ValueError(f"kind is one of {', '.join(PEER_KINDS)}")
     model = model_name(model)
     if model and kind != "task":
         raise ValueError("--model is for tasks; a chat starts on the project's chat or design model")
+    effort = effort_name(effort)
+    if effort and kind != "task":
+        raise ValueError("--effort is for tasks; a chat runs at the effort setting")
     if not text:
         raise ValueError("say what the other project should do")
     o = origin_of(ref)
@@ -4722,7 +4762,7 @@ def send_peer(ref, project, kind, text, title="", hold=False, model=None):
         head = (f"[ops: sent by {who}, a Claude session in the claude-ops queue, not typed by the owner. "
                 f"{place + '. ' if place else ''}You may read its files; change only your own worktree. "
                 "When this task ends, the queue tells the sender how it went.]")
-        tid = add_task(p.name, f"{head}\n\n{text}", title, hold=hold, origin=o, model=model)
+        tid = add_task(p.name, f"{head}\n\n{text}", title, hold=hold, origin=o, model=model, effort=effort)
         ev(tid, f"sent by {who}")
         if o:
             tell_origin(o, f"Sent task #{tid} to {p.title}: {task(tid)['title']}", [tid])
@@ -5073,7 +5113,7 @@ class H(BaseHTTPRequestHandler):
         if path == "/api/state":
             tasks = q("SELECT id,project,title,state,phase,priority,hold,depends_on,parent,created,started,"
                       "finished,cost,rounds,summary,question,error,merged,branch,kind,auto_release,origin,paused_by,start_at,"
-                      "model,session_model FROM tasks "
+                      "model,session_model,effort FROM tasks "
                       "ORDER BY id DESC LIMIT 500")
             # What each task is doing right now, for the status line under it in the list.
             last = {r["task_id"]: r for r in q(
@@ -5198,7 +5238,8 @@ class H(BaseHTTPRequestHandler):
                 raise ValueError("describe the task")
             dep = int(str(b["depends_on"]).lstrip("#")) if str(b.get("depends_on") or "").strip() else None
             tid = add_task(b["project"], b["body"], b.get("title", ""), b.get("priority", 0),
-                           b.get("hold", 0), dep, auto_release=b.get("release"), model=b.get("model"))
+                           b.get("hold", 0), dep, auto_release=b.get("release"), model=b.get("model"),
+                           effort=b.get("effort"))
             p = PROJECTS.get(b["project"])
             return {"id": tid, **({"warning": w} if p and (w := uncommitted_warning(p)) else {})}
         if path == "/api/openspec/new":  # New change: a design chat that drafts one
@@ -5207,7 +5248,7 @@ class H(BaseHTTPRequestHandler):
             return openspec_run(proj(b["project"]), b.get("sub") or "", path.rsplit("/", 1)[1])
         if path == "/api/send":  # opsd.py send, from a session the queue started
             return send_peer(b.get("from"), b["project"], b.get("kind") or "task", b.get("text"), b.get("title") or "",
-                             bool(b.get("hold")), b.get("model"))
+                             bool(b.get("hold")), b.get("model"), b.get("effort"))
         if path == "/api/settings":
             if "usage_brake" in b:
                 b["usage_brake"] = min(100, max(0, int(float(b["usage_brake"] or 0))))
@@ -5215,7 +5256,8 @@ class H(BaseHTTPRequestHandler):
                 b["release_wait"] = max(0, int(float(b["release_wait"] or 0)))
             for k in SETTING_KEYS:
                 if k in b:
-                    set_setting(k, model_name(b[k]) or "" if k.startswith("model") else b[k])
+                    set_setting(k, model_name(b[k]) or "" if k.startswith("model")
+                                else effort_name(b[k]) or "" if k == "effort" else b[k])
             if "release_wait" in b:  # a train whose new time is up leaves now
                 release_trains()
             return
@@ -5418,7 +5460,7 @@ def post(path, body):
 
 
 def send_cli(argv):
-    """opsd.py send PROJECT [--design|--chat] [--title T] [--hold] [--model M] [TEXT...]; TEXT from stdin when not
+    """opsd.py send PROJECT [--design|--chat] [--title T] [--hold] [--model M] [--effort E] [TEXT...]; TEXT from stdin when not
     given."""
     body, words, it = {"project": argv[0], "kind": "task", "from": os.environ.get("OPS_FROM", "")}, [], iter(argv[1:])
     for a in it:
@@ -5428,8 +5470,8 @@ def send_cli(argv):
             body["title"] = next(it, "")
         elif a == "--hold":
             body["hold"] = True
-        elif a == "--model":
-            body["model"] = next(it, "")
+        elif a in ("--model", "--effort"):
+            body[a[2:]] = next(it, "")
         else:
             words.append(a)
     body["text"] = " ".join(words) if words else sys.stdin.read()
@@ -5460,11 +5502,11 @@ if __name__ == "__main__":
     elif cmd == "send" and args and not args[0].startswith("-"):
         send_cli(args)
     elif cmd == "add" and len(args) >= 2 and args[0] == "-p":
-        words, model = args[2:], None
-        if words[:1] == ["--model"] and len(words) >= 2:
-            model, words = words[1], words[2:]
+        words, opts = args[2:], {}
+        while words[:1] in (["--model"], ["--effort"]) and len(words) >= 2:
+            opts[words[0][2:]], words = words[1], words[2:]
         try:
-            out = post("/api/tasks", {"project": args[1], "body": " ".join(words) or sys.stdin.read(), "model": model})
+            out = post("/api/tasks", {"project": args[1], "body": " ".join(words) or sys.stdin.read(), **opts})
         except HTTPError as e:
             sys.exit(json.loads(e.read() or b"{}").get("error") or str(e))
         if w := (json.loads(out or "{}") or {}).get("warning"):
