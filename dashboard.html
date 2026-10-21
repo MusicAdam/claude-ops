@@ -34,6 +34,17 @@ header h1 { font-size: 16px; margin: 0; }
 .st .bar { width: 38px; height: 6px; border-radius: 3px; background: var(--line); overflow: hidden; }
 .st .bar i { display: block; height: 100%; background: var(--accent); }
 .st.alert .bar i { background: var(--warn); } .st.danger .bar i { background: var(--bad); }
+/* Phones: title, project and + Project on one row, the tabs on their own row that scrolls sideways,
+   then the stats and the queue buttons, wrapping from the left */
+@media (max-width: 600px) {
+  header { gap: 8px; padding: 10px 12px; }
+  header > .grow { display: none; }
+  #proj { flex: 1 1 0; min-width: 0; }
+  header > .tabs { flex-basis: 100%; overflow-x: auto; scrollbar-width: none; margin: 0 -12px; padding: 0 12px; }
+  header > .tabs::-webkit-scrollbar { display: none; }
+  header > .tabs button { flex: none; white-space: nowrap; }
+  header > button { white-space: nowrap; }
+}
 main { display: grid; grid-template-columns: minmax(340px, 460px) 1fr; gap: 20px; padding: 20px;
        max-width: 1500px; margin: 0 auto; align-items: start; }
 main > section { min-width: 0; }
@@ -340,7 +351,7 @@ a[data-task] { color: var(--accent); cursor: pointer; }
   <select id="proj" title="Project"></select>
   <button id="addproj" title="Add a git repository, or a folder of git repos, as a project">+ Project</button>
   <div class="tabs"><button id="tab-projects" title="Every project: branches, Promote, Play, Deploys, Archive, and its tasks">Projects</button><button id="tab-tasks">Tasks</button><button id="tab-design" title="Plan work with Claude">Design</button><button id="tab-chat" title="Talk to Claude in the project folder, as in a terminal">Chat</button><button id="tab-settings" title="Parallel, release wait, usage brake, models, effort, and what Claude has cost">Settings</button></div>
-  <span style="flex:1"></span>
+  <span class="grow" style="flex:1"></span>
   <span class="stats" id="hdr"></span>
   <span class="stats hidden" id="usage"></span>
   <button id="pause" title="Hold queued tasks; running ones carry on"></button>
@@ -1232,6 +1243,13 @@ function showTab(t) {
   tab = t;
   try { localStorage.setItem("ops-tab", t); } catch {}
   for (const k of ["tasks", "projects", "design", "chat", "settings"]) $(`#tab-${k}`).className = t === k ? "on" : "";
+  // On a phone the tabs scroll sideways: bring the chosen one into view, without scrolling the page.
+  const bar = $("header > .tabs"), on = $(`#tab-${t}`);
+  if (on && bar.scrollWidth > bar.clientWidth) {
+    const r = on.getBoundingClientRect(), b = bar.getBoundingClientRect();
+    if (r.left < b.left + 12) bar.scrollLeft -= b.left + 12 - r.left;
+    else if (r.right > b.right - 12) bar.scrollLeft += r.right - b.right + 12;
+  }
   $("#tasksview").classList.toggle("hidden", t !== "tasks");
   $("#projectsview").classList.toggle("hidden", t !== "projects");
   $("#settingsview").classList.toggle("hidden", t !== "settings");
