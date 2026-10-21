@@ -2431,6 +2431,8 @@ def schedule_once():
             continue
         if t["id"] in THREADS:  # resumed before its paused pipeline finished stopping
             continue
+        if t["id"] in TASK_CHAT_LIVE:  # a chat turn has its session: the worker starts when the reply is in
+            continue
         if p.max_parallel:
             mine = sum(1 for i in THREADS if (task(i) or {}).get("project") == p.name)
             if mine >= p.max_parallel:
@@ -4793,41 +4795,75 @@ PROJECT_CHAT_PROMPT = ("You are talking with the owner through the claude-ops da
                        "in your context. Keep command output short: pipe it through `tail` or `grep`, and use quiet "
                        "flags for tests and builds.")
 CHAT_STATES = ("review", "needs_input", "failed", "done", "cancelled", "paused")  # the worker is not running
+CHAT_NEXT = {"review": "Approve merges the branch with your commits (the gate runs again first); Send back with "
+                       "feedback sends the worker back to work",
+             "needs_input": "Send answer resumes the task",
+             "failed": "Retry runs the task again in this worktree, in this session",
+             "cancelled": "Retry runs the task again in this worktree, in this session",
+             "paused": "Resume continues the task"}  # the dashboard button that carries a chat's edits on
 
 
 def task_ask(tid, text):
-    """Ask the task's worker a question: resume its Claude session, read-only, in the background."""
+    """Talk with the task's stopped worker: resume its Claude session in the background. In its worktree it has its
+    full tools; once the task is done (merged, its worktree gone) it can read and queue a follow-up task."""
     t = task(tid)
     if not text:
         raise ValueError("ask something")
-    if t["state"] not in CHAT_STATES:
-        raise ValueError("the worker is busy; ask when it stops")
+    if t["state"] not in CHAT_STATES or tid in THREADS or tid in PROCS:
+        raise ValueError("the worker is busy; talk to it with Send, or ask when it stops")
     if not t["session_id"]:
-        raise ValueError("this task has no worker session to ask")
+        raise ValueError("this task has no worker session to talk to")
     if tid in TASK_CHAT_LIVE:
         raise ValueError("wait for the reply first")
-    TASK_CHAT_LIVE[tid] = []
+    TASK_CHAT_LIVE[tid] = []  # schedule_once starts no worker for the task while this is set
     q("INSERT INTO task_msgs (task_id, role, text, ts) VALUES (?,?,?,?)", (tid, "user", text, time.time()))
     threading.Thread(target=task_chat_turn, args=(tid, text), daemon=True).start()
+
+
+def chat_full(t):
+    """Whether a chat with stopped task t gets full tools: its worktree is there and its branch can still land."""
+    return t["state"] != "done" and bool(t["worktree"]) and Path(t["worktree"]).is_dir()
 
 
 def task_chat_turn(tid, text):
     t = task(tid)
     p = proj(t["project"])
     cwd = Path(t["worktree"] or p.wt / f"t{tid}")
+    full = chat_full(t)
     made = not cwd.exists()  # the worktree goes after a merge, but the session lives under its path
-    note = (f"[ops: the user is asking about this task on the dashboard; its state is {t['state']}. Answer them. "
-            "This turn is read-only: do not change files and do not write $OPS_RESULT. If they want a change, "
-            "tell them which button does it (Send back with feedback, Send answer, Retry, Resume, or a new task); "
-            "you will carry this conversation into that work."
-            + (f" Your worktree was removed after the task finished; the merged code is in {p.dev_wt}."
-               if made else "") + "]\n\n")
-    cmd = [CLAUDE, "-p", note + with_images(text), "--output-format", "stream-json", "--verbose",
-           "--permission-mode", "dontAsk", "--permission-prompts", "none", "--allowedTools", DESIGN_TOOLS,
-           "--strict-mcp-config", "--no-chrome", "--resume", t["session_id"], "--add-dir", str(IMAGES)]
-    if made:
-        cmd += ["--add-dir", str(p.dev_wt)]
+    env = dict(os.environ, OPS_FROM=f"task:{tid}", OPS_DAEMON=DAEMON_URL, OPS_TASK_ID=str(tid))
+    env.pop("OPS_RESULT", None)  # a chat turn reports nothing to the queue
+    if full:  # like the Chat tab: your own settings and auto mode, in the worker's worktree on its branch
+        port = p.port_for(tid)
+        env.update(OPS_PORT=str(port), **{k: str(v).format(port=port) for k, v in p.env.items()})
+        note = (f"[ops: the user is talking with you about this task on the dashboard; its state is {t['state']}. "
+                f"You are not running as the worker now: this is a chat, with your full tools, in your worktree "
+                f"{cwd} on branch {t['branch']}. Do what they ask. If you change code, run the checks and commit "
+                "on this branch as the worker would. Do not write $OPS_RESULT, do not merge, and do not switch "
+                f"branches. When you changed something, end by saying the next step: {CHAT_NEXT.get(t['state'], '')}."
+                "]\n\n")
+        mcp, _ = mcp_servers(p)
+        cmd = [CLAUDE, "-p", note + with_images(text), "--output-format", "stream-json", "--verbose",
+               "--permission-mode", "auto", "--permission-prompts", "none", "--no-chrome",
+               "--mcp-config", mcp, "--strict-mcp-config", "--settings", guard_settings(str(cwd)),
+               "--append-system-prompt", PROJECT_CHAT_PROMPT]
+    else:  # merged: its edits would land nowhere, so it reads, and a change goes to a follow-up task
+        note = (f"[ops: the user is asking about this task on the dashboard; its state is {t['state']}. Answer them. "
+                "This turn is read-only: do not change files and do not write $OPS_RESULT. "
+                + (f"Your worktree was removed after the task finished; the merged code is in {p.dev_wt}. "
+                   if made else "")
+                + "If they want a change, offer to queue a follow-up task, and when they agree run "
+                  f"`{SEND_CMD} {p.name} --title \"...\" \"<a brief that stands alone>\"`: it runs in its own "
+                  f"worktree from {p.dev} and merges through the queue.]\n\n")
+        cmd = [CLAUDE, "-p", note + with_images(text), "--output-format", "stream-json", "--verbose",
+               "--permission-mode", "dontAsk", "--permission-prompts", "none",
+               "--allowedTools", DESIGN_TOOLS + f",Bash({SEND_CMD}:*)", "--strict-mcp-config", "--no-chrome"]
+        if made:
+            cmd += ["--add-dir", str(p.dev_wt)]
+    cmd += ["--resume", t["session_id"], "--add-dir", str(IMAGES)]
     cmd += model_args(session_model(t, t["kind"])) + effort_args(effort_for(t))  # the worker's own session: its model
+    rp = cwd / RESULT_FILE
+    had = rp.exists()
 
     def on_session(sid):
         if sid != task(tid)["session_id"]:
@@ -4837,13 +4873,15 @@ def task_chat_turn(tid, text):
         if made:
             cwd.mkdir(parents=True)
         reply, cost = stream_claude(cmd, cwd, RUNS / str(tid) / "chat", TASK_CHAT_LIVE[tid], TASK_CHAT_PROCS,
-                                    tid, on_session,  # its calls warm the worker's cache: see stale_session
+                                    tid, on_session, env=env,  # its calls warm the worker's cache: see stale_session
                                     on_call=lambda ctx: upd(tid, last_call=time.time(), ctx_tokens=ctx))
         upd(tid, cost=(task(tid)["cost"] or 0) + cost)
     except Exception as e:
         reply = f"(chat error: {e})"
     finally:
         TASK_CHAT_PROCS.pop(tid, None)
+        if full and not had:  # wrote its result anyway: the queue reads only what a worker turn writes
+            rp.unlink(missing_ok=True)
         if made:
             try:
                 cwd.rmdir()
@@ -5435,6 +5473,7 @@ class H(BaseHTTPRequestHandler):
             t["chat"] = q("SELECT role,text,ts,delivered FROM task_msgs WHERE task_id=? ORDER BY id", (tid,))
             t["chat_live"] = TASK_CHAT_LIVE.get(tid)
             t["can_chat"] = bool(t["session_id"]) and t["state"] in CHAT_STATES
+            t["chat_full"] = t["can_chat"] and chat_full(t)  # full tools in its worktree, or read-only after a merge
             t["steer_live"] = tid in STEER_PIPES  # the worker reads a message after its current step
             t["can_steer"] = t["state"] in STEER_STATES and (t["kind"] in MERGES or t["steer_live"])
             if t["kind"] == "deploy":  # its command's output
