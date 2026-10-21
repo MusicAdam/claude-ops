@@ -32,7 +32,7 @@ import xml.etree.ElementTree as ET
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 from urllib.error import HTTPError, URLError
-from urllib.parse import quote, unquote, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlparse
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
@@ -5412,6 +5412,238 @@ def with_images(text):
             "Look at each with the Read tool before you answer: " + ", ".join(paths) + "]")
 
 
+# ---------------------------------------------------------------- analyze
+# The Analyze tab: where the queue's time and money went over a period, and plain rules that say how to spend less.
+# All of it comes from the tasks table (tasks.cost is exact per task, see cost_added) and each task's events.
+
+TURN_EVENTS = ("fix round", "answered", "changes requested", "retried", "resumed")  # each starts another Claude turn
+WAIT_EVENTS = {"needs your input": "your answer", "needs you:": "your answer", "waiting for your review": "your review",
+               "hit the Claude usage limit": "the usage limit", "paused: usage limit": "the usage limit",
+               "paused": "a pause"}  # the task sits idle from one of these to its next event
+COLD_GAP = 3600  # the prompt cache lives an hour: a turn that starts later writes its whole context again
+COLD_COST = 0.80  # extra $ per cold turn: $11.48 over 14 misses in docs/usage-analysis.md (Q2)
+STARTUP_COST = 0.53  # $ a fresh worker spends before its first edit, median (docs/usage-analysis.md Q1)
+SONNET_SHARE = 0.5  # Sonnet 5.5 costs half of Opus 5.5 per token ($2/$10 against $4/$20; cache reads are equal)
+
+
+def pct(xs, p):
+    """The p-th percentile of xs (nearest rank), or None for none."""
+    xs = sorted(x for x in xs if x is not None)
+    if not xs:
+        return None
+    if p == 50 and len(xs) % 2 == 0:  # the median of an even count: the mean of the middle two
+        return (xs[len(xs) // 2 - 1] + xs[len(xs) // 2]) / 2
+    return xs[min(len(xs) - 1, int(p / 100 * len(xs)))]
+
+
+def model_family(m):
+    m = (m or "").lower()
+    return next((f for f in ("opus", "sonnet", "haiku", "fable") if f in m), m or "default")
+
+
+def task_times(t, evs, now):
+    """(queued, ran, waited, colds, fixes, causes) for task t from its events. waited: seconds it sat on you, the usage
+    limit or a pause between started and finished; ran is the rest. colds: the reasons of turns that started over an
+    hour after the task's previous event. causes: what each fix round fixed."""
+    queued = t["started"] - t["created"] if t["started"] and t["created"] else None
+    end = t["finished"] or now
+    waited, colds, fixes, causes = 0.0, [], 0, []
+    for i, e in enumerate(evs):
+        text, prev = e["text"], evs[i - 1] if i else None
+        why = next((w for k, w in WAIT_EVENTS.items() if text.startswith(k)), None)
+        if why and t["started"] and e["ts"] >= t["started"]:
+            nxt = evs[i + 1]["ts"] if i + 1 < len(evs) else end
+            waited += max(0, min(nxt, end) - e["ts"])
+        if text.startswith("fix round"):
+            fixes += 1
+            if "rebase conflict" in text:
+                causes.append("rebase conflict")
+        if text.startswith("gate failed: "):
+            causes.append(text[len("gate failed: "):])
+        if text.startswith(TURN_EVENTS) and prev and e["ts"] - prev["ts"] > COLD_GAP:
+            colds.append(next((w for k, w in WAIT_EVENTS.items() if prev["text"].startswith(k)), "other"))
+    ran = max(0.0, end - t["started"] - waited) if t["started"] else None
+    return queued, ran, waited, colds, fixes, causes
+
+
+def gate_cause(p, text):
+    """A gate failure's first line ("`cmd` exited 1") as the gate step's name, when the project has that step."""
+    m = re.match(r"`(.*)` exited", text)
+    if p and m:
+        for g in p.gate:
+            if g["run"] == m.group(1):
+                return g["name"]
+    return text[:100]
+
+
+def group_stats(rows, total):
+    costs, rans = [r["cost"] for r in rows], [r["ran"] for r in rows if r["ran"] is not None]
+    cost = sum(costs)
+    return {"n": len(rows), "cost": cost, "share": cost / total if total else 0,
+            "cost_med": pct(costs, 50), "cost_p90": pct(costs, 90),
+            "ran_med": pct(rans, 50), "ran_p90": pct(rans, 90), "ran_total": sum(rans)}
+
+
+def breakdown(rows, key, total, order=None):
+    groups = {}
+    for r in rows:
+        groups.setdefault(key(r), []).append(r)
+    out = [{"key": k, **group_stats(v, total)} for k, v in groups.items()]
+    return sorted(out, key=lambda g: order.index(g["key"]) if order and g["key"] in order else -g["cost"])
+
+
+def turns_bucket(n):
+    return "1" if n <= 1 else "2" if n == 2 else "3–4" if n <= 4 else "5+"
+
+
+def analysis(period="7", project=""):
+    """The /api/analyze body: run times and costs of the tasks created in the period, per project and overall,
+    broken down, with the dearest and slowest tasks and the suggestions computed from them."""
+    now = time.time()
+    days = {"1": 1, "7": 7, "30": 30}.get(period)
+    since = now - days * 86400 if days else 0
+    cols = "id,project,title,kind,state,cost,created,started,finished,model,session_model,effort,error"
+    every = q(f"SELECT {cols} FROM tasks WHERE created >= ? ORDER BY id", (since,))
+    evs = {}
+    for e in q("SELECT task_id, ts, text FROM events WHERE task_id IN (SELECT id FROM tasks WHERE created >= ?) "
+               "ORDER BY task_id, id", (since,)):
+        evs.setdefault(e["task_id"], []).append(e)
+    rows = []
+    for t in every:
+        queued, ran, waited, colds, fixes, causes = task_times(t, evs.get(t["id"], []), now)
+        p = PROJECTS.get(t["project"])
+        turns = 1 + sum(e["text"].startswith(TURN_EVENTS) for e in evs.get(t["id"], [])) if t["started"] else 0
+        rows.append({"id": t["id"], "project": t["project"], "title": t["title"], "kind": t["kind"] or "task",
+                     "created": t["created"] or now,
+                     "state": t["state"], "cost": t["cost"] or 0, "queued": queued, "ran": ran, "waited": waited,
+                     "colds": colds, "fixes": fixes, "turns": turns, "causes": [gate_cause(p, c) for c in causes],
+                     "model": model_family(t["session_model"] or t["model"] or model_for(t["kind"] or "task")),
+                     "effort": t["effort"] or "default", "error": (t["error"] or "").splitlines()[0][:160]
+                     if t["error"] else ""})
+    first = min((r["created"] for r in every if r["created"]), default=now)
+    span_days = days or max(1.0, (now - first) / 86400)
+    chats = q("SELECT project, kind, cost FROM designs WHERE updated >= ?", (since,))
+
+    def summary(rs, chat_rows):
+        total = sum(r["cost"] for r in rs)
+        qs, rans = [r["queued"] for r in rs if r["queued"] is not None], [r["ran"] for r in rs if r["ran"] is not None]
+        wasted = [r for r in rs if r["state"] in ("failed", "cancelled")]
+        return {**group_stats(rs, total), "chat_cost": sum(c["cost"] or 0 for c in chat_rows),
+                "queued_med": pct(qs, 50), "queued_p90": pct(qs, 90), "queued_total": sum(qs),
+                "waited_total": sum(r["waited"] for r in rs), "ran_total": sum(rans),
+                "wasted": sum(r["cost"] for r in wasted), "wasted_n": len(wasted)}
+
+    per_project = sorted(({"project": name, "title": PROJECTS[name].title if name in PROJECTS else name,
+                           **summary([r for r in rows if r["project"] == name],
+                                     [c for c in chats if c["project"] == name])}
+                          for name in {r["project"] for r in rows}), key=lambda s: -s["cost"])
+    if project:
+        rows, chats = [r for r in rows if r["project"] == project], [c for c in chats if c["project"] == project]
+    total = sum(r["cost"] for r in rows)
+    day = lambda ts: time.strftime("%Y-%m-%d", time.localtime(ts))  # noqa: E731
+    daily = {}
+    for r in rows:
+        d = daily.setdefault(day(r["created"]), {"day": day(r["created"]), "cost": 0, "n": 0})
+        d["cost"] += r["cost"]
+        d["n"] += 1
+    causes = {}
+    for r in rows:
+        for c in r["causes"]:
+            g = causes.setdefault(c, {"cause": c, "n": 0, "tasks": set()})
+            g["n"] += 1
+            g["tasks"].add(r["id"])
+    causes = sorted(({**g, "tasks": sorted(g["tasks"])} for g in causes.values()), key=lambda g: -g["n"])
+    colds = {}
+    for r in rows:
+        for c in r["colds"]:
+            colds[c] = colds.get(c, 0) + 1
+    brief = lambda r: {k: r[k] for k in ("id", "project", "title", "kind", "state", "cost", "ran", "queued",  # noqa: E731
+                                         "fixes", "turns", "model", "effort")}
+    out = {"now": now, "period": period if days else "all", "days": span_days, "project": project,
+           "summary": summary(rows, chats), "per_project": per_project,
+           "by_kind": breakdown(rows, lambda r: r["kind"], total),
+           "by_model": breakdown(rows, lambda r: r["model"], total),
+           "by_effort": breakdown(rows, lambda r: r["effort"], total,
+                                  ["low", "medium", "high", "xhigh", "max", "default"]),
+           "by_fixes": breakdown(rows, lambda r: "2+" if r["fixes"] >= 2 else str(r["fixes"]), total, ["0", "1", "2+"]),
+           "by_turns": breakdown([r for r in rows if r["turns"]], lambda r: turns_bucket(r["turns"]), total,
+                                 ["1", "2", "3–4", "5+"]),
+           "by_state": breakdown(rows, lambda r: r["state"], total),
+           "dearest": [brief(r) for r in sorted(rows, key=lambda r: -r["cost"])[:8] if r["cost"]],
+           "slowest": [brief(r) for r in sorted(rows, key=lambda r: -(r["ran"] or 0))[:8] if r["ran"]],
+           "daily": sorted(daily.values(), key=lambda d: d["day"]),
+           "gate_causes": causes[:8], "colds": colds}
+    out["suggestions"] = suggestions(rows, out)
+    return out
+
+
+def suggestions(rows, a):
+    """How to make the queue cheaper and faster, from plain rules over the analysis. Each is {text, save}: save is
+    the dollars it might save over the period (an estimate, or None), and the list is dearest first."""
+    out, total, per_week = [], a["summary"]["cost"], 7 / a["days"]
+    money = lambda x: f"${x:,.2f}"  # noqa: E731
+    fixed, clean = [r for r in rows if r["fixes"]], [r for r in rows if not r["fixes"] and r["state"] == "done"]
+    if len(fixed) >= 2 and len(clean) >= 2:
+        mf, mc = pct([r["cost"] for r in fixed], 50), pct([r["cost"] for r in clean], 50)
+        if mc and mf > 1.3 * mc:
+            text = (f"Tasks that needed a gate-fix round cost {mf / mc:.1f}× as much as those that passed first time "
+                    f"(median {money(mf)} against {money(mc)}; {len(fixed)} tasks).")
+            if a["gate_causes"]:
+                top = a["gate_causes"][0]
+                rounds = sum(g["n"] for g in a["gate_causes"])
+                text += (f" The main cause is {top['cause']} ({top['n']} of {rounds} failures). "
+                         + ("Tasks that touch the same files ran side by side: chain them with After #."
+                            if top["cause"] == "rebase conflict" else
+                            "Say in the project's CLAUDE.md how to run that check and what usually trips it, so "
+                            "workers pass it before they hand in."))
+            out.append({"text": text, "save": sum(max(0, r["cost"] - mc) for r in fixed) / 2})
+    rel = [r for r in rows if r["kind"] == "release"]  # the one kind with its own model setting and routine work
+    opus = [r for r in rel if r["model"] in ("opus", "fable")]
+    cost = sum(r["cost"] for r in opus)
+    if cost >= 1 and model_family(model_for("release")) not in ("sonnet", "haiku"):
+        sonnet = [r["cost"] for r in rel if r["model"] == "sonnet"]
+        share = min(1, pct(sonnet, 50) / pct([r["cost"] for r in opus], 50)) if len(sonnet) >= 2 else SONNET_SHARE
+        out.append({"text": f"Opus on release checks costs {money(cost * per_week)}/week ({len(opus)} runs). Sonnet "
+                            f"would save about {money(cost * (1 - share) * per_week)}/week: set Releases to sonnet "
+                            f"under Models on the Settings tab.", "save": cost * (1 - share)})
+    n = sum(a["colds"].values())
+    if n:
+        parts = ", ".join(f"{k} {v}" for k, v in sorted(a["colds"].items(), key=lambda kv: -kv[1]))
+        tip = []
+        if a["colds"].get("your answer", 0) + a["colds"].get("your review", 0):
+            tip.append("answering questions and reviews within an hour keeps the cache warm")
+        if a["colds"].get("the usage limit"):
+            tip.append("a lower Usage brake (Settings) stops new tasks before the limit cuts running ones off")
+        out.append({"text": f"{n} turn{'s' if n > 1 else ''} started over an hour after the task's last step, so "
+                            f"the prompt cache had expired and the context was paid for again (about "
+                            f"{money(COLD_COST)} each). Waiting on: {parts}." + (f" Tip: {'; '.join(tip)}." if tip else ""),
+                    "save": n * COLD_COST})
+    s = a["summary"]
+    if s["wasted"] > 1 and s["wasted"] > 0.1 * total:
+        worst = max((r for r in rows if r["state"] in ("failed", "cancelled")), key=lambda r: r["cost"])
+        out.append({"text": f"Failed and cancelled tasks cost {money(s['wasted'])}, {s['wasted'] / total:.0%} of "
+                            f"the spend ({s['wasted_n']} task{'s' if s['wasted_n'] > 1 else ''}). The dearest is #{worst['id']} "
+                            f"({money(worst['cost'])}, {worst['state']}{': ' + worst['error'] if worst['error'] else ''}). "
+                            f"A design chat before queueing catches briefs that can't be done as written.",
+                    "save": s["wasted"]})
+    small = [r for r in rows if r["kind"] == "task" and r["state"] == "done" and 0 < r["cost"] < 2 * STARTUP_COST]
+    if len(small) >= 5 and len(small) > 0.3 * len(rows):
+        out.append({"text": f"{len(small)} tasks cost under {money(2 * STARTUP_COST)} each, and about "
+                            f"{money(STARTUP_COST)} of any task goes on starting up and reading the code. Queue small "
+                            f"related changes as one task.", "save": len(small) * STARTUP_COST / 2})
+    if s["queued_med"] and s["queued_med"] > 900:
+        out.append({"text": f"Tasks waited a median {span(s['queued_med'])} in the queue before a worker took them "
+                            f"(p90 {span(s['queued_p90'])}). More Parallel workers (Settings) start them sooner, at "
+                            f"the same cost, as long as the usage window allows it.", "save": None})
+    hi = [r["cost"] for r in rows if r["effort"] in ("high", "xhigh", "max") and r["state"] == "done"]
+    lo = [r["cost"] for r in rows if r["effort"] in ("low", "medium") and r["state"] == "done"]
+    if len(hi) >= 3 and len(lo) >= 3 and pct(hi, 50) > 1.5 * pct(lo, 50):
+        out.append({"text": f"Tasks at high effort or above cost a median {money(pct(hi, 50))}, against "
+                            f"{money(pct(lo, 50))} at low or medium. Keep high effort for hard tasks.",
+                    "save": sum(hi) - len(hi) * pct(lo, 50)})
+    return sorted(out, key=lambda x: -(x["save"] or 0))
+
+
 # ---------------------------------------------------------------- http
 
 def state_payload():
@@ -5565,6 +5797,9 @@ class H(BaseHTTPRequestHandler):
         if m and m.group(2) in IMAGE_TYPES.values() and (IMAGES / m.group(1)).is_file():
             ctype = next(k for k, v in IMAGE_TYPES.items() if v == m.group(2))
             return self.send(200, (IMAGES / m.group(1)).read_bytes(), ctype)
+        if path == "/api/analyze":  # the Analyze tab: ?period=1|7|30|all&project=<name>
+            qs = parse_qs(urlparse(self.path).query)
+            return self.send(200, analysis(qs.get("period", ["7"])[0], qs.get("project", [""])[0]))
         if path == "/api/designs":
             chats = q(f"SELECT {CHAT_COLS},origin FROM designs ORDER BY updated DESC")
             for c in chats:
