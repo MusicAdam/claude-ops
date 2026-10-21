@@ -1722,6 +1722,14 @@ def pipeline(tid):
         THREADS.pop(tid, None)
 
 
+def gate_key(p, wt):
+    """What a gate pass vouches for: every repo's commit in worktree wt, plus the gate commands. None if the
+    worktree has uncommitted changes, since the gate ran on those too."""
+    if any(r.git("status", "--porcelain", cwd=r.at(wt)) for r in p.parts):
+        return None
+    return " ".join(r.git("rev-parse", "HEAD", cwd=r.at(wt)) for r in p.parts) + "|" + "|".join(g["run"] for g in p.gate)
+
+
 def _pipeline(p, tid):
     t = task(tid)
     upd(tid, started=t["started"] or time.time(), error=None)
@@ -1800,9 +1808,16 @@ def _pipeline(p, tid):
                       f"write $OPS_RESULT again.\n\ngit said:\n{r.stdout[-1500:]}{r.stderr[-1500:]}")
             upd(tid, state="running")
             continue
-        ok, detail = gate(p, tid, wt)
+        key = gate_key(p, wt)
+        if key and setting(f"gated:{tid}") == key:  # approved after a pass, and nothing moved since
+            ok, detail = True, ""
+            ev(tid, "gate skipped: it passed on exactly these commits")
+        else:
+            ok, detail = gate(p, tid, wt)
         if stopped(tid):
             return
+        if ok and key:
+            set_setting(f"gated:{tid}", key)
         if not ok:
             ev(tid, f"gate failed: {detail.splitlines()[0]}")
             if not bump_round(p, tid, "gate failed:\n" + detail):
