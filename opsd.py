@@ -1039,6 +1039,26 @@ def play_run(p, where):
     stale_facts(p.name)
 
 
+def stop_play(p, where):
+    """Stop p's app running from its main or dev worktree, as the card's Stop button asks. An [app] stop command
+    can take a while, so it runs in the background and PLAYS shows "stopping" on the card meanwhile."""
+    path = p.dev_wt if where == "dev" else p.main_wt
+    name = p.dev if where == "dev" else p.main
+    with PLAYS_LOCK:
+        if (PLAYS.get(p.name) or {}).get("phase"):
+            raise ValueError(f"wait: already {PLAYS[p.name]['phase']}")
+        PLAYS[p.name] = {"where": where, "phase": f"stopping {name}", "error": None}
+
+    def run():
+        try:
+            kill_app(p, path)
+            PLAYS.pop(p.name, None)
+        except Exception as e:
+            PLAYS[p.name] = {"where": where, "phase": None, "error": str(e), "stop": True}
+        stale_facts(p.name)
+    threading.Thread(target=run, daemon=True).start()
+
+
 def dev_head(p):
     """The commit (a revs string) checked out in the dev worktree."""
     return " ".join(r.git("rev-parse", "HEAD", cwd=r.at(p.dev_wt)) for r in p.parts)
@@ -5660,7 +5680,7 @@ class H(BaseHTTPRequestHandler):
         m = re.fullmatch(r"/api/projects/([^/]+)/(archive|unarchive)", path)
         if m:  # unarchive names a project that is not loaded, so these come before proj()
             return (archive_project if m.group(2) == "archive" else unarchive_project)(unquote(m.group(1)))
-        m = re.fullmatch(r"/api/projects/([\w-]+)/(promote|play|pause|resume|release|senddev)", path)
+        m = re.fullmatch(r"/api/projects/([\w-]+)/(promote|play|stop|pause|resume|release|senddev)", path)
         if m:
             p, act = proj(m.group(1)), m.group(2)
             if act == "senddev":  # Send to dev, on the banner about your checkout's uncommitted files
@@ -5674,6 +5694,8 @@ class H(BaseHTTPRequestHandler):
             elif act == "play":  # Play main, or Play dev with {"where": "dev"}
                 play(p, "dev" if b.get("where") == "dev" else "main")
                 stale_facts(p.name)
+            elif act == "stop":  # Stop main, or Stop dev with {"where": "dev"}: quit the app running from there
+                stop_play(p, "dev" if b.get("where") == "dev" else "main")
             else:
                 set_setting(f"paused:{p.name}", "1" if act == "pause" else "0")
             return
