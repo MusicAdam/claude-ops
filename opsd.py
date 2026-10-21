@@ -53,6 +53,8 @@ STOPPED = ("cancelled", "paused")  # set by you; the pipeline stops at its next 
 ENDED = ("done", "failed", "cancelled")
 MERGES = ("task", "senddev")  # kinds that go through the gate into dev: they can release after merge
 RELEASE_LOCK = threading.Lock()  # one release queued at a time, when tasks finish together
+TRAIN = {}  # project -> {"ids", "by"}: merged tasks waiting for the release train (auto_release), for the dashboard
+IN_MAIN = set()  # ids of merged tasks main contains: main only moves forward, so auto_release checks each once
 DBL = threading.RLock()
 PROCS = {}  # task id -> current Popen (claude or a gate step), for cancel
 STOPPING = threading.Event()  # this daemon is shutting down: start nothing new. Never stored, so it can't outlive us
@@ -560,7 +562,8 @@ def init_db():
         q("ALTER TABLE task_msgs ADD COLUMN delivered REAL")
     q("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)")
     q("CREATE TABLE IF NOT EXISTS session_costs (session_id TEXT PRIMARY KEY, total REAL)")  # see cost_added
-    for k, v in {"max_parallel": "3", "paused": "0", "model": "", "usage_brake": "85", "model:release": "sonnet"}.items():
+    for k, v in {"max_parallel": "3", "paused": "0", "model": "", "usage_brake": "85", "model:release": "sonnet",
+                 "release_wait": "180"}.items():
         q("INSERT OR IGNORE INTO settings VALUES (?,?)", (k, v))
     q("DELETE FROM settings WHERE key='draining'")  # the old restart's stored hold: a crash could leave it set
 
@@ -583,7 +586,8 @@ def set_setting(k, v):
 # goes to --model on every resume, whatever the settings say now.
 
 MODEL_KINDS = ("task", "release", "design", "chat")
-SETTING_KEYS = ("max_parallel", "paused", "model", "usage_brake", *(f"model:{k}" for k in MODEL_KINDS))  # the dashboard's
+SETTING_KEYS = ("max_parallel", "paused", "model", "usage_brake", "release_wait",  # the dashboard's
+                *(f"model:{k}" for k in MODEL_KINDS))
 MODEL_OF_KIND = {"senddev": "task", "deploy": "task", "project": "chat"}  # a project chat is the Chat tab
 
 
@@ -624,6 +628,20 @@ def init_model(e):
 def release_default(p):
     """Whether new tasks of p are marked "Release after merge" unless you say otherwise."""
     return setting(f"auto_release:{p.name}") == "1"
+
+
+def release_play(p):
+    """Whether p's releases have Claude build and play dev ("Play-check releases" on the project, on by default).
+    Off, a release is gate-only: the merge check passes and main moves."""
+    return setting(f"release_play:{p.name}") != "0"
+
+
+def release_wait():
+    """Minutes the release train waits at most for p's queue to go quiet, after the first of its tasks merges."""
+    try:
+        return max(0.0, float(setting("release_wait") or 180))
+    except ValueError:
+        return 180.0
 
 
 def task(tid):
@@ -1611,8 +1629,12 @@ def queue_release(p):
               (p.name,), one=True)
     if open_:
         return open_["id"]
+    TRAIN.pop(p.name, None)
     body = (f"Check the latest {p.dev} as a whole: the merge check, then a build that a release checker runs "
             f"and plays like a player. If it passes, build it into {p.main} and fast-forward {p.main} to it.")
+    if not release_play(p):
+        body = (f"Check the latest {p.dev} with the merge check alone (Play-check releases is off). If it passes, "
+                f"build it into {p.main} and fast-forward {p.main} to it.")
     return add_task(p.name, body, f"Release {p.dev} → {p.main}", priority=100, kind="release")
 
 
@@ -1627,25 +1649,50 @@ def root_of(t):
 
 
 def auto_release(p):
-    """Queue a release for tasks marked "Release after merge" once they are in dev and not yet in main. With a
-    release already open this waits: the release's own end calls it again, so anything that merged after its
-    snapshot gets the next one. The tasks of one split release together, after the last of them merges."""
+    """Queue a release for tasks marked "Release after merge" once they are in dev and not yet in main, as a train:
+    when the project is quiet (none of its tasks or Send to devs queued, running, gating or merging; ones waiting
+    on you don't count), or once the first of them merged release_wait minutes ago. The scheduler calls this every
+    minute, and a merge at its end. With a release already open this waits: the release's own end calls it again,
+    so anything that merged after its snapshot gets the next one. The tasks of one split release together, after
+    the last of them merges."""
     with RELEASE_LOCK:
+        TRAIN.pop(p.name, None)
         if q("SELECT id FROM tasks WHERE project=? AND kind='release' AND state NOT IN (?,?,?)",
              (p.name, *ENDED), one=True):
             return None
         tasks = q("SELECT * FROM tasks WHERE project=? AND kind IN (?,?) AND auto_release=1", (p.name, *MERGES))
         busy = {root_of(t) for t in tasks if t["state"] not in ENDED}
-        ready = [t for t in tasks if t["state"] == "done" and t["merged"] and root_of(t) not in busy
-                 and not all(any(is_ancestor(r, sha, p.main) for r in p.parts if r.has(sha))
-                             for sha in t["merged"].split())]
+        ready = [t for t in tasks if t["state"] == "done" and t["merged"] and t["id"] not in IN_MAIN
+                 and root_of(t) not in busy]
+        for t in ready:
+            if all(any(is_ancestor(r, sha, p.main) for r in p.parts if r.has(sha)) for sha in t["merged"].split()):
+                IN_MAIN.add(t["id"])
+        ready = [t for t in ready if t["id"] not in IN_MAIN]
         if not ready:
+            return None
+        first = min(t["finished"] or 0 for t in ready)
+        by = first + release_wait() * 60
+        quiet = not q(f"SELECT id FROM tasks WHERE project=? AND kind IN (?,?) AND state IN "
+                      f"({','.join('?' * (1 + len(ACTIVE)))}) LIMIT 1", (p.name, *MERGES, "queued", *ACTIVE), one=True)
+        if not quiet and time.time() < by:
+            TRAIN[p.name] = {"ids": [t["id"] for t in ready], "by": by}
             return None
         rid = queue_release(p)
     for t in ready:
         ev(t["id"], f"queued release #{rid}")
-    ev(rid, "queued after " + ", ".join(f"#{t['id']}" for t in ready) + " merged (release after merge)")
+    why = "the queue is quiet" if quiet else f"the first merged {round((time.time() - first) / 60)} min ago"
+    ev(rid, "queued after " + ", ".join(f"#{t['id']}" for t in ready) + f" merged (release after merge; {why})")
     return rid
+
+
+def release_trains():
+    """The scheduler's minute check: a train may leave because its time is up, or because the queue went quiet
+    without a merge (a task failed, was cancelled, or now waits for your review)."""
+    for p in list(PROJECTS.values()):
+        try:
+            auto_release(p)
+        except Exception as e:  # one project's git trouble must not stop the others' trains
+            print(f"release train {p.name}:", e, flush=True)
 
 
 ANSWERED = "The user answered your question:"  # how an answer reaches a task's next turn
@@ -1695,14 +1742,30 @@ def unblock_releases():
             ev(t["id"], "the way is clear; going on")
 
 
-def release_prompt(p, t):
+def release_contents(p, t):
+    """What release t brings to main: [(repo, "sha short subject")] of first-parent commits, and the tasks that
+    merged them."""
     log = [(r, l) for r, sha in p.pairs(t["base"])
            for l in r.git("log", "--first-parent", "--format=%H %h %s", f"{p.main}..{sha}").splitlines()]
-    changes = "\n".join(f"- {r.sub + ': ' if r.sub else ''}{l.split(' ', 1)[1]}" for r, l in log[:60]) \
-        or f"- (nothing: this only rebuilds {p.main})"
     shas = {l.split(" ", 1)[0] for _, l in log}
     done = [d for d in q("SELECT id,title,summary,merged FROM tasks WHERE project=? AND merged IS NOT NULL "
-                         "ORDER BY id", (p.name,)) if shas & set(d["merged"].split())] if shas else []
+                         "ORDER BY id", (p.name,)) if shas & set(d["merged"].split())] \
+        if shas else []
+    return log, done
+
+
+def gate_only_summary(p, t):
+    """A gate-only release's summary (Play-check releases off): what passed, then each task's own summary."""
+    checks = ", ".join(g["name"] for g in p.gate) or "no checks configured"
+    _, done = release_contents(p, t)
+    return "\n\n".join([f"Gate-only release: the merge check passed ({checks})"]
+                       + [f"#{d['id']} {d['title']}\n{d['summary'] or '(no summary)'}" for d in done])
+
+
+def release_prompt(p, t):
+    log, done = release_contents(p, t)
+    changes = "\n".join(f"- {r.sub + ': ' if r.sub else ''}{l.split(' ', 1)[1]}" for r, l in log[:60]) \
+        or f"- (nothing: this only rebuilds {p.main})"
     summaries = "\n\n".join(f"#{d['id']} {d['title']}\n{(d['summary'] or '(no summary)')[:1500]}" for d in done)
     checks = ", ".join(f"`{g['run']}`" for g in p.gate) or "(none configured)"
     notes = workspace_note(p) + (f"## Notes for {p.title}\n\n{p.worker_notes}\n" if p.worker_notes else "")
@@ -1714,7 +1777,8 @@ def release_prompt(p, t):
 
 
 def release_pipeline(p, tid):
-    """Snapshot dev, gate it, have Claude play it, then promote exactly that commit."""
+    """Snapshot dev, gate it, have Claude play it (unless Play-check releases is off), then promote exactly that
+    commit."""
     t = task(tid)
     start_at, resume = t["start_at"], t["next_prompt"]
     upd(tid, started=t["started"] or time.time(), error=None, next_prompt=None, start_at="claude")
@@ -1745,8 +1809,9 @@ def release_pipeline(p, tid):
             if r.git("rev-parse", "HEAD", cwd=r.at(t["worktree"])) != sha:  # left at the merge worker's commit
                 r.git("checkout", "--force", "--detach", sha, cwd=r.at(t["worktree"]))
 
+    checker = release_play(p)  # off: gate-only, no release checker
     if start_at != "promote":
-        if resume and t["session_id"]:  # an answer, a retry or a restart resumes the checker
+        if checker and resume and t["session_id"]:  # an answer, a retry or a restart resumes the checker
             prompt = resume
         else:
             upd(tid, state="gating")
@@ -1756,27 +1821,31 @@ def release_pipeline(p, tid):
             if not ok:
                 return fail(p, tid, "gate failed, so the release stops here:\n" + detail)
             ev(tid, "gate passed" + (": " + ", ".join(g["name"] for g in p.gate) if p.gate else " (no gate steps)"))
-            prompt = release_prompt(p, t)
-        upd(tid, state="running")
-        res = run_claude(p, tid, prompt)
-        if stopped(tid):
-            return
-        if res is None:
-            err = (RUNS / str(tid) / "claude.err").read_text(errors="replace")[-1500:]
-            return fail(p, tid, "release checker stopped without writing a result.\n" + err)
-        upd(tid, summary=res.get("summary") or task(tid)["summary"])
-        ids = add_subtasks(p, tid, res.get("tasks"))
-        if ids:
-            ev(tid, "queued follow-ups " + ", ".join(f"#{i}" for i in ids))
-        status = res.get("status")
-        if status == "needs_input":
-            upd(tid, state="needs_input", phase="", question=res.get("question") or res.get("summary"))
-            ev(tid, "needs your input")
-            notify(f"{p.title}: release needs input", f"#{tid}: {res.get('question', '')}")
-            return
-        if status != "done":
-            return fail(p, tid, "release blocked: " + (res.get("summary") or f"checker reported {status}"))
-        ev(tid, "release check passed")
+            prompt = release_prompt(p, t) if checker else None
+        if not checker:
+            upd(tid, summary=gate_only_summary(p, t))
+            ev(tid, "gate-only release: Play-check releases is off, so no release checker runs")
+        else:
+            upd(tid, state="running")
+            res = run_claude(p, tid, prompt)
+            if stopped(tid):
+                return
+            if res is None:
+                err = (RUNS / str(tid) / "claude.err").read_text(errors="replace")[-1500:]
+                return fail(p, tid, "release checker stopped without writing a result.\n" + err)
+            upd(tid, summary=res.get("summary") or task(tid)["summary"])
+            ids = add_subtasks(p, tid, res.get("tasks"))
+            if ids:
+                ev(tid, "queued follow-ups " + ", ".join(f"#{i}" for i in ids))
+            status = res.get("status")
+            if status == "needs_input":
+                upd(tid, state="needs_input", phase="", question=res.get("question") or res.get("summary"))
+                ev(tid, "needs your input")
+                notify(f"{p.title}: release needs input", f"#{tid}: {res.get('question', '')}")
+                return
+            if status != "done":
+                return fail(p, tid, "release blocked: " + (res.get("summary") or f"checker reported {status}"))
+            ev(tid, "release check passed")
 
     upd(tid, start_at="promote")  # a retry, a resume or a restart continues here
     if stopped(tid):
@@ -2024,7 +2093,10 @@ def usage_braked():
 def starts_claude(t):
     """Whether starting queued task t starts a Claude session, so the usage brake holds it. A deploy only runs its
     command, and a task whose start_at is past 'claude' resumes at its gate, merge or promote; those hold back no
-    usage, so they start while braked (a merge or promote that needs a worker for a conflict still runs one)."""
+    usage, so they start while braked (a merge or promote that needs a worker for a conflict still runs one), and so
+    does a gate-only release (Play-check releases off)."""
+    if t["kind"] == "release" and t["project"] in PROJECTS and not release_play(PROJECTS[t["project"]]):
+        return False
     return t["kind"] != "deploy" and t["start_at"] == "claude"
 
 
@@ -2037,6 +2109,8 @@ def scheduler():
             schedule_once()
             if n % 3 == 0:  # every 6 s: a scan for a running build takes up to 0.4 s
                 unblock_releases()
+            if n % 30 == 0 and not STOPPING.is_set():  # every minute: release trains whose time is up
+                release_trains()
         except Exception as e:
             print("scheduler error:", e, flush=True)
         n += 1
@@ -2215,6 +2289,8 @@ def main_info(p, s=None):
             "dev_stale": bool(p.build) and (dev_built != f["dev"] or not f.get("dev_has_build")),
             "paused": s.get(f"paused:{p.name}") == "1",
             "auto_release": s.get(f"auto_release:{p.name}") == "1",  # release_default(p), from the snapshot
+            "release_play": s.get(f"release_play:{p.name}") != "0",  # release_play(p), from the snapshot
+            "train": TRAIN.get(p.name),  # merged tasks waiting for the release train: {"ids", "by"}
             "gate": [g["name"] for g in p.gate], "release": rel,
             "deploys": deploys, "deploys_loading": bool(p.deploys) and f.get("deploys") is None,
             "deploy_open": opens[0]["id"] if opens else None, "uncommitted": f.get("uncommitted") or [],
@@ -4996,9 +5072,13 @@ class H(BaseHTTPRequestHandler):
         if path == "/api/settings":
             if "usage_brake" in b:
                 b["usage_brake"] = min(100, max(0, int(float(b["usage_brake"] or 0))))
+            if "release_wait" in b:
+                b["release_wait"] = max(0, int(float(b["release_wait"] or 0)))
             for k in SETTING_KEYS:
                 if k in b:
                     set_setting(k, model_name(b[k]) or "" if k.startswith("model") else b[k])
+            if "release_wait" in b:  # a train whose new time is up leaves now
+                release_trains()
             return
         if path == "/api/projects":
             if b.get("check"):  # what the path resolves to, and whether it can be created
@@ -5024,7 +5104,7 @@ class H(BaseHTTPRequestHandler):
         m = re.fullmatch(r"/api/projects/([^/]+)/(archive|unarchive)", path)
         if m:  # unarchive names a project that is not loaded, so these come before proj()
             return (archive_project if m.group(2) == "archive" else unarchive_project)(unquote(m.group(1)))
-        m = re.fullmatch(r"/api/projects/([\w-]+)/(promote|play|pause|resume|release|senddev)", path)
+        m = re.fullmatch(r"/api/projects/([\w-]+)/(promote|play|pause|resume|release|playcheck|senddev)", path)
         if m:
             p, act = proj(m.group(1)), m.group(2)
             if act == "senddev":  # Send to dev, on the banner about your checkout's uncommitted files
@@ -5033,6 +5113,8 @@ class H(BaseHTTPRequestHandler):
                 return {"id": tid}
             if act == "release":  # the project's "Release after merge" default, for tasks queued from now on
                 set_setting(f"auto_release:{p.name}", "1" if b.get("on") else "0")
+            elif act == "playcheck":  # "Play-check releases": off, releases are gate-only
+                set_setting(f"release_play:{p.name}", "1" if b.get("on") else "0")
             elif act == "promote":
                 return {"id": queue_release(p)}
             elif act == "play":  # Play main, or Play dev with {"where": "dev"}
