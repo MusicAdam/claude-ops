@@ -72,6 +72,7 @@ DBL = threading.RLock()
 PROCS = {}  # task id -> current Popen (claude or a gate step), for cancel
 STEPS = {}  # Popen -> cwd of every run_step command running now, so a shutdown or a setup in its folder can stop it
 SETUP_TIMEOUT = 15  # minutes a [worktree] setup command may run; a project's setup_timeout overrides it
+STUCK_AFTER = 15 * 60  # seconds a worker may stay silent with no command running before it counts as stuck
 STOPPING = threading.Event()  # this daemon is shutting down: start nothing new. Never stored, so it can't outlive us
 THREADS = {}  # task id -> pipeline thread
 PHASE_SINCE = {}  # task id -> when its phase last changed, so the dashboard can say how long a step has run
@@ -1221,6 +1222,52 @@ def shell_segments(cmd):
     return out
 
 
+def watch_stuck(proc, seen, stuck):
+    """Stop a worker that printed nothing for STUCK_AFTER and started no process since: it is blocked inside
+    Claude, not running a long build or test. In #179 that was a macOS privacy prompt for ~/Downloads nobody
+    saw, and the task sat 'claude working' for 90 minutes. seen[0] is when its last line came; stuck gets
+    how long it was silent, and run_claude turns that into a question for you."""
+    while True:
+        try:
+            proc.wait(60)
+            return
+        except subprocess.TimeoutExpired:
+            pass
+        quiet = time.time() - seen[0]
+        if quiet > STUCK_AFTER and not started_under(proc.pid, seen[0]):
+            stuck.append(quiet)
+            stop(proc)
+            return
+
+
+def started_under(pid, since):
+    """True if a process below pid, other than caffeinate, started after the time since: a command it runs."""
+    kids, born, now = {}, {}, time.time()
+    out = subprocess.run(["ps", "-axo", "pid=,ppid=,etime=,comm="], capture_output=True, text=True).stdout
+    for line in out.splitlines():
+        f = line.split(None, 3)
+        if len(f) < 4:
+            continue
+        d, _, hms = f[2].rpartition("-")  # [[dd-]hh:]mm:ss
+        secs = sum(int(x) * m for x, m in zip(reversed(hms.split(":")), (1, 60, 3600))) + int(d or 0) * 86400
+        kids.setdefault(int(f[1]), []).append(int(f[0]))
+        born[int(f[0])] = (now - secs, os.path.basename(f[3]))
+    todo = list(kids.get(pid, []))
+    while todo:
+        c = todo.pop()
+        todo += kids.get(c, [])
+        if born[c][1] != "caffeinate" and born[c][0] > since:
+            return True
+    return False
+
+
+def tool_label(block):
+    """A tool call as the question names it: Bash `ls ~/Downloads`, Read some/file, ..."""
+    i = block.get("input") or {}
+    arg = next((str(i[k]) for k in ("command", "file_path", "path", "url", "query", "pattern") if i.get(k)), "")
+    return f"{block.get('name')} `{arg[:120]}`" if arg else str(block.get("name"))
+
+
 def proc_table():
     """pid -> (ppid, uid) for every process."""
     out = {}
@@ -1498,6 +1545,8 @@ def run_claude(p, tid, prompt):
         proc = subprocess.Popen(cmd, cwd=t["worktree"], env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                 stderr=err, text=True, start_new_session=True)
         track(tid, proc)
+        seen, stuck, last_tool = [time.time()], [], "its first step"  # see watch_stuck
+        threading.Thread(target=watch_stuck, args=(proc, seen, stuck), daemon=True).start()
         try:
             send_user(proc.stdin, prompt)
             with STEER_LOCK:
@@ -1510,12 +1559,16 @@ def run_claude(p, tid, prompt):
         except OSError:
             pass  # claude died at once; its stderr says why
         for line in proc.stdout:
+            seen[0] = time.time()
             log.write(line)
             log.flush()
             try:
                 e = json.loads(line)
             except ValueError:
                 continue
+            if e.get("type") == "assistant" and isinstance(e.get("message"), dict):
+                last_tool = next((tool_label(c) for c in e["message"].get("content") or []
+                                  if isinstance(c, dict) and c.get("type") == "tool_use"), last_tool)
             if e.get("session_id") and e["session_id"] != sid:  # compared here: a turn streams thousands of lines
                 sid = e["session_id"]
                 upd(tid, session_id=sid)
@@ -1562,6 +1615,13 @@ def run_claude(p, tid, prompt):
         with STEER_LOCK:
             INFLIGHT.pop(tid, None)  # written but never read: still pending, so the next turn gets them
     kill_app(p, t["worktree"])
+    if stuck and not stopped(tid):
+        return {"status": "needs_input", "summary": f"stuck on {last_tool}",
+                "question": f"The worker was stuck for {stuck[0] // 60:.0f} min on {last_tool}, with no command "
+                            "running, so it was stopped. On a Mac this is almost always a privacy prompt for Claude "
+                            "Ops (Downloads, Desktop, Documents, data from other apps, App Management) waiting on "
+                            "the screen. Allow it there, or give Claude Ops Full Disk Access in System Settings → "
+                            "Privacy & Security, then answer to resume the worker."}
     if limit is not None:
         until = limit_hit(limit)
         if not rp.exists():  # cut off mid-turn: wait for the reset, then resume the session
