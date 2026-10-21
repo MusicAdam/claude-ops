@@ -213,6 +213,9 @@ The Design tab is a chat with Claude about one project. It reads the project's d
 dev code but cannot edit anything (`--permission-mode dontAsk` with read-only tools). When you
 agree on the work, ask it to queue: it writes self-contained task briefs, and they appear as chips
 under its reply. Each message it gets starts with that project's current queue, so it avoids duplicates.
+When it has read the code a task touches, the brief ends with **Where to look**: about 20 lines of
+`file:line` pointers and facts it found, so the worker skips the search. It merges small pieces into one
+task only when they touch the same files. A worker that splits its task writes the same section.
 
 ### OpenSpec changes
 
@@ -569,6 +572,9 @@ notes = """Project-specific guidance for design chats."""
 - **Workers** run `claude -p --permission-mode auto --permission-prompts none --strict-mcp-config`.
   Anything that would prompt is denied. They never push, and never touch your checkout, dev or main.
   None of the daemon's Claude sessions (workers, design, chat) connect to Claude in Chrome (`--no-chrome`).
+- **Reading rules.** Worker, release and chat briefs tell Claude to search before reading, read big files in
+  ranges of 150 lines or fewer, not reread what is already in context, and keep command output short. Everything
+  read stays in context and is paid for again on every later call.
 - **Processes.** The daemon and its sessions stop only processes they started. See below.
 
 ## Process safety

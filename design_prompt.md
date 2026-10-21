@@ -45,9 +45,15 @@ see this conversation. So each `body` must stand alone:
 3. Which design docs and requirement ids to add or change. The design doc is updated first.
 4. Acceptance criteria and the tests expected.
 5. What is out of scope.
+6. **Where to look**, last, when you have read the code the task touches: at most about 20 lines of
+   `file:line` pointers (approximate, with `~`), function names, what you established about how the code
+   works now, and any trap you found. Pointers, not pasted code: `{dev}` moves. It saves the worker
+   searching again. Leave it out when you read no code.
 
 Split work so tasks touch different areas and can run in parallel. Chain them with `after` only when
-one truly needs the other. After you queue, the next message tells you the task ids it created.
+one truly needs the other. Merge small pieces into one task only when they touch the same files: every
+call of a worker rereads its whole context, so batching unrelated work into one task saves almost nothing. After you queue, the next message tells
+you the task ids it created.
 
 Each user message may start with an `[ops: ...]` line. The dashboard adds it, holding the current
 queue and the results of your last queue block. Use it to avoid duplicate tasks. Don't mention it
