@@ -113,6 +113,8 @@ class Project:
         self.launch = app.get("launch")
         self.process = app.get("process")
         self.artifact = app.get("artifact")
+        self.running_cmd = app.get("running")  # a server-style app: exit 0 = it runs from the worktree (cwd)
+        self.stop_cmd = app.get("stop")  # and this stops it there; both replace the process-table match
         wk = c.get("worker", {})
         self.env = wk.get("env", {})
         self.port_base = int(wk.get("port_base", 47900))
@@ -329,12 +331,13 @@ def bootstrap(p):
             r.git("branch", p.dev, p.main)
         if not r.at(p.dev_wt).exists():
             r.git("worktree", "add", str(r.at(p.dev_wt)), p.dev)
+            set_setting(f"dev_prepared:{p.name}", "")  # a new dev worktree: Play dev prepares it first
         exclude = Path(r.git("rev-parse", "--path-format=absolute", "--git-common-dir")) / "info" / "exclude"
         if RESULT_FILE not in (exclude.read_text() if exclude.exists() else ""):
             exclude.parent.mkdir(exist_ok=True)
             with open(exclude, "a") as f:
                 f.write(f"\n{RESULT_FILE}\n")
-    if p.build:
+    if p.build or p.launch:  # Play main runs it there
         copy_workspace_files(p, p.main_wt)
         if not all(r.at(p.main_wt).exists() for r in p.parts):
             for r in p.parts:
@@ -722,15 +725,8 @@ def proc_cwd(pid):
     return proc_cwds([pid]).get(pid, "")
 
 
-def app_pids(p, path):
-    """Copies of the project's app running from this worktree: your processes whose executable lies in
-    <path>/<process>. Matched on the executable, literally: `pkill -f` matched a regex against every
-    command line, so it also hit a shell, editor or `tail` that merely named the path."""
-    if not (p and p.process and path):
-        return []
-    app = os.path.realpath(Path(path) / p.process)
-    if not within(app, path):  # an absolute or ../ process would reach outside the worktree
-        return []
+def my_exes():
+    """(pid, executable) of each of your processes but the daemon, the executable as an absolute path."""
     found, relative = [], []
     ps = subprocess.run(["ps", "-axo", "pid=,uid=,comm="], capture_output=True, text=True).stdout
     for line in ps.splitlines():
@@ -743,12 +739,46 @@ def app_pids(p, path):
         else:  # started by a relative path: ps shows it as given, so it is relative to the process's cwd
             relative.append((pid, exe))
     cwds = proc_cwds([pid for pid, _ in relative])
-    found += [(pid, os.path.join(cwds.get(pid) or "/nonexistent", exe)) for pid, exe in relative]
-    return [pid for pid, exe in found if within(exe, app)]
+    return found + [(pid, os.path.join(cwds.get(pid) or "/nonexistent", exe)) for pid, exe in relative]
+
+
+def app_pids(p, path, exes=None):
+    """Copies of the project's app running from this worktree: your processes whose executable lies in
+    <path>/<process>. Matched on the executable, literally: `pkill -f` matched a regex against every
+    command line, so it also hit a shell, editor or `tail` that merely named the path. exes is my_exes(),
+    passed in when the caller checks several worktrees, so the process table is read once."""
+    if not (p and p.process and path):
+        return []
+    app = os.path.realpath(Path(path) / p.process)
+    if not within(app, path):  # an absolute or ../ process would reach outside the worktree
+        return []
+    return [pid for pid, exe in (my_exes() if exes is None else exes) if within(exe, app)]
+
+
+APP_CMD_TIMEOUT = 120  # seconds an [app] running or stop command may take
+
+
+def app_cmd(p, cmd, path):
+    """Run an [app] running or stop command in the worktree. Returns its exit code; 1 if it can't run there."""
+    if not Path(path).is_dir():
+        return 1
+    try:
+        return subprocess.run(cmd, shell=True, cwd=path, capture_output=True, timeout=APP_CMD_TIMEOUT,
+                              env=dict(os.environ, OPS_REPO=str(p.repo))).returncode
+    except subprocess.TimeoutExpired:
+        print(f"{p.name}: [app] command timed out in {path}: {cmd}", flush=True)
+        return 1
 
 
 def kill_app(p, path):
-    """Quit any copy of the project's app running from this worktree."""
+    """Quit any copy of the project's app running from this worktree: its [app] stop command, or else SIGTERM
+    to the processes app_pids finds."""
+    if not (p and path):
+        return
+    if p.stop_cmd:
+        if not p.running_cmd or app_running(p, path):  # with a running command, stop only where it runs
+            app_cmd(p, p.stop_cmd, path)
+        return
     for pid in app_pids(p, path):
         try:
             os.kill(pid, signal.SIGTERM)
@@ -756,8 +786,11 @@ def kill_app(p, path):
             pass
 
 
-def app_running(p, path):
-    return bool(app_pids(p, path))
+def app_running(p, path, exes=None):
+    """The project's app runs from this worktree: its [app] running command exits 0, or else app_pids finds it."""
+    if p and p.running_cmd:
+        return bool(path) and app_cmd(p, p.running_cmd, path) == 0
+    return bool(app_pids(p, path, exes))
 
 
 def launch_app(p, path):
@@ -765,8 +798,74 @@ def launch_app(p, path):
         raise ValueError(f"{p.name} has no [app] launch command")
     if p.artifact and not (Path(path) / p.artifact).exists():
         raise ValueError("there is no build there yet")
+    if p.stop_cmd:  # a server-style app holds fixed ports, so only one worktree can serve: stop the others
+        tasks = q(f"SELECT worktree FROM tasks WHERE project=? AND worktree IS NOT NULL AND state NOT IN "
+                  f"({','.join('?' * len(ENDED))})", (p.name, *ENDED))
+        for o in [p.main_wt, p.dev_wt] + [Path(t["worktree"]) for t in tasks]:
+            if o.is_dir() and not within(o, path):
+                kill_app(p, o)
     subprocess.Popen(p.launch, shell=True, cwd=path, start_new_session=True,
                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+# ---------------------------------------------------------------- Play main and Play dev
+# The card's Play buttons run [app] launch in <worktrees>/main or <worktrees>/dev. Play dev first prepares the dev
+# worktree (the [worktree] clone files and setup, once) and runs [app] build there when dev has moved since its
+# last build. That can take minutes, so a Play runs in a thread, and PLAYS holds what it is doing for the card.
+
+PLAYS = {}  # project name -> {"where": "main"|"dev", "phase": what it does now or None, "error": why it failed}
+PLAYS_LOCK = threading.Lock()
+
+
+def play(p, where):
+    """Start a Play of p's main or dev in the background. Raises if it can't start."""
+    if not p.launch:
+        raise ValueError(f"{p.name} has no [app] launch command")
+    if where == "main" and not (p.main_wt.is_dir() and (not p.artifact or (p.main_wt / p.artifact).exists())):
+        raise ValueError(f"there is no build of {p.main} yet: Promote to build it")
+    with PLAYS_LOCK:
+        if (PLAYS.get(p.name) or {}).get("phase"):
+            raise ValueError(f"wait: already {PLAYS[p.name]['phase']}")
+        PLAYS[p.name] = {"where": where, "phase": f"starting {p.dev if where == 'dev' else p.main}", "error": None}
+    threading.Thread(target=play_run, args=(p, where), daemon=True).start()
+
+
+def play_run(p, where):
+    def phase(text):
+        PLAYS[p.name] = {"where": where, "phase": text, "error": None}
+    try:
+        if where == "dev":
+            path = p.dev_wt
+            if setting(f"dev_prepared:{p.name}") != "1":  # bootstrap made it without clone files and setup
+                phase(f"setting up {path}")
+                copy_workspace_files(p, path)
+                prepare_worktree(p, path)
+                set_setting(f"dev_prepared:{p.name}", "1")
+            if p.build:
+                head = dev_head(p)
+                if setting(f"dev_built:{p.name}") != head or (p.artifact and not (path / p.artifact).exists()):
+                    phase(f"building {p.dev} at {p.show(head)}")
+                    log = RUNS / f"play-{p.name}" / "build.log"
+                    rc, tail = run_step(f"play-{p.name}", f"building {p.dev}", p.build, path, "build.log")
+                    if rc or (p.artifact and not (path / p.artifact).exists()):
+                        raise RuntimeError(f"Building {p.dev} failed (log: {log}).\n{tail[-1500:]}")
+                    set_setting(f"dev_built:{p.name}", head)  # what it was at the start: a merge meanwhile rebuilds
+        else:
+            path = p.main_wt
+            if not p.build:  # no build pins main's worktree to what was built: play main as it is now
+                for r in p.parts:
+                    r.git("checkout", "--detach", p.main, cwd=r.at(path), check=False)
+        phase(f"launching {p.dev if where == 'dev' else p.main}")
+        launch_app(p, path)
+        PLAYS.pop(p.name, None)
+    except Exception as e:
+        PLAYS[p.name] = {"where": where, "phase": None, "error": str(e)}
+    stale_facts(p.name)
+
+
+def dev_head(p):
+    """The commit (a revs string) checked out in the dev worktree."""
+    return " ".join(r.git("rev-parse", "HEAD", cwd=r.at(p.dev_wt)) for r in p.parts)
 
 
 def child_commands(pid):
@@ -2100,6 +2199,7 @@ def main_info(p, s=None):
     if f.get("error"):
         raise RuntimeError(f["error"])
     built = s.get(f"main_built:{p.name}", "")
+    dev_built = s.get(f"dev_built:{p.name}", "")
     rel = q("SELECT id,state,phase,error FROM tasks WHERE project=? AND kind='release' ORDER BY id DESC LIMIT 1",
             (p.name,), one=True)
     opens = q("SELECT id,state,deploy FROM tasks WHERE project=? AND kind='deploy' AND state NOT IN (?,?,?) "
@@ -2110,7 +2210,9 @@ def main_info(p, s=None):
             "main": p.show(f["main"]), "built": p.show(built), "dev": p.show(f["dev"]), "ahead": f["ahead"],
             "has_app": bool(p.build), "can_launch": bool(p.launch),
             "stale": bool(p.build) and built != f["main"], "running": f["running"],
-            "has_build": bool(p.build) and f["has_build"],
+            "has_build": bool(p.build or p.launch) and f["has_build"],  # without a build, Play main needs none
+            "dev_running": f.get("dev_running", False), "play": PLAYS.get(p.name),
+            "dev_stale": bool(p.build) and (dev_built != f["dev"] or not f.get("dev_has_build")),
             "paused": s.get(f"paused:{p.name}") == "1",
             "auto_release": s.get(f"auto_release:{p.name}") == "1",  # release_default(p), from the snapshot
             "gate": [g["name"] for g in p.gate], "release": rel,
@@ -2125,7 +2227,8 @@ def main_info(p, s=None):
 # FACTS at once and rereads an entry older than FACTS_TTL behind the request: what it shows is at most a poll old.
 # Every task event marks its project's entry stale and rereads it, so a merge or promote shows on the next poll.
 
-FACTS = {}  # project name -> {"at": when read, "main", "dev": revs, "ahead": [lines], "running", "has_build", "deploys"}
+FACTS = {}  # project name -> {"at": when read, "main", "dev": revs, "ahead": [lines], "running", "dev_running",
+#   "has_build", "dev_has_build", "deploys"}
 FACTS_TTL = 5
 FACTS_BUSY = set()  # projects being reread now, so a burst of requests starts one reread, not one each
 FACTS_LOCK = threading.Lock()
@@ -2145,9 +2248,12 @@ def read_facts(p, deploys=True):
                     AHEAD.clear()
                 AHEAD[key] = r.git("log", "--first-parent", "--format=%h %s", f"{m}..{d}").splitlines()
             ahead += [f"{r.sub + ': ' if r.sub else ''}{l}" for l in AHEAD[key]]
+        exes = my_exes() if p.process and not p.running_cmd else None  # one read of the process table for both
         f = {"main": " ".join(main), "dev": " ".join(dev), "ahead": ahead[:30],
-             "running": app_running(p, p.main_wt),
-             "has_build": not p.artifact or (p.main_wt / p.artifact).exists()}
+             "running": app_running(p, p.main_wt, exes),
+             "dev_running": bool(p.launch) and app_running(p, p.dev_wt, exes),
+             "has_build": not p.artifact or (p.main_wt / p.artifact).exists(),
+             "dev_has_build": not p.artifact or (p.dev_wt / p.artifact).exists()}
         f["deploys"] = deploy_facts(p, f["main"]) if deploys else None  # tags, and version commands
         f["senddev"] = senddev_pending(p, f["main"])  # sent to dev, not yet back in main
     except Exception as e:
@@ -2600,8 +2706,8 @@ def promote(p, tid, commit, note=""):
             shutil.rmtree(art, ignore_errors=True)
             prev.rename(art)
 
-    if p.build:
-        art = p.main_wt / p.artifact if p.artifact else None
+    if p.build or p.launch:  # Play main plays its worktree, so it follows main even with nothing to build
+        art = p.main_wt / p.artifact if p.artifact and p.build else None
         if art and (not within(art, p.main_wt) or within(p.main_wt, art)):  # it gets deleted and replaced
             return f"[app] artifact must be a path inside the worktree, not {p.artifact!r}."
         prev = art.with_name(art.name + ".previous") if art else None
@@ -2612,7 +2718,8 @@ def promote(p, tid, commit, note=""):
         old = [(r, r.git("rev-parse", "HEAD", cwd=r.at(p.main_wt))) for r in p.parts]
         for r, sha in p.pairs(commit):
             r.git("checkout", "--detach", sha, cwd=r.at(p.main_wt))
-        rc, tail = run_step(tid, f"building {p.main} at {p.show(commit)}", p.build, p.main_wt, "build.log")
+        rc, tail = run_step(tid, f"building {p.main} at {p.show(commit)}", p.build, p.main_wt,
+                            "build.log") if p.build else (0, "")
         if rc or (art and not art.exists()):
             undo()
             return f"Build failed; {p.main} and its build are unchanged.\n" + tail[-2000:]
@@ -4929,8 +5036,8 @@ class H(BaseHTTPRequestHandler):
                 set_setting(f"auto_release:{p.name}", "1" if b.get("on") else "0")
             elif act == "promote":
                 return {"id": queue_release(p)}
-            elif act == "play":
-                launch_app(p, p.main_wt)
+            elif act == "play":  # Play main, or Play dev with {"where": "dev"}
+                play(p, "dev" if b.get("where") == "dev" else "main")
                 stale_facts(p.name)
             else:
                 set_setting(f"paused:{p.name}", "1" if act == "pause" else "0")
