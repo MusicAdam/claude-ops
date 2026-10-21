@@ -104,6 +104,7 @@ pre { white-space: pre-wrap; margin: 0; }
 details summary { cursor: pointer; color: var(--muted); margin: 10px 0 6px; }
 .err { color: var(--bad); }
 ul.ahead { margin: 6px 0 0; padding-left: 18px; max-height: 160px; overflow: auto; }
+ul.clog { max-height: 220px; }
 /* Uncommitted work in your checkout: one line per repo. The row leaves room on the right for a button. */
 .dirty { display: flex; gap: 10px; align-items: flex-start; white-space: normal; margin: 0 0 10px; }
 .dirty .lines { flex: 1; min-width: 0; }
@@ -707,10 +708,11 @@ function projBody(g) {
   return dirtyHtml(g) + sentHtml(g) + `<div>${esc(g.main_branch)} (golden): <span class="mono">${esc(g.main)}</span>${g.running ? ' · <span class="s-running">running now</span>' : ""}</div>` +
     (g.has_app && g.stale && g.built ? `<div class="s-review">The build is of ${esc(g.built)}, older than ${esc(g.main_branch)}. Promote to rebuild.</div>` : "") +
     (g.has_app && !g.has_build ? `<div class="s-review">Not built yet. Promote to build it.</div>` : "") +
+    mainLogHtml(g) +
     `<div>${esc(g.dev_branch)}: <span class="mono">${esc(g.dev)}</span> · ${g.ahead.length ? `${g.ahead.length} merge(s) waiting to promote` : "nothing waiting"}${g.dev_running ? ' · <span class="s-running">running now</span>' : ""}</div>` +
     (g.can_launch && g.dev_stale ? `<div class="s-review">${esc(g.dev_branch)} needs build: it moved since its last build. Play ${esc(g.dev_branch)} builds it first.</div>` : "") +
     (g.train ? `<div class="s-review">Release after merge: ${g.train.ids.map(taskLink).join(", ")} ${trainWords(g.train)}.</div>` : "") +
-    (g.ahead.length ? `<details data-k="ahead"><summary>What would be promoted</summary><ul class="ahead mono">${g.ahead.map(l => `<li>${esc(l)}</li>`).join("")}</ul></details>` : "") +
+    devLogHtml(g) +
     `<div class="muted" style="font-size:12px;margin-top:4px">gate: ${g.gate.length ? esc(g.gate.join(", ")) : "none configured"}</div>
     <div class="row">
       ${g.can_launch ? `<button class="primary" data-p="${g.name}" data-a="play" ${g.has_build && !playing ? "" : "disabled"}>Play ${esc(g.main_branch)}</button>` : ""}
@@ -720,6 +722,23 @@ function projBody(g) {
       <label title="New tasks start with &quot;Release after merge&quot; ticked: once one merges into dev, the queue queues a release, as Promote does. You can still untick it on a task. Tasks already queued keep theirs."><input type="checkbox" data-rel="${g.name}" ${g.auto_release ? "checked" : ""}> Release after merge by default</label>
       <span style="flex:1"></span>${archiveBtn(g)}
     </div>` + archiveAskHtml(g) + (msg ? `<div class="muted" style="margin-top:8px;white-space:pre-wrap">${msg}</div>` : "") + projTasksHtml(g) + deploysHtml(g);
+}
+// Changelogs: what is on dev and not on main (Promote empties it), and what main gained since its last deploy (a
+// deploy empties it; without deploy targets, what the last promote brought in). One row per task, else per commit.
+const logRows = log => `<ul class="ahead clog">${log.map(c => `<li>${c.task ? taskLink(c.task) : `<span class="mono muted">${esc(c.sha)}</span>`}
+  ${c.repo ? `<span class="muted">${esc(c.repo)}:</span> ` : ""}${esc(c.title)} <span class="muted nw" title="${esc(new Date(c.at * 1000).toLocaleString())}">· ${ago(c.at, state.now)} ago</span></li>`).join("")}</ul>`;
+const nTasks = log => { const t = log.filter(c => c.task).length, o = log.length - t;
+  return [t ? `${t} task${t === 1 ? "" : "s"}` : "", o ? `${o} other commit${o === 1 ? "" : "s"}` : ""].filter(Boolean).join(" and "); };
+function devLogHtml(g) {
+  const log = g.dev_log || [];
+  return log.length ? `<details data-k="devlog"><summary>${esc(g.dev_branch)} changelog: ${nTasks(log)} not on ${esc(g.main_branch)} yet</summary>${logRows(log)}</details>` : "";
+}
+function mainLogHtml(g) {
+  const log = g.main_log || [], m = esc(g.main_branch), since = g.main_since ? ` <span class="mono">${esc(g.main_since)}</span>` : "";
+  const what = g.main_since_kind === "deploy" ? `since the last deploy, at${since}` : `brought in by the last promote${since ? `, since${since}` : ""}`;
+  if (!g.main_since_kind) return `<div class="muted" style="font-size:12px">${m} changelog: starts at the next ${g.deploys.length ? "deploy" : "promote"}.</div>`;
+  if (!log.length) return `<div class="muted" style="font-size:12px">${m} changelog: nothing new ${what}.</div>`;
+  return `<details data-k="mainlog"><summary>${m} changelog: ${nTasks(log)} ${what}</summary>${logRows(log)}</details>`;
 }
 // The project's tasks, open ones first, then the last few finished. A click opens the task on the Tasks tab.
 function projTasksHtml(g) {
@@ -884,7 +903,7 @@ document.addEventListener("keydown", e => {
 });
 function renderMains() {
   const ps = state.projects.filter(p => inView(p.name)), fx = focus;
-  // Keep an open "What would be promoted" or list of uncommitted files open across the 3-second refresh.
+  // Keep an open changelog or list of uncommitted files open across the 3-second refresh.
   const open = [...document.querySelectorAll("#mains .prow.on details[open]")].map(d => d.dataset.k);
   let html = ps.length ? `<div class="card projs"><h2>Projects</h2>` + ps.map(g => {
     const on = g.name === fx;
