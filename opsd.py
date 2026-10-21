@@ -64,6 +64,8 @@ TRAIN = {}  # project -> {"ids", "by"}: merged tasks waiting for the release tra
 IN_MAIN = set()  # ids of merged tasks main contains: main only moves forward, so auto_release checks each once
 DBL = threading.RLock()
 PROCS = {}  # task id -> current Popen (claude or a gate step), for cancel
+STEPS = {}  # Popen -> cwd of every run_step command running now, so a shutdown or a setup in its folder can stop it
+SETUP_TIMEOUT = 15  # minutes a [worktree] setup command may run; a project's setup_timeout overrides it
 STOPPING = threading.Event()  # this daemon is shutting down: start nothing new. Never stored, so it can't outlive us
 THREADS = {}  # task id -> pipeline thread
 PHASE_SINCE = {}  # task id -> when its phase last changed, so the dashboard can say how long a step has run
@@ -134,6 +136,7 @@ class Project:
         w = c.get("worktree", {})
         self.clone = w.get("clone", [])
         self.setup = w.get("setup", [])
+        self.setup_timeout = float(w.get("setup_timeout", SETUP_TIMEOUT))  # minutes, per command
         self.gate = c.get("gate", [])
         app = c.get("app", {})
         self.build = app.get("build")
@@ -373,13 +376,14 @@ def bootstrap(p):
             set_setting(f"main_prepared:{p.name}", "")  # setup can take minutes: promote or Play main does it
 
 
-def prepare_main(p, say):
+def prepare_main(p, say, key):
     """Clone files and setup for a main worktree bootstrap made, on its first use; say(text) reports the phase.
-    Slow, so only off the request thread. No main_prepared setting at all is a worktree made before it existed."""
+    Slow, so only off the request thread. No main_prepared setting at all is a worktree made before it existed.
+    key is where its setup.log goes (a task id or play-<name>); raises SetupFailed, and then it stays unprepared."""
     r = q("SELECT value FROM settings WHERE key=?", (f"main_prepared:{p.name}",), one=True)
     if r and r["value"] != "1":
         say(f"setting up {p.main_wt}")
-        prepare_worktree(p, p.main_wt, src_first=p.repo)
+        prepare_worktree(p, p.main_wt, src_first=p.repo, key=key)
         set_setting(f"main_prepared:{p.name}", "1")
 
 
@@ -401,8 +405,20 @@ def copy_workspace_files(p, dest):
         subprocess.run(["cp", "-cR", str(src), str(out)], capture_output=True)
 
 
-def prepare_worktree(p, dest, src_first=None, setup=True):
-    """Clone warm caches (APFS clone, near-instant) and run the project's setup commands."""
+class SetupFailed(Exception):
+    """A [worktree] setup command failed or timed out: nothing runs in that worktree until setup succeeds."""
+
+
+def unprepared(dest):
+    """True if setup in dest started but never succeeded (it failed, timed out, or was stopped). A worktree with no
+    prepared setting at all was made before it existed, and counts as prepared."""
+    r = q("SELECT value FROM settings WHERE key=?", (f"prepared:{dest}",), one=True)
+    return bool(r) and r["value"] != "1"
+
+
+def prepare_worktree(p, dest, src_first=None, setup=True, key=None):
+    """Clone warm caches (APFS clone, near-instant) and run the project's setup commands, logged to
+    runs/<key>/setup.log. Raises SetupFailed; the worktree counts as prepared only once every command succeeded."""
     for rel in p.clone:
         if (dest / rel).exists():
             continue
@@ -411,9 +427,38 @@ def prepare_worktree(p, dest, src_first=None, setup=True):
                 (dest / rel).parent.mkdir(parents=True, exist_ok=True)
                 subprocess.run(["cp", "-cR", str(src / rel), str(dest / rel)], capture_output=True)
                 break
-    for cmd in p.setup if setup else []:
-        subprocess.run(cmd, shell=True, cwd=dest, capture_output=True,
-                       env=dict(os.environ, OPS_REPO=str(p.repo)))
+    if setup and p.setup:
+        set_setting(f"prepared:{dest}", "")
+        run_setup(p, key or f"setup-{p.name}", dest)
+        set_setting(f"prepared:{dest}", "1")
+
+
+def run_setup(p, key, dest, log_name="setup.log"):
+    """Run p's setup commands in dest, each in a process group of its own with p.setup_timeout. First stops any
+    setup an earlier attempt left running there. Raises SetupFailed naming the command, with its output tail."""
+    stop_setup_in(dest)
+    log = RUNS / str(key) / log_name
+    for i, cmd in enumerate(p.setup, 1):
+        rc, tail = run_step(key, f"setup {i}/{len(p.setup)}", cmd, dest, log_name,
+                            env=dict(os.environ, OPS_REPO=str(p.repo)), timeout=p.setup_timeout * 60,
+                            pidkey=f"setup_pid:{dest}")
+        if isinstance(key, int) and stopped(key):
+            raise SetupFailed("stopped")
+        if rc is None:
+            raise SetupFailed(f"setup command `{cmd}` timed out after {p.setup_timeout:g} min (log: {log}).\n"
+                              + tail[-1500:])
+        if rc:
+            raise SetupFailed(f"setup command `{cmd}` exited {rc} (log: {log}).\n" + tail[-1500:])
+
+
+def stop_setup_in(dest):
+    """Stop whatever setup is still running in dest: one this daemon started (a Play, a task paused moments ago),
+    or one an earlier daemon left behind, by the pid and start time it recorded."""
+    stop_many([proc for proc, cwd in list(STEPS.items()) if str(cwd) == str(dest)])
+    rec = setting(f"setup_pid:{dest}").split(" ", 1)
+    if len(rec) == 2 and rec[0].isdigit() and started_at(int(rec[0])) == rec[1]:
+        killgroup(int(rec[0]))
+    set_setting(f"setup_pid:{dest}", "")
 
 
 def projects_home():
@@ -477,7 +522,7 @@ def detect_project(path, name=None, create=False):
                   f'process = "{app}"', f'artifact = "{app}"', ""]
     elif (repo / "package.json").exists():
         scripts = json.loads((repo / "package.json").read_text()).get("scripts", {})
-        lines += ['[worktree]', 'setup = ["npm ci --silent"]', ""]
+        lines += ['[worktree]', 'setup = ["npm ci --silent"]', "# setup_timeout = 15   # minutes each setup command may run before it is stopped and the task fails", ""]
         for s in ("lint", "typecheck", "test"):
             if s in scripts:
                 lines += gate_toml(s, f"npm run {s} --silent")
@@ -522,7 +567,8 @@ def workspace_toml(repo, subs):
              "repos = [" + ", ".join(f'"{s}"' for s in subs) + "]   # a workspace: each folder is its own git repo",
              f'main_branch = "{main}"', f'dev_branch = "{dev}"', "", "[worktree]",
              "clone = [" + ", ".join(f'"{c}"' for c in clone) + "]",
-             "setup = [" + ", ".join(f'"{c}"' for c in setup) + "]", ""]
+             "setup = [" + ", ".join(f'"{c}"' for c in setup) + "]",
+             "# setup_timeout = 15   # minutes each setup command may run before it is stopped and the task fails", ""]
     for g in gates:
         lines += g
     lines += ["[worker]", "notes = \"\"\"", "\"\"\"", "", "[design]", "notes = \"\"\"", "\"\"\"", ""]
@@ -924,7 +970,7 @@ def play_run(p, where):
             if setting(f"dev_prepared:{p.name}") != "1":  # bootstrap made it without clone files and setup
                 phase(f"setting up {path}")
                 copy_workspace_files(p, path)
-                prepare_worktree(p, path)
+                prepare_worktree(p, path, key=f"play-{p.name}")
                 set_setting(f"dev_prepared:{p.name}", "1")
             if p.build:
                 head = dev_head(p)
@@ -937,7 +983,7 @@ def play_run(p, where):
                     set_setting(f"dev_built:{p.name}", head)  # what it was at the start: a merge meanwhile rebuilds
         else:
             path = p.main_wt
-            prepare_main(p, phase)
+            prepare_main(p, phase, f"play-{p.name}")
             if not p.build:  # no build pins main's worktree to what was built: play main as it is now
                 for r in p.parts:
                     r.git("checkout", "--detach", p.main, cwd=r.at(path), check=False)
@@ -961,21 +1007,60 @@ def child_commands(pid):
     return [int(l.split()[0]) for l in out if l.split()[1:2] != ["caffeinate"]]
 
 
+STOP_WAIT = 5  # seconds a process group gets to exit on SIGTERM before SIGKILL: npm ci can ignore SIGTERM
+
+
+def signal_groups(groups, sig):
+    for g in groups:
+        try:
+            os.killpg(g, sig)
+        except (ProcessLookupError, PermissionError):
+            pass
+
+
+def group_alive(g):
+    try:
+        os.killpg(g, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+
+
+def kill_groups(groups, procs=(), wait=STOP_WAIT):
+    """SIGTERM every group, wait up to wait seconds for them all to go, then SIGKILL what is left. procs are our
+    Popens among them: polling reaps them, as a zombie leader would keep its group alive."""
+    signal_groups(groups, signal.SIGTERM)
+    deadline = time.time() + wait
+    while time.time() < deadline:
+        for proc in procs:
+            proc.poll()
+        if not any(group_alive(g) for g in groups):
+            return
+        time.sleep(0.1)
+    signal_groups([g for g in groups if group_alive(g)], signal.SIGKILL)
+
+
 def killgroup(pid):
     """Stop pid's process group and its commands' groups, so no test run or build is left orphaned.
     Only for a pid that is surely ours: a stale one may by now be Chrome, a terminal shell, anything."""
     if pid:
-        for g in child_commands(pid) + [pid]:
-            try:
-                os.killpg(g, signal.SIGTERM)
-            except (ProcessLookupError, PermissionError):
-                pass
+        kill_groups(child_commands(pid) + [pid])
+
+
+def stop_many(procs):
+    """Stop processes we started, unless they already exited (a pid may then belong to someone else), all at once:
+    SIGTERM, up to STOP_WAIT seconds, then SIGKILL."""
+    live = [proc for proc in procs if proc and proc.poll() is None]
+    groups = [g for proc in live for g in child_commands(proc.pid) + [proc.pid]]
+    if groups:
+        kill_groups(groups, live)
 
 
 def stop(proc):
     """Stop a process we started, unless it already exited (its pid may then belong to someone else)."""
-    if proc and proc.poll() is None:
-        killgroup(proc.pid)
+    stop_many([proc])
 
 
 def started_at(pid):
@@ -1493,9 +1578,11 @@ def steered_prompt(when):
 
 # ---------------------------------------------------------------- gate
 
-def run_step(key, label, cmd, cwd, log_name, env=None):
-    """Run a shell step in cwd, output appended to runs/<key>/<log_name>. Returns (exit code, output tail).
-    An int key is a task id: the step shows as its phase and can be cancelled."""
+def run_step(key, label, cmd, cwd, log_name, env=None, timeout=None, pidkey=None):
+    """Run a shell step in cwd, output appended to runs/<key>/<log_name>. Returns (exit code, output tail); the
+    exit code is None if it ran past timeout seconds, and then its process group is stopped.
+    An int key is a task id: the step shows as its phase and can be cancelled. pidkey: a setting that holds the
+    step's pid and start time while it runs, so a later daemon can find it."""
     is_task = isinstance(key, int)
     if is_task:
         upd(key, phase=label)
@@ -1507,9 +1594,22 @@ def run_step(key, label, cmd, cwd, log_name, env=None):
         start = f.tell()
         proc = subprocess.Popen(["caffeinate", "-i", "/bin/bash", "-lc", cmd], cwd=cwd, stdout=f,
                                 stderr=subprocess.STDOUT, start_new_session=True, env=env)
+        STEPS[proc] = cwd
         if is_task:
             track(key, proc)
-        rc = proc.wait()
+        if pidkey:
+            set_setting(pidkey, f"{proc.pid} {started_at(proc.pid)}")
+        try:
+            rc = proc.wait(timeout)
+        except subprocess.TimeoutExpired:
+            stop(proc)
+            proc.wait()
+            f.write(f"\n==== timed out after {timeout / 60:g} min; stopped\n")
+            rc = None
+        finally:
+            STEPS.pop(proc, None)
+        if pidkey:
+            set_setting(pidkey, "")
         if is_task:
             untrack(key)
     with open(log, errors="replace") as f:
@@ -1561,6 +1661,9 @@ def failure_detail(wt, g, rc, tail):
 def ensure_worktree(p, tid):
     t = task(tid)
     if t["worktree"] and all(r.at(t["worktree"]).exists() for r in p.parts):
+        if unprepared(t["worktree"]):  # its setup failed or was stopped: run it again
+            upd(tid, phase="setting up the worktree")
+            prepare_worktree(p, Path(t["worktree"]), key=tid)
         return
     slug = re.sub(r"[^a-z0-9]+", "-", t["title"].lower()).strip("-")[:40] or "task"
     branch = t["branch"] or f"task/{tid}-{slug}"
@@ -1574,7 +1677,7 @@ def ensure_worktree(p, tid):
             r.git("worktree", "add", str(r.at(path)), branch)
         else:
             r.git("worktree", "add", "-b", branch, str(r.at(path)), p.dev)
-    prepare_worktree(p, path)
+    prepare_worktree(p, path, key=tid)
     upd(tid, branch=branch, worktree=str(path))
     ev(tid, f"worktree {path} on {branch}")
 
@@ -1583,6 +1686,9 @@ def pipeline(tid):
     try:
         t = task(tid)
         {"release": release_pipeline, "deploy": deploy_pipeline}.get(t["kind"], _pipeline)(proj(t["project"]), tid)
+    except SetupFailed as e:  # before any gate runs, as a failed gate would
+        if not stopped(tid):
+            fail(proj(task(tid)["project"]), tid, str(e))
     except Exception as e:  # keep the daemon alive; surface the error on the task
         if not stopped(tid):
             upd(tid, state="failed", phase="", error=f"orchestrator error: {e}", finished=time.time())
@@ -1980,7 +2086,7 @@ def release_pipeline(p, tid):
         for r, sha in p.pairs(t["base"]):
             if not r.at(path).exists():
                 r.git("worktree", "add", "--detach", str(r.at(path)), sha)
-        prepare_worktree(p, path)
+        prepare_worktree(p, path, key=tid)
         upd(tid, worktree=str(path))
         ev(tid, f"worktree {path} at {p.show(t['base'])}")
         t = task(tid)
@@ -1988,6 +2094,8 @@ def release_pipeline(p, tid):
         for r, sha in p.pairs(t["base"]):
             if r.git("rev-parse", "HEAD", cwd=r.at(t["worktree"])) != sha:  # left at the merge worker's commit
                 r.git("checkout", "--force", "--detach", sha, cwd=r.at(t["worktree"]))
+        if unprepared(t["worktree"]):  # its setup failed or was stopped: run it again
+            prepare_worktree(p, Path(t["worktree"]), key=tid)
 
     checker = release_play(p)  # off: gate-only, no release checker
     if start_at != "promote":
@@ -2368,8 +2476,9 @@ def recover():
           "WHERE id=?", (time.time(), "claude-ops restarted while the deploy ran, and stopped its command. Retry "
                                       "starts the deploy over.", t["id"]))
         ev(t["id"], "failed: claude-ops restarted during the deploy")
-    for t in q("SELECT id FROM tasks WHERE state='paused' AND paused_by='restart'"):
-        upd(t["id"], state="queued", paused_by=None)
+    for t in q("SELECT * FROM tasks WHERE state='paused' AND paused_by='restart'"):
+        killgroup(own_pid(t))  # the last daemon stops its commands as it goes, unless it was killed first
+        upd(t["id"], state="queued", paused_by=None, pid=None, pid_start=None)
         ev(t["id"], "resumed after the restart")
     for t in q(f"SELECT * FROM tasks WHERE state IN ({','.join('?' * len(ACTIVE))})", ACTIVE):
         killgroup(own_pid(t))  # a worker from the old daemon would otherwise run alongside its resume
@@ -2381,20 +2490,27 @@ def shutdown():
     """The daemon is stopping (opsctl restart or stop, launchd, a kill): start nothing new, pause every running
     task for the next daemon to resume, and give a merge, which can't be paused, a moment to finish."""
     STOPPING.set()
+    deadline = time.time() + 45  # launchd's ExitTimeOut (opsctl) is 60
+    paused = []
     for t in q(f"SELECT id FROM tasks WHERE state IN ({','.join('?' * len(ACTIVE))})", ACTIVE):
         try:
-            pause_task(t["id"], by="restart")
+            pause_task(t["id"], by="restart", kill=False)
+            paused.append(t["id"])
         except ValueError:
             pass  # merging
-    deadline = time.time() + 45  # launchd's ExitTimeOut (opsctl) is 60
+    # Then stop them all at once, so commands that ignore SIGTERM cost STOP_WAIT once, not once per task. A Play's
+    # setup or build goes too; a merge's steps are left to finish.
+    tasked = list(PROCS.values())
+    stop_many([PROCS.get(tid) for tid in paused] + [proc for proc in list(STEPS) if proc not in tasked])
     while q("SELECT id FROM tasks WHERE state='merging'") and time.time() < deadline:
         time.sleep(0.5)
 
 
-def pause_task(tid, by=None):
+def pause_task(tid, by=None, kill=True):
     """Stop a task now and keep its place: a worker resumes its Claude session, a gate starts over.
     by='restart': the daemon is stopping, and the next one resumes the task.
-    by='limit': its worker hit the usage limit, and the queue resumes it after the reset (see limit_clear)."""
+    by='limit': its worker hit the usage limit, and the queue resumes it after the reset (see limit_clear).
+    kill=False leaves stopping its process to the caller (shutdown stops them all at once)."""
     t = task(tid)
     if t["state"] == "merging" and by != "limit":  # the limit stops a merge only in a Claude step, before main moves
         raise ValueError("it is merging; that can't be paused, and it is nearly done")
@@ -2408,7 +2524,8 @@ def pause_task(tid, by=None):
     # Otherwise Claude has not had its prompt yet, and run_claude keeps it for the resume.
     was = t["state"]
     upd(tid, state="paused", phase="", paused_by=by, **kw)
-    stop(PROCS.get(tid))
+    if kill:
+        stop(PROCS.get(tid))
     if was != "queued" and t["worktree"]:
         kill_app(PROJECTS.get(t["project"]), t["worktree"])
     ev(tid, {"restart": "paused for a restart", "limit": "paused: usage limit"}.get(by, "paused")
@@ -2877,8 +2994,8 @@ def resolve_main_into_dev(p, tid, conflict):
                 r.git("checkout", "--detach", p.dev, cwd=r.at(path))
             else:
                 r.git("worktree", "add", "--detach", str(r.at(path)), p.dev)
-        if fresh:
-            prepare_worktree(p, path)
+        if fresh or unprepared(path):
+            prepare_worktree(p, path, key=tid)
         upd(tid, worktree=str(path), session_id=None)
         conflicts = []
         for r in p.parts:
@@ -2975,7 +3092,11 @@ def promote(p, tid, commit, note=""):
         old = [(r, r.git("rev-parse", "HEAD", cwd=r.at(p.main_wt))) for r in p.parts]
         for r, sha in p.pairs(commit):
             r.git("checkout", "--detach", sha, cwd=r.at(p.main_wt))
-        prepare_main(p, lambda text: upd(tid, phase=text))
+        try:
+            prepare_main(p, lambda text: upd(tid, phase=text), tid)
+        except SetupFailed as e:
+            undo()
+            return f"Setting up {p.main_wt} failed; {p.main} and its build are unchanged.\n{e}"
         rc, tail = run_step(tid, f"building {p.main} at {p.show(commit)}", p.build, p.main_wt, "build.log")
         if rc or (art and not art.exists()):
             undo()
@@ -3690,14 +3811,12 @@ def deploy_run(p, tid, tg, d):
     ev(tid, f"deploying {target_show(p, tg, target_commit(p, tg, revs))} in {path}")
     key = f"deploy_setup:{p.name}"
     if p.setup and (fresh or setting(key) != revs):  # setup again only when the commit changed
-        for i, cmd in enumerate(p.setup, 1):
-            rc, tail = run_step(tid, f"setup {i}/{len(p.setup)}", cmd, path, "deploy.log",
-                                env=dict(os.environ, OPS_REPO=str(p.repo)))
-            if stopped(tid):
-                return False
-            if rc:
-                fail(p, tid, f"setup `{cmd}` exited {rc}.\n\n{tail[-2000:]}")
-                return False
+        try:
+            run_setup(p, tid, path, "deploy.log")
+        except SetupFailed as e:
+            if not stopped(tid):
+                fail(p, tid, str(e))
+            return False
         set_setting(key, revs)
     version = None
     if tg.version:
@@ -5445,8 +5564,7 @@ def on_term(*_):
         shutdown()
     except Exception as e:  # still stop; the next daemon requeues whatever is left running
         print("shutdown error:", e, flush=True)
-    for proc in list(PROCS.values()) + list(DESIGN_PROCS.values()) + list(TASK_CHAT_PROCS.values()):
-        stop(proc)
+    stop_many(list(PROCS.values()) + list(STEPS) + list(DESIGN_PROCS.values()) + list(TASK_CHAT_PROCS.values()))
     try:
         if PIDFILE.read_text().strip() == str(os.getpid()):
             PIDFILE.unlink()
