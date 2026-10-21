@@ -25,7 +25,7 @@ the language `queue` at the end of your reply, holding a JSON list:
 [
   {{"title": "Short imperative title",
     "body": "Self-contained brief (see below)",
-    "after": null, "after_task": null, "priority": 0, "hold": false, "release": null}}
+    "after": null, "after_task": null, "priority": 0, "hold": false, "release": null, "model": null}}
 ]
 ```
 
@@ -37,6 +37,9 @@ the language `queue` at the end of your reply, holding a JSON list:
 - `release`: true when the owner asks for it to go out on its own once it merges: the queue then
   releases dev to main, as Promote does. False when they ask it not to. Otherwise null, which takes
   the project's default (the `[ops: ...]` line says whether it is on).
+- `model`: the Claude model its worker runs on: "opus", "sonnet", "haiku", or null for the queue's
+  task model setting. Use sonnet for mechanical plumbing tasks: a rename, a config field passed
+  through, a doc update. Leave it null for design-heavy or tricky work, or when unsure.
 
 An unattended worker builds each task in its own worktree, and several run in parallel. It can't
 see this conversation. So each `body` must stand alone:
