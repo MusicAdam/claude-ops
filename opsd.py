@@ -12,6 +12,7 @@
   opsd.py pause-all | resume-all       pause every running task (it stops now, resumable) / resume every paused one
   opsd.py archive-project NAME         take a project off the queue: its config moves to projects/archived/
   opsd.py unarchive-project NAME       bring an archived project back, as it was
+  opsd.py event TASK_ID TEXT           add a line to a task's log, without the daemon (opsctl, when a restart fails)
   opsd.py guard --daemon PID [--root DIR]   PreToolUse hook: refuse Bash commands that stop processes the session did not start
 
 Per project (paths come from ~/.claude-ops/projects/<name>.toml):
@@ -369,7 +370,17 @@ def bootstrap(p):
             for r in p.parts:
                 if not r.at(p.main_wt).exists():
                     r.git("worktree", "add", "--detach", str(r.at(p.main_wt)), p.main)
-            prepare_worktree(p, p.main_wt, src_first=p.repo)
+            set_setting(f"main_prepared:{p.name}", "")  # setup can take minutes: promote or Play main does it
+
+
+def prepare_main(p, say):
+    """Clone files and setup for a main worktree bootstrap made, on its first use; say(text) reports the phase.
+    Slow, so only off the request thread. No main_prepared setting at all is a worktree made before it existed."""
+    r = q("SELECT value FROM settings WHERE key=?", (f"main_prepared:{p.name}",), one=True)
+    if r and r["value"] != "1":
+        say(f"setting up {p.main_wt}")
+        prepare_worktree(p, p.main_wt, src_first=p.repo)
+        set_setting(f"main_prepared:{p.name}", "1")
 
 
 def copy_workspace_files(p, dest):
@@ -926,6 +937,7 @@ def play_run(p, where):
                     set_setting(f"dev_built:{p.name}", head)  # what it was at the start: a merge meanwhile rebuilds
         else:
             path = p.main_wt
+            prepare_main(p, phase)
             if not p.build:  # no build pins main's worktree to what was built: play main as it is now
                 for r in p.parts:
                     r.git("checkout", "--detach", p.main, cwd=r.at(path), check=False)
@@ -2059,7 +2071,8 @@ def restart_self(tid):
         return
     ev(tid, "restarting claude-ops to load the new code; running tasks pause and resume")
     (RUNS / str(tid)).mkdir(parents=True, exist_ok=True)
-    subprocess.Popen([str(CODE / "opsctl"), "restart"], cwd=CODE, env=dict(os.environ, OPS_DATA=str(DATA)),
+    subprocess.Popen([str(CODE / "opsctl"), "restart"], cwd=CODE,  # if the new daemon doesn't answer, it logs that here
+                     env=dict(os.environ, OPS_DATA=str(DATA), OPS_RESTART_TASK=str(tid)),
                      start_new_session=True, stdin=subprocess.DEVNULL,
                      stdout=open(RUNS / str(tid) / "restart.log", "a"), stderr=subprocess.STDOUT)
 
@@ -2962,6 +2975,7 @@ def promote(p, tid, commit, note=""):
         old = [(r, r.git("rev-parse", "HEAD", cwd=r.at(p.main_wt))) for r in p.parts]
         for r, sha in p.pairs(commit):
             r.git("checkout", "--detach", sha, cwd=r.at(p.main_wt))
+        prepare_main(p, lambda text: upd(tid, phase=text))
         rc, tail = run_step(tid, f"building {p.main} at {p.show(commit)}", p.build, p.main_wt, "build.log")
         if rc or (art and not art.exists()):
             undo()
@@ -5110,6 +5124,8 @@ class H(BaseHTTPRequestHandler):
         path = urlparse(self.path).path
         if path == "/":
             return self.send(200, (CODE / "dashboard.html").read_bytes(), "text/html; charset=utf-8")
+        if path == "/api/state" and not READY.is_set():  # the dashboard shows "starting up" until this goes
+            return self.send(200, {"starting": True, "now": time.time(), "data_dir": str(DATA)})
         if path == "/api/state":
             tasks = q("SELECT id,project,title,state,phase,priority,hold,depends_on,parent,created,started,"
                       "finished,cost,rounds,summary,question,error,merged,branch,kind,auto_release,origin,paused_by,start_at,"
@@ -5223,6 +5239,8 @@ class H(BaseHTTPRequestHandler):
         except ValueError:
             return self.send(400, {"error": "bad json"})
         path = urlparse(self.path).path
+        if not READY.is_set():  # PROJECTS is half loaded and tasks not yet recovered
+            return self.send(503, {"error": STARTING, "starting": True})
         try:
             return self.send(200, self.route(path, body) or {"ok": True})
         except KeyError as e:
@@ -5437,17 +5455,31 @@ def on_term(*_):
     os._exit(0)
 
 
+READY = threading.Event()  # set once projects are loaded and tasks recovered; until then the API says it's starting
+STARTING = "claude-ops is still starting up. Try again in a few seconds."
+
+
+def start_up():
+    """Load projects and recover tasks, then start the scheduler: after the bind, so the port answers at once."""
+    try:
+        load_projects()
+        recover()
+    except Exception as e:  # serve anyway: a broken project or task shouldn't keep the dashboard down
+        print("startup error:", e, flush=True)
+    READY.set()
+    threading.Thread(target=scheduler, daemon=True).start()
+    print(f"claude-ops ready  projects: {', '.join(PROJECTS) or 'none'}", flush=True)
+
+
 def serve():
     signal.signal(signal.SIGTERM, on_term)
     signal.signal(signal.SIGINT, on_term)
+    print(f"claude-ops starting on http://{HOST}:{PORT}  (pid {os.getpid()})", flush=True)
     init_db()
-    load_projects()
-    recover()
-    threading.Thread(target=scheduler, daemon=True).start()
     srv = ThreadingHTTPServer((HOST, PORT), H)
     PIDFILE.write_text(f"{os.getpid()}\n")  # after the bind, so a second daemon that fails can't overwrite it
-    print(f"claude-ops on http://{HOST}:{PORT}  projects: {', '.join(PROJECTS) or 'none'}  (claude: {CLAUDE})",
-          flush=True)
+    print(f"claude-ops on http://{HOST}:{PORT}  loading projects  (claude: {CLAUDE})", flush=True)
+    threading.Thread(target=start_up, daemon=True).start()
     srv.serve_forever()
 
 
@@ -5493,6 +5525,8 @@ if __name__ == "__main__":
         serve()
     elif cmd == "guard":
         guard(args)
+    elif cmd == "event" and len(args) == 2 and args[0].isdigit():  # straight into the db: the daemon may be down
+        q("INSERT INTO events (task_id, ts, text) VALUES (?,?,?)", (int(args[0]), time.time(), args[1]))
     elif cmd in ("pause-all", "resume-all"):
         post(f"/api/{cmd}", {})
     elif cmd == "add-project" and args:
