@@ -9,7 +9,7 @@ the golden version: it changes only when you promote.
 
 ```bash
 ./opsctl start                       # install + start the launchd service (runs at login, restarts if it dies)
-./opsctl open                        # dashboard: http://127.0.0.1:8788  (…/#design, …/#chat open those tabs)
+./opsctl open                        # dashboard: http://127.0.0.1:8788  (…/#tasks, …/#projects, …/#design, …/#chat open those tabs)
 ./opsctl status | log | stop | restart   # stop and restart pause running tasks; the next start resumes them
 ./opsctl pause | resume              # pause every running task now / resume every paused one
 ./opsd.py add-project ~/dev/myrepo   # or "+ Project" on the dashboard
@@ -33,7 +33,7 @@ several (see [Workspaces](#workspaces)). Read it, adjust it, then click **Reload
 
 ```
  Design tab ──(you agree)──┐
- Queue tab ────────────────┴─▶ scheduler ──(up to N at once)──▶ worker: claude -p in <worktrees>/t<id>
+ Tasks tab ────────────────┴─▶ scheduler ──(up to N at once)──▶ worker: claude -p in <worktrees>/t<id>
                                                                   │ commits on task/<id>-<slug>
                                                                   ▼
                                rebase onto dev ─▶ gate: the [[gate]] commands, in order
@@ -218,7 +218,7 @@ run = "bin/swish release"
   command made are already in your repo. dev picks the commits up at the next release, which merges commits made
   straight to main into dev. If the deploy succeeded but main couldn't move (say the build failed), Retry only
   moves main.
-- **Where you deploy.** Open the project on the Queue tab: its card has a **Deploys** section, one block per target. It
+- **Where you deploy.** Open the project on the Projects tab: its card has a **Deploys** section, one block per target. It
   shows what the target last shipped (commit, when, its task), how far behind main (or its `from` target) it is, and
   for a target with `version` the current version, whether it is released and the newest build tag. **Deploy** opens
   a dialog with the commit it will ship, a version picker (new build, patch, minor, major, or another X.Y.Z), and the
@@ -460,7 +460,7 @@ gitignored `.env` files each repo has, to clone into new worktrees.
 
 On the dashboard, open a project's card and click **Archive**, or run `./opsd.py archive-project NAME`. Either
 takes a project off the queue without losing anything. It moves `~/.claude-ops/projects/NAME.toml` to `~/.claude-ops/projects/archived/NAME.toml` and reloads projects, so the
-project leaves the dashboard's project list. `/api/state` lists it under `archived`, with how many of its tasks
+project leaves the Projects tab's list. `/api/state` lists it under `archived`, with how many of its tasks
 are not finished.
 
 - **What it leaves alone.** Your repo, its worktrees, its branches, its tasks and its settings (paused, release
@@ -469,7 +469,7 @@ are not finished.
   "(archived)" and a queued one says "archived project". They carry on after a restore.
 - **When it refuses.** While a task of the project is working, being checked or merging, or while it has an open
   release or deploy. The error names them: wait for them to finish, or cancel them.
-- **Restore.** Click **Restore** under **Archived projects** at the bottom of the dashboard's project list (it is
+- **Restore.** Click **Restore** under **Archived projects** at the bottom of the Projects tab's list (it is
   collapsed, and hidden when none are archived), or run `./opsd.py unarchive-project NAME`. Either moves the
   file back and reloads, and the project is back as it was. It refuses if a new project has taken the name: rename or archive that one first.
 
@@ -523,11 +523,16 @@ notes = """Project-specific guidance for design chats."""
 
 ## Other details
 
-- **Queue tab.** Projects are on the left, one line each with their counts. Click one to open it:
-  branches, what is waiting to promote, Promote, Play and Pause. Opening a project also sets the
-  project filter in the header, so only its tasks and chats show; click it again to see every
-  project. Tasks are on the right. Clicking a
-  task opens it on the left and focuses its project, and new tasks default to that project.
+- **Tabs.** The header has four: Tasks, Projects, Design and Chat. `#tasks`, `#projects`, `#design` and
+  `#chat` open one; the old `#queue` opens Tasks. The dashboard remembers the last tab you used.
+- **Tasks tab.** The task page is on the left; New task and the task list are on the right. The project
+  picker in the header filters the list. Clicking a task opens it on the left and focuses its project,
+  and new tasks default to that project.
+- **Projects tab.** Every project, one line each with its counts, at full width. Click one to open it:
+  branches, what is waiting to promote, Promote, Play main and dev, Pause, Deploys and Archive; click it
+  again to close it. Archived projects are at the bottom. **+ Project** in the header opens this tab with
+  the Add project card at the top. A task link here (such as a deploy's `#id`, or the task a merge or
+  release runs in) opens that task on the Tasks tab, and so does confirming a deploy.
 - **Play main and Play dev.** A project with `[app] launch` has both buttons on its card. Play main
   runs `launch` in `<worktrees>/main`: the last Promote's build, or, with no `[app] build`, `main` as it
   is now. Play dev runs it in `<worktrees>/dev`, so you can try `dev` before you promote. The first Play
