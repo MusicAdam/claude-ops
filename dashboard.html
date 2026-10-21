@@ -20,8 +20,20 @@ body { margin: 0; background: var(--bg); color: var(--ink);
 header { display: flex; flex-wrap: wrap; gap: 12px 20px; align-items: center; padding: 14px 20px;
          border-bottom: 1px solid var(--line); background: var(--panel); position: sticky; top: 0; z-index: 2; }
 header h1 { font-size: 16px; margin: 0; }
-.stat { color: var(--muted); }
-.stat b { color: var(--ink); }
+.stats { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.st { display: inline-flex; align-items: center; gap: 5px; padding: 3px 10px; border-radius: 99px; font-size: 13px;
+      background: var(--chip); border: 1px solid var(--line); color: var(--muted); cursor: help; white-space: nowrap;
+      font-variant-numeric: tabular-nums; }
+.st b { color: var(--ink); font-weight: 600; }
+.st.zero b { color: var(--muted); font-weight: 400; }
+.st.live { border-color: var(--accent); } .st.live b { color: var(--accent); }
+.st.alert { border-color: var(--warn); color: var(--warn); background: color-mix(in srgb, var(--warn) 12%, var(--panel)); }
+.st.alert b { color: var(--warn); }
+.st.danger { border-color: var(--bad); color: var(--bad); background: color-mix(in srgb, var(--bad) 12%, var(--panel)); }
+.st.danger b { color: var(--bad); }
+.st .bar { width: 38px; height: 6px; border-radius: 3px; background: var(--line); overflow: hidden; }
+.st .bar i { display: block; height: 100%; background: var(--accent); }
+.st.alert .bar i { background: var(--warn); } .st.danger .bar i { background: var(--bad); }
 main { display: grid; grid-template-columns: 1fr minmax(340px, 460px); gap: 20px; padding: 20px;
        max-width: 1500px; margin: 0 auto; align-items: start; }
 main > section { min-width: 0; }  /* a long one-line status is cut off, not widening its column */
@@ -92,9 +104,6 @@ ul.ahead { margin: 6px 0 0; padding-left: 18px; max-height: 160px; overflow: aut
 .hidden { display: none !important; }
 #limitbar { flex-basis: 100%; display: flex; gap: 12px; align-items: center; padding: 6px 12px; border-radius: 8px;
             border: 1px solid var(--warn); color: var(--warn); font-weight: 600; }
-#usage { font-variant-numeric: tabular-nums; cursor: default; }
-#usage.warn, #usage.warn b { color: var(--warn); font-weight: 600; }
-#usage.bad, #usage.bad b { color: var(--bad); font-weight: 600; }
 #designview { display: grid; grid-template-columns: 260px 1fr; gap: 20px; padding: 20px; max-width: 1500px; margin: 0 auto; }
 @media (max-width: 900px) { #designview { grid-template-columns: 1fr; padding: 16px; } }
 .chatitem { padding: 8px 10px; border-radius: 6px; cursor: pointer; border: 1px solid transparent; }
@@ -319,8 +328,8 @@ a[data-task] { color: var(--accent); cursor: pointer; }
   <select id="proj" title="Project"></select>
   <button id="addproj" title="Add a git repository, or a folder of git repos, as a project">+ Project</button>
   <div class="tabs"><button id="tab-queue" class="on">Queue</button><button id="tab-design" title="Plan work with Claude">Design</button><button id="tab-chat" title="Talk to Claude in the project folder, as in a terminal">Chat</button></div>
-  <span class="stat" id="hdr"></span>
-  <span class="stat hidden" id="usage"></span>
+  <span class="stats" id="hdr"></span>
+  <span class="stats hidden" id="usage"></span>
   <span style="flex:1"></span>
   <label>Parallel <input id="par" type="number" min="1" max="8" style="width:58px"></label>
   <label title="Release train: a task marked Release after merge releases once its project's queue is quiet (nothing queued, running, checking or merging), or at most this many minutes after the first such task merged. Promote releases at once.">Release wait <input id="relwait" type="number" min="0" step="15" style="width:64px"> min</label>
@@ -520,11 +529,24 @@ $("#tproj").addEventListener("change", syncRelease);
 function renderHeader() {
   const s = state.settings, ts = state.tasks.filter(t => inView(t.project));
   const n = st => ts.filter(t => st.includes(t.state)).length;
-  const cost = ts.reduce((a, t) => a + (t.cost || 0), 0) + (state.design_cost || 0);
-  $("#hdr").innerHTML =
-    `<b>${state.active}</b>/${s.max_parallel} working · <b>${n(["queued"])}</b> queued · ` +
-    `<b>${n(["needs_input","review","failed"])}</b> need you · ` +
-    (n(["paused"]) ? `<b>${n(["paused"])}</b> paused · ` : "") + `$${cost.toFixed(2)} spent`;
+  const tcost = ts.reduce((a, t) => a + (t.cost || 0), 0), dcost = state.design_cost || 0;
+  const ask = n(["needs_input"]), rev = n(["review"]), bad = n(["failed"]), need = ask + rev + bad;
+  const plural = (k, one, many) => `${k} ${k === 1 ? one : many}`;
+  // One chip per number: a word next to it, a tooltip saying what it counts, and colour only when it wants you.
+  const chip = (cls, html, tip) => `<span class="st ${cls}" title="${esc(tip)}">${html}</span>`;
+  put($("#hdr"), [
+    chip(state.active ? "live" : "zero", `<b>${state.active}/${s.max_parallel}</b> working`,
+      `${plural(state.active, "worker", "workers")} running now, across every project, out of at most ${s.max_parallel} at once (the Parallel setting).`),
+    chip(n(["queued"]) ? "" : "zero", `<b>${n(["queued"])}</b> queued`,
+      `${plural(n(["queued"]), "task waits", "tasks wait")} for a free worker${pf ? ` in ${P(pf).title || pf}` : ""}.`),
+    chip(need ? "alert" : "zero", `<b>${need}</b> need${need === 1 ? "s" : ""} you`,
+      need ? [ask && plural(ask, "question to answer", "questions to answer"), rev && plural(rev, "task to review", "tasks to review"),
+              bad && plural(bad, "failed task", "failed tasks")].filter(Boolean).join(", ") + ". They stay put until you act."
+        : "Nothing waits on you: no question, review or failure."),
+    n(["paused"]) ? chip("", `<b>${n(["paused"])}</b> paused`, `${plural(n(["paused"]), "task is", "tasks are")} paused. Resume to put them back in the queue.`) : "",
+    chip("", `<b>$${(tcost + dcost).toFixed(2)}</b> spent`,
+      `Claude usage, priced at API rates:\n$${tcost.toFixed(2)} on tasks${pf ? ` in ${P(pf).title || pf}` : ""}\n$${dcost.toFixed(2)} on chats, in every project`),
+  ].join(""));
   if (document.activeElement !== $("#par")) $("#par").value = s.max_parallel;
   if (document.activeElement !== $("#relwait")) $("#relwait").value = s.release_wait;
   modelSelect($("#model"), s.model, "default");
@@ -551,11 +573,14 @@ function renderHeader() {
 function renderUsage() {
   const u = state.usage || {windows: []}, el = $("#usage");
   if (document.activeElement !== $("#brake")) $("#brake").value = state.settings.usage_brake;
-  el.innerHTML = u.windows.map(w => `${w.short} <b>${w.pct}%</b>`).join(" · ");
-  el.title = u.windows.map(w => `${w.label} window: ${w.pct}% used` + (w.resets ? `, resets ${w.resets}` : " (reset since)")).join("\n") +
-    (u.braked ? `\n${u.braked.words}` : "") +
-    (u.brake ? `\nBrake at ${u.brake}%: no new tasks start at or above it` : "\nBrake off");
-  el.className = "stat" + (u.windows.length ? "" : " hidden") + (state.limit ? " bad" : u.braked ? " warn" : "");
+  const tail = (u.braked ? `\n${u.braked.words}` : "") +
+    (u.brake ? `\nBrake at ${u.brake}%: no new tasks start at or above it.` : "\nBrake off.");
+  put(el, u.windows.map(w => {
+    const cls = state.limit ? "danger" : u.brake && w.pct >= u.brake ? "alert" : "";
+    const tip = `Claude usage, ${w.label} window: ${w.pct}% used` + (w.resets ? `, resets ${w.resets}.` : " (reset since).") + tail;
+    return `<span class="st ${cls}" title="${esc(tip)}">${esc(w.short)} <span class="bar"><i style="width:${Math.min(100, Math.max(0, w.pct))}%"></i></span><b>${w.pct}%</b></span>`;
+  }).join(""));
+  el.className = "stats" + (u.windows.length ? "" : " hidden");
 }
 // The Design and Chat tabs show how many open chats have a new reply for you, and ● while Claude is replying in one.
 function renderTabCounts() {
@@ -782,13 +807,13 @@ document.addEventListener("keydown", e => {
   else if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) confirmDeploy();
 });
 function renderMains() {
-  const ps = state.projects.filter(p => inView(p.name)), fx = pf || focus;
+  const ps = state.projects.filter(p => inView(p.name)), fx = focus;
   // Keep an open "What would be promoted" or list of uncommitted files open across the 3-second refresh.
   const open = [...document.querySelectorAll("#mains .prow.on details[open]")].map(d => d.dataset.k);
   let html = ps.length ? `<div class="card projs"><h2>Projects</h2>` + ps.map(g => {
     const on = g.name === fx;
     return `<div class="prow ${on ? "on" : ""}" data-proj="${esc(g.name)}">
-      <div class="phead" title="${on ? "Collapse and show all projects" : "Show only this project"}"><span class="pname">${esc(g.title)}</span>
+      <div class="phead" title="${on ? "Collapse" : "Show this project's details"}"><span class="pname">${esc(g.title)}</span>
         <span class="pstats">${projStats(g)}</span><span class="caret">${on ? "▼" : "▶"}</span></div>
       ${on ? `<div class="pbody">${projBody(g)}</div>` : ""}</div>`;
   }).join("") + `</div>` : `<div class="card"><h2>No projects yet</h2>Click <b>+ Project</b> and give the path of a git repository, or of a folder that holds several.</div>`;
@@ -797,10 +822,8 @@ function renderMains() {
   document.querySelectorAll("#mains .prow.on details").forEach(d => { if (open.includes(d.dataset.k)) d.open = true; });
   document.querySelectorAll("#mains .phead").forEach(h => h.onclick = () => {
     const name = h.parentElement.dataset.proj;
-    // Opening a project also filters to it; closing it shows every project again.
-    const open = name === (pf || focus);
-    setFocus(open ? "" : name);
-    setFilter(open ? "" : name); render(); refresh(); if (tab !== "queue") refreshDesign();
+    // Opening a project only expands it: the project picker in the header is the one filter.
+    setFocus(name === focus ? "" : name);
   });
   document.querySelectorAll("#mains [data-a]").forEach(b => b.onclick = () => {
     delete mainMsg[b.dataset.p];
@@ -1109,7 +1132,7 @@ function modelSelect(el, v, none) {
 // The model a task's session runs on, short: "sonnet" for claude-sonnet-4-5-20250929. Opus is the usual one.
 function modelShort(m) { const k = MODELS.find(a => String(m || "").toLowerCase().includes(a)); return k || m || ""; }
 $("#proj").onchange = () => {
-  setFilter($("#proj").value); if (state) render(); refresh(); if (tab !== "queue") refreshDesign();
+  setFilter($("#proj").value); if ($("#proj").value) setFocus($("#proj").value); if (state) render(); refresh(); if (tab !== "queue") refreshDesign();
 };
 $("#addproj").onclick = () => { showTab("queue"); $("#addcard").classList.remove("hidden"); $("#ppath").focus(); };
 $("#pcancel").onclick = () => $("#addcard").classList.add("hidden");
@@ -1678,7 +1701,7 @@ function renderChat() {
   $("#rinfo").querySelectorAll("[data-cmd]").forEach(b => b.disabled = !!thinking);
   if (key === chatKey) return;
   // A chat you just opened, or a message you just sent, starts at the bottom
-  const box = $("#msgs"), stick = box.scrollTop + box.clientHeight >= box.scrollHeight - 40 || !chatKey.startsWith(`${d && d.id}:`);
+  const box = $("#msgs"), stick = atBottom(box) || !chatKey.startsWith(`${d && d.id}:`);
   chatKey = key;
   renderReader(d); renderSlash();
   $("#chathead").innerHTML = d && d.kind === "project" ? `Runs in <code>${esc(d.cwd)}</code>`
@@ -1698,7 +1721,20 @@ function renderChat() {
       : `<div class="msg ${m.role === "ops" ? "ops" : ""}">${md(m.text)}${m.tasks.length ? `<div class="chips">${m.tasks.map(t => `<button class="chip" data-task="${t.id}">#${t.id} ${esc(t.title || "")} · ${LABEL[t.state] || t.state}</button>`).join("")}</div>` : ""}</div>`).join("")
     + (thinking ? `<div class="live"><span class="pulse s-running">Claude is thinking</span>${d.live.map(l => `<div>  ${esc(l)}</div>`).join("")}</div>` : "");
   box.querySelectorAll("[data-task]").forEach(b => b.onclick = () => { showTab("queue"); selectTask(+b.dataset.task); refresh(); });
-  if (stick || thinking) box.scrollTop = box.scrollHeight;
+  if (stick || thinking) {
+    toBottom(box);
+    // Pictures load after this: their height would leave you short of the bottom, so go down again as each arrives.
+    box.querySelectorAll("img").forEach(i => i.complete || i.addEventListener("load", () => toBottom(box), {once: true}));
+  }
+}
+// The message list scrolls on its own beside an OpenSpec change. Elsewhere it grows with its messages and the page
+// scrolls instead (the message box stays stuck to the bottom of the window), so both are moved and checked.
+const pageEl = () => document.scrollingElement || document.documentElement;
+const atBottom = box => box.scrollHeight > box.clientHeight + 1 ? box.scrollTop + box.clientHeight >= box.scrollHeight - 40
+  : pageEl().scrollTop + innerHeight >= pageEl().scrollHeight - 40;
+function toBottom(box) {
+  box.scrollTop = box.scrollHeight;
+  if (box.offsetParent && box.scrollHeight <= box.clientHeight + 1) pageEl().scrollTop = pageEl().scrollHeight;
 }
 async function sayChat(text) {  // a change's command button: sent as if typed, leaving the message box alone
   $("#rinfo").querySelectorAll("[data-cmd]").forEach(b => b.disabled = true);
