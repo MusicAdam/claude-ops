@@ -26,6 +26,7 @@ A workspace (`repos = [...]` in its config) is a folder that holds several git r
 app. Each of the paths above is then a folder with a copy of the workspace's own files and one worktree per repo,
 and every repo has its own main, dev and task branches.
 """
+from contextlib import nullcontext
 import base64, fnmatch, json, os, re, secrets, shlex, shutil, signal, sqlite3, subprocess, sys, threading, time, tomllib
 import xml.etree.ElementTree as ET
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
@@ -581,25 +582,57 @@ def gate_toml(name, run, **kw):
 
 # ---------------------------------------------------------------- storage
 
+SLOW_MS = 100  # a request slower than this is logged, with where its time went
+SQLT = threading.local()  # per request thread: [seconds waiting for DBL, seconds in queries]
+
+
 def q(sql, args=(), one=False):
-    with DBL:
-        c = sqlite3.connect(DB, timeout=30)
-        c.row_factory = sqlite3.Row
+    """One statement on its own connection. A read takes no lock (the database is in WAL mode, so a write in
+    progress does not block it); a write takes DBL, so the daemon's writes go one at a time."""
+    t0 = time.time()
+    head = sql.lstrip()[:6].upper()
+    read = head == "SELECT" or (head == "PRAGMA" and "=" not in sql)
+    with (nullcontext() if read else DBL):
+        t1 = time.time()
         try:
-            cur = c.execute(sql, args)
-            rows = [dict(r) for r in cur.fetchall()]
-            c.commit()
-            if sql.lstrip().upper().startswith("INSERT"):
-                return cur.lastrowid
-            return (rows[0] if rows else None) if one else rows
+            return q_run(sql, args, one)
         finally:
-            c.close()
+            t = getattr(SQLT, "t", None)
+            if t:
+                t[0] += t1 - t0
+                t[1] += time.time() - t1
+
+
+DB_POOL = []  # idle connections: opening one and closing it (which checkpoints the WAL) cost ms per query
+
+
+def q_run(sql, args, one):
+    try:
+        c = DB_POOL.pop()
+    except IndexError:
+        c = sqlite3.connect(DB, timeout=30, check_same_thread=False)
+        c.row_factory = sqlite3.Row
+    try:
+        cur = c.execute(sql, args)
+        rows = [dict(r) for r in cur.fetchall()]
+        c.commit()
+        out = cur.lastrowid if sql.lstrip().upper().startswith("INSERT") else (
+            (rows[0] if rows else None) if one else rows)
+    except BaseException:
+        c.close()
+        raise
+    if len(DB_POOL) < 8:
+        DB_POOL.append(c)
+    else:
+        c.close()
+    return out
 
 
 def init_db():
     DATA.mkdir(parents=True, exist_ok=True)
     RUNS.mkdir(exist_ok=True)
     IMAGES.mkdir(exist_ok=True)
+    q("PRAGMA journal_mode=WAL")  # readers and the writer don't block each other; the mode is kept in the file
     q("""CREATE TABLE IF NOT EXISTS tasks (
         id INTEGER PRIMARY KEY, project TEXT, title TEXT, body TEXT, priority INTEGER DEFAULT 0,
         hold INTEGER DEFAULT 0, depends_on INTEGER, parent INTEGER,
@@ -5215,6 +5248,74 @@ def with_images(text):
 
 # ---------------------------------------------------------------- http
 
+def state_payload():
+    tasks = q("SELECT id,project,title,state,phase,priority,hold,depends_on,parent,created,started,"
+              "finished,cost,rounds,summary,question,error,merged,branch,kind,auto_release,origin,paused_by,start_at,"
+              "model,session_model,effort FROM tasks "
+              "ORDER BY id DESC LIMIT 500")
+    # What each task is doing right now, for the status line under it in the list.
+    # Per listed task, one index lookup (events_task): a GROUP BY over every event scanned the whole table.
+    last = {r["task_id"]: r for r in q(
+        "SELECT t.id AS task_id, e.text, e.ts FROM (SELECT id FROM tasks "
+        "ORDER BY id DESC LIMIT 500) t JOIN events e ON e.id = "
+        "(SELECT MAX(id) FROM events WHERE task_id = t.id)")}
+    s = settings_now()
+    waits = wait_reasons(tasks, s)
+    for t in tasks:
+        t["summary"] = list_summary(t)  # the list shows one line; the task page has the rest
+        for k in ("question", "error"):
+            t[k] = clip(t[k], 400) or None
+        ev_ = last.get(t["id"])
+        t["last_event"] = {"text": ev_["text"], "ts": ev_["ts"]} if ev_ else None
+        t["phase_since"] = PHASE_SINCE.get(t["id"]) if t["state"] in ACTIVE else None
+        t["step"] = last_step(t["id"]) if t["state"] == "running" and t["phase"] == "claude working" else None
+        t["wait"] = waits.get(t["id"])
+        t["origin"] = origin_view(t["origin"])
+    projects = []
+    for p in PROJECTS.values():
+        try:
+            projects.append(main_info(p, s))
+        except Exception as e:
+            projects.append({"name": p.name, "title": p.title, "error": str(e)})
+    return {
+        "tasks": tasks, "now": time.time(), "projects": projects, "archived": archived_projects(),
+        "settings": {k: s.get(k, "") for k in SETTING_KEYS},
+        "limit": limit_info(s), "usage": usage_info(s),
+        "active": len(THREADS), "data_dir": str(DATA),
+        "design_cost": (q("SELECT SUM(cost) AS c FROM designs", one=True) or {}).get("c") or 0,
+        "chats": chat_counts()}
+
+
+STATE_CACHE = {"at": 0.0, "data": None, "busy": False}
+STATE_TTL = 1.0  # seconds a built /api/state answers requests; every open tab polls it every few seconds
+STATE_LOCK = threading.Lock()
+
+
+def state_bytes():
+    """The /api/state body. A request never waits on a rebuild once there is one to show: it gets the last body at
+    once and, when that is older than STATE_TTL, starts one rebuild behind it (what it shows is at most a poll old)."""
+    c = STATE_CACHE
+    if c["data"] is not None and time.time() - c["at"] < STATE_TTL:
+        return c["data"]
+    with STATE_LOCK:
+        if c["busy"] and c["data"] is not None:
+            return c["data"]
+        stale = c["data"]
+        c["busy"] = True
+
+    def build():
+        try:
+            data = json.dumps(state_payload()).encode()
+            c["data"], c["at"] = data, time.time()
+        finally:
+            c["busy"] = False
+    if stale is None:
+        build()  # nothing to show yet: build it now
+        return c["data"]
+    threading.Thread(target=build, daemon=True).start()
+    return stale
+
+
 class H(BaseHTTPRequestHandler):
     def log_message(self, *a):
         pass
@@ -5237,7 +5338,29 @@ class H(BaseHTTPRequestHandler):
             h.strip().lower() for h in os.environ.get("OPS_ALLOWED_HOSTS", "").split(",") if h.strip()}
         return host in allowed or host.endswith(".ts.net")  # Tailscale serve, tailnet-only
 
+    def timed(self, handler):
+        """Run a request handler and log it when it takes over SLOW_MS, with the time it spent waiting for
+        the database lock and in queries, so a slow page says where its time went."""
+        SQLT.t = [0.0, 0.0]
+        t0 = time.time()
+        try:
+            handler()
+        finally:
+            ms = (time.time() - t0) * 1000
+            if ms > SLOW_MS:
+                wait, run = SQLT.t
+                print(f"slow request {self.command} {self.path} {ms:.0f} ms "
+                      f"(db lock wait {wait * 1000:.0f} ms, queries {run * 1000:.0f} ms)", flush=True)
+
     def do_GET(self):
+        self.timed(self.get)
+
+    def do_POST(self):
+        STATE_CACHE["data"] = None  # an action changes what /api/state shows: the next poll builds it afresh
+        self.timed(self.post)
+        STATE_CACHE["data"] = None
+
+    def get(self):
         if not self.host_ok():
             return self.send(403, {"error": "unknown Host header"})
         path = urlparse(self.path).path
@@ -5246,39 +5369,7 @@ class H(BaseHTTPRequestHandler):
         if path == "/api/state" and not READY.is_set():  # the dashboard shows "starting up" until this goes
             return self.send(200, {"starting": True, "now": time.time(), "data_dir": str(DATA)})
         if path == "/api/state":
-            tasks = q("SELECT id,project,title,state,phase,priority,hold,depends_on,parent,created,started,"
-                      "finished,cost,rounds,summary,question,error,merged,branch,kind,auto_release,origin,paused_by,start_at,"
-                      "model,session_model,effort FROM tasks "
-                      "ORDER BY id DESC LIMIT 500")
-            # What each task is doing right now, for the status line under it in the list.
-            last = {r["task_id"]: r for r in q(
-                "SELECT e.task_id, e.text, e.ts FROM events e JOIN (SELECT MAX(id) AS m FROM events "
-                "GROUP BY task_id) x ON e.id = x.m")}
-            s = settings_now()
-            waits = wait_reasons(tasks, s)
-            for t in tasks:
-                t["summary"] = list_summary(t)  # the list shows one line; the task page has the rest
-                for k in ("question", "error"):
-                    t[k] = clip(t[k], 400) or None
-                ev_ = last.get(t["id"])
-                t["last_event"] = {"text": ev_["text"], "ts": ev_["ts"]} if ev_ else None
-                t["phase_since"] = PHASE_SINCE.get(t["id"]) if t["state"] in ACTIVE else None
-                t["step"] = last_step(t["id"]) if t["state"] == "running" and t["phase"] == "claude working" else None
-                t["wait"] = waits.get(t["id"])
-                t["origin"] = origin_view(t["origin"])
-            projects = []
-            for p in PROJECTS.values():
-                try:
-                    projects.append(main_info(p, s))
-                except Exception as e:
-                    projects.append({"name": p.name, "title": p.title, "error": str(e)})
-            return self.send(200, {
-                "tasks": tasks, "now": time.time(), "projects": projects, "archived": archived_projects(),
-                "settings": {k: s.get(k, "") for k in SETTING_KEYS},
-                "limit": limit_info(s), "usage": usage_info(s),
-                "active": len(THREADS), "data_dir": str(DATA),
-                "design_cost": (q("SELECT SUM(cost) AS c FROM designs", one=True) or {}).get("c") or 0,
-                "chats": chat_counts()})
+            return self.send(200, state_bytes())
         m = re.fullmatch(r"/api/tasks/(\d+)", path)
         if m:
             tid = int(m.group(1))
@@ -5347,7 +5438,7 @@ class H(BaseHTTPRequestHandler):
             return self.send(200, d)
         self.send(404, {"error": "not found"})
 
-    def do_POST(self):
+    def post(self):
         if not self.host_ok():
             return self.send(403, {"error": "unknown Host header"})
         if self.headers.get("X-Ops") != "1":  # blocks cross-site form posts
@@ -5595,6 +5686,7 @@ def serve():
     print(f"claude-ops starting on http://{HOST}:{PORT}  (pid {os.getpid()})", flush=True)
     init_db()
     srv = ThreadingHTTPServer((HOST, PORT), H)
+    threading.Thread(target=state_bytes, daemon=True).start()  # the first dashboard load finds /api/state built
     PIDFILE.write_text(f"{os.getpid()}\n")  # after the bind, so a second daemon that fails can't overwrite it
     print(f"claude-ops on http://{HOST}:{PORT}  loading projects  (claude: {CLAUDE})", flush=True)
     threading.Thread(target=start_up, daemon=True).start()
