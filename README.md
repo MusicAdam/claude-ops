@@ -453,6 +453,22 @@ and `chat`. `file` serves only `.md` files inside the research repo.
 - **The brake.** While the usage brake holds the queue, dispatch refuses a new run with a 409 that gives the
   brake's words. Chats are never held.
 
+### The Research tab
+
+The dashboard's **Research** tab replaces the old page. It shows only while `research_repo` is set (Settings,
+under Research). It has the old page's views in claude-ops' look: proposals grouped by research project, each
+with its report, brief, chat and run log; the projects themselves (create, edit, delete, notes, activity); runs
+(a new question or an existing brief, with tier, size, model, project and notes), each with its live feed and a
+Stop button; to-dos; and the source registry. Reports render with the dashboard's own markdown, and a link to a
+`.md` file opens it in a side drawer. What is open is in the URL (`#research/p/<slug>/report`,
+`#research/project/<id>/chat`, `#research/run` …), so the back button and links from a phone work.
+
+- **Read-only.** While the old server runs, a banner at the top says "The old research dashboard is running.
+  Stop it to make changes here." and every write control is disabled. Reads keep working. A refused write shows
+  the server's words next to its button, as does a run the usage brake holds.
+- **Header count.** While research runs or chat turns are under way, the header's working chip adds
+  `· K research`. They take no task slot, so they are not in `N/max`. Click it to open the tab on the runs.
+
 ### Cutover from the old server
 
 1. Promote while nothing runs, so the daemon restarts on the new code.

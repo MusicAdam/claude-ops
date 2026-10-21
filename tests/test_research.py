@@ -4,6 +4,7 @@ The fake research repo is a copy of tests/fixtures/research, and a free port sta
 Run from the repo root: /opt/homebrew/bin/python3 -m unittest discover -s tests -q"""
 import json
 import os
+import re
 import shutil
 import signal
 import socket
@@ -199,6 +200,25 @@ class Research(unittest.TestCase):
         self.assertEqual(self.state()["settings"]["research_repo"], str(self.repo.resolve()))
 
     # ---- reads
+
+    def test_the_dashboard_tab_reads_answer(self):
+        """Every read the Research tab in dashboard.html makes answers 200 against the fixture. A new kind of read
+        in the page fails here until it is added below."""
+        with urlopen(self.url + "/") as r:
+            page = r.read().decode()
+        self.assertIn('id="tab-research"', page)
+        self.assertIn('id="researchview"', page)
+        reads = {
+            '"/proposals': "/proposals", '"/projects': "/projects", '"/jobs': "/jobs", '"/todos': "/todos",
+            '"/references': "/references", '"/jobs/': "/jobs/20261004-100000-aaaa",
+            '"/threads?target=': "/threads?target=proposal:llm-search-tools", '"/threads/': "/threads/20261005-090000-bbbb",
+            '"/file?path=': "/file?path=reports/2026-10-04-llm-search-tools.md", '"/slug?q=': "/slug?q=robots%3F",
+            "`/projects/": "/projects/ai-search/activity",
+        }
+        self.assertEqual(set(re.findall(r'rsApi\(([`"]/[\w/?=-]*)', page)), set(reads))
+        for path in reads.values():
+            code, _ = self.get("/api/research" + path)
+            self.assertEqual(code, 200, path)
 
     def test_reads_return_the_fixture(self):
         props = {p["slug"]: p for p in self.get("/api/research/proposals")[1]}
