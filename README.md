@@ -115,7 +115,7 @@ several (see [Workspaces](#workspaces)). Read it, adjust it, then click **Reload
   - the project is **quiet**: none of its tasks (or Send to devs) is queued, running, checking or merging. Tasks
     waiting on you (review, needs input, paused) don't count; or
   - the first task still waiting for the train merged **Release wait** minutes ago (`release_wait`, a global
-    setting next to Parallel in the dashboard header; default 180).
+    setting on the Settings tab; default 180).
 
   So tasks that merge close together share one release instead of one each. The queue checks this at the end of
   every merge and once a minute. While a task waits, its line in the list and the project's card say `releases
@@ -523,15 +523,22 @@ notes = """Project-specific guidance for design chats."""
 
 ## Other details
 
-- **Tabs.** The header has four: Tasks, Projects, Design and Chat. `#tasks`, `#projects`, `#design` and
-  `#chat` open one; the old `#queue` opens Tasks. The dashboard remembers the last tab you used.
-- **Tasks tab.** The task page is on the left; New task and the task list are on the right. The project
-  picker in the header filters the list. Clicking a task opens it on the left and focuses its project,
+- **Tabs.** The header has five: Projects, Tasks, Design, Chat and Settings. `#projects`, `#tasks`, `#design`,
+  `#chat` and `#settings` open one; the old `#queue` opens Tasks. The dashboard remembers the last tab you
+  used, and opens on Projects the first time.
+- **Header.** Only what you watch or act on: the tabs, the queue readouts (working, queued, needs you,
+  paused), the usage meters, and the pause buttons. Hover a readout or meter for what it counts; the
+  dashboard draws that tooltip itself, so it shows at once and survives the 3-second redraw.
+- **Settings tab.** Parallel, Release wait, Usage brake, Model, Effort and the model per kind of work, each
+  with what it does written next to it, and **Spent**: what Claude has cost, priced at API rates.
+- **Tasks tab.** New task and the task list are on the left; the task page is on the right. The project
+  picker in the header filters the list. Clicking a task opens it on the right and focuses its project,
   and new tasks default to that project.
 - **Projects tab.** Every project, one line each with its counts, at full width. Click one to open it:
   branches, what is waiting to promote, Promote, Play main and dev, Pause, Deploys and Archive; click it
   again to close it. Archived projects are at the bottom. **+ Project** in the header opens this tab with
-  the Add project card at the top. A task link here (such as a deploy's `#id`, or the task a merge or
+  the Add project card at the top. An open project lists its tasks, open ones first, then the last few
+  finished; click one to open it on the Tasks tab. A task link here (such as a deploy's `#id`, or the task a merge or
   release runs in) opens that task on the Tasks tab, and so does confirming a deploy.
 - **Play main and Play dev.** A project with `[app] launch` has both buttons on its card. Play main
   runs `launch` in `<worktrees>/main`: the last Promote's build, or, with no `[app] build`, `main` as it
@@ -554,12 +561,12 @@ notes = """Project-specific guidance for design chats."""
   being checked or merged shows its step and how long it has run (`gate 2/3: test · for 1m`). A
   queued task says why it hasn't started: a free slot, the task it runs after, a paused project or
   queue. Tasks that need you show the question or error; finished ones show the summary.
-- **Parallelism.** "Parallel" on the dashboard is the global limit (default 3; setting `max_parallel`). Workers
-  also split big tasks into subtasks (with "after" ordering) and use subagents inside a task. "Brake %" next to it
+- **Parallelism.** "Parallel" on the Settings tab is the global limit (default 3; setting `max_parallel`). Workers
+  also split big tasks into subtasks (with "after" ordering) and use subagents inside a task. "Usage brake" next to it
   is the usage brake (setting `usage_brake`, default 85; see Usage limits). "Release wait" is the release train's
   longest wait in minutes (setting `release_wait`, default 180; see [Release after merge](#main-is-the-golden-version)).
-- **Models.** Each kind of work picks its Claude model. "Model" in the header is the global setting (`model`);
-  **per kind** next to it sets `model:task` (task workers and Send to dev), `model:release` (the workers a release
+- **Models.** Each kind of work picks its Claude model. "Model" on the Settings tab is the global setting (`model`);
+  **Per kind of work** below it sets `model:task` (task workers and Send to dev), `model:release` (the workers a release
   starts to merge main into dev, default `sonnet`), `model:design` (design and OpenSpec chats) and `model:chat`
   (the Chat tab). Each is an alias (`opus`, `sonnet`, `haiku`), a full model id, or empty for the global setting,
   whose empty value is Claude Code's own default.
@@ -576,8 +583,8 @@ notes = """Project-specific guidance for design chats."""
     keep it. A fresh session that replaces a cold or oversized one (see **Fresh sessions**) keeps it too.
   - **On the dashboard** the task page shows the model its session runs on, and the task list tags tasks that
     are not on Opus, so you can compare a trial of Sonnet tasks later.
-- **Effort.** How hard Claude thinks, passed as `--effort` (`low`, `medium`, `high`, `xhigh`, `max`). "Effort" in
-  the header is the setting `effort`, default `medium`, for every task, release and chat; empty leaves it to
+- **Effort.** How hard Claude thinks, passed as `--effort` (`low`, `medium`, `high`, `xhigh`, `max`). "Effort" on
+  the Settings tab is the setting `effort`, default `medium`, for every task, release and chat; empty leaves it to
   Claude Code (`effortLevel` in your `~/.claude/settings.json`). A task's own effort beats it: the Effort dropdown
   on New task, `"effort"` in a design chat's queue block, or `--effort high` on `opsd.py add` and `opsd.py send`.
   Subtasks from a split take their parent's effort. Unlike the model, effort is read again on every turn: a
@@ -616,8 +623,8 @@ notes = """Project-specific guidance for design chats."""
     reads it in every stream it parses (workers, chats) and keeps the latest reading per window in
     the settings `usage:five_hour` and `usage:seven_day` (`{utilization, resetsAt, ts}`). A reading whose reset has
     passed is stale and counts as 0.
-  - **The setting `usage_brake`** is a percent: default 85, 0 turns the brake off. Set it as **Brake %** next to
-    Parallel (`POST /api/settings {"usage_brake": 85}`). While either window is at or above it, the queue starts
+  - **The setting `usage_brake`** is a percent: default 85, 0 turns the brake off. Set it as **Usage brake** on the
+    Settings tab (`POST /api/settings {"usage_brake": 85}`). While either window is at or above it, the queue starts
     nothing that starts a Claude session: a new task or release, or one resuming its Claude session. Queued work that
     needs no Claude still starts, since holding it frees no usage: deploys (they only run a command), a release that
     only promotes, and a task resumed at its gate or merge (its `start_at` is not `claude`). A merge or promote that

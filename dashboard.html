@@ -34,13 +34,14 @@ header h1 { font-size: 16px; margin: 0; }
 .st .bar { width: 38px; height: 6px; border-radius: 3px; background: var(--line); overflow: hidden; }
 .st .bar i { display: block; height: 100%; background: var(--accent); }
 .st.alert .bar i { background: var(--warn); } .st.danger .bar i { background: var(--bad); }
-main { display: grid; grid-template-columns: 1fr minmax(340px, 460px); gap: 20px; padding: 20px;
+main { display: grid; grid-template-columns: minmax(340px, 460px) 1fr; gap: 20px; padding: 20px;
        max-width: 1500px; margin: 0 auto; align-items: start; }
 main > section { min-width: 0; }
-#projectsview { grid-template-columns: 1fr; }  /* a long one-line status is cut off, not widening its column */
-#left { position: sticky; top: calc(var(--hdr-h, 64px) + 12px); max-height: calc(100vh - var(--hdr-h, 64px) - 32px); overflow: auto; }
+#projectsview, #settingsview { grid-template-columns: 1fr; }
+#settingsview { max-width: 820px; }  /* a long one-line status is cut off, not widening its column */
+#detailcol { position: sticky; top: calc(var(--hdr-h, 64px) + 12px); max-height: calc(100vh - var(--hdr-h, 64px) - 32px); overflow: auto; }
 @media (max-width: 900px) { main { grid-template-columns: 1fr; padding: 16px; }
-                            #left { position: static; max-height: none; overflow: visible; } }
+                            #detailcol { position: static; max-height: none; overflow: visible; } }
 .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px; margin-bottom: 20px; }
 .card h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: 0 0 10px; }
 textarea, input, select { font: inherit; color: var(--ink); background: var(--bg); border: 1px solid var(--line);
@@ -313,13 +314,23 @@ a[data-task] { color: var(--accent); cursor: pointer; }
 #dlg .vopt input[type=text] { width: 110px; padding: 2px 6px; }
 #dlg .notebox { display: block; color: var(--ink); margin-top: 12px; }
 #dlg .notebox textarea { min-height: 90px; margin-top: 4px; }
-#models { position: relative; }
-#models summary { cursor: pointer; color: var(--muted); font-size: 13px; }
-#models .pop { position: absolute; right: 0; top: 24px; z-index: 5; background: var(--panel); border: 1px solid var(--line);
-  border-radius: 8px; padding: 10px 12px; width: 280px; box-shadow: 0 4px 16px rgba(0, 0, 0, .15); }
-#models.left .pop { right: auto; left: 0; }
-#models .pop label { display: flex; justify-content: space-between; align-items: center; padding: 3px 0; }
-#models .pop .muted { font-size: 12px; margin-top: 6px; }
+.settings label { display: grid; grid-template-columns: 130px auto 1fr; gap: 4px 12px; align-items: center; padding: 6px 0; }
+.settings label > span:first-child { font-weight: 550; }
+.settings .why { grid-column: 2 / -1; color: var(--muted); font-size: 12px; }
+.settings h3 { font-size: 13px; color: var(--muted); margin: 14px 0 2px; font-weight: 600; }
+.settings .muted { font-size: 12px; margin-top: 6px; }
+#spent .big { font-size: 22px; font-weight: 600; font-variant-numeric: tabular-nums; }
+#spent table { border-collapse: collapse; margin-top: 8px; font-variant-numeric: tabular-nums; }
+#spent td { padding: 2px 16px 2px 0; } #spent td:last-child { text-align: right; }
+/* Our own tooltip: the header redraws every few seconds, and a native title tooltip dies with the element it was on */
+#tip { position: fixed; z-index: 20; max-width: 340px; padding: 8px 10px; border-radius: 8px; font-size: 12px; white-space: pre-line;
+       background: var(--panel); color: var(--ink); border: 1px solid var(--line); box-shadow: 0 4px 16px rgba(0, 0, 0, .2); pointer-events: none; }
+.ptasks { margin-top: 10px; }
+.ptasks h3 { font-size: 12px; color: var(--muted); margin: 10px 0 4px; font-weight: 600; }
+.ptask { display: flex; gap: 8px; align-items: baseline; padding: 3px 6px; border-radius: 6px; cursor: pointer; }
+.ptask:hover { background: var(--bg); }
+.ptask .id { color: var(--muted); font-family: var(--mono); font-size: 12px; }
+.ptask .title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .mtag { font-size: 11px; padding: 0 6px; border-radius: 4px; border: 1px solid var(--muted); color: var(--muted); }
 </style>
 </head>
@@ -328,31 +339,53 @@ a[data-task] { color: var(--accent); cursor: pointer; }
   <h1>Claude Ops</h1>
   <select id="proj" title="Project"></select>
   <button id="addproj" title="Add a git repository, or a folder of git repos, as a project">+ Project</button>
-  <div class="tabs"><button id="tab-tasks" class="on">Tasks</button><button id="tab-projects" title="Every project: branches, Promote, Play, Deploys, Archive">Projects</button><button id="tab-design" title="Plan work with Claude">Design</button><button id="tab-chat" title="Talk to Claude in the project folder, as in a terminal">Chat</button></div>
+  <div class="tabs"><button id="tab-projects" title="Every project: branches, Promote, Play, Deploys, Archive, and its tasks">Projects</button><button id="tab-tasks">Tasks</button><button id="tab-design" title="Plan work with Claude">Design</button><button id="tab-chat" title="Talk to Claude in the project folder, as in a terminal">Chat</button><button id="tab-settings" title="Parallel, release wait, usage brake, models, effort, and what Claude has cost">Settings</button></div>
+  <span style="flex:1"></span>
   <span class="stats" id="hdr"></span>
   <span class="stats hidden" id="usage"></span>
-  <span style="flex:1"></span>
-  <label>Parallel <input id="par" type="number" min="1" max="8" style="width:58px"></label>
-  <label title="Release train: a task marked Release after merge releases once its project's queue is quiet (nothing queued, running, checking or merging), or at most this many minutes after the first such task merged. Promote releases at once.">Release wait <input id="relwait" type="number" min="0" step="15" style="width:64px"> min</label>
-  <label title="Usage brake: at this percent of the 5-hour or 7-day usage window, start no new task that needs Claude until it resets (0 = off). Deploys, promotes and gates still start; chats are never held.">Brake <input id="brake" type="number" min="0" max="100" step="5" style="width:58px">%</label>
-  <label title="The model every kind of work starts on, unless its own setting under Per kind says otherwise">Model <select id="model">
-    <option value="">default</option><option value="opus">opus</option>
-    <option value="sonnet">sonnet</option><option value="haiku">haiku</option><option value="fable">fable</option></select></label>
-  <label title="How hard Claude thinks (--effort), for every task, release and chat. A task's own effort beats it. default: Claude Code's effortLevel setting. A change reaches running tasks at their next turn.">Effort <select id="effort">
-    <option value="">default</option><option value="low">low</option><option value="medium">medium</option>
-    <option value="high">high</option><option value="xhigh">xhigh</option><option value="max">max</option></select></label>
-  <details id="models"><summary title="Pick a model per kind of work">per kind</summary><div class="pop">
-    <label title="Workers on tasks, and on Send to dev">Tasks <select data-model="task"></select></label>
-    <label title="Workers a release starts to merge main into dev">Releases <select data-model="release"></select></label>
-    <label title="Design chats, including OpenSpec chats">Design chats <select data-model="design"></select></label>
-    <label title="Chat tab: Claude in your checkout">Chats <select data-model="chat"></select></label>
-    <div class="muted">“same as Model” uses the Model setting. A session keeps the model it started with: a change applies to new tasks and chats, not to ones already under way.</div></div></details>
   <button id="pause" title="Hold queued tasks; running ones carry on"></button>
   <button id="pauseall" class="hidden" title="Stop every running task now; each resumes from where it was"></button>
   <button id="resumeall" class="primary hidden" title="Put every paused task, in every project, back in the queue"></button>
   <div id="limitbar" class="hidden"><span id="limitwords"></span>
     <button id="trynow" title="Stop waiting for the reset: resume the tasks the usage limit paused and start queued ones">Try now</button></div>
 </header>
+<div id="tip" class="hidden"></div>
+<main id="settingsview" class="hidden">
+  <section>
+    <div class="card settings">
+      <h2>Queue</h2>
+      <label><span>Parallel</span><input id="par" type="number" min="1" max="8" style="width:64px">
+        <span class="why">How many workers run at once, across every project.</span></label>
+      <label><span>Release wait</span><span><input id="relwait" type="number" min="0" step="15" style="width:64px"> min</span>
+        <span class="why">Release train: a task marked Release after merge releases once its project's queue is quiet (nothing queued, running, checking or merging), or at most this many minutes after the first such task merged. Promote releases at once.</span></label>
+      <label><span>Usage brake</span><span><input id="brake" type="number" min="0" max="100" step="5" style="width:64px"> %</span>
+        <span class="why">At this percent of the 5-hour or 7-day usage window, start no new task that needs Claude until it resets (0 = off). Deploys, promotes and gates still start; chats are never held.</span></label>
+    </div>
+    <div class="card settings">
+      <h2>Models</h2>
+      <label><span>Model</span><select id="model">
+        <option value="">default</option><option value="opus">opus</option>
+        <option value="sonnet">sonnet</option><option value="haiku">haiku</option><option value="fable">fable</option></select>
+        <span class="why">The model every kind of work starts on, unless its own setting below says otherwise.</span></label>
+      <label><span>Effort</span><select id="effort">
+        <option value="">default</option><option value="low">low</option><option value="medium">medium</option>
+        <option value="high">high</option><option value="xhigh">xhigh</option><option value="max">max</option></select>
+        <span class="why">How hard Claude thinks (--effort), for every task, release and chat. A task's own effort beats it. default: Claude Code's effortLevel setting. A change reaches running tasks at their next turn.</span></label>
+      <div id="models">
+        <h3>Per kind of work</h3>
+        <label><span>Tasks</span><select data-model="task"></select><span class="why">Workers on tasks, and on Send to dev.</span></label>
+        <label><span>Releases</span><select data-model="release"></select><span class="why">Workers a release starts to merge main into dev.</span></label>
+        <label><span>Design chats</span><select data-model="design"></select><span class="why">Design chats, including OpenSpec chats.</span></label>
+        <label><span>Chats</span><select data-model="chat"></select><span class="why">The Chat tab: Claude in your checkout.</span></label>
+        <div class="muted">“same as Model” uses the Model setting. A session keeps the model it started with: a change applies to new tasks and chats, not to ones already under way.</div>
+      </div>
+    </div>
+    <div class="card settings">
+      <h2>Spent</h2>
+      <div id="spent"></div>
+    </div>
+  </section>
+</main>
 <main id="projectsview" class="hidden">
   <section>
     <div class="card hidden" id="addcard">
@@ -366,10 +399,7 @@ a[data-task] { color: var(--accent); cursor: pointer; }
   </section>
 </main>
 <main id="tasksview">
-  <section id="left">
-    <div class="card" id="detail"></div>
-  </section>
-  <section id="right">
+  <section id="taskcol">
     <div class="card">
       <h2>New task</h2>
       <textarea id="body" placeholder="Describe what you want. First line is the title. Drop or paste screenshots to attach them."></textarea>
@@ -377,8 +407,8 @@ a[data-task] { color: var(--accent); cursor: pointer; }
         <label id="tprojwrap">Project <select id="tproj"></select></label>
         <label>Priority <select id="prio"><option value="0">normal</option><option value="1">high</option><option value="-1">low</option></select></label>
         <label>After # <input id="after" style="width:60px" placeholder="—"></label>
-        <label title="The model its worker starts on. Default: the Tasks model setting (per kind, in the header)">Model <select id="tmodel"><option value="">Default</option><option value="opus">Opus</option><option value="sonnet">Sonnet</option><option value="haiku">Haiku</option></select></label>
-        <label title="How hard its worker thinks (--effort). Default: the Effort setting in the header">Effort <select id="teffort"><option value="">Default</option><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option><option value="xhigh">Extra high</option><option value="max">Max</option></select></label>
+        <label title="The model its worker starts on. Default: the Tasks model setting (per kind, on the Settings tab)">Model <select id="tmodel"><option value="">Default</option><option value="opus">Opus</option><option value="sonnet">Sonnet</option><option value="haiku">Haiku</option></select></label>
+        <label title="How hard its worker thinks (--effort). Default: the Effort setting on the Settings tab">Effort <select id="teffort"><option value="">Default</option><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option><option value="xhigh">Extra high</option><option value="max">Max</option></select></label>
         <label title="Build it and wait for you to play and approve before merging"><input type="checkbox" id="hold"> Hold for my review</label>
         <label title="Once it merges into dev, queue a release, as Promote does. Tasks it splits into release together, after the last one merges. Starts as the project's default, set on its card."><input type="checkbox" id="autorel"> Release after merge</label>
       </div>
@@ -386,6 +416,9 @@ a[data-task] { color: var(--accent); cursor: pointer; }
       <div class="row"><button class="primary" id="submit">Queue task</button> <span class="muted">⌘↩</span><span id="formmsg" class="err"></span></div>
     </div>
     <div id="list"></div>
+  </section>
+  <section id="detailcol">
+    <div class="card" id="detail"></div>
   </section>
 </main>
 <div id="designview" class="hidden">
@@ -538,7 +571,7 @@ function renderHeader() {
   const ask = n(["needs_input"]), rev = n(["review"]), bad = n(["failed"]), need = ask + rev + bad;
   const plural = (k, one, many) => `${k} ${k === 1 ? one : many}`;
   // One chip per number: a word next to it, a tooltip saying what it counts, and colour only when it wants you.
-  const chip = (cls, html, tip) => `<span class="st ${cls}" title="${esc(tip)}">${html}</span>`;
+  const chip = (cls, html, tip) => `<span class="st ${cls}" data-tip="${esc(tip)}">${html}</span>`;
   put($("#hdr"), [
     chip(state.active ? "live" : "zero", `<b>${state.active}/${s.max_parallel}</b> working`,
       `${plural(state.active, "worker", "workers")} running now, across every project, out of at most ${s.max_parallel} at once (the Parallel setting).`),
@@ -549,9 +582,10 @@ function renderHeader() {
               bad && plural(bad, "failed task", "failed tasks")].filter(Boolean).join(", ") + ". They stay put until you act."
         : "Nothing waits on you: no question, review or failure."),
     n(["paused"]) ? chip("", `<b>${n(["paused"])}</b> paused`, `${plural(n(["paused"]), "task is", "tasks are")} paused. Resume to put them back in the queue.`) : "",
-    chip("", `<b>$${(tcost + dcost).toFixed(2)}</b> spent`,
-      `Claude usage, priced at API rates:\n$${tcost.toFixed(2)} on tasks${pf ? ` in ${P(pf).title || pf}` : ""}\n$${dcost.toFixed(2)} on chats, in every project`),
   ].join(""));
+  put($("#spent"), `<div class="big">$${(tcost + dcost).toFixed(2)}</div><div class="muted">Claude usage, priced at API rates.</div>
+    <table><tr><td>Tasks${pf ? ` in ${esc(P(pf).title || pf)}` : ", every project"}</td><td>$${tcost.toFixed(2)}</td></tr>
+    <tr><td>Design chats and chats, every project</td><td>$${dcost.toFixed(2)}</td></tr></table>`);
   if (document.activeElement !== $("#par")) $("#par").value = s.max_parallel;
   if (document.activeElement !== $("#relwait")) $("#relwait").value = s.release_wait;
   modelSelect($("#model"), s.model, "default");
@@ -572,7 +606,23 @@ function renderHeader() {
   if (state.limit) $("#limitwords").textContent = state.limit.words;
   renderUsage();
   renderTabCounts();
+  tipSync();
 }
+// Tooltips for the header chips. They show at once, follow redraws (the chip under the pointer is a new element
+// every few seconds), and read data-tip, so the browser's own slow title tooltip doesn't also appear.
+let tipAt = null;
+function tipSync() {
+  const tip = $("#tip"), hit = tipAt && document.elementFromPoint(tipAt.x, tipAt.y), el = hit && hit.closest("[data-tip]");
+  if (!el) { tip.classList.add("hidden"); return; }
+  if (tip.textContent !== el.dataset.tip) tip.textContent = el.dataset.tip;
+  tip.classList.remove("hidden");
+  const r = el.getBoundingClientRect(), w = tip.offsetWidth;
+  tip.style.left = Math.max(8, Math.min(r.left, window.innerWidth - w - 8)) + "px";
+  tip.style.top = (r.bottom + 6) + "px";
+}
+document.addEventListener("mousemove", e => { tipAt = {x: e.clientX, y: e.clientY}; tipSync(); });
+document.addEventListener("mouseleave", () => { tipAt = null; tipSync(); });
+window.addEventListener("scroll", () => tipSync(), true);
 // The usage meter: how much of each Claude usage window is used, account-wide. Amber at the brake (no new tasks
 // start), red while the queue waits out the usage limit itself.
 function renderUsage() {
@@ -583,7 +633,7 @@ function renderUsage() {
   put(el, u.windows.map(w => {
     const cls = state.limit ? "danger" : u.brake && w.pct >= u.brake ? "alert" : "";
     const tip = `Claude usage, ${w.label} window: ${w.pct}% used` + (w.resets ? `, resets ${w.resets}.` : " (reset since).") + tail;
-    return `<span class="st ${cls}" title="${esc(tip)}">${esc(w.short)} <span class="bar"><i style="width:${Math.min(100, Math.max(0, w.pct))}%"></i></span><b>${w.pct}%</b></span>`;
+    return `<span class="st ${cls}" data-tip="${esc(tip)}">${esc(w.short)} <span class="bar"><i style="width:${Math.min(100, Math.max(0, w.pct))}%"></i></span><b>${w.pct}%</b></span>`;
   }).join(""));
   el.className = "stats" + (u.windows.length ? "" : " hidden");
 }
@@ -658,7 +708,17 @@ function projBody(g) {
       <button data-p="${g.name}" data-a="${g.paused ? "resume" : "pause"}" title="Pause or resume this project's tasks">${g.paused ? "▶ Resume" : "❚❚ Pause"}</button>
       <label title="New tasks start with &quot;Release after merge&quot; ticked: once one merges into dev, the queue queues a release, as Promote does. You can still untick it on a task. Tasks already queued keep theirs."><input type="checkbox" data-rel="${g.name}" ${g.auto_release ? "checked" : ""}> Release after merge by default</label>
       <span style="flex:1"></span>${archiveBtn(g)}
-    </div>` + archiveAskHtml(g) + (msg ? `<div class="muted" style="margin-top:8px;white-space:pre-wrap">${msg}</div>` : "") + deploysHtml(g);
+    </div>` + archiveAskHtml(g) + (msg ? `<div class="muted" style="margin-top:8px;white-space:pre-wrap">${msg}</div>` : "") + projTasksHtml(g) + deploysHtml(g);
+}
+// The project's tasks, open ones first, then the last few finished. A click opens the task on the Tasks tab.
+function projTasksHtml(g) {
+  const ts = state.tasks.filter(t => t.project === g.name), fin = ["done", "cancelled"];
+  const open = ts.filter(t => !fin.includes(t.state)), done = ts.filter(t => fin.includes(t.state)).slice(0, 8);
+  const row = t => `<div class="ptask" data-task="${t.id}" title="Open #${t.id} on the Tasks tab"><span class="id">#${t.id}</span>
+    <span class="title">${esc(t.title)}</span><span class="badge s-${t.state} ${LIVE.includes(t.state) ? "pulse" : ""}">${LABEL[t.state] || t.state}</span></div>`;
+  if (!ts.length) return `<div class="ptasks"><h3>Tasks</h3><div class="muted">No tasks yet.</div></div>`;
+  return `<div class="ptasks">` + (open.length ? `<h3>Open (${open.length})</h3>${open.map(row).join("")}` : "") +
+    (done.length ? `<h3>Recently finished</h3>${done.map(row).join("")}` : "") + `</div>`;
 }
 
 // ---------------------------------------------------------------- archiving: the card's Archive button and the Archived list
@@ -802,7 +862,7 @@ async function confirmDeploy() {
 }
 // A task link (a deploy's #id) anywhere on the page opens that task on the Tasks tab; in the dialog it closes the dialog first.
 document.addEventListener("click", e => {
-  const a = e.target.closest && e.target.closest("a[data-task]");
+  const a = e.target.closest && e.target.closest("a[data-task], .ptask[data-task]");
   if (!a) return;
   e.preventDefault(); if (dlg) closeDeploy(); showTab("tasks"); selectTask(+a.dataset.task);
 });
@@ -1116,14 +1176,6 @@ $("#model").onchange = () => api("/api/settings", {model: $("#model").value}).th
 $("#effort").onchange = () => api("/api/settings", {effort: $("#effort").value}).then(refresh);
 document.querySelectorAll("#models select").forEach(el =>
   el.onchange = () => api("/api/settings", {["model:" + el.dataset.model]: el.value}).then(refresh));
-// The popover hangs off the summary's right edge, but when the header wraps the summary lands at the
-// far left and the popover would open off-screen: anchor it on the left edge then.
-function placeModels() {
-  const d = $("#models"), r = d.getBoundingClientRect();
-  d.classList.toggle("left", r.left + r.width / 2 < window.innerWidth / 2);
-}
-$("#models").addEventListener("toggle", placeModels);
-window.addEventListener("resize", placeModels);
 // A model setting's dropdown: the aliases, plus the current value when it is a full model id set elsewhere.
 const MODELS = ["opus", "sonnet", "haiku", "fable"];
 function modelSelect(el, v, none) {
@@ -1170,18 +1222,19 @@ const TABTEXT = {
            intro: "Start a design chat: describe an idea, a problem, or a feature you want. Claude reads the project docs and code, asks questions, and queues tasks when you agree. Or open an OpenSpec change on the left: read it, change it with Claude, and queue it."},
   chat: {button: "New chat", none: "No chats yet.", say: "Ask or tell Claude anything about this project. Drop or paste screenshots to attach them.",
          intro: "Talk to Claude in the project folder, as if you ran claude there. It can read, edit and run commands in your checkout. Actions that would ask for permission are denied, since nobody can answer here."}};
-let tab = "tasks", chatSel = null, chatData = null, chatKey = "", chatSels = {};
-try { tab = localStorage.getItem("ops-tab") || "tasks"; chatSels = JSON.parse(localStorage.getItem("ops-chats") || "{}"); } catch {}
-if (["#tasks", "#projects", "#design", "#queue", "#chat"].includes(location.hash)) tab = location.hash.slice(1);
-if (!["tasks", "projects", "design", "chat"].includes(tab)) tab = "tasks";  // "queue", the old name of Tasks
+let tab = "projects", chatSel = null, chatData = null, chatKey = "", chatSels = {};
+try { tab = localStorage.getItem("ops-tab") || "projects"; chatSels = JSON.parse(localStorage.getItem("ops-chats") || "{}"); } catch {}
+if (["#tasks", "#projects", "#design", "#queue", "#chat", "#settings"].includes(location.hash)) tab = location.hash.slice(1);
+if (!["tasks", "projects", "design", "chat", "settings"].includes(tab)) tab = "tasks";  // "queue", the old name of Tasks
 const chatTab = () => tab === "design" || tab === "chat";
 
 function showTab(t) {
   tab = t;
   try { localStorage.setItem("ops-tab", t); } catch {}
-  for (const k of ["tasks", "projects", "design", "chat"]) $(`#tab-${k}`).className = t === k ? "on" : "";
+  for (const k of ["tasks", "projects", "design", "chat", "settings"]) $(`#tab-${k}`).className = t === k ? "on" : "";
   $("#tasksview").classList.toggle("hidden", t !== "tasks");
   $("#projectsview").classList.toggle("hidden", t !== "projects");
+  $("#settingsview").classList.toggle("hidden", t !== "settings");
   $("#designview").classList.toggle("hidden", !chatTab());
   if (!chatTab()) return;
   chatSel = chatSels[t] || null; chatData = null; chatKey = "";
@@ -1194,6 +1247,7 @@ $("#tab-tasks").onclick = () => showTab("tasks");
 $("#tab-projects").onclick = () => showTab("projects");
 $("#tab-design").onclick = () => showTab("design");
 $("#tab-chat").onclick = () => showTab("chat");
+$("#tab-settings").onclick = () => showTab("settings");
 
 // Markdown for chat replies and OpenSpec files, in house. The source is HTML-escaped first, so raw HTML never
 // renders and every pattern below matches escaped text (a quote's ">" is "&gt;"). With idPrefix each heading gets
@@ -1813,7 +1867,7 @@ $("#reopenchat").onclick = () => api(`/api/designs/${chatSel}/reopen`, {}).then(
   .catch(e => { $("#chatmsg").textContent = e.message; });
 $("#newchat").onclick = () => { selectChat(null); chatData = null; renderProjects(); $("#say").focus(); };
 
-// The header wraps to two lines on narrow windows or when it gains buttons; keep #left just below it.
+// The header wraps to two lines on narrow windows or when it gains buttons; keep #detailcol just below it.
 new ResizeObserver(() => document.documentElement.style.setProperty("--hdr-h", $("header").offsetHeight + "px")).observe($("header"));
 
 // ---------------------------------------------------------------- screenshots: drop or paste into any message box
@@ -1822,7 +1876,7 @@ const imageFiles = dt => [...((dt && dt.files) || [])].filter(f => f.type.starts
 function dropBox(el) {  // the textarea a drop on el goes to: el itself, or the message box of the panel it is in
   if (!el || !el.closest) return null;
   const ta = el.closest("textarea"); if (ta) return ta;
-  for (const zone of [el.closest("details"), el.closest("#chat, #detail, #right .card")])
+  for (const zone of [el.closest("details"), el.closest("#chat, #detail, #taskcol .card")])
     if (zone && zone.querySelector("textarea")) return zone.querySelector("textarea");
   return null;
 }
