@@ -703,7 +703,7 @@ function projBody(g) {
   if (g.error) return `<div class="err">${esc(g.error)}</div><div class="row">${archiveBtn(g)}</div>${archiveAskHtml(g)}`;
   const r = g.release, busy = r && !["done", "failed", "cancelled"].includes(r.state);
   const pl = g.play, playing = !!(pl && pl.phase);
-  const msg = mainMsg[g.name] || (pl && pl.error ? `<span class="err">Play ${esc(pl.where === "dev" ? g.dev_branch : g.main_branch)} failed: ${esc(pl.error)}</span>` : "") || (!r ? "" : busy ? `Release #${r.id}: ${esc(r.phase || LABEL[r.state] || r.state)}`
+  const msg = mainMsg[g.name] || (pl && pl.error ? `<span class="err">${pl.stop ? "Stop" : "Play"} ${esc(pl.where === "dev" ? g.dev_branch : g.main_branch)} failed: ${esc(pl.error)}</span>` : "") || (!r ? "" : busy ? `Release #${r.id}: ${esc(r.phase || LABEL[r.state] || r.state)}`
     : r.state === "failed" ? `<span class="err">Release #${r.id} failed: ${esc((r.error || "").split("\n")[0])}</span>` : "");
   return dirtyHtml(g) + sentHtml(g) + `<div>${esc(g.main_branch)} (golden): <span class="mono">${esc(g.main)}</span>${g.running ? ' · <span class="s-running">running now</span>' : ""}</div>` +
     (g.has_app && g.stale && g.built ? `<div class="s-review">The build is of ${esc(g.built)}, older than ${esc(g.main_branch)}. Promote to rebuild.</div>` : "") +
@@ -717,6 +717,8 @@ function projBody(g) {
     <div class="row">
       ${g.can_launch ? `<button class="primary" data-p="${g.name}" data-a="play" ${g.has_build && !playing ? "" : "disabled"}>Play ${esc(g.main_branch)}</button>` : ""}
       ${g.can_launch ? `<button data-p="${g.name}" data-a="play" data-where="dev" title="Run ${esc(g.dev_branch)} in its worktree, to try it before you promote${g.has_app ? `. Builds it first if it moved since its last build` : ""}" ${playing ? "disabled" : ""}>Play ${esc(g.dev_branch)}</button>` : ""}
+      ${g.running ? `<button data-p="${g.name}" data-a="stop" title="Quit ${esc(g.title)} running from ${esc(g.main_branch)}" ${playing ? "disabled" : ""}>■ Stop ${esc(g.main_branch)}</button>` : ""}
+      ${g.dev_running ? `<button data-p="${g.name}" data-a="stop" data-where="dev" title="Quit ${esc(g.title)} running from ${esc(g.dev_branch)}" ${playing ? "disabled" : ""}>■ Stop ${esc(g.dev_branch)}</button>` : ""}
       <button data-p="${g.name}" data-a="promote" title="Queues a release: if the gate passes on ${esc(g.dev_branch)}, ${esc(g.main_branch)} moves to it" ${busy || (!g.ahead.length && (!g.has_app || (g.has_build && !g.stale))) ? "disabled" : ""}>${busy ? `Release #${r.id} in progress` : `Promote ${esc(g.dev_branch)} → ${esc(g.main_branch)}`}</button>
       <button data-p="${g.name}" data-a="${g.paused ? "resume" : "pause"}" title="Pause or resume this project's tasks">${g.paused ? "▶ Resume" : "❚❚ Pause"}</button>
       <label title="New tasks start with &quot;Release after merge&quot; ticked: once one merges into dev, the queue queues a release, as Promote does. You can still untick it on a task. Tasks already queued keep theirs."><input type="checkbox" data-rel="${g.name}" ${g.auto_release ? "checked" : ""}> Release after merge by default</label>
