@@ -27,7 +27,7 @@ app. Each of the paths above is then a folder with a copy of the workspace's own
 and every repo has its own main, dev and task branches.
 """
 from contextlib import nullcontext
-import base64, fnmatch, json, os, re, secrets, shlex, shutil, signal, sqlite3, subprocess, sys, threading, time, tomllib
+import base64, ctypes, fnmatch, json, os, re, secrets, shlex, shutil, signal, sqlite3, subprocess, sys, threading, time, tomllib
 import xml.etree.ElementTree as ET
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
@@ -391,6 +391,19 @@ def prepare_main(p, say, key):
         set_setting(f"main_prepared:{p.name}", "1")
 
 
+_libc = ctypes.CDLL(None, use_errno=True)
+
+
+def clone_tree(src, dst):
+    """APFS-clone src (file or directory) to dst, which must not exist. One clonefile(2) call clones a whole tree
+    in the kernel: ~2 s for an 80k-file node_modules, where cp -cR clones file by file and took 30+ minutes.
+    Falls back to cp -cR where clonefile can't (another volume, not APFS)."""
+    if _libc.clonefile(os.fsencode(src), os.fsencode(dst), 1) != 0:  # 1 = CLONE_NOFOLLOW: a symlink stays one, as cp -R
+        if Path(dst).is_dir() and not Path(dst).is_symlink():
+            shutil.rmtree(dst, ignore_errors=True)
+        subprocess.run(["cp", "-cR", str(src), str(dst)], capture_output=True)
+
+
 def copy_workspace_files(p, dest):
     """A workspace's own files (CLAUDE.md, docs, .claude, ...) are in none of its repos: copy them into dest
     (APFS clone), replacing older copies. Edits made to them in a worktree are not kept."""
@@ -406,7 +419,7 @@ def copy_workspace_files(p, dest):
             shutil.rmtree(out)
         elif out.exists() or out.is_symlink():
             out.unlink()
-        subprocess.run(["cp", "-cR", str(src), str(out)], capture_output=True)
+        clone_tree(src, out)
 
 
 class SetupFailed(Exception):
@@ -421,7 +434,7 @@ def unprepared(dest):
 
 
 def prepare_worktree(p, dest, src_first=None, setup=True, key=None):
-    """Clone warm caches (APFS clone, near-instant) and run the project's setup commands, logged to
+    """Clone warm caches (APFS clone, seconds) and run the project's setup commands, logged to
     runs/<key>/setup.log. Raises SetupFailed; the worktree counts as prepared only once every command succeeded."""
     for rel in p.clone:
         if (dest / rel).exists():
@@ -429,7 +442,7 @@ def prepare_worktree(p, dest, src_first=None, setup=True, key=None):
         for src in (src_first or p.main_wt, p.repo):
             if (src / rel).exists():
                 (dest / rel).parent.mkdir(parents=True, exist_ok=True)
-                subprocess.run(["cp", "-cR", str(src / rel), str(dest / rel)], capture_output=True)
+                clone_tree(src / rel, dest / rel)
                 break
     if setup and p.setup:
         set_setting(f"prepared:{dest}", "")
@@ -3083,7 +3096,7 @@ def promote(p, tid, commit, note=""):
         if prev:
             shutil.rmtree(prev, ignore_errors=True)
             if art.exists():
-                subprocess.run(["cp", "-cR", str(art), str(prev)], capture_output=True)
+                clone_tree(art, prev)
         old = [(r, r.git("rev-parse", "HEAD", cwd=r.at(p.main_wt))) for r in p.parts]
         for r, sha in p.pairs(commit):
             r.git("checkout", "--detach", sha, cwd=r.at(p.main_wt))
