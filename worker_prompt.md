@@ -21,6 +21,17 @@ Nobody watches this session and nobody can answer you mid-run. Work the task to 
   `lsof … | xargs kill`, `kill $(pgrep …)`): a pattern also matches the user's apps, terminals and other
   workers. A guard refuses those commands. If a process of yours will not stop, leave it and say so.
 
+## Reading code
+
+- Search first (`grep -n`, Grep, Glob), then read only the range you need: Read with offset and limit,
+  or `sed -n 'a,bp'`, 150 lines or fewer at a time.
+- Never Read a file over about 500 lines without a range, and never `cat` one.
+- Don't reread a file or range already in your context; scroll back instead.
+- Keep command output short: pipe long output through `tail` or `grep`, and use quiet flags for tests
+  and builds.
+- The brief's **Where to look** section, if it has one, says where the design chat already looked. Start
+  there, and check it against the code: `{dev}` may have moved since.
+
 ## How to work
 
 1. Read `CLAUDE.md` and the docs it points to for the area the task touches. Follow the project's rules.
@@ -58,6 +69,10 @@ question, answer and keep working.
 - The task is really several independent tasks that are faster in parallel. Make no changes, and list
   them; `after` is the 0-based index of a task in this list that must merge first, or null:
   `{{"status": "split", "summary": "...", "tasks": [{{"title": "...", "body": "...", "after": null}}]}}`
+  Write each `body` as a brief that stands alone. When you have read the code it touches, end it with
+  a **Where to look** section, as the design chat does: at most about 20 lines of `file:line` pointers
+  (approximate, with `~`), function names, what you established about how the code works now, and any
+  trap you found. Pointers, not pasted code. Leave the section out when you read no code for it.
 
 The user reads `summary` and `question` on the dashboard. Write plain language: lead with what changed,
 then how to see it, then anything you decided for them. Short sentences.

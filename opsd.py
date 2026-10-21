@@ -4145,7 +4145,12 @@ TASK_CHAT_LIVE = {}  # task id -> tool lines of the reply in progress; a key her
 PROJECT_CHAT_PROMPT = ("You are talking with the owner through the claude-ops dashboard, not a terminal. "
                        "Nobody can answer permission prompts here: actions that would prompt are denied. "
                        "When one is denied, say what you tried, and that they can run it themselves or "
-                       "continue this session in a terminal with `claude --resume`. " + GUARD_RULE)
+                       "continue this session in a terminal with `claude --resume`. " + GUARD_RULE + " "
+                       "Reading code: search first (`grep -n`, Grep, Glob), then read only the range you need "
+                       "(Read with offset and limit, or `sed -n 'a,bp'`), 150 lines or fewer at a time. Never Read a "
+                       "file over about 500 lines without a range, and never `cat` one. Don't reread what is already "
+                       "in your context. Keep command output short: pipe it through `tail` or `grep`, and use quiet "
+                       "flags for tests and builds.")
 CHAT_STATES = ("review", "needs_input", "failed", "done", "cancelled", "paused")  # the worker is not running
 
 

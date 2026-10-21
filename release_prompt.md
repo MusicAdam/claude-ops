@@ -29,6 +29,15 @@ moves. The queue has already run the merge check on this commit, and it passed: 
   `lsof … | xargs kill`, `kill $(pgrep …)`): a pattern also matches the user's apps, terminals and other
   workers. A guard refuses those commands. If a process of yours will not stop, leave it and say so.
 
+## Reading code
+
+- Search first (`grep -n`, Grep, Glob), then read only the range you need: Read with offset and limit,
+  or `sed -n 'a,bp'`, 150 lines or fewer at a time.
+- Never Read a file over about 500 lines without a range, and never `cat` one.
+- Don't reread a file or range already in your context; scroll back instead.
+- Keep command output short: pipe long output through `tail` or `grep`, and use quiet flags for tests
+  and builds.
+
 ## What to check
 
 Unit tests already passed. Your job is what they cannot catch: does the build work as a whole, for a player?

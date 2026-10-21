@@ -59,4 +59,5 @@ Each task body points the worker at `{path}/` instead of copying it, names the `
 it covers (or "all open items"), and tells the worker to tick each box as it finishes it, to update
 `design.md` and the spec deltas if what it builds has to differ (and say so in its summary), to keep
 to the proposal's scope, and not to archive the change. Archiving happens in this chat, when the owner
-asks, once the work is merged.
+asks, once the work is merged. When this chat has read the code the task touches, end the body with a
+**Where to look** section, as for any task (see above).
