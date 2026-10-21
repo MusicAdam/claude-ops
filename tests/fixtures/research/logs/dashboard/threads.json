@@ -1,0 +1,10 @@
+{
+  "20261005-090000-bbbb": {
+    "id": "20261005-090000-bbbb",
+    "target": "project:ai-search",
+    "created": "2026-10-05T09:00:00",
+    "title": "What next?",
+    "turns": ["20261005-090000-cccc"],
+    "ctx": 3
+  }
+}

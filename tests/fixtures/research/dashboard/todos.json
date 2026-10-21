@@ -1,0 +1,16 @@
+{
+  "next": 2,
+  "todos": [
+    {
+      "id": 1,
+      "text": "Email the vendor",
+      "notes": null,
+      "project": null,
+      "proposal": "llm-search-tools",
+      "due": "2026-11-01",
+      "created": "2026-10-03",
+      "done": null,
+      "by": "dashboard"
+    }
+  ]
+}

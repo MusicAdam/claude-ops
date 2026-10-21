@@ -1,0 +1,35 @@
+[
+  {
+    "kind": "question",
+    "slug": "llm-search-tools",
+    "question": "Which LLM search tools are worth using?",
+    "tier": "T1",
+    "model": "default",
+    "size": "normal",
+    "budget": 3,
+    "notes": "",
+    "id": "20261004-100000-aaaa",
+    "pid": 999999,
+    "started": "2026-10-04T10:00:00",
+    "deadline": "2026-10-04T10:15:00"
+  },
+  {
+    "kind": "chat",
+    "target": "project:ai-search",
+    "thread": "20261005-090000-bbbb",
+    "slug": "chat:project:ai-search",
+    "question": "What next?",
+    "tier": "chat",
+    "model": "default",
+    "size": "normal",
+    "budget": 3,
+    "notes": "",
+    "briefsBefore": ["llm-search-tools", "old-idea"],
+    "id": "20261005-090000-cccc",
+    "pid": 999998,
+    "started": "2026-10-05T09:00:00",
+    "deadline": "2026-10-05T09:15:00",
+    "newBriefs": [],
+    "finalized": true
+  }
+]

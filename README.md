@@ -406,6 +406,60 @@ settings and `CLAUDE.md`. Each chat keeps one Claude session across messages, un
   queued change and then clears them from the checkout (see [main is the golden version](#main-is-the-golden-version));
   they come back with the next Promote.
 
+## Research
+
+claude-ops also serves the research dashboard's data and runs, which used to need their own server
+(`~/dev/research/dashboard/server.py`, port 8787). The code is `research.py`; `opsd.py` only routes to it.
+The API is `/api/research/...`, with the old server's endpoints and response shapes: `proposals`, `projects`
+(with `/<id>/activity`, `/<id>/notes`, `/<id>/delete`), `assign`, `archive`, `references`, `todos`,
+`jobs` (and `/<id>`, `/<id>/stop`), `threads` (`?target=` and `/<id>`), `file?path=`, `slug?q=`, `dispatch`
+and `chat`. `file` serves only `.md` files inside the research repo.
+
+- **Setting.** `research_repo` (Settings) is the research repo's path. Research is off while it is empty: the
+  research API answers 404 `{error: "research is off"}` and `/api/state` has `research: null`.
+- **Same files, same places.** Nothing is migrated. It reads and writes what the old server did:
+  `dashboard/projects.json`, `dashboard/archived.json`, `dashboard/todos.json`, `projects/<id>.md` (project
+  notes), `logs/dashboard/jobs.json`, `logs/dashboard/threads.json`, `logs/dashboard/<job>.jsonl`, `briefs/`,
+  `reports/` and `sources/registry.md`. Every state JSON file is written atomically (a temp file in the same
+  folder, fsync, `os.replace`). To-dos go through the repo's own `dashboard/todos.py`, loaded by path, so its
+  `.todos.lock` is shared with `bin/todo` and the skill.
+- **Runs and chats are as before.** No worktree, gate or merge: `claude -p` in the research repo with the
+  old flags, tools, prompts, run sizes ($1/$3/$10) and time limits (T0 5, T1 15, T2 40, chat 15 minutes), in
+  their own process group.
+- **Single writer.** The old server guards its files with an in-process lock, so two writers would lose
+  updates. Before every write, and before each watchdog pass, claude-ops tries port 8787
+  (`OPS_RESEARCH_OLD_PORT` overrides it). If anything answers, the write gets 409 `{error: "The old research
+  dashboard is running. Stop it to make changes here.", readonly: true}` and the watchdog skips its pass (the
+  old server's watchdog covers it). Reads always work. `/api/state` shows `research.readonly`.
+- **Backup.** Before the first write after each daemon start, the state files (`projects.json`,
+  `archived.json`, `todos.json`, `jobs.json`, `threads.json` and the notes in `projects/`) are copied to
+  `~/.claude-ops/research-backup/<YYYYmmdd-HHMMSS>/`. The newest 10 are kept. The `.jsonl` transcripts are not
+  copied: only their own claude process writes them, and only by appending. If the backup fails, the write is
+  refused with a 500 that names the error.
+- **Adopting runs.** A run the old server started shows as running, and keeps its deadline, while its pid is
+  alive and that process started within 5 s of the job's `started` time (`ps -o lstart=`), so a reused pid
+  doesn't count. New jobs also store `pid_start`. Stop and the watchdog never signal a pid that fails the check.
+- **Restarts leave research runs alone.** Research processes are not in the tasks table, `PROCS` or `STEPS`, so
+  `shutdown()`, `pause_all()`, an `opsctl restart` or a Promote never stop one. After a restart the watchdog
+  picks the deadlines back up from `jobs.json`; it skips any more than an hour past.
+- **A separate count.** `/api/state` has `research: {active, readonly}`, where `active` is the running research
+  runs and chat turns. The existing `active` (pipeline threads) doesn't include them, and research runs take no
+  task slot: `max_parallel` and the scheduler ignore them.
+- **Usage meter.** Each watchdog pass reads what running jobs added to their `.jsonl` since the last pass (a
+  byte offset per job) and feeds every `rate_limit_event` to the usage meter.
+- **Notifications.** One notification when a run finishes, fails or times out; a chat notifies only when it
+  fails or times out. `notified: true` in `jobs.json` stops a restart notifying again. A job that ended over an
+  hour ago never notifies, so turning research on doesn't replay its history.
+- **The brake.** While the usage brake holds the queue, dispatch refuses a new run with a 409 that gives the
+  brake's words. Chats are never held.
+
+### Cutover from the old server
+
+1. Promote while nothing runs, so the daemon restarts on the new code.
+2. Set `research_repo` to `~/dev/research`. Research is read-only while the old server runs, and its history shows.
+3. Stop the 8787 server. Its runs carry on: claude-ops adopts them.
+4. claude-ops becomes writable, and backs up the state files before its first write.
+
 ## Projects hand work to each other
 
 A worker or chat in one project can start work in another, the way one Claude session messages a peer. Each
@@ -730,6 +784,7 @@ Nothing claude-ops runs may stop, signal or quit a process it did not start.
 |---|---|
 | `launcher.c` | `Claude Ops.app`: starts the daemon so macOS permission prompts name it |
 | `opsd.py` | daemon: HTTP API + dashboard, scheduler, pipeline, promote, design and project chats |
+| `research.py` | the research dashboard's API, runs, chats and watchdog (see [Research](#research)) |
 | `worker_prompt.md`, `design_prompt.md` | briefs for workers and design chats |
 | `spec_prompt.md` | added to a design chat's brief when it is about an OpenSpec change |
 | `spec_new_prompt.md` | added instead while a chat from **+ New change** has no change yet |
@@ -740,9 +795,11 @@ Nothing claude-ops runs may stop, signal or quit a process it did not start.
 | `~/.claude-ops/images/` | screenshots attached to messages |
 | `~/.claude-ops/opsd.log` | daemon log |
 | `~/.claude-ops/opsd.pid` | the running daemon's pid |
+| `~/.claude-ops/research-backup/` | copies of the research state files, one folder per daemon start, newest 10 |
 
 Env overrides: `OPS_DAEMON` (where `opsd.py send` goes), `OPS_PORT` (8788), `OPS_HOST` (127.0.0.1), `OPS_DATA` (~/.claude-ops),
-`OPS_ALLOWED_HOSTS` (extra host names the API answers, comma-separated).
+`OPS_ALLOWED_HOSTS` (extra host names the API answers, comma-separated), `OPS_RESEARCH_OLD_PORT` (8787, the old
+research server's port that makes research read-only while it answers).
 The API answers only requests addressed to `127.0.0.1`, `localhost`, `OPS_HOST` or a `*.ts.net` name, so a
 web page can't reach it by re-pointing its own domain at 127.0.0.1 (DNS rebinding).
 Keep the host on 127.0.0.1: the API can start work on your machine. For phone access, use Tailscale
