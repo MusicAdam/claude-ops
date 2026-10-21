@@ -433,10 +433,19 @@ const LABEL = {queued:"queued", running:"working", gating:"checking", merging:"m
 
 async function api(path, body) {
   // A read that hangs would hold its poll forever (see single below), so give up on it after 20 seconds.
-  const r = await fetch(path, body === undefined ? {signal: AbortSignal.timeout(20000)} :
-    {method: "POST", headers: {"Content-Type": "application/json", "X-Ops": "1"}, body: JSON.stringify(body)});
-  const j = await r.json();
-  if (!r.ok) throw new Error(j.error || r.status);
+  // A daemon that is down or not yet bound gives no answer, an empty one or not JSON: say that, not a parse error.
+  const down = "The claude-ops daemon isn't answering. Run `opsctl log` to see why.";
+  let r, text;
+  try {
+    r = await fetch(path, body === undefined ? {signal: AbortSignal.timeout(20000)} :
+      {method: "POST", headers: {"Content-Type": "application/json", "X-Ops": "1"}, body: JSON.stringify(body)});
+    text = await r.text();
+  } catch (e) { throw new Error(down); }
+  let j = null;
+  try { j = JSON.parse(text); } catch {}
+  if (!j || typeof j !== "object")
+    throw new Error(r.ok ? down : `The claude-ops daemon answered HTTP ${r.status}. Run \`opsctl log\` to see why.`);
+  if (!r.ok) throw new Error(j.error || `HTTP ${r.status}`);
   return j;
 }
 
@@ -460,7 +469,11 @@ function single(fn) {
 }
 
 async function loadState() {
-  try { state = await api("/api/state"); } catch (e) { $("#hdr").innerHTML = `<span class="err">daemon not reachable</span>`; return; }
+  let s;
+  try { s = await api("/api/state"); } catch (e) { $("#hdr").innerHTML = `<span class="err">${esc(e.message)}</span>`; return; }
+  // Bound but still loading projects: keep what we last drew, and say why nothing moves.
+  if (s.starting) { $("#hdr").innerHTML = `<span class="err">claude-ops is starting up…</span>`; return; }
+  state = s;
   render();
   if (sel) loadDetail(sel);
 }

@@ -132,7 +132,12 @@ several (see [Workspaces](#workspaces)). Read it, adjust it, then click **Reload
   queues. You can still untick it on a task. Tasks already queued keep what they have. It is off until you
   turn it on.
 - Promoting claude-ops itself restarts the daemon to load the new code (`opsctl restart`: running
-  tasks pause and resume).
+  tasks pause and resume). If the new daemon doesn't answer within 30 s, the release's log says so; its
+  output is in `runs/<id>/restart.log`.
+- The daemon opens its port first, then loads projects and resumes tasks. Until then the dashboard says
+  "claude-ops is starting up" and refuses actions. `opsctl start` and `restart` wait up to 30 s for it to
+  answer, and print the end of `opsd.log` if it doesn't. A new main worktree gets its `[worktree]` setup on
+  first use (Promote's build, or Play main), not at startup. `scripts/startup-smoke.sh` checks this.
 - Commits made straight to main are merged into dev when the release takes its snapshot (no gate). If they
   conflict with dev, a worker merges them in the release's worktree, resolves the conflicts and runs the checks;
   dev moves to that merge, and the release checks it as usual. Retry starts the merge over.
