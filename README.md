@@ -55,11 +55,9 @@ several (see [Workspaces](#workspaces)). Read it, adjust it, then click **Reload
 - **dev** gets every task that passes the gate. It is the newest version.
 - **main** moves only when a **release** passes, and its build (`<worktrees>/main`) always matches it. The one
   exception: commits a successful [deploy](#deploys) makes itself, such as a build-number bump, move main too.
-- **Promote** queues a release task ahead of other work. It takes a snapshot of dev, runs the gate,
-  then a Claude release checker (`release_prompt.md`) builds the app and plays it the way a player
-  would. If the checker passes it, main moves to exactly that snapshot; anything merged into dev
-  meanwhile waits for the next release. The checker never changes code: problems it finds are queued
-  as ordinary tasks, and a blocked release leaves main as it was.
+- **Promote** queues a release task ahead of other work. It takes a snapshot of dev and runs the gate. If the
+  gate passes, main moves to exactly that snapshot; anything merged into dev meanwhile waits for the next
+  release. No Claude session checks the build: the gate is the whole check. A failed gate leaves main as it was.
 - Promote never refuses: it always queues a release (or points at the one already open). Anything in the way
   of moving main is checked only when the release gets there. If only you can clear it (quit the main build,
   or switch another worktree off main), the release **needs you**: it shows under Needs you, with a
@@ -106,11 +104,9 @@ several (see [Workspaces](#workspaces)). Read it, adjust it, then click **Reload
   Pausing, stopping or cancelling the task before the merge clears nothing; Retry after a merge clears then. Until
   the next Promote the work is in dev but not in your checkout: the card says `On dev, not released yet. Promote to
   get it back here.` with a link to the task, until main contains it.
-- With nothing new on dev, Promote only rebuilds main (no gate, no checker).
-- **Play-check releases** (a checkbox on the project's card, on by default). Off, releases are **gate-only**, for
-  a project with nothing to play: a release does everything above except start the Claude release checker. It
-  snapshots dev, runs the gate, builds main, fast-forwards main and carries your uncommitted changes (a carry
-  conflict still uses a worker). A gate failure still blocks it. Its summary starts `Gate-only release: the merge
+- With nothing new on dev, Promote only rebuilds main (no gate).
+- A release snapshots dev, runs the gate, builds main, fast-forwards main and carries your uncommitted changes (a
+  carry conflict still uses a worker). A gate failure blocks it. Its summary starts `Gate-only release: the merge
   check passed (<checks>)`, then gives each released task's summary, and **Not part of this release** as usual.
   A gate-only release starts while the usage brake is on, as it starts no Claude session.
 - **Release after merge** (a checkbox on a new task, and on its page until it finishes) promotes for you, as a
@@ -128,7 +124,7 @@ several (see [Workspaces](#workspaces)). Read it, adjust it, then click **Reload
   one merges (or is cancelled). In a design chat, ask for it and the task's `release` is set. **Promote** never
   waits for the train: it queues a release at once.
 - **Release after merge by default** (a checkbox on the project's card) ticks that box for every task the
-  project gets from then on: from the form, `opsd.py add`, a design chat, and the follow-ups a release checker
+  project gets from then on: from the form, `opsd.py add`, a design chat, and the follow-ups a worker
   queues. You can still untick it on a task. Tasks already queued keep what they have. It is off until you
   turn it on.
 - Promoting claude-ops itself restarts the daemon to load the new code (`opsctl restart`: running
@@ -177,7 +173,7 @@ run = "bin/swish release"
 
 - **Only on your click.** A deploy starts only from the dashboard, `POST /api/deploys`, or
   `./opsd.py deploy -p <project> <target> [--version …] [--note …]`. Never from a release, Release after merge, a
-  release checker, a worker or a design chat, and nothing that queues follow-ups can make one.
+  worker or a design chat, and nothing that queues follow-ups can make one.
 - **Like a release, it goes ahead of other work.** Its title reads `Deploy swish test → 3.5.0`. The task page shows
   its step, its events and `deploy.log`. You get notified when it needs you, fails or succeeds.
 - **One at a time.** A project runs one deploy at a time; a later click queues behind it. A release and a deploy of the
@@ -542,8 +538,8 @@ notes = """Project-specific guidance for design chats."""
   is the usage brake (setting `usage_brake`, default 85; see Usage limits). "Release wait" is the release train's
   longest wait in minutes (setting `release_wait`, default 180; see [Release after merge](#main-is-the-golden-version)).
 - **Models.** Each kind of work picks its Claude model. "Model" in the header is the global setting (`model`);
-  **per kind** next to it sets `model:task` (task workers and Send to dev), `model:release` (release checkers,
-  default `sonnet`: they build, run and summarise), `model:design` (design and OpenSpec chats) and `model:chat`
+  **per kind** next to it sets `model:task` (task workers and Send to dev), `model:release` (the workers a release
+  starts to merge main into dev, default `sonnet`), `model:design` (design and OpenSpec chats) and `model:chat`
   (the Chat tab). Each is an alias (`opus`, `sonnet`, `haiku`), a full model id, or empty for the global setting,
   whose empty value is Claude Code's own default.
   - **Per task.** A task's own model beats its kind's setting: the Model dropdown on New task, `"model"` in a
@@ -555,7 +551,7 @@ notes = """Project-specific guidance for design chats."""
     starts, and the one it actually started on (from the stream's init event) is stored as `session_model` on the
     task or chat. Every resume passes it to `--model`, whatever the settings say now: answers, gate fixes, rebase
     conflicts, retries, pauses, usage-limit waits and Ask the worker. Only a new session picks again: a
-    release's checker after a worker merged main into dev, or a worker that merges your uncommitted changes. Sessions from before this ran on the global model and
+    a worker that merges your uncommitted changes. Sessions from before this ran on the global model and
     keep it. A fresh session that replaces a cold or oversized one (see **Fresh sessions**) keeps it too.
   - **On the dashboard** the task page shows the model its session runs on, and the task list tags tasks that
     are not on Opus, so you can compare a trial of Sonnet tasks later.
@@ -577,9 +573,9 @@ notes = """Project-specific guidance for design chats."""
 - **Usage limits.** When Claude's usage limit hits, work waits for the reset instead of failing.
   - **The worker that hits it is paused, not failed** (`paused_by` `limit`). When it resumes, its Claude session is
     told the limit stopped it mid-turn and to check `git status` and `git log`, finish, and write its result. This
-    covers every Claude step: workers, release checkers, and the workers that carry your changes over or merge main
+    covers every Claude step: workers, and the workers that carry your changes over or merge main
     into dev. Other running workers carry on, and are paused the same way if they hit it. Gates and merges don't use
-    Claude and carry on. A wait of over 55 minutes outlives the prompt cache, so a worker or release checker
+    Claude and carry on. A wait of over 55 minutes outlives the prompt cache, so a worker
     resumes in a fresh session with a handoff note (see **Fresh sessions**).
   - **The queue starts nothing until the reset.** The reset time and the limit's kind are saved as the settings
     `limited_until` and `limited_kind`, so a restart keeps them (if Claude doesn't say when it resets, or names a time
@@ -596,7 +592,7 @@ notes = """Project-specific guidance for design chats."""
   - **The usage brake stops starting Claude sessions before the limit hits**, so the end of each window is left for your own
     design chats, chats and answers. Every Claude stream reports how much of each usage window is used
     (`rate_limit_event`, from 0 to 1, account-wide, so it counts your own Claude use outside claude-ops too). The daemon
-    reads it in every stream it parses (workers, release checkers, chats) and keeps the latest reading per window in
+    reads it in every stream it parses (workers, chats) and keeps the latest reading per window in
     the settings `usage:five_hour` and `usage:seven_day` (`{utilization, resetsAt, ts}`). A reading whose reset has
     passed is stale and counts as 0.
   - **The setting `usage_brake`** is a percent: default 85, 0 turns the brake off. Set it as **Brake %** next to
@@ -617,7 +613,7 @@ notes = """Project-specific guidance for design chats."""
   queue: if the daemon crashes instead, the next one requeues whatever was running.
 - **Questions.** A worker that needs a decision stops with a question. Answer it on the dashboard
   and the same Claude session resumes, or a fresh one if you answer after the cache expired.
-- **Fresh sessions.** Before a worker or release checker resumes its Claude session (an answer, a gate fix, a
+- **Fresh sessions.** Before a worker resumes its Claude session (an answer, a gate fix, a
   rebase conflict, a retry, a pause, a restart, a usage-limit wait), the daemon checks the session's last call.
   If it was over 55 minutes ago (the prompt cache lasts an hour, and a cold resume rewrites the whole context at
   about 40 times the price of rereading it) or its context was over 155k tokens (every call rereads it), the
@@ -674,7 +670,7 @@ Nothing claude-ops runs may stop, signal or quit a process it did not start.
   executable lies in that worktree's `[app] process` path. It matches the path exactly, never as a pattern,
   so a terminal or editor that merely names the path is spared. With `[app] stop` set, it runs that command
   in the worktree instead, and your script decides what to stop.
-- **Workers, release checkers and project chats** run each Bash command past `opsd.py guard` first (a
+- **Workers and project chats** run each Bash command past `opsd.py guard` first (a
   `PreToolUse` hook passed with `--settings`). It refuses:
   - `pkill`, `killall`, `xargs kill`, and `kill` of pids found by `pgrep`, `lsof`, `ps` or `pidof`
   - `kill` of a pid the session did not start (not its descendant, and not running from its worktree),
@@ -695,7 +691,7 @@ Nothing claude-ops runs may stop, signal or quit a process it did not start.
 |---|---|
 | `launcher.c` | `Claude Ops.app`: starts the daemon so macOS permission prompts name it |
 | `opsd.py` | daemon: HTTP API + dashboard, scheduler, pipeline, promote, design and project chats |
-| `worker_prompt.md`, `release_prompt.md`, `design_prompt.md` | briefs for workers, release checkers and design chats |
+| `worker_prompt.md`, `design_prompt.md` | briefs for workers and design chats |
 | `spec_prompt.md` | added to a design chat's brief when it is about an OpenSpec change |
 | `spec_new_prompt.md` | added instead while a chat from **+ New change** has no change yet |
 | `dashboard.html` | the page |

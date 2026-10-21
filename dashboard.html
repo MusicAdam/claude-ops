@@ -333,7 +333,7 @@ a[data-task] { color: var(--accent); cursor: pointer; }
     <option value="high">high</option><option value="xhigh">xhigh</option><option value="max">max</option></select></label>
   <details id="models"><summary title="Pick a model per kind of work">per kind</summary><div class="pop">
     <label title="Workers on tasks, and on Send to dev">Tasks <select data-model="task"></select></label>
-    <label title="Release checkers: build, run, summarise">Releases <select data-model="release"></select></label>
+    <label title="Workers a release starts to merge main into dev">Releases <select data-model="release"></select></label>
     <label title="Design chats, including OpenSpec chats">Design chats <select data-model="design"></select></label>
     <label title="Chat tab: Claude in your checkout">Chats <select data-model="chat"></select></label>
     <div class="muted">“same as Model” uses the Model setting. A session keeps the model it started with: a change applies to new tasks and chats, not to ones already under way.</div></div></details>
@@ -624,10 +624,9 @@ function projBody(g) {
     <div class="row">
       ${g.can_launch ? `<button class="primary" data-p="${g.name}" data-a="play" ${g.has_build && !playing ? "" : "disabled"}>Play ${esc(g.main_branch)}</button>` : ""}
       ${g.can_launch ? `<button data-p="${g.name}" data-a="play" data-where="dev" title="Run ${esc(g.dev_branch)} in its worktree, to try it before you promote${g.has_app ? `. Builds it first if it moved since its last build` : ""}" ${playing ? "disabled" : ""}>Play ${esc(g.dev_branch)}</button>` : ""}
-      <button data-p="${g.name}" data-a="promote" title="${g.release_play ? `Queues a release: the gate, then Claude builds and plays ${esc(g.dev_branch)}; if it passes, ${esc(g.main_branch)} moves to it` : `Queues a gate-only release: if the gate passes on ${esc(g.dev_branch)}, ${esc(g.main_branch)} moves to it`}" ${busy || (!g.ahead.length && (!g.has_app || (g.has_build && !g.stale))) ? "disabled" : ""}>${busy ? `Release #${r.id} in progress` : `Promote ${esc(g.dev_branch)} → ${esc(g.main_branch)}`}</button>
+      <button data-p="${g.name}" data-a="promote" title="Queues a release: if the gate passes on ${esc(g.dev_branch)}, ${esc(g.main_branch)} moves to it" ${busy || (!g.ahead.length && (!g.has_app || (g.has_build && !g.stale))) ? "disabled" : ""}>${busy ? `Release #${r.id} in progress` : `Promote ${esc(g.dev_branch)} → ${esc(g.main_branch)}`}</button>
       <button data-p="${g.name}" data-a="${g.paused ? "resume" : "pause"}" title="Pause or resume this project's tasks">${g.paused ? "▶ Resume" : "❚❚ Pause"}</button>
       <label title="New tasks start with &quot;Release after merge&quot; ticked: once one merges into dev, the queue queues a release, as Promote does. You can still untick it on a task. Tasks already queued keep theirs."><input type="checkbox" data-rel="${g.name}" ${g.auto_release ? "checked" : ""}> Release after merge by default</label>
-      <label title="A release runs the gate, then Claude builds and plays ${esc(g.dev_branch)} before ${esc(g.main_branch)} moves. Off: gate-only releases, for a project with nothing to play. ${esc(g.main_branch)} moves once the gate passes, and no Claude session starts."><input type="checkbox" data-playcheck="${g.name}" ${g.release_play ? "checked" : ""}> Play-check releases</label>
       <span style="flex:1"></span>${archiveBtn(g)}
     </div>` + archiveAskHtml(g) + (msg ? `<div class="muted" style="margin-top:8px;white-space:pre-wrap">${msg}</div>` : "") + deploysHtml(g);
 }
@@ -827,11 +826,6 @@ function renderMains() {
   });
   const ad = $("#archived"); if (ad) ad.ontoggle = () => archOpen = ad.open;
   document.querySelectorAll("#mains [data-deploy]").forEach(b => b.onclick = () => openDeploy(b.dataset.p, b.dataset.deploy));
-  document.querySelectorAll("#mains [data-playcheck]").forEach(c => c.onchange = () => {
-    delete mainMsg[c.dataset.playcheck];
-    api(`/api/projects/${c.dataset.playcheck}/playcheck`, {on: c.checked ? 1 : 0}).then(refresh)
-      .catch(e => { mainMsg[c.dataset.playcheck] = `<span class="err">${esc(e.message)}</span>`; refresh(); });
-  });
   document.querySelectorAll("#mains [data-rel]").forEach(c => c.onchange = () => {
     delete mainMsg[c.dataset.rel];
     api(`/api/projects/${c.dataset.rel}/release`, {on: c.checked ? 1 : 0}).then(refresh)
