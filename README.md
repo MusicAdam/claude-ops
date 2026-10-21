@@ -107,11 +107,26 @@ several (see [Workspaces](#workspaces)). Read it, adjust it, then click **Reload
   the next Promote the work is in dev but not in your checkout: the card says `On dev, not released yet. Promote to
   get it back here.` with a link to the task, until main contains it.
 - With nothing new on dev, Promote only rebuilds main (no gate, no checker).
-- **Release after merge** (a checkbox on a new task, and on its page until it finishes) promotes for you:
-  once the task merges into dev, the queue queues a release, the same one Promote makes. If a release is
-  already open, the task waits for it and the next release takes it. A task that splits passes the box to
-  its subtasks, and they release together after the last one merges (or is cancelled). In a design chat,
-  ask for it and the task's `release` is set.
+- **Play-check releases** (a checkbox on the project's card, on by default). Off, releases are **gate-only**, for
+  a project with nothing to play: a release does everything above except start the Claude release checker. It
+  snapshots dev, runs the gate, builds main, fast-forwards main and carries your uncommitted changes (a carry
+  conflict still uses a worker). A gate failure still blocks it. Its summary starts `Gate-only release: the merge
+  check passed (<checks>)`, then gives each released task's summary, and **Not part of this release** as usual.
+  A gate-only release starts while the usage brake is on, as it starts no Claude session.
+- **Release after merge** (a checkbox on a new task, and on its page until it finishes) promotes for you, as a
+  **release train**: once the task merges into dev, the queue queues a release, the same one Promote makes, but
+  only when either
+  - the project is **quiet**: none of its tasks (or Send to devs) is queued, running, checking or merging. Tasks
+    waiting on you (review, needs input, paused) don't count; or
+  - the first task still waiting for the train merged **Release wait** minutes ago (`release_wait`, a global
+    setting next to Parallel in the dashboard header; default 180).
+
+  So tasks that merge close together share one release instead of one each. The queue checks this at the end of
+  every merge and once a minute. While a task waits, its line in the list and the project's card say `releases
+  when the queue is quiet, or by 3:40 pm`. If a release is already open, the task waits for it and the next
+  release takes it. A task that splits passes the box to its subtasks, and they release together after the last
+  one merges (or is cancelled). In a design chat, ask for it and the task's `release` is set. **Promote** never
+  waits for the train: it queues a release at once.
 - **Release after merge by default** (a checkbox on the project's card) ticks that box for every task the
   project gets from then on: from the form, `opsd.py add`, a design chat, and the follow-ups a release checker
   queues. You can still untick it on a task. Tasks already queued keep what they have. It is off until you
@@ -510,7 +525,8 @@ notes = """Project-specific guidance for design chats."""
   queue. Tasks that need you show the question or error; finished ones show the summary.
 - **Parallelism.** "Parallel" on the dashboard is the global limit (default 3; setting `max_parallel`). Workers
   also split big tasks into subtasks (with "after" ordering) and use subagents inside a task. "Brake %" next to it
-  is the usage brake (setting `usage_brake`, default 85; see Usage limits).
+  is the usage brake (setting `usage_brake`, default 85; see Usage limits). "Release wait" is the release train's
+  longest wait in minutes (setting `release_wait`, default 180; see [Release after merge](#main-is-the-golden-version)).
 - **Models.** Each kind of work picks its Claude model. "Model" in the header is the global setting (`model`);
   **per kind** next to it sets `model:task` (task workers and Send to dev), `model:release` (release checkers,
   default `sonnet`: they build, run and summarise), `model:design` (design and OpenSpec chats) and `model:chat`

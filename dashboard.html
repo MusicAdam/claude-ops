@@ -322,6 +322,7 @@ a[data-task] { color: var(--accent); cursor: pointer; }
   <span class="stat hidden" id="usage"></span>
   <span style="flex:1"></span>
   <label>Parallel <input id="par" type="number" min="1" max="8" style="width:58px"></label>
+  <label title="Release train: a task marked Release after merge releases once its project's queue is quiet (nothing queued, running, checking or merging), or at most this many minutes after the first such task merged. Promote releases at once.">Release wait <input id="relwait" type="number" min="0" step="15" style="width:64px"> min</label>
   <label title="Usage brake: at this percent of the 5-hour or 7-day usage window, start no new task that needs Claude until it resets (0 = off). Deploys, promotes and gates still start; chats are never held.">Brake <input id="brake" type="number" min="0" max="100" step="5" style="width:58px">%</label>
   <label title="The model every kind of work starts on, unless its own setting under Per kind says otherwise">Model <select id="model">
     <option value="">default</option><option value="opus">opus</option>
@@ -507,6 +508,7 @@ function renderHeader() {
     `<b>${n(["needs_input","review","failed"])}</b> need you · ` +
     (n(["paused"]) ? `<b>${n(["paused"])}</b> paused · ` : "") + `$${cost.toFixed(2)} spent`;
   if (document.activeElement !== $("#par")) $("#par").value = s.max_parallel;
+  if (document.activeElement !== $("#relwait")) $("#relwait").value = s.release_wait;
   modelSelect($("#model"), s.model, "default");
   document.querySelectorAll("#models select").forEach(el => modelSelect(el, s["model:" + el.dataset.model], "same as Model"));
   $("#pause").textContent = s.paused === "1" ? "▶ Resume queue" : "❚❚ Pause queue";
@@ -548,6 +550,12 @@ function renderTabCounts() {
 }
 
 const mainMsg = {};  // project -> error from a click, shown until the next success
+// The release train: merged tasks marked Release after merge wait until their project's queue is quiet, or until by.
+const clock = ts => { const d = new Date(ts * 1000), today = d.toDateString() === new Date().toDateString();
+  return (today ? "" : d.toLocaleDateString([], {weekday: "short"}) + " ") +
+    d.toLocaleTimeString([], {hour: "numeric", minute: "2-digit"}).replace(/\s*([AP])M$/i, (_, x) => ` ${x.toLowerCase()}m`); };
+const trainWords = tr => tr.by * 1000 <= Date.now() ? "releases within a minute" : `releases when the queue is quiet, or by ${clock(tr.by)}`;
+const trainOf = t => { const tr = t.state === "done" && (P(t.project).train || null); return tr && tr.ids.includes(t.id) ? tr : null; };
 const LIVE = ["running", "gating", "merging"], NEEDS = ["needs_input", "review", "failed"];
 // The focused project is the one expanded in the project list. Clicking a task focuses its project.
 function setFocus(name) {
@@ -591,14 +599,16 @@ function projBody(g) {
     (g.has_app && !g.has_build ? `<div class="s-review">Not built yet. Promote to build it.</div>` : "") +
     `<div>${esc(g.dev_branch)}: <span class="mono">${esc(g.dev)}</span> · ${g.ahead.length ? `${g.ahead.length} merge(s) waiting to promote` : "nothing waiting"}${g.dev_running ? ' · <span class="s-running">running now</span>' : ""}</div>` +
     (g.can_launch && g.dev_stale ? `<div class="s-review">${esc(g.dev_branch)} needs build: it moved since its last build. Play ${esc(g.dev_branch)} builds it first.</div>` : "") +
+    (g.train ? `<div class="s-review">Release after merge: ${g.train.ids.map(taskLink).join(", ")} ${trainWords(g.train)}.</div>` : "") +
     (g.ahead.length ? `<details data-k="ahead"><summary>What would be promoted</summary><ul class="ahead mono">${g.ahead.map(l => `<li>${esc(l)}</li>`).join("")}</ul></details>` : "") +
     `<div class="muted" style="font-size:12px;margin-top:4px">gate: ${g.gate.length ? esc(g.gate.join(", ")) : "none configured"}</div>
     <div class="row">
       ${g.can_launch ? `<button class="primary" data-p="${g.name}" data-a="play" ${g.has_build && !playing ? "" : "disabled"}>Play ${esc(g.main_branch)}</button>` : ""}
       ${g.can_launch ? `<button data-p="${g.name}" data-a="play" data-where="dev" title="Run ${esc(g.dev_branch)} in its worktree, to try it before you promote${g.has_app ? `. Builds it first if it moved since its last build` : ""}" ${playing ? "disabled" : ""}>Play ${esc(g.dev_branch)}</button>` : ""}
-      <button data-p="${g.name}" data-a="promote" title="Queues a release: the gate, then Claude builds and plays ${esc(g.dev_branch)}; if it passes, ${esc(g.main_branch)} moves to it" ${busy || (!g.ahead.length && (!g.has_app || (g.has_build && !g.stale))) ? "disabled" : ""}>${busy ? `Release #${r.id} in progress` : `Promote ${esc(g.dev_branch)} → ${esc(g.main_branch)}`}</button>
+      <button data-p="${g.name}" data-a="promote" title="${g.release_play ? `Queues a release: the gate, then Claude builds and plays ${esc(g.dev_branch)}; if it passes, ${esc(g.main_branch)} moves to it` : `Queues a gate-only release: if the gate passes on ${esc(g.dev_branch)}, ${esc(g.main_branch)} moves to it`}" ${busy || (!g.ahead.length && (!g.has_app || (g.has_build && !g.stale))) ? "disabled" : ""}>${busy ? `Release #${r.id} in progress` : `Promote ${esc(g.dev_branch)} → ${esc(g.main_branch)}`}</button>
       <button data-p="${g.name}" data-a="${g.paused ? "resume" : "pause"}" title="Pause or resume this project's tasks">${g.paused ? "▶ Resume" : "❚❚ Pause"}</button>
       <label title="New tasks start with &quot;Release after merge&quot; ticked: once one merges into dev, the queue queues a release, as Promote does. You can still untick it on a task. Tasks already queued keep theirs."><input type="checkbox" data-rel="${g.name}" ${g.auto_release ? "checked" : ""}> Release after merge by default</label>
+      <label title="A release runs the gate, then Claude builds and plays ${esc(g.dev_branch)} before ${esc(g.main_branch)} moves. Off: gate-only releases, for a project with nothing to play. ${esc(g.main_branch)} moves once the gate passes, and no Claude session starts."><input type="checkbox" data-playcheck="${g.name}" ${g.release_play ? "checked" : ""}> Play-check releases</label>
       <span style="flex:1"></span>${archiveBtn(g)}
     </div>` + archiveAskHtml(g) + (msg ? `<div class="muted" style="margin-top:8px;white-space:pre-wrap">${msg}</div>` : "") + deploysHtml(g);
 }
@@ -798,6 +808,11 @@ function renderMains() {
   });
   const ad = $("#archived"); if (ad) ad.ontoggle = () => archOpen = ad.open;
   document.querySelectorAll("#mains [data-deploy]").forEach(b => b.onclick = () => openDeploy(b.dataset.p, b.dataset.deploy));
+  document.querySelectorAll("#mains [data-playcheck]").forEach(c => c.onchange = () => {
+    delete mainMsg[c.dataset.playcheck];
+    api(`/api/projects/${c.dataset.playcheck}/playcheck`, {on: c.checked ? 1 : 0}).then(refresh)
+      .catch(e => { mainMsg[c.dataset.playcheck] = `<span class="err">${esc(e.message)}</span>`; refresh(); });
+  });
   document.querySelectorAll("#mains [data-rel]").forEach(c => c.onchange = () => {
     delete mainMsg[c.dataset.rel];
     api(`/api/projects/${c.dataset.rel}/release`, {on: c.checked ? 1 : 0}).then(refresh)
@@ -860,7 +875,8 @@ function renderList() {
         t.parent ? `from #${t.parent}` : "",
         t.origin ? `sent by ${esc(t.origin.words)}` : "",
         t.hold ? "hold for review" : "",
-        t.auto_release ? "release after merge" : "",
+        trainOf(t) ? `<span class="s-review" title="Release after merge waits for the release train">${trainWords(trainOf(t))}</span>`
+          : t.auto_release ? "release after merge" : "",
         t.priority > 0 ? "high priority" : t.priority < 0 ? "low priority" : "",
         live ? `${took(t, now)} running` : t.finished ? `${ago(t.finished, now)} ago${t.started ? ` · took ${took(t, now)}` : ""}`
           : t.started && t.state !== "queued" ? `started ${took(t, now)} ago` : `queued ${ago(t.created, now)} ago`,
@@ -1054,6 +1070,7 @@ $("#resumeall").onclick = () => api("/api/resume-all", {}).then(refresh);
 $("#trynow").onclick = () => api("/api/limit/clear", {}).then(refresh);
 $("#brake").onchange = () => api("/api/settings", {usage_brake: Math.min(100, Math.max(0, +$("#brake").value || 0))}).then(refresh);
 $("#par").onchange = () => api("/api/settings", {max_parallel: Math.max(1, +$("#par").value || 1)}).then(refresh);
+$("#relwait").onchange = () => api("/api/settings", {release_wait: Math.max(0, +$("#relwait").value || 0)}).then(refresh);
 $("#model").onchange = () => api("/api/settings", {model: $("#model").value}).then(refresh);
 document.querySelectorAll("#models select").forEach(el =>
   el.onchange = () => api("/api/settings", {["model:" + el.dataset.model]: el.value}).then(refresh));
