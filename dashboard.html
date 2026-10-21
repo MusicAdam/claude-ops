@@ -36,7 +36,8 @@ header h1 { font-size: 16px; margin: 0; }
 .st.alert .bar i { background: var(--warn); } .st.danger .bar i { background: var(--bad); }
 main { display: grid; grid-template-columns: 1fr minmax(340px, 460px); gap: 20px; padding: 20px;
        max-width: 1500px; margin: 0 auto; align-items: start; }
-main > section { min-width: 0; }  /* a long one-line status is cut off, not widening its column */
+main > section { min-width: 0; }
+#projectsview { grid-template-columns: 1fr; }  /* a long one-line status is cut off, not widening its column */
 #left { position: sticky; top: calc(var(--hdr-h, 64px) + 12px); max-height: calc(100vh - var(--hdr-h, 64px) - 32px); overflow: auto; }
 @media (max-width: 900px) { main { grid-template-columns: 1fr; padding: 16px; }
                             #left { position: static; max-height: none; overflow: visible; } }
@@ -327,7 +328,7 @@ a[data-task] { color: var(--accent); cursor: pointer; }
   <h1>Claude Ops</h1>
   <select id="proj" title="Project"></select>
   <button id="addproj" title="Add a git repository, or a folder of git repos, as a project">+ Project</button>
-  <div class="tabs"><button id="tab-queue" class="on">Queue</button><button id="tab-design" title="Plan work with Claude">Design</button><button id="tab-chat" title="Talk to Claude in the project folder, as in a terminal">Chat</button></div>
+  <div class="tabs"><button id="tab-tasks" class="on">Tasks</button><button id="tab-projects" title="Every project: branches, Promote, Play, Deploys, Archive">Projects</button><button id="tab-design" title="Plan work with Claude">Design</button><button id="tab-chat" title="Talk to Claude in the project folder, as in a terminal">Chat</button></div>
   <span class="stats" id="hdr"></span>
   <span class="stats hidden" id="usage"></span>
   <span style="flex:1"></span>
@@ -352,8 +353,8 @@ a[data-task] { color: var(--accent); cursor: pointer; }
   <div id="limitbar" class="hidden"><span id="limitwords"></span>
     <button id="trynow" title="Stop waiting for the reset: resume the tasks the usage limit paused and start queued ones">Try now</button></div>
 </header>
-<main id="queueview">
-  <section id="left">
+<main id="projectsview" class="hidden">
+  <section>
     <div class="card hidden" id="addcard">
       <h2>Add project</h2>
       <input id="ppath" placeholder="Folder path, or a name for a new project" style="width:100%">
@@ -362,6 +363,10 @@ a[data-task] { color: var(--accent); cursor: pointer; }
       <div id="pmsg" class="muted" style="margin-top:8px;white-space:pre-wrap"></div>
     </div>
     <div id="mains"></div>
+  </section>
+</main>
+<main id="tasksview">
+  <section id="left">
     <div class="card" id="detail"></div>
   </section>
   <section id="right">
@@ -792,14 +797,14 @@ async function confirmDeploy() {
     const g = P(dlg.project), d = g.deploys.find(x => x.name === dlg.target);
     if (!g.deploy_open) g.deploy_open = r.id;
     if (d && !d.open) d.open = r.id;
-    closeDeploy(); renderMains(); selectTask(r.id); refresh();
+    closeDeploy(); renderMains(); showTab("tasks"); selectTask(r.id); refresh();
   } catch (e) { $("#dmsg").textContent = e.message; syncDeploy(); }
 }
-// A task link (a deploy's #id) anywhere on the page opens that task; in the dialog it closes the dialog first.
+// A task link (a deploy's #id) anywhere on the page opens that task on the Tasks tab; in the dialog it closes the dialog first.
 document.addEventListener("click", e => {
   const a = e.target.closest && e.target.closest("a[data-task]");
   if (!a) return;
-  e.preventDefault(); if (dlg) closeDeploy(); selectTask(+a.dataset.task);
+  e.preventDefault(); if (dlg) closeDeploy(); showTab("tasks"); selectTask(+a.dataset.task);
 });
 document.addEventListener("keydown", e => {
   if (!dlg) return;
@@ -1059,7 +1064,7 @@ function originLine(o, verb) {
   return o ? `<div class="muted" style="margin:4px 0">${verb} <a class="origin">${esc(o.words)}</a>${o.title ? ` · ${esc(o.title)}` : ""}</div>` : "";
 }
 function openOrigin(o) {
-  if (o.ref.startsWith("task:")) { showTab("queue"); selectTask(o.id); refresh(); return; }
+  if (o.ref.startsWith("task:")) { showTab("tasks"); selectTask(o.id); refresh(); return; }
   if (!inView(o.project)) { setFilter(o.project); renderProjects(); renderHeader(); renderMains(); }
   showTab(o.kind === "project" ? "chat" : "design"); selectChat(o.id);
 }
@@ -1132,9 +1137,9 @@ function modelSelect(el, v, none) {
 // The model a task's session runs on, short: "sonnet" for claude-sonnet-4-5-20250929. Opus is the usual one.
 function modelShort(m) { const k = MODELS.find(a => String(m || "").toLowerCase().includes(a)); return k || m || ""; }
 $("#proj").onchange = () => {
-  setFilter($("#proj").value); if ($("#proj").value) setFocus($("#proj").value); if (state) render(); refresh(); if (tab !== "queue") refreshDesign();
+  setFilter($("#proj").value); if ($("#proj").value) setFocus($("#proj").value); if (state) render(); refresh(); if (chatTab()) refreshDesign();
 };
-$("#addproj").onclick = () => { showTab("queue"); $("#addcard").classList.remove("hidden"); $("#ppath").focus(); };
+$("#addproj").onclick = () => { showTab("projects"); $("#addcard").classList.remove("hidden"); $("#ppath").focus(); };
 $("#pcancel").onclick = () => $("#addcard").classList.add("hidden");
 $("#padd").onclick = () => addProject(false);
 async function addProject(create) {
@@ -1165,24 +1170,28 @@ const TABTEXT = {
            intro: "Start a design chat: describe an idea, a problem, or a feature you want. Claude reads the project docs and code, asks questions, and queues tasks when you agree. Or open an OpenSpec change on the left: read it, change it with Claude, and queue it."},
   chat: {button: "New chat", none: "No chats yet.", say: "Ask or tell Claude anything about this project. Drop or paste screenshots to attach them.",
          intro: "Talk to Claude in the project folder, as if you ran claude there. It can read, edit and run commands in your checkout. Actions that would ask for permission are denied, since nobody can answer here."}};
-let tab = "queue", chatSel = null, chatData = null, chatKey = "", chatSels = {};
-try { tab = localStorage.getItem("ops-tab") || "queue"; chatSels = JSON.parse(localStorage.getItem("ops-chats") || "{}"); } catch {}
-if (["#design", "#queue", "#chat"].includes(location.hash)) tab = location.hash.slice(1);
+let tab = "tasks", chatSel = null, chatData = null, chatKey = "", chatSels = {};
+try { tab = localStorage.getItem("ops-tab") || "tasks"; chatSels = JSON.parse(localStorage.getItem("ops-chats") || "{}"); } catch {}
+if (["#tasks", "#projects", "#design", "#queue", "#chat"].includes(location.hash)) tab = location.hash.slice(1);
+if (!["tasks", "projects", "design", "chat"].includes(tab)) tab = "tasks";  // "queue", the old name of Tasks
+const chatTab = () => tab === "design" || tab === "chat";
 
 function showTab(t) {
   tab = t;
   try { localStorage.setItem("ops-tab", t); } catch {}
-  for (const k of ["queue", "design", "chat"]) $(`#tab-${k}`).className = t === k ? "on" : "";
-  $("#queueview").classList.toggle("hidden", t !== "queue");
-  $("#designview").classList.toggle("hidden", t === "queue");
-  if (t === "queue") return;
+  for (const k of ["tasks", "projects", "design", "chat"]) $(`#tab-${k}`).className = t === k ? "on" : "";
+  $("#tasksview").classList.toggle("hidden", t !== "tasks");
+  $("#projectsview").classList.toggle("hidden", t !== "projects");
+  $("#designview").classList.toggle("hidden", !chatTab());
+  if (!chatTab()) return;
   chatSel = chatSels[t] || null; chatData = null; chatKey = "";
   $("#newchat").textContent = TABTEXT[t].button;
   $("#say").placeholder = TABTEXT[t].say;
   if (state) renderProjects();
   refreshDesign();
 }
-$("#tab-queue").onclick = () => showTab("queue");
+$("#tab-tasks").onclick = () => showTab("tasks");
+$("#tab-projects").onclick = () => showTab("projects");
 $("#tab-design").onclick = () => showTab("design");
 $("#tab-chat").onclick = () => showTab("chat");
 
@@ -1720,7 +1729,7 @@ function renderChat() {
       ? `<div class="msg user">${pics(esc(m.text.replace(/^\[ops:[^\n]*\]\n\n/, "")))}</div>`
       : `<div class="msg ${m.role === "ops" ? "ops" : ""}">${md(m.text)}${m.tasks.length ? `<div class="chips">${m.tasks.map(t => `<button class="chip" data-task="${t.id}">#${t.id} ${esc(t.title || "")} · ${LABEL[t.state] || t.state}</button>`).join("")}</div>` : ""}</div>`).join("")
     + (thinking ? `<div class="live"><span class="pulse s-running">Claude is thinking</span>${d.live.map(l => `<div>  ${esc(l)}</div>`).join("")}</div>` : "");
-  box.querySelectorAll("[data-task]").forEach(b => b.onclick = () => { showTab("queue"); selectTask(+b.dataset.task); refresh(); });
+  box.querySelectorAll("[data-task]").forEach(b => b.onclick = () => { showTab("tasks"); selectTask(+b.dataset.task); refresh(); });
   if (stick || thinking) {
     toBottom(box);
     // Pictures load after this: their height would leave you short of the bottom, so go down again as each arrives.
@@ -1856,10 +1865,10 @@ document.addEventListener("paste", e => {
 showTab(tab);
 // Poll while the page is in view. A hidden tab asks nothing, and catches up as soon as it is shown again.
 refresh(); setInterval(() => { if (!document.hidden) refresh.poll(); }, 3000);
-setInterval(() => { if (!document.hidden && tab !== "queue") refreshDesign.poll(); }, 1500);
+setInterval(() => { if (!document.hidden && chatTab()) refreshDesign.poll(); }, 1500);
 document.addEventListener("visibilitychange", () => {
   if (document.hidden) return;
-  refresh.poll(); if (tab !== "queue") refreshDesign.poll();
+  refresh.poll(); if (chatTab()) refreshDesign.poll();
 });
 </script>
 </body>
