@@ -307,6 +307,7 @@ a[data-task] { color: var(--accent); cursor: pointer; }
 #models summary { cursor: pointer; color: var(--muted); font-size: 13px; }
 #models .pop { position: absolute; right: 0; top: 24px; z-index: 5; background: var(--panel); border: 1px solid var(--line);
   border-radius: 8px; padding: 10px 12px; width: 280px; box-shadow: 0 4px 16px rgba(0, 0, 0, .15); }
+#models.left .pop { right: auto; left: 0; }
 #models .pop label { display: flex; justify-content: space-between; align-items: center; padding: 3px 0; }
 #models .pop .muted { font-size: 12px; margin-top: 6px; }
 .mtag { font-size: 11px; padding: 0 6px; border-radius: 4px; border: 1px solid var(--muted); color: var(--muted); }
@@ -1074,6 +1075,14 @@ $("#relwait").onchange = () => api("/api/settings", {release_wait: Math.max(0, +
 $("#model").onchange = () => api("/api/settings", {model: $("#model").value}).then(refresh);
 document.querySelectorAll("#models select").forEach(el =>
   el.onchange = () => api("/api/settings", {["model:" + el.dataset.model]: el.value}).then(refresh));
+// The popover hangs off the summary's right edge, but when the header wraps the summary lands at the
+// far left and the popover would open off-screen: anchor it on the left edge then.
+function placeModels() {
+  const d = $("#models"), r = d.getBoundingClientRect();
+  d.classList.toggle("left", r.left + r.width / 2 < window.innerWidth / 2);
+}
+$("#models").addEventListener("toggle", placeModels);
+window.addEventListener("resize", placeModels);
 // A model setting's dropdown: the aliases, plus the current value when it is a full model id set elsewhere.
 const MODELS = ["opus", "sonnet", "haiku", "fable"];
 function modelSelect(el, v, none) {
