@@ -1792,12 +1792,15 @@ function renderChat() {
 }
 // The message list scrolls on its own beside an OpenSpec change. Elsewhere it grows with its messages and the page
 // scrolls instead (the message box stays stuck to the bottom of the window), so both are moved and checked.
+// The page is as tall as its tallest column, often the chat list, so its own bottom can sit far below the chat's:
+// line up the bottom of the chat with the bottom of the window instead.
 const pageEl = () => document.scrollingElement || document.documentElement;
+const chatBelow = () => $("#chat").getBoundingClientRect().bottom - innerHeight;
 const atBottom = box => box.scrollHeight > box.clientHeight + 1 ? box.scrollTop + box.clientHeight >= box.scrollHeight - 40
-  : pageEl().scrollTop + innerHeight >= pageEl().scrollHeight - 40;
+  : chatBelow() <= 40;
 function toBottom(box) {
   box.scrollTop = box.scrollHeight;
-  if (box.offsetParent && box.scrollHeight <= box.clientHeight + 1) pageEl().scrollTop = pageEl().scrollHeight;
+  if (box.offsetParent && box.scrollHeight <= box.clientHeight + 1) pageEl().scrollTop += chatBelow();
 }
 async function sayChat(text) {  // a change's command button: sent as if typed, leaving the message box alone
   $("#rinfo").querySelectorAll("[data-cmd]").forEach(b => b.disabled = true);
