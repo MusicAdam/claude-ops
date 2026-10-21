@@ -36,6 +36,9 @@ from urllib.parse import parse_qs, quote, unquote, urlparse
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
+import research  # the research dashboard's backend (README: ## Research); it calls back into this module as ops
+research.bind(sys.modules[__name__])
+
 HOME = Path.home()
 CODE = Path(__file__).resolve().parent
 DATA = Path(os.environ.get("OPS_DATA", HOME / ".claude-ops"))
@@ -720,7 +723,7 @@ def set_setting(k, v):
 
 MODEL_KINDS = ("task", "release", "design", "chat")
 SETTING_KEYS = ("max_parallel", "paused", "model", "usage_brake", "release_wait", "effort",  # the dashboard's
-                *(f"model:{k}" for k in MODEL_KINDS))
+                "research_repo", *(f"model:{k}" for k in MODEL_KINDS))
 MODEL_OF_KIND = {"senddev": "task", "deploy": "task", "project": "chat"}  # a project chat is the Chat tab
 
 
@@ -5680,6 +5683,7 @@ def state_payload():
         "settings": {k: s.get(k, "") for k in SETTING_KEYS},
         "limit": limit_info(s), "usage": usage_info(s),
         "active": len(THREADS), "data_dir": str(DATA),
+        "research": research.state(),  # its own count: research runs take no task slot
         "design_cost": (q("SELECT SUM(cost) AS c FROM designs", one=True) or {}).get("c") or 0,
         "chats": chat_counts()}
 
@@ -5768,6 +5772,8 @@ class H(BaseHTTPRequestHandler):
             return self.send(200, {"starting": True, "now": time.time(), "data_dir": str(DATA)})
         if path == "/api/state":
             return self.send(200, state_bytes())
+        if path.startswith("/api/research/"):
+            return self.send(*research.get(path, urlparse(self.path).query))
         m = re.fullmatch(r"/api/tasks/(\d+)", path)
         if m:
             tid = int(m.group(1))
@@ -5853,6 +5859,8 @@ class H(BaseHTTPRequestHandler):
         path = urlparse(self.path).path
         if not READY.is_set():  # PROJECTS is half loaded and tasks not yet recovered
             return self.send(503, {"error": STARTING, "starting": True})
+        if path.startswith("/api/research/"):  # its own status codes: 404 while off, 409 while read-only
+            return self.send(*research.post(path, body))
         try:
             return self.send(200, self.route(path, body) or {"ok": True})
         except KeyError as e:
@@ -5884,6 +5892,8 @@ class H(BaseHTTPRequestHandler):
                 b["usage_brake"] = min(100, max(0, int(float(b["usage_brake"] or 0))))
             if "release_wait" in b:
                 b["release_wait"] = max(0, int(float(b["release_wait"] or 0)))
+            if "research_repo" in b:  # "" turns research off
+                b["research_repo"] = research.check_repo(b["research_repo"])
             for k in SETTING_KEYS:
                 if k in b:
                     set_setting(k, model_name(b[k]) or "" if k.startswith("model")
@@ -6079,6 +6089,7 @@ def start_up():
         print("startup error:", e, flush=True)
     READY.set()
     threading.Thread(target=scheduler, daemon=True).start()
+    research.start()  # its watchdog: time limits, the usage meter and notifications for research runs
     print(f"claude-ops ready  projects: {', '.join(PROJECTS) or 'none'}", flush=True)
 
 

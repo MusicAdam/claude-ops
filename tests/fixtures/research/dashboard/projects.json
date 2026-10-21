@@ -1,0 +1,12 @@
+{
+  "projects": {
+    "ai-search": {
+      "name": "AI search",
+      "description": "Search ideas",
+      "created": "2026-10-01"
+    }
+  },
+  "members": {
+    "llm-search-tools": "ai-search"
+  }
+}
