@@ -255,6 +255,7 @@ PROJECTS = {}
 
 
 def load_projects():
+    global PROJECTS
     PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
     found = {}
     for f in sorted(PROJECTS_DIR.glob("*.toml")):
@@ -269,8 +270,7 @@ def load_projects():
             found[p.name] = p
         except Exception as e:
             print(f"project {f.name}: {e}", flush=True)
-    PROJECTS.clear()
-    PROJECTS.update(found)
+    PROJECTS = found  # swap, never clear and refill: requests iterate PROJECTS while a reload or archive runs
     with FACTS_LOCK:
         FACTS.clear()
     for p in PROJECTS.values():
