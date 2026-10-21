@@ -70,6 +70,13 @@ PHASE_SINCE = {}  # task id -> when its phase last changed, so the dashboard can
 # ---------------------------------------------------------------- projects
 
 HAS = set()  # (repo, sha) of commits known to be in that repo
+WORKTREE_LOCKS = {}  # repo -> lock: two tasks starting at once add their worktrees one after the other
+GIT_LOCKED = re.compile(r"\.lock\b|cannot lock|could not lock|another git process", re.I)
+GIT_CHATTER = re.compile(r"^(Preparing worktree|HEAD is now at|Updating files)")  # stderr before the real error
+
+
+def worktree_lock(repo):
+    return WORKTREE_LOCKS.setdefault(str(repo), threading.Lock())  # setdefault is atomic: one lock per repo
 
 
 class Part:
@@ -84,7 +91,18 @@ class Part:
         return Path(root) / self.sub if self.sub else Path(root)
 
     def git(self, *a, cwd=None, check=True):
-        return sh("git", *a, cwd=cwd or self.src, check=check)
+        if a[:1] != ("worktree",) or a[1:2] == ("list",):
+            return sh("git", *a, cwd=cwd or self.src, check=check)
+        # worktree add/remove/prune write the repo's shared refs and worktree files: one at a time per repo, and
+        # once more after a second if a git of yours or a worker's held a lock
+        with worktree_lock(self.src):
+            for retry in (True, False):
+                try:
+                    return sh("git", *a, cwd=cwd or self.src, check=check)
+                except RuntimeError as e:
+                    if not (retry and GIT_LOCKED.search(str(e))):
+                        raise
+                    time.sleep(1)
 
     def rev(self, ref):
         return self.git("rev-parse", ref)
@@ -719,7 +737,8 @@ def notify(title, msg):
 def sh(*cmd, cwd=None, check=True):
     r = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
     if check and r.returncode:
-        raise RuntimeError(f"{' '.join(map(str, cmd))}: {r.stderr.strip() or r.stdout.strip()}")
+        err = "\n".join(l for l in r.stderr.strip().splitlines() if not GIT_CHATTER.match(l))
+        raise RuntimeError(f"{' '.join(map(str, cmd))}: {err or r.stdout.strip()}")
     return r.stdout.strip()
 
 
