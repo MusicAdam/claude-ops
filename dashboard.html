@@ -367,6 +367,55 @@ a[data-task] { color: var(--accent); cursor: pointer; }
 .ptask .id { color: var(--muted); font-family: var(--mono); font-size: 12px; }
 .ptask .title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .mtag { font-size: 11px; padding: 0 6px; border-radius: 4px; border: 1px solid var(--muted); color: var(--muted); }
+/* Research tab: the research repo's proposals, projects, reports, to-dos, sources and runs */
+#researchview { grid-template-columns: 1fr; }
+#rsnav { flex-wrap: wrap; margin-bottom: 14px; }
+.rssplit { display: grid; grid-template-columns: minmax(300px, 440px) 1fr; gap: 20px; align-items: start; }
+.rssplit > * { min-width: 0; }
+#rsreader { position: sticky; top: calc(var(--hdr-h, 64px) + 12px); max-height: calc(100vh - var(--hdr-h, 64px) - 32px); overflow: auto; margin: 0; }
+.rsback { display: none; margin-bottom: 8px; }
+@media (max-width: 900px) {
+  .rssplit { grid-template-columns: 1fr; }
+  #rsreader { position: static; max-height: none; overflow: visible; }
+  #rssplit.detail > .rslist, #rssplit:not(.detail) > #rsreader { display: none; }
+  .rsback { display: inline-block; }
+}
+.card h2.rsh { font-size: 18px; text-transform: none; letter-spacing: 0; color: var(--ink); margin: 0 0 4px; }
+.rstabs { margin: 12px 0; flex-wrap: wrap; }
+.chip.on { background: var(--accent); color: #fff; }
+.rsform label { display: flex; flex-direction: column; align-items: stretch; gap: 4px; margin-bottom: 10px; }
+.rsform .row label { flex: 1 1 140px; margin: 0; }
+#researchview textarea { min-height: 0; }
+.rsform input, .rsform select { width: 100%; }
+.rsform .tiers { display: flex; flex-wrap: wrap; gap: 6px 14px; margin: 0 0 10px; color: var(--muted); }
+.rsform .tiers label { flex-direction: row; align-items: center; margin: 0; }
+.rsform .tiers input { width: auto; }
+.rsdoc { border: 0; padding: 0; background: none; max-width: none; margin: 0; }
+.card .rsdoc h2 { text-transform: none; letter-spacing: 0; color: var(--ink); }
+.rsdoc pre, .rsdoc table { max-width: 100%; overflow: auto; }
+.rslog { max-height: 60vh; overflow: auto; }
+#rsreader .composer { background: var(--panel); }
+.rslog .msg { max-width: none; }
+.rslog .msg.user { max-width: 85%; }
+.feed .sub { padding-left: 14px; opacity: .8; }
+.rsjob { cursor: default; }
+.rsjob .top button, .rstodo .acts button { padding: 2px 10px; font-size: 12px; }
+.rsjd { margin-top: 8px; }
+.rstodo { display: flex; gap: 10px; align-items: flex-start; cursor: default; }
+.rstodo > div:first-of-type { flex: 1; min-width: 0; }
+.rstodo .title { white-space: normal; }
+.rstodo.done .title { text-decoration: line-through; color: var(--muted); }
+.rstodo.editing { border-color: var(--accent); }
+.rstodo .acts { display: flex; gap: 6px; flex: none; }
+.rsref { padding: 8px 0; border-top: 1px solid var(--line); display: grid; grid-template-columns: 1fr minmax(120px, 260px); gap: 12px; }
+.rsref .url, .rsref .meta { color: var(--muted); font-size: 12px; word-break: break-all; }
+.rsref .meta a { margin-right: 6px; }
+@media (max-width: 600px) { .rsref { grid-template-columns: 1fr; } }
+.rsdrawerbg { position: fixed; inset: 0; background: rgba(0, 0, 0, .3); z-index: 29; }
+.rsdrawer { position: fixed; top: 0; right: 0; bottom: 0; width: min(780px, 100vw); overflow: auto; z-index: 30; padding: 16px;
+            background: var(--panel); border-left: 1px solid var(--line); box-shadow: -6px 0 24px rgba(0, 0, 0, .2); }
+#hdr .rsn { cursor: pointer; color: var(--accent); }
+#researchview a, .rsdrawer a { color: var(--accent); }
 </style>
 </head>
 <body>
@@ -374,7 +423,7 @@ a[data-task] { color: var(--accent); cursor: pointer; }
   <h1>Claude Ops</h1>
   <select id="proj" title="Project"></select>
   <button id="addproj" title="Add a git repository, or a folder of git repos, as a project">+ Project</button>
-  <div class="tabs"><button id="tab-projects" title="Every project: branches, Promote, Play, Deploys, Archive, and its tasks">Projects</button><button id="tab-tasks">Tasks</button><button id="tab-design" title="Plan work with Claude">Design</button><button id="tab-chat" title="Talk to Claude in the project folder, as in a terminal">Chat</button><button id="tab-analyze" title="Where time and money went: run times and costs of tasks, and how to make them cheaper and faster">Analyze</button><button id="tab-settings" title="Parallel, release wait, usage brake, models, effort, and what Claude has cost">Settings</button></div>
+  <div class="tabs"><button id="tab-projects" title="Every project: branches, Promote, Play, Deploys, Archive, and its tasks">Projects</button><button id="tab-tasks">Tasks</button><button id="tab-design" title="Plan work with Claude">Design</button><button id="tab-chat" title="Talk to Claude in the project folder, as in a terminal">Chat</button><button id="tab-analyze" title="Where time and money went: run times and costs of tasks, and how to make them cheaper and faster">Analyze</button><button id="tab-research" class="hidden" title="The research repo: proposals, reports, projects, to-dos, sources and runs">Research</button><button id="tab-settings" title="Parallel, release wait, usage brake, models, effort, and what Claude has cost">Settings</button></div>
   <span class="grow" style="flex:1"></span>
   <span class="stats" id="hdr"></span>
   <span class="stats hidden" id="usage"></span>
@@ -416,8 +465,76 @@ a[data-task] { color: var(--accent); cursor: pointer; }
       </div>
     </div>
     <div class="card settings">
+      <h2>Research</h2>
+      <label><span>Research repo</span><input id="rsrepo" placeholder="~/dev/research" style="width:100%">
+        <span class="why">The research repo's folder. It turns on the Research tab, which replaces the old research dashboard (port 8787). Empty: off.</span></label>
+      <div id="rsrepomsg" class="err"></div>
+    </div>
+    <div class="card settings">
       <h2>Spent</h2>
       <div id="spent"></div>
+    </div>
+  </section>
+</main>
+<main id="researchview" class="hidden">
+  <section>
+    <div class="callout hidden" id="rsro">The old research dashboard is running. Stop it to make changes here.</div>
+    <div class="card hidden" id="rsoff">Research is off. Set the research repo on the Settings tab.</div>
+    <div id="rsmsg"></div>
+    <div id="rsbody">
+    <div class="tabs" id="rsnav"><button data-v="proposals">Proposals</button><button data-v="run">Run</button><button data-v="todos">To-dos</button><button data-v="refs">References</button></div>
+    <div id="rs-proposals">
+      <div class="rssplit" id="rssplit">
+        <div class="rslist">
+          <div class="card"><h2>Research projects</h2><div class="chips" id="rsprojbar" style="margin:0"></div><div id="rsprojpanel"></div></div>
+          <input id="rsq" type="search" placeholder="Search proposals" style="width:100%">
+          <div class="chips" id="rsfilters"></div>
+          <div class="callout ok hidden" id="rsundo"></div>
+          <div id="rsplist"></div>
+        </div>
+        <div class="card" id="rsreader"></div>
+      </div>
+    </div>
+    <div id="rs-run" class="rssplit hidden">
+      <form class="card rsform" id="rsdform" autocomplete="off">
+        <h2>New research</h2>
+        <label>Run <select id="rsdbrief"><option value="">A new question</option></select></label>
+        <label id="rsdqwrap">Question <textarea id="rsdq" rows="4" placeholder="Is anyone selling X to Y? What's the state of Z?"></textarea></label>
+        <div class="tiers" id="rsdtier"><span>Tier</span>
+          <label title="One fact, 1-5 searches"><input type="radio" name="rstier" value="T0"> T0 lookup</label>
+          <label title="5-15 searches, a one-page report"><input type="radio" name="rstier" value="T1" checked> T1 scan</label>
+          <label title="3-5 workers, about 15 times the tokens"><input type="radio" name="rstier" value="T2"> T2 deep dive</label></div>
+        <div class="row" style="margin:0 0 10px">
+          <label title="Stops the run once its tokens, priced at API rates, pass this. Nothing is billed per run: it protects your usage allowance.">Size <select id="rsdsize"></select></label>
+          <label>Model <select id="rsdmodel"></select></label></div>
+        <label>Project <select id="rsdproj"></select></label>
+        <label id="rsdslugwrap">Slug <input id="rsdslug" placeholder="auto from question"></label>
+        <label>Notes <textarea id="rsdnotes" rows="2" placeholder="Constraints, what you already know, what to skip"></textarea></label>
+        <div class="row"><button class="primary rw" id="rsdgo" type="submit">Run</button></div>
+        <div class="muted" style="margin-top:10px;font-size:12px">Runs <code>claude -p</code> with the research skill in the research repo. It can't ask you anything. Research runs take no task slot.</div>
+      </form>
+      <div><div class="group"><h3 style="margin-top:0">Runs</h3></div><div id="rsjobs"></div></div>
+    </div>
+    <div id="rs-todos" class="rssplit hidden">
+      <form class="card rsform" id="rstform" autocomplete="off">
+        <h2 id="rsttitle">New to-do</h2>
+        <label>To-do <input id="rsttext" placeholder="Email the KVR mods about a survey"></label>
+        <label>Notes <textarea id="rstnotes" rows="3" placeholder="Why, links, what done looks like"></textarea></label>
+        <div class="row" style="margin:0 0 10px"><label>Project <select id="rstproj"></select></label><label>Proposal <select id="rstprop"></select></label></div>
+        <label>Due <input id="rstdue" type="date"></label>
+        <div class="row"><button class="primary rw" id="rstsave" type="submit">Add to-do</button><button type="button" id="rstcancel" class="hidden">Cancel</button></div>
+      </form>
+      <div>
+        <div class="row" style="margin:0"><input id="rstq" type="search" placeholder="Search to-dos" style="flex:1"><select id="rstpf"></select></div>
+        <div class="chips" id="rstfilters"></div>
+        <div id="rstlist" style="margin-top:10px"></div>
+      </div>
+    </div>
+    <div id="rs-refs" class="hidden">
+      <div class="row" style="margin:0"><input id="rsrq" type="search" placeholder="Search sources, notes, URLs" style="flex:1"><span class="muted" id="rsrcount"></span></div>
+      <div class="chips" id="rsrfilters"></div>
+      <div id="rsrlist" style="margin-top:10px"></div>
+    </div>
     </div>
   </section>
 </main>
@@ -581,6 +698,8 @@ function render() {
   const st = sel && state.tasks.find(t => t.id === sel);
   if (st && !inView(st.project)) clearSelection();
   renderProjects(); renderHeader(); renderMains(); renderList();
+  $("#tab-research").classList.toggle("hidden", !state.research);
+  if (tab === "research") { if (state.research) { rsLock(); refreshResearch.poll(); } else rsRender(); }
   if (tab === "analyze" && (anaKey !== `${anaPeriod}|${pf}` || Date.now() - anaAt > 60000)) refreshAnalyze();
 }
 
@@ -618,11 +737,13 @@ function renderHeader() {
   const tcost = ts.reduce((a, t) => a + (t.cost || 0), 0), dcost = state.design_cost || 0;
   const ask = n(["needs_input"]), rev = n(["review"]), bad = n(["failed"]), need = ask + rev + bad;
   const plural = (k, one, many) => `${k} ${k === 1 ? one : many}`;
+  const rsn = (state.research && state.research.active) || 0;  // research runs and chat turns: no task slot
   // One chip per number: a word next to it, a tooltip saying what it counts, and colour only when it wants you.
   const chip = (cls, html, tip) => `<span class="st ${cls}" data-tip="${esc(tip)}">${html}</span>`;
   put($("#hdr"), [
-    chip(state.active ? "live" : "zero", `<b>${state.active}/${s.max_parallel}</b> working`,
-      `${plural(state.active, "worker", "workers")} running now, across every project, out of at most ${s.max_parallel} at once (the Parallel setting).`),
+    chip(state.active ? "live" : "zero", `<b>${state.active}/${s.max_parallel}</b> working` + (rsn ? ` <span class="rsn" data-rs>· <b>${rsn}</b> research</span>` : ""),
+      `${plural(state.active, "worker", "workers")} running now, across every project, out of at most ${s.max_parallel} at once (the Parallel setting).`
+      + (rsn ? ` Plus ${plural(rsn, "research run", "research runs")}, counted apart: they take no task slot. Click “research” to see them.` : "")),
     chip(n(["queued"]) ? "" : "zero", `<b>${n(["queued"])}</b> queued`,
       `${plural(n(["queued"]), "task waits", "tasks wait")} for a free worker${pf ? ` in ${P(pf).title || pf}` : ""}.`),
     chip(need ? "alert" : "zero", `<b>${need}</b> need${need === 1 ? "s" : ""} you`,
@@ -636,6 +757,7 @@ function renderHeader() {
     <tr><td>Design chats and chats, every project</td><td>$${dcost.toFixed(2)}</td></tr></table>`);
   if (document.activeElement !== $("#par")) $("#par").value = s.max_parallel;
   if (document.activeElement !== $("#relwait")) $("#relwait").value = s.release_wait;
+  if (document.activeElement !== $("#rsrepo")) $("#rsrepo").value = s.research_repo || "";
   modelSelect($("#model"), s.model, "default");
   if (document.activeElement !== $("#effort")) $("#effort").value = s.effort || "";
   document.querySelectorAll("#models select").forEach(el => modelSelect(el, s["model:" + el.dataset.model], "same as Model"));
@@ -1379,14 +1501,16 @@ const TABTEXT = {
          intro: "Talk to Claude in the project folder, as if you ran claude there. It can read, edit and run commands in your checkout. Actions that would ask for permission are denied, since nobody can answer here."}};
 let tab = "projects", chatSel = null, chatData = null, chatKey = "", chatSels = {};
 try { tab = localStorage.getItem("ops-tab") || "projects"; chatSels = JSON.parse(localStorage.getItem("ops-chats") || "{}"); } catch {}
+const TABS = ["tasks", "projects", "design", "chat", "analyze", "research", "settings"];
 if (["#tasks", "#projects", "#design", "#queue", "#chat", "#analyze", "#settings"].includes(location.hash)) tab = location.hash.slice(1);
-if (!["tasks", "projects", "design", "chat", "analyze", "settings"].includes(tab)) tab = "tasks";  // "queue", the old name of Tasks
+if (/^#research(\/|$)/.test(location.hash)) tab = "research";
+if (!TABS.includes(tab)) tab = "tasks";  // "queue", the old name of Tasks
 const chatTab = () => tab === "design" || tab === "chat";
 
 function showTab(t) {
   tab = t;
   try { localStorage.setItem("ops-tab", t); } catch {}
-  for (const k of ["tasks", "projects", "design", "chat", "analyze", "settings"]) $(`#tab-${k}`).className = t === k ? "on" : "";
+  for (const k of TABS) $(`#tab-${k}`).classList.toggle("on", t === k);
   // On a phone the tabs scroll sideways: bring the chosen one into view, without scrolling the page.
   const bar = $("header > .tabs"), on = $(`#tab-${t}`);
   if (on && bar.scrollWidth > bar.clientWidth) {
@@ -1399,6 +1523,9 @@ function showTab(t) {
   $("#settingsview").classList.toggle("hidden", t !== "settings");
   $("#analyzeview").classList.toggle("hidden", t !== "analyze");
   if (t === "analyze") refreshAnalyze();
+  $("#researchview").classList.toggle("hidden", t !== "research");
+  if (t === "research") { rsRender(); refreshResearch(); rsUrl(false); }
+  else if (/^#research(\/|$)/.test(location.hash)) history.replaceState(null, "", "#" + t);
   $("#designview").classList.toggle("hidden", !chatTab());
   if (!chatTab()) return;
   chatSel = chatSels[t] || null; chatData = null; chatKey = "";
@@ -1413,6 +1540,7 @@ $("#tab-design").onclick = () => showTab("design");
 $("#tab-chat").onclick = () => showTab("chat");
 $("#tab-settings").onclick = () => showTab("settings");
 $("#tab-analyze").onclick = () => showTab("analyze");
+$("#tab-research").onclick = () => showTab("research");
 
 // Markdown for chat replies and OpenSpec files, in house. The source is HTML-escaped first, so raw HTML never
 // renders and every pattern below matches escaped text (a quote's ">" is "&gt;"). With idPrefix each heading gets
@@ -2084,6 +2212,768 @@ document.addEventListener("paste", e => {
   if (ta && files.length) { e.preventDefault(); attachImages(ta, files); }
 });
 
+// ---------------------------------------------------------------- research tab
+// The research repo's proposals, projects, reports, to-dos, sources and runs, from /api/research/ (README: ## Research).
+// It replaces the old research dashboard on port 8787. While that one runs, the server refuses every write with 409 and
+// /api/state says research.readonly: the tab shows a banner and rsLock disables every write control (class rw).
+// The URL follows what is open (#research/p/<slug>/<tab>, #research/project/<id>/<tab>, #research/run …), so the
+// back button and links from a phone work.
+const RS = {view: "proposals", proposals: [], projects: [], todos: [], refs: null, jobs: [], loaded: false,
+  sel: null, rtab: null, detail: false, readerKey: "", pProject: "all", pFilter: "all", projForm: null, lastArchived: null,
+  tFilter: "open", tProj: "all", tEdit: null, tDelete: null, rFilter: "all", expanded: new Set(), showArchived: false,
+  chats: {}, openSteps: new Set(), sig: "", sizeTouched: false};
+const rsq = (s, el = document) => el.querySelector(s);
+const rsqa = (s, el = document) => [...el.querySelectorAll(s)];
+const rsApi = (p, body) => api("/api/research" + p, body);
+const rsRO = () => !!(state && state.research && state.research.readonly);
+const rsBadge = s => `<span class="badge s-${{answered: "done", stopped: "cancelled", proposed: "paused"}[s] || s}${s === "running" ? " pulse" : ""}">${esc(s)}</span>`;
+const rsPretty = s => s.replace(/-/g, " ").replace(/^\w/, c => c.toUpperCase());
+const rsTitle = p => (p.report && p.report.title) || rsPretty(p.slug);
+const rsMoney = n => n == null ? "" : "$" + Number(n).toFixed(2);
+const RS_SIZES = {small: "Small ($1)", normal: "Normal ($3)", large: "Large ($10)"};
+const RS_TIER_SIZE = {T0: "small", T1: "normal", T2: "large"};
+const RS_MODELS = `<option value="">Default model</option><option value="sonnet">Sonnet</option><option value="opus">Opus</option>`;
+const rsSizeOpts = cur => Object.entries(RS_SIZES).map(([v, l]) => `<option value="${v}"${v === cur ? " selected" : ""}>${l}</option>`).join("");
+const rsDur = ms => { const s = Math.round(ms / 1000);
+  return s < 60 ? `${s}s` : s < 3600 ? `${(s / 60) | 0}m ${s % 60}s` : `${(s / 3600) | 0}h ${((s % 3600) / 60) | 0}m`; };
+const rsWhen = t => new Date(t).toLocaleString([], {month: "short", day: "numeric", hour: "2-digit", minute: "2-digit"});
+const rsLimits = j => [/budget/.test(j.resultSubtype || "") && "hit size limit", j.timedOut && "hit time limit"].filter(Boolean);
+const rsProjName = id => (RS.projects.find(p => p.id === id) || {}).name;
+const rsOpenTodos = pid => RS.todos.filter(t => !t.done && t.effectiveProject === pid).length;
+const rsNarrow = () => matchMedia("(max-width: 900px)").matches;
+
+// Reports render with the page's own markdown. As on the old page, a link to a .md file or a `briefs/…md` style
+// path in code opens that file in a side drawer.
+const RS_PATH = /^(?:\S*\/)?((?:briefs|reports|topics|sources|projects)\/[\w./-]+\.md)$/;
+function rsMd(text) {
+  const div = document.createElement("div");
+  div.className = "msg rsdoc";
+  div.innerHTML = md(text || "");
+  div.querySelectorAll("a[href]").forEach(a => {
+    const h = a.getAttribute("href");
+    if (/^https?:/i.test(h) || !/\.md(#.*)?$/.test(h)) return;
+    a.dataset.doc = h.replace(/#.*$/, "").replace(/^(\.\.?\/)+/, ""); a.href = "#"; a.removeAttribute("target");
+  });
+  div.querySelectorAll("code").forEach(c => {
+    if (c.closest("pre, a")) return;
+    const m = c.textContent.trim().match(RS_PATH);
+    if (!m) return;
+    const a = document.createElement("a"); a.href = "#"; a.dataset.doc = m[1];
+    c.replaceWith(a); a.appendChild(c);
+  });
+  return div;
+}
+const rsFeed = feed => (feed || []).map(f => f.kind === "tool"
+  ? `<div class="tool${f.sub ? " sub" : ""}"><b>${esc(f.name)}</b> ${esc(f.detail)}</div>`
+  : `<div class="${f.kind === "stderr" ? "err" : "say"}${f.sub ? " sub" : ""}">${esc(f.text)}</div>`).join("");
+
+async function rsOpenDoc(path) {
+  rsCloseDoc();
+  const bg = document.createElement("div"), dr = document.createElement("aside");
+  bg.className = "rsdrawerbg"; bg.id = "rsdocbg"; dr.className = "rsdrawer"; dr.id = "rsdoc";
+  dr.innerHTML = `<div class="row" style="margin:0 0 12px"><code class="mono">${esc(path)}</code><span style="flex:1"></span><button id="rsdocx">Close</button></div><div class="muted">Loading…</div>`;
+  document.body.append(bg, dr);
+  bg.onclick = rsCloseDoc; rsq("#rsdocx").onclick = rsCloseDoc;
+  const body = dr.lastChild;
+  try { const f = await rsApi("/file?path=" + encodeURIComponent(path)); body.replaceWith(rsMd(f.text)); }
+  catch (e) { body.innerHTML = `<span class="err">Couldn't open ${esc(path)}: ${esc(e.message)}</span>`; }
+}
+function rsCloseDoc() { for (const id of ["#rsdoc", "#rsdocbg"]) { const el = rsq(id); if (el) el.remove(); } }
+document.addEventListener("keydown", e => { if (e.key === "Escape" && rsq("#rsdoc")) rsCloseDoc(); });
+document.addEventListener("click", async e => {
+  const t = e.target.closest ? e.target : e.target.parentElement;
+  const doc = t.closest("#researchview [data-doc], #rsdoc [data-doc]");
+  if (doc) { e.preventDefault(); rsOpenDoc(doc.dataset.doc); return; }
+  const stop = t.closest("#researchview [data-stop]");
+  if (stop) { try { await rsWrite(stop, `/jobs/${stop.dataset.stop}/stop`); } catch { return; } rsReload(); }
+});
+
+// ---- read-only and writes
+// Every write control has class rw. Read-only disables them all; reading and moving around keep working.
+function rsLock() {
+  const ro = rsRO();
+  $("#rsro").classList.toggle("hidden", !ro);
+  rsqa("#researchview .rw").forEach(el => {
+    if (ro && !el.disabled) { el.disabled = true; el.dataset.ro = "1"; el.title = el.title || "Read-only while the old research dashboard runs"; }
+    else if (!ro && el.dataset.ro) { el.disabled = false; delete el.dataset.ro; }
+  });
+}
+new MutationObserver(() => { if (rsRO()) rsLock(); }).observe($("#researchview"), {childList: true, subtree: true});
+// A refused write shows the server's words next to its control: the old dashboard runs (409), the usage brake
+// holds runs, or a field is wrong.
+function rsErr(el, e) {
+  let s = el.nextElementSibling;
+  if (!s || !s.classList.contains("rserr")) {
+    if (!e) return;
+    s = document.createElement("span"); s.className = "err rserr"; el.after(s);
+  }
+  s.textContent = e ? e.message : "";
+  if (e) refresh();  // a 409 may mean the old dashboard just started: pick up research.readonly
+}
+async function rsWrite(el, path, body) {
+  if (el) el.disabled = true;
+  try { const r = await rsApi(path, body || {}); if (el) rsErr(el, null); return r; }
+  catch (e) { if (el) rsErr(el, e); throw e; }
+  finally { if (el) el.disabled = rsRO(); }
+}
+
+// ---- loading
+async function rsLoad() {
+  if (!state || !state.research) return;
+  let p, pr, jobs, todos;
+  try { [p, pr, jobs, todos] = await Promise.all([rsApi("/proposals"), rsApi("/projects"), rsApi("/jobs"), rsApi("/todos")]); }
+  catch (e) { put($("#rsmsg"), `<div class="callout bad">${esc(e.message)}</div>`); return; }
+  put($("#rsmsg"), "");
+  // mtime is left out: a run that hasn't written its brief yet gets a new one on every request.
+  const sig = JSON.stringify([p.map(({mtime, ...x}) => x), pr.projects, jobs, todos]);
+  RS.proposals = p; RS.projects = pr.projects; RS.jobs = jobs; RS.todos = todos;
+  if (!RS.sel) {
+    const live = p.filter(x => !x.archived), first = live.find(x => x.status === "proposed") || live[0];
+    if (first) RS.sel = {type: "proposal", id: first.slug};
+  }
+  if (RS.view === "refs" && !RS.refs) rsLoadRefs();
+  if (sig !== RS.sig || !RS.loaded) { RS.sig = sig; RS.loaded = true; rsRender(); }
+  else if (RS.jobs.some(j => j.status === "running")) rsRender();  // elapsed times and live feeds
+}
+const refreshResearch = single(rsLoad);
+const rsReload = () => { RS.sig = ""; return refreshResearch(); };
+
+function rsRender() {
+  if (!state) return;
+  const on = !!state.research;
+  $("#rsoff").classList.toggle("hidden", on);
+  $("#rsbody").classList.toggle("hidden", !on);
+  rsLock();
+  if (!on || !RS.loaded) return;
+  const running = RS.jobs.filter(j => j.status === "running").length, open = RS.todos.filter(t => !t.done).length;
+  const names = {proposals: "Proposals", run: "Run" + (running ? `<span class="busy pulse"></span>` : ""),
+                 todos: "To-dos" + (open ? `<span class="cnt">${open}</span>` : ""), refs: "References"};
+  rsqa("#rsnav button").forEach(b => { put(b, names[b.dataset.v]); b.className = b.dataset.v === RS.view ? "on" : ""; });
+  for (const v of ["proposals", "run", "todos", "refs"]) $("#rs-" + v).classList.toggle("hidden", v !== RS.view);
+  rsFillSelects(); rsRenderProjects(); rsRenderProposals(); rsRenderReader(); rsRenderJobs(); rsRenderTodos();
+  if (RS.refs) rsRenderRefs();
+  rsLock();
+}
+
+// ---- the URL
+function rsHash() {
+  if (RS.view !== "proposals") return "#research/" + RS.view;
+  if (!RS.sel || !RS.detail) return "#research";
+  return `#research/${RS.sel.type === "project" ? "project" : "p"}/${encodeURIComponent(RS.sel.id)}${RS.rtab ? "/" + RS.rtab : ""}`;
+}
+function rsUrl(push) {
+  const h = rsHash();
+  if (tab !== "research" || location.hash === h) return;
+  history[push ? "pushState" : "replaceState"](null, "", h);
+}
+function rsApply(h) {
+  const parts = h.slice(1).split("/"), v = parts[1] || "";
+  RS.readerKey = "";
+  if (["run", "todos", "refs"].includes(v)) { RS.view = v; return; }
+  RS.view = "proposals";
+  if (v === "p" || v === "project") {
+    RS.sel = {type: v === "p" ? "proposal" : "project", id: decodeURIComponent(parts[2] || "")};
+    RS.rtab = parts[3] || null; RS.detail = true;
+  } else RS.detail = false;
+}
+function rsShow(v, push = true) {
+  RS.view = v;
+  if (v === "refs" && !RS.refs) rsLoadRefs();
+  rsRender(); rsUrl(push);
+}
+rsqa("#rsnav button").forEach(b => b.onclick = () => rsShow(b.dataset.v));
+function rsSelect(s, rtab = null) {
+  RS.sel = s; RS.rtab = rtab; RS.detail = true; RS.readerKey = "";
+  rsRenderProposals(); rsRenderReader(); rsUrl(true);
+  if (rsNarrow()) scrollTo(0, 0);
+}
+
+// ---- research projects
+function rsRenderProjects() {
+  const live = RS.proposals.filter(p => !p.archived);
+  const n = id => live.filter(p => id === "none" ? !p.project : p.project === id).length;
+  if (!["all", "none"].includes(RS.pProject) && !RS.projects.some(p => p.id === RS.pProject)) RS.pProject = "all";
+  const chip = (id, label, k) => `<button class="chip ${RS.pProject === id ? "on" : ""}" data-p="${esc(id)}">${esc(label)} ${k}</button>`;
+  if (put($("#rsprojbar"), chip("all", "All", live.length) + chip("none", "Unsorted", n("none"))
+      + RS.projects.map(p => chip(p.id, p.name, n(p.id))).join("") + `<button class="chip rw" id="rsnewproj">+ New project</button>`)) {
+    rsqa("#rsprojbar [data-p]").forEach(c => c.onclick = () => {
+      RS.pProject = c.dataset.p; RS.projForm = null; rsRenderProjects(); rsRenderProposals();
+    });
+    $("#rsnewproj").onclick = () => { RS.projForm = {mode: "new"}; rsRenderProjPanel(true); $("#rspfname").focus(); };
+  }
+  rsRenderProjPanel();
+}
+function rsRenderProjPanel(force) {
+  const el = $("#rsprojpanel"), proj = RS.projects.find(p => p.id === RS.pProject), f = RS.projForm;
+  if (!force && f && f.mode !== "delete" && $("#rspform")) return;  // a poll keeps what you typed
+  if (f && (f.mode === "new" || (f.mode === "edit" && proj))) {
+    const editing = f.mode === "edit";
+    el.innerHTML = `<form id="rspform" class="rsform" style="margin-top:12px">
+      <label>${editing ? "Name" : "New project"}${f.assignSlug ? ` <span class="muted">for ${esc(f.assignSlug)}</span>` : ""}
+        <input id="rspfname" placeholder="Name, e.g. Construction software" value="${esc(editing ? proj.name : "")}"></label>
+      <label>Description <textarea id="rspfdesc" rows="2" placeholder="What this project is for (the chat agent reads this)">${esc(editing ? proj.description || "" : "")}</textarea></label>
+      <div class="row"><button class="primary rw" type="submit" id="rspfsave">${editing ? "Save" : "Create"}</button><button type="button" id="rspfcancel">Cancel</button></div></form>`;
+    $("#rspfcancel").onclick = () => { RS.projForm = null; rsRenderProjPanel(true); };
+    $("#rspform").onsubmit = async e => {
+      e.preventDefault();
+      const body = {name: $("#rspfname").value, description: $("#rspfdesc").value};
+      try {
+        if (editing) await rsWrite($("#rspfsave"), "/projects/" + proj.id, body);
+        else {
+          const made = await rsWrite($("#rspfsave"), "/projects", body);
+          if (f.assignSlug) await rsWrite($("#rspfsave"), "/assign", {slug: f.assignSlug, project: made.id});
+          else RS.pProject = made.id;
+        }
+      } catch { return; }
+      RS.projForm = null; rsRenderProjPanel(true); rsReload();
+    };
+    return;
+  }
+  if (!proj) { el.innerHTML = ""; return; }
+  const confirming = f && f.mode === "delete";
+  el.innerHTML = `<div style="margin-top:12px"><b>${esc(proj.name)}</b>
+    <div class="muted">${proj.description ? esc(proj.description) : "No description."} · created ${esc(proj.created)}</div>
+    <div class="row"><button class="primary" id="rspjopen">Open and chat</button><button class="rw" id="rspjedit">Edit</button>
+      <button class="danger rw" id="rspjdel">${confirming ? "Click again to delete" : "Delete"}</button>
+      ${confirming ? '<span class="muted">Files stay; its proposals become unsorted.</span>' : ""}</div></div>`;
+  $("#rspjopen").onclick = () => rsSelect({type: "project", id: proj.id}, "chat");
+  $("#rspjedit").onclick = () => { RS.projForm = {mode: "edit"}; rsRenderProjPanel(true); };
+  $("#rspjdel").onclick = async e => {
+    if (!confirming) { RS.projForm = {mode: "delete"}; rsRenderProjPanel(true); return; }
+    try { await rsWrite(e.target, `/projects/${proj.id}/delete`); } catch { return; }
+    if (RS.sel && RS.sel.type === "project" && RS.sel.id === proj.id) RS.sel = null;
+    RS.projForm = null; RS.pProject = "all"; rsReload();
+  };
+}
+
+// ---- proposals, grouped by research project
+const RS_FILTERS = ["all", "proposed", "running", "done", "answered", "failed", "archived"];
+const rsMatchF = (p, f) => f === "archived" ? !!p.archived : !p.archived && (f === "all" || p.status === f);
+const rsMatchP = p => RS.pProject === "all" || (RS.pProject === "none" ? !p.project : p.project === RS.pProject);
+function rsRenderProposals() {
+  const inP = RS.proposals.filter(rsMatchP);
+  const counts = Object.fromEntries(RS_FILTERS.map(f => [f, inP.filter(p => rsMatchF(p, f)).length]));
+  if (RS.pFilter !== "all" && !counts[RS.pFilter]) RS.pFilter = "all";
+  if (put($("#rsfilters"), RS_FILTERS.filter(f => f === "all" || counts[f])
+      .map(f => `<button class="chip ${f === RS.pFilter ? "on" : ""}" data-f="${f}">${f === "all" ? "All" : f} ${counts[f]}</button>`).join("")))
+    rsqa("#rsfilters .chip").forEach(c => c.onclick = () => { RS.pFilter = c.dataset.f; rsRenderProposals(); });
+  const q = $("#rsq").value.toLowerCase();
+  const list = inP.filter(p => rsMatchF(p, RS.pFilter) &&
+    (!q || [p.slug, p.question, p.report && p.report.title, rsProjName(p.project)].join(" ").toLowerCase().includes(q)));
+  const isSel = p => RS.sel && RS.sel.type === "proposal" && RS.sel.id === p.slug;
+  const card = p => `<div class="task ${isSel(p) ? "sel" : ""}" data-slug="${esc(p.slug)}">
+    <div class="top">${rsBadge(p.status)}<span class="title">${esc(rsTitle(p))}</span><span class="id">${p.tier ? esc(p.tier) + " · " : ""}${esc(p.date)}</span></div>
+    <div class="sub">${esc(p.question)}</div></div>`;
+  let html;
+  if (!list.length) html = `<div class="muted" style="margin-top:12px">${RS.pProject !== "all" && RS.pProject !== "none" && !inP.length
+    ? "No proposals in this project yet. Assign one from its reader, run one into it, or ask its chat to research something." : "Nothing matches."}</div>`;
+  else if (RS.pProject === "all") {
+    const groups = new Map();
+    for (const p of list) { const g = p.project && rsProjName(p.project) ? p.project : ""; if (!groups.has(g)) groups.set(g, []); groups.get(g).push(p); }
+    html = [...RS.projects.map(p => p.id), ""].filter(g => groups.has(g)).map(g =>
+      `<div class="group"><h3>${esc(g ? rsProjName(g) : "Unsorted")} · ${groups.get(g).length}</h3>${groups.get(g).map(card).join("")}</div>`).join("");
+  } else html = `<div class="group" style="margin-top:12px">${list.map(card).join("")}</div>`;
+  if (put($("#rsplist"), html)) rsqa("#rsplist [data-slug]").forEach(c => c.onclick = () => rsSelect({type: "proposal", id: c.dataset.slug}));
+  rsRenderUndo();
+}
+$("#rsq").oninput = rsRenderProposals;
+
+// After archiving, offer a one-click undo until the next archive or a dismiss.
+function rsRenderUndo() {
+  const el = $("#rsundo"), s = RS.lastArchived;
+  el.classList.toggle("hidden", !s);
+  if (!s) return;
+  const p = RS.proposals.find(x => x.slug === s);
+  if (put(el, `Archived “${esc(p ? rsTitle(p) : rsPretty(s))}” <button class="rw" id="rsundobtn">Undo</button> <button id="rsundox" title="Dismiss">×</button>`)) {
+    $("#rsundobtn").onclick = e => rsArchive(s, false, e.target);
+    $("#rsundox").onclick = () => { RS.lastArchived = null; rsRenderUndo(); };
+  }
+}
+async function rsArchive(slug, archived, btn) {
+  try { await rsWrite(btn, "/archive", {slug, archived}); } catch { return; }
+  if (archived) {
+    RS.lastArchived = slug;
+    // Move on to the next proposal still in the list.
+    const visible = RS.proposals.filter(x => rsMatchP(x) && rsMatchF(x, RS.pFilter) && x.slug !== slug);
+    const idx = RS.proposals.findIndex(x => x.slug === slug);
+    const next = visible.find(x => RS.proposals.indexOf(x) > idx) || visible[visible.length - 1];
+    RS.sel = next ? {type: "proposal", id: next.slug} : null; RS.rtab = null; rsUrl(false);
+  } else if (RS.lastArchived === slug) RS.lastArchived = null;
+  rsReload();
+}
+
+// ---- the reader: a proposal (report, brief, chat, run log) or a research project (chat, notes, proposals, files)
+async function rsRenderReader() {
+  const el = $("#rsreader");
+  $("#rssplit").classList.toggle("detail", RS.detail && !!RS.sel);
+  if (RS.sel && RS.sel.type === "project") return rsRenderProjectReader(el);
+  const p = RS.sel && RS.proposals.find(x => x.slug === RS.sel.id);
+  if (!p) {
+    RS.readerKey = "";
+    el.innerHTML = `<button class="rsback">← All proposals</button><div class="muted">${RS.sel ? "No proposal named " + esc(RS.sel.id) + "." : "Pick a proposal on the left."}</div>`;
+    el.firstChild.onclick = rsBack;
+    return;
+  }
+  const tabs = [p.report && "report", p.path && "brief", p.path && "chat", p.jobId && "run"].filter(Boolean);
+  const rtab = tabs.includes(RS.rtab) ? RS.rtab : tabs[0];
+  const key = JSON.stringify(["p", p.slug, p.status, p.report && p.report.path, p.jobId, rtab, p.archived, p.project, RS.projects.map(x => x.id + x.name)]);
+  if (key === RS.readerKey) {
+    if (rtab === "run" && p.status === "running") rsFillRun($("#rsrbody"), p.jobId, p.slug);  // the live feed
+    return;
+  }
+  RS.readerKey = key;
+  const canRun = p.path && ["proposed", "failed", "stopped"].includes(p.status) && !p.archived;
+  const answer = p.report && p.report.answer && !["report", "chat"].includes(rtab);
+  el.innerHTML = `<button class="rsback">← All proposals</button>
+    <h2 class="rsh">${esc(rsTitle(p))}</h2><div class="muted">${esc(p.question)}</div>
+    <div class="row">${rsBadge(p.status)}${p.tier ? `<span class="mtag">${esc(p.tier)}</span>` : ""}${p.archived ? `<span class="badge">archived ${esc(p.archived)}</span>` : ""}
+      <span class="muted">${esc(p.date)}${p.report && p.report.confidence ? " · confidence: " + esc(p.report.confidence) : ""}</span><span style="flex:1"></span>
+      <select id="rsassign" class="rw" title="Research project"><option value="">No project</option>${RS.projects.map(x =>
+        `<option value="${esc(x.id)}"${x.id === p.project ? " selected" : ""}>${esc(x.name)}</option>`).join("")}<option value="__new">+ New project…</option></select>
+      <button id="rsaddtodo" title="Add a to-do that stems from this proposal">+ To-do</button>
+      ${canRun ? `<button class="primary rw" id="rsrunbrief">${p.status === "proposed" ? "Run this brief" : "Run again"}</button>` : ""}
+      ${p.status !== "running" ? `<button class="rw" id="rsarch" title="Hides it here. Files stay on disk, so research still builds on it.">${p.archived ? "Unarchive" : "Archive"}</button>` : ""}</div>
+    ${answer ? `<div class="callout ok"><b>Answer:</b> ${esc(p.report.answer)}</div>` : ""}
+    <div class="tabs rstabs">${tabs.map(t => `<button data-t="${t}" class="${t === rtab ? "on" : ""}">${{report: "Report", brief: "Brief", chat: "Chat", run: "Run log"}[t]}</button>`).join("")}</div>
+    <div id="rsrbody"><div class="muted">Loading…</div></div>`;
+  rsqa(".rstabs button", el).forEach(b => b.onclick = () => { RS.rtab = b.dataset.t; RS.detail = true; rsRenderReader(); rsUrl(true); });
+  rsq(".rsback", el).onclick = rsBack;
+  if ($("#rsrunbrief")) $("#rsrunbrief").onclick = async e => {
+    try { await rsWrite(e.target, "/dispatch", {brief: p.slug}); } catch { return; }
+    RS.rtab = "run"; rsUrl(true); rsReload();
+  };
+  if ($("#rsarch")) $("#rsarch").onclick = e => rsArchive(p.slug, !p.archived, e.target);
+  $("#rsaddtodo").onclick = () => rsNewTodo({proposal: p.slug, project: p.project || ""});
+  $("#rsassign").onchange = async e => {
+    const v = e.target.value;
+    if (v === "__new") {
+      e.target.value = p.project || ""; RS.projForm = {mode: "new", assignSlug: p.slug};
+      RS.detail = false; $("#rssplit").classList.remove("detail");
+      rsRenderProjPanel(true); $("#rsprojpanel").scrollIntoView({block: "center"}); $("#rspfname").focus(); return;
+    }
+    try { await rsWrite(e.target, "/assign", {slug: p.slug, project: v || null}); } catch { e.target.value = p.project || ""; return; }
+    rsReload();
+  };
+  const body = $("#rsrbody");
+  try {
+    if (rtab === "chat") return rsMountChat(body, "proposal:" + p.slug, "proposal");
+    if (rtab === "run") return await rsFillRun(body, p.jobId, p.slug);
+    const f = await rsApi("/file?path=" + encodeURIComponent(rtab === "report" ? p.report.path : p.path));
+    if (RS.readerKey === key) body.replaceChildren(rsMd(f.text));
+  } catch (e) { body.innerHTML = `<div class="err">${esc(e.message)}</div>`; }
+}
+function rsBack() { RS.detail = false; $("#rssplit").classList.remove("detail"); rsUrl(true); }
+
+function rsRenderProjectReader(el) {
+  const proj = RS.projects.find(x => x.id === RS.sel.id);
+  if (!proj) {
+    RS.readerKey = "";
+    el.innerHTML = `<button class="rsback">← All proposals</button><div class="muted">No research project ${esc(RS.sel.id)}.</div>`;
+    el.firstChild.onclick = rsBack;
+    return;
+  }
+  if ($("#rsntext")) return;  // notes being edited: a poll must not throw them away
+  const members = RS.proposals.filter(p => p.project === proj.id), open = rsOpenTodos(proj.id);
+  const rtab = ["chat", "notes", "proposals", "files"].includes(RS.rtab) ? RS.rtab : "chat";
+  const key = JSON.stringify(["pj", proj, rtab, members.map(m => m.slug + m.status), open]);
+  if (key === RS.readerKey) return;
+  RS.readerKey = key;
+  el.innerHTML = `<button class="rsback">← All proposals</button><div class="muted">Research project</div>
+    <h2 class="rsh">${esc(proj.name)}</h2>
+    <div class="muted">${proj.description ? esc(proj.description) : "No description yet. Add one with Edit; the chat agent reads it."}</div>
+    <div class="row"><span class="muted">${members.length} proposal${members.length === 1 ? "" : "s"} · ${open} open to-do${open === 1 ? "" : "s"} · created ${esc(proj.created)}</span>
+      <span style="flex:1"></span><button id="rspjtodos">To-dos</button><button id="rsaddtodo">+ To-do</button></div>
+    <div class="tabs rstabs">${[["chat", "Chat"], ["notes", "Notes"], ["proposals", `Proposals ${members.length}`], ["files", "Activity"]]
+      .map(([t, label]) => `<button data-t="${t}" class="${rtab === t ? "on" : ""}">${label}</button>`).join("")}</div>
+    <div id="rsrbody"></div>`;
+  rsqa(".rstabs button", el).forEach(b => b.onclick = () => { RS.rtab = b.dataset.t; RS.readerKey = ""; rsRenderReader(); rsUrl(true); });
+  rsq(".rsback", el).onclick = rsBack;
+  $("#rsaddtodo").onclick = () => rsNewTodo({project: proj.id});
+  $("#rspjtodos").onclick = () => { RS.tProj = proj.id; RS.tFilter = "open"; rsShow("todos"); };
+  const body = $("#rsrbody");
+  if (rtab === "chat") return rsMountChat(body, "project:" + proj.id, "project");
+  if (rtab === "notes") return rsMountNotes(body, proj);
+  if (rtab === "files") return rsMountActivity(body, proj);
+  body.innerHTML = members.length ? members.map(p => `<div class="task" data-slug="${esc(p.slug)}">
+      <div class="top">${rsBadge(p.status)}<span class="title">${esc(rsTitle(p))}</span><span class="id">${p.archived ? "archived · " : ""}${esc(p.date)}</span></div>
+      <div class="sub">${esc((p.report && p.report.answer) || p.question)}</div></div>`).join("") : '<div class="muted">No proposals yet.</div>';
+  rsqa("[data-slug]", body).forEach(c => c.onclick = () => rsSelect({type: "proposal", id: c.dataset.slug}));
+}
+
+// Project notes: projects/<id>.md, written here or by the chat agent.
+async function rsMountNotes(body, proj) {
+  let text = "";
+  try { text = proj.notes ? (await rsApi("/file?path=" + encodeURIComponent(proj.notes))).text : ""; }
+  catch (e) { body.innerHTML = `<div class="err">${esc(e.message)}</div>`; return; }
+  const view = () => {
+    body.innerHTML = `<div class="row" style="margin:0 0 8px"><code class="mono">projects/${esc(proj.id)}.md</code><span style="flex:1"></span>
+      <button class="rw" id="rsnedit">${text ? "Edit" : "Write notes"}</button></div>`;
+    body.append(text ? rsMd(text) : Object.assign(document.createElement("div"),
+      {className: "muted", textContent: "No notes yet. Ask the chat to add something to the project, or write them yourself."}));
+    $("#rsnedit").onclick = edit;
+  };
+  const edit = () => {
+    body.innerHTML = `<textarea id="rsntext" rows="20" class="mono"></textarea>
+      <div class="row"><button class="primary rw" id="rsnsave">Save</button><button id="rsncancel">Cancel</button></div>`;
+    $("#rsntext").value = text || `# Project: ${proj.name}\n\n${proj.description || ""}\n`;
+    $("#rsncancel").onclick = view;
+    $("#rsnsave").onclick = async e => {
+      const next = $("#rsntext").value;
+      try { await rsWrite(e.target, `/projects/${proj.id}/notes`, {text: next}); } catch { return; }
+      text = next; view(); rsReload();
+    };
+  };
+  view();
+}
+async function rsMountActivity(body, proj) {
+  let files;
+  try { files = await rsApi(`/projects/${proj.id}/activity`); } catch (e) { body.innerHTML = `<div class="err">${esc(e.message)}</div>`; return; }
+  body.innerHTML = `<div class="muted" style="margin-bottom:6px">Files changed by chats with this project or its proposals.</div>` + (files.length
+    ? files.map(f => `<div class="rsref"><div><a href="#" data-doc="${esc(f.path)}"><code>${esc(f.path)}</code></a>
+        <div class="url">After: “${esc((f.question || "").slice(0, 90))}”${(f.target || "").startsWith("proposal:") ? " · in " + esc(f.target.slice(9)) : ""}</div></div>
+        <div class="meta">${esc(rsWhen(f.when))}</div></div>`).join("")
+    : '<div class="muted">No chat has changed a file yet.</div>');
+}
+
+// ---- chat with a proposal or a project: pick a conversation, then each message is a `claude -p --resume` turn
+const RS_SUGGEST = {
+  proposal: ["What should I do next based on this?", "What would change this verdict?", "Which evidence here is weakest? Check it again."],
+  project: ["Where does this project stand? One paragraph.", "What's the biggest open question across these proposals?", "Propose the next piece of research to run, with a tier."]};
+let rsChatGen = 0;
+async function rsMountChat(box, target, kind) {
+  const gen = ++rsChatGen, live = () => gen === rsChatGen && box.isConnected;
+  const st = RS.chats[target] = RS.chats[target] || {thread: undefined, draft: "", model: "", size: "normal"};
+  box.innerHTML = `<div class="row" style="margin:0 0 8px"><select id="rsthread"></select><button id="rsnewthread">New conversation</button></div>
+    <div class="rslog" id="rslog"></div>
+    <div class="composer"><textarea id="rssay" rows="3" placeholder="Ask about this ${kind}, or ask for new research."></textarea>
+      <div class="row"><select id="rscmodel">${RS_MODELS}</select><select id="rscsize" title="Stops the turn once its tokens, priced at API rates, pass this">${rsSizeOpts(st.size)}</select>
+        <button class="primary rw" id="rssend">Send</button><span class="muted">⌘↩</span></div></div>`;
+  const say = $("#rssay"), log = $("#rslog"), send = $("#rssend");
+  say.value = st.draft; $("#rscmodel").value = st.model;
+  say.oninput = () => st.draft = say.value;
+  $("#rscmodel").onchange = e => st.model = e.target.value;
+  $("#rscsize").onchange = e => st.size = e.target.value;
+  let threads = [], busy = false, wasRunning = false, timer = null;
+  try { threads = await rsApi("/threads?target=" + encodeURIComponent(target)); } catch {}
+  if (!live()) return;
+  if (st.thread === undefined || (st.thread && !threads.some(t => t.id === st.thread))) st.thread = threads.length ? threads[threads.length - 1].id : null;
+  const fillThreads = () => {
+    $("#rsthread").innerHTML = (st.thread ? "" : '<option value="">New conversation</option>') + threads.map(t =>
+      `<option value="${esc(t.id)}"${t.id === st.thread ? " selected" : ""}>${esc(rsWhen(t.created))} · ${esc(t.title.slice(0, 40))}</option>`).join("");
+    $("#rsthread").classList.toggle("hidden", !threads.length);
+  };
+  fillThreads();
+  $("#rsthread").onchange = e => { st.thread = e.target.value || null; wasRunning = false; load(); };
+  $("#rsnewthread").onclick = () => { st.thread = null; fillThreads(); load(); say.focus(); };
+  const setBusy = b => { busy = b; send.textContent = b ? "Working…" : "Send"; send.disabled = b || rsRO(); };
+  async function load() {
+    clearTimeout(timer);
+    if (!live()) return;
+    if (!st.thread) {
+      setBusy(false);
+      log.innerHTML = `<p class="muted">Start a conversation about this ${kind}. The agent reads its brief${kind === "project" ? "s and reports" : " and report"} first and can run new research.</p>
+        <div class="chips">${RS_SUGGEST[kind].map(s => `<button class="chip" type="button">${esc(s)}</button>`).join("")}</div>`;
+      rsqa(".chip", log).forEach(c => c.onclick = () => { say.value = st.draft = c.textContent; say.focus(); });
+      return;
+    }
+    let th;
+    try { th = await rsApi("/threads/" + st.thread); } catch (e) { log.innerHTML = `<div class="err">${esc(e.message)}</div>`; return; }
+    if (!live()) return;
+    // Scroll the chat's own box, never the page: to the bottom when you were there or it just opened.
+    const stick = log.scrollTop + log.clientHeight >= log.scrollHeight - 80;
+    log.replaceChildren(...th.turns.flatMap(rsTurn));
+    if (stick || !wasRunning) log.scrollTop = log.scrollHeight;
+    const running = th.turns.length && th.turns[th.turns.length - 1].status === "running";
+    setBusy(running);
+    if (running) { wasRunning = true; timer = setTimeout(load, 2500); }
+    else if (wasRunning) { wasRunning = false; rsReload(); }  // the turn may have written new briefs or reports
+  }
+  const submit = async () => {
+    const message = say.value.trim();
+    if (!message || busy) return;
+    let r;
+    try { r = await rsWrite(send, "/chat", {target, thread: st.thread, message, model: st.model, size: st.size}); } catch { return; }
+    say.value = st.draft = "";
+    if (st.thread !== r.thread) {
+      st.thread = r.thread;
+      try { threads = await rsApi("/threads?target=" + encodeURIComponent(target)); } catch {}
+      fillThreads();
+    }
+    wasRunning = true; await load(); log.scrollTop = log.scrollHeight;
+  };
+  send.onclick = submit;
+  say.onkeydown = e => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); submit(); } };
+  await load();
+}
+function rsTurn(t) {
+  const u = document.createElement("div"), b = document.createElement("div");
+  u.className = "msg user"; u.textContent = t.question; b.className = "msg";
+  const meta = [t.steps + (t.steps === 1 ? " step" : " steps"), t.cost != null && rsMoney(t.cost), t.durationMs && rsDur(t.durationMs), ...rsLimits(t)].filter(Boolean).join(" · ");
+  const last = [...(t.feed || [])].reverse().find(f => f.kind === "tool");
+  b.innerHTML = `<details${RS.openSteps.has(t.id) ? " open" : ""}><summary>${t.status === "running"
+    ? `<span class="pulse s-running">Working… ${esc(meta)}${last ? " · " + esc(last.name) + " " + esc((last.detail || "").slice(0, 60)) : ""}</span>` : esc(meta)}</summary>
+    <div class="feed">${rsFeed(t.feed) || "Starting…"}</div></details>`;
+  rsq("details", b).ontoggle = e => e.target.open ? RS.openSteps.add(t.id) : RS.openSteps.delete(t.id);
+  if (t.result) b.append(rsMd(t.result));
+  else if (t.status !== "running") b.insertAdjacentHTML("beforeend", `<p class="err">${t.status === "stopped" ? "Stopped." : "This turn ended without a reply. Open the steps above to see why."}</p>`);
+  if (t.changed && t.changed.length) b.insertAdjacentHTML("beforeend", `<div class="note">Changed: ${t.changed.map(p => `<a href="#" data-doc="${esc(p)}"><code>${esc(p)}</code></a>`).join(" ")}</div>`);
+  if (t.newBriefs && t.newBriefs.length) b.insertAdjacentHTML("beforeend", `<div class="note">New research: ${t.newBriefs.map(s => `<a href="#" data-doc="briefs/${esc(s)}.md">${esc(s)}</a>`).join(", ")}</div>`);
+  const foot = [t.status === "running" ? `<button class="danger rw" data-stop="${esc(t.id)}">Stop</button>` : "",
+    t.session ? `${esc(t.model)} · session <code>${esc(t.session.slice(0, 8))}</code>` : ""].filter(Boolean).join(" ");
+  if (foot) b.insertAdjacentHTML("beforeend", `<div class="note">${foot}</div>`);
+  return [u, b];
+}
+
+// ---- runs: a question or an existing brief, and the live feed of each run
+// stop: a Stop button in it (the runs list has its own on the row).
+function rsJobDetail(j, slug, stop = true) {
+  const wrap = document.createElement("div");
+  wrap.innerHTML = `<div class="row" style="margin:0 0 8px">${slug && !slug.startsWith("chat:") ? `<a href="#" data-doc="briefs/${esc(slug)}.md">Open brief</a>` : ""}
+    ${j.session ? `<span class="muted">Continue in a terminal: <code class="mono">claude -r ${esc(j.session)}</code></span>` : ""}
+    ${stop && j.status === "running" ? `<button class="danger rw" data-stop="${esc(j.id)}">Stop</button>` : ""}</div>
+    <div class="feed">${rsFeed(j.feed) || '<span class="muted">Waiting for the first step…</span>'}</div>`;
+  if (j.result) {
+    wrap.insertAdjacentHTML("beforeend", `<div class="muted" style="margin:10px 0 6px">Final summary${j.resultSubtype && j.resultSubtype !== "success" ? " (" + esc(j.resultSubtype) + ")" : ""}</div>`);
+    wrap.append(rsMd(j.result));
+  } else if (j.status !== "running")
+    wrap.insertAdjacentHTML("beforeend", `<p class="err">${j.status === "stopped" ? "Stopped before it finished." : "Ended without a result. Check the log above."}</p>`);
+  return wrap;
+}
+// Fill box with a run's detail, keeping the feed's scroll: at the bottom if it was there, so a live feed follows along.
+async function rsFillRun(box, id, slug, stop = true) {
+  const old = box.querySelector(".feed");
+  const stick = !old || old.scrollTop + old.clientHeight >= old.scrollHeight - 30, top = old ? old.scrollTop : 0;
+  const j = await rsApi("/jobs/" + encodeURIComponent(id));
+  if (!box.isConnected) return;
+  box.replaceChildren(rsJobDetail(j, slug, stop));
+  const fd = box.querySelector(".feed"); fd.scrollTop = stick ? fd.scrollHeight : top;
+}
+function rsRenderJobs() {
+  const el = $("#rsjobs"), now = Date.now();
+  const hidden = RS.jobs.filter(j => j.archived && j.status !== "running").length;
+  const shown = RS.jobs.filter(j => RS.showArchived || !j.archived || j.status === "running");
+  const html = (shown.length ? shown.map(j => {
+    const took = j.durationMs != null ? j.durationMs : j.status === "running" ? now - new Date(j.started).getTime() : null;
+    const last = j.last ? (j.last.kind === "tool" ? `${j.last.name}: ${j.last.detail}` : j.last.text) : "";
+    return `<div class="task rsjob" data-id="${esc(j.id)}">
+      <div class="top">${rsBadge(j.status)}<span class="mtag">${esc(j.tier)}</span><span class="title">${esc(j.slug)}</span>${j.kind === "chat" ? '<span class="badge" title="Run inside a chat turn">from chat</span>' : ""}
+        ${j.status === "running" ? `<button class="danger rw" data-stop="${esc(j.id)}">Stop</button>` : ""}
+        ${j.archived && j.status !== "running" ? `<button class="rw" data-unarch="${esc(j.slug)}">Unarchive</button>` : ""}
+        <button data-toggle="${esc(j.id)}">${RS.expanded.has(j.id) ? "Hide" : "Details"}</button></div>
+      <div class="sub">${esc(j.model)} · ${esc(rsWhen(j.started))}${took != null ? " · " + rsDur(took) : ""} · ${j.steps} steps${j.size ? " · " + RS_SIZES[j.size] : ""}${j.cost != null ? " · " + rsMoney(j.cost) + " of " + rsMoney(j.budget) : ""}${rsLimits(j).map(h => " · " + h).join("")}</div>
+      <div class="sub">${esc(j.question)}</div>
+      ${j.status === "running" && last ? `<div class="now mono">${esc(last)}</div>` : ""}
+      ${RS.expanded.has(j.id) ? `<div class="rsjd" data-jd="${esc(j.id)}"></div>` : ""}</div>`;
+  }).join("") : '<div class="muted">No runs yet. Start one here, or open a proposal and press Run this brief.</div>')
+    + (hidden ? `<button class="chip" id="rsarchruns">${RS.showArchived ? "Hide" : "Show"} ${hidden} archived run${hidden > 1 ? "s" : ""}</button>` : "");
+  const keep = Object.fromEntries(rsqa(".rsjd", el).map(d => [d.dataset.jd, d]));
+  if (put(el, html)) {
+    rsqa(".rsjd", el).forEach(d => { if (keep[d.dataset.jd]) d.replaceWith(keep[d.dataset.jd]); });  // keeps the feed's scroll
+    rsqa("[data-toggle]", el).forEach(b => b.onclick = () => {
+      const id = b.dataset.toggle; RS.expanded.has(id) ? RS.expanded.delete(id) : RS.expanded.add(id); rsRenderJobs();
+    });
+    rsqa("[data-unarch]", el).forEach(b => b.onclick = () => rsArchive(b.dataset.unarch, false, b));
+    if ($("#rsarchruns")) $("#rsarchruns").onclick = () => { RS.showArchived = !RS.showArchived; rsRenderJobs(); };
+  }
+  rsqa(".rsjd", el).forEach(d => {
+    const j = RS.jobs.find(x => x.id === d.dataset.jd);
+    if (j && (j.status === "running" || !d.childNodes.length || d.dataset.status !== j.status)) {
+      d.dataset.status = j.status; rsFillRun(d, j.id, j.slug, false).catch(() => {});
+    }
+  });
+}
+// The form: a new question, or an existing brief (which carries its own question and tier).
+const rsTier = () => (rsq("#rsdtier input:checked") || {}).value || "T1";
+$("#rsdsize").innerHTML = rsSizeOpts("normal");
+$("#rsdmodel").innerHTML = RS_MODELS;
+$("#rsdtier").onchange = () => { if (!RS.sizeTouched) $("#rsdsize").value = RS_TIER_SIZE[rsTier()]; };
+$("#rsdsize").onchange = () => RS.sizeTouched = true;
+$("#rsdbrief").onchange = () => {
+  const brief = $("#rsdbrief").value;
+  for (const id of ["#rsdqwrap", "#rsdtier", "#rsdslugwrap"]) $(id).classList.toggle("hidden", !!brief);
+  const p = brief && RS.proposals.find(x => x.slug === brief);
+  if (p && p.project) $("#rsdproj").value = p.project;
+  if (p && !RS.sizeTouched && RS_TIER_SIZE[p.tier]) $("#rsdsize").value = RS_TIER_SIZE[p.tier];
+};
+let rsSlugTimer;
+$("#rsdq").oninput = () => {
+  clearTimeout(rsSlugTimer);
+  rsSlugTimer = setTimeout(async () => {
+    const q = $("#rsdq").value.trim();
+    try { $("#rsdslug").placeholder = q ? (await rsApi("/slug?q=" + encodeURIComponent(q))).slug : "auto from question"; } catch {}
+  }, 350);
+};
+$("#rsdform").onsubmit = async e => {
+  e.preventDefault();
+  const btn = $("#rsdgo"), brief = $("#rsdbrief").value;
+  const body = {model: $("#rsdmodel").value, size: $("#rsdsize").value, project: $("#rsdproj").value, notes: $("#rsdnotes").value,
+    ...(brief ? {brief} : {question: $("#rsdq").value, tier: rsTier(), slug: $("#rsdslug").value})};
+  btn.textContent = "Starting…";
+  let job;
+  try { job = await rsWrite(btn, "/dispatch", body); } catch { btn.textContent = "Run"; return; }
+  btn.textContent = "Run";
+  const project = $("#rsdproj").value;
+  $("#rsdform").reset(); RS.sizeTouched = false; $("#rsdsize").value = "normal"; $("#rsdslug").placeholder = "auto from question";
+  $("#rsdproj").value = project; $("#rsdbrief").onchange();
+  if (job && job.id) RS.expanded.add(job.id);
+  rsReload();
+};
+
+// Select options that follow the data. A poll keeps what is picked.
+function rsFill(el, html) {
+  if (el.dataset.html === html) return;
+  const v = el.value;
+  el.innerHTML = el.dataset.html = html; el.value = v;
+  if (el.selectedIndex < 0) el.selectedIndex = 0;
+}
+const rsProjOpts = none => `<option value="">${none}</option>` + RS.projects.map(p => `<option value="${esc(p.id)}">${esc(p.name)}</option>`).join("");
+function rsFillSelects() {
+  rsFill($("#rsdproj"), rsProjOpts("No project"));
+  rsFill($("#rstproj"), rsProjOpts("None"));
+  rsFill($("#rstpf"), `<option value="all">All projects</option><option value="none">No project</option>` + rsProjOpts("").replace('<option value=""></option>', ""));
+  const briefs = RS.proposals.filter(p => p.path && !p.archived && p.status !== "running");
+  rsFill($("#rsdbrief"), `<option value="">A new question</option>` + briefs.map(p => `<option value="${esc(p.slug)}">Brief: ${esc(rsTitle(p))} (${esc(p.status)})</option>`).join(""));
+  rsFillTodoProposals();
+}
+
+// ---- to-dos, shared with the research repo's bin/todo
+function rsFillTodoProposals(keep) {
+  const project = $("#rstproj").value, cur = keep !== undefined ? keep : $("#rstprop").value;
+  const pool = RS.proposals.filter(p => (!p.archived || p.slug === cur) && p.path && (!project || p.project === project));
+  rsFill($("#rstprop"), '<option value="">None</option>' + pool.map(p => `<option value="${esc(p.slug)}">${esc(rsTitle(p))}</option>`).join(""));
+  $("#rstprop").value = pool.some(p => p.slug === cur) ? cur : "";
+}
+$("#rstproj").onchange = () => rsFillTodoProposals();
+$("#rstprop").onchange = () => {  // a proposal carries its project
+  const p = RS.proposals.find(x => x.slug === $("#rstprop").value);
+  if (p && p.project && $("#rstproj").value !== p.project) { $("#rstproj").value = p.project; rsFillTodoProposals(p.slug); }
+};
+function rsTodoForm(t) {
+  $("#rsttext").value = t.text || ""; $("#rstnotes").value = t.notes || ""; $("#rstdue").value = t.due || "";
+  $("#rstproj").value = RS.projects.some(p => p.id === (t.effectiveProject || t.project)) ? (t.effectiveProject || t.project) : "";
+  rsFillTodoProposals(t.proposal || "");
+  $("#rsttitle").textContent = RS.tEdit ? `Edit to-do #${RS.tEdit}` : "New to-do";
+  $("#rstsave").textContent = RS.tEdit ? "Save" : "Add to-do";
+  $("#rstcancel").classList.toggle("hidden", !RS.tEdit);
+}
+function rsNewTodo(link) {
+  RS.tEdit = null; rsShow("todos"); rsTodoForm(link); $("#rsttext").focus();
+}
+$("#rstcancel").onclick = () => { RS.tEdit = null; rsTodoForm({}); rsRenderTodos(); };
+$("#rstform").onsubmit = async e => {
+  e.preventDefault();
+  const proposal = $("#rstprop").value;
+  // A proposal carries its project, so the project is stored only when no proposal is picked.
+  const body = {text: $("#rsttext").value, notes: $("#rstnotes").value, proposal, project: proposal ? "" : $("#rstproj").value, due: $("#rstdue").value};
+  try { await rsWrite($("#rstsave"), RS.tEdit ? `/todos/${RS.tEdit}` : "/todos", body); } catch { return; }
+  const project = $("#rstproj").value;
+  RS.tEdit = null; rsTodoForm({project}); $("#rsttext").focus(); rsReload();
+};
+function rsDue(due, done) {
+  if (!due) return "";
+  const days = Math.round((new Date(due + "T00:00") - new Date(new Date().toDateString())) / 864e5);
+  const cls = done ? "" : days < 0 ? "s-failed" : days <= 2 ? "s-review" : "";
+  return `<span class="badge ${cls}">${esc(done ? `due ${due}` : days < 0 ? `overdue · ${due}` : days === 0 ? "due today" : `due ${due}`)}</span>`;
+}
+function rsRenderTodos() {
+  if (!["all", "none"].includes(RS.tProj) && !RS.projects.some(p => p.id === RS.tProj)) RS.tProj = "all";
+  $("#rstpf").value = RS.tProj;
+  const inP = RS.todos.filter(t => RS.tProj === "all" || (RS.tProj === "none" ? !rsProjName(t.effectiveProject) : t.effectiveProject === RS.tProj));
+  const counts = {open: inP.filter(t => !t.done).length, done: inP.filter(t => t.done).length, all: inP.length};
+  if (put($("#rstfilters"), [["open", "Open"], ["done", "Done"], ["all", "All"]]
+      .map(([f, l]) => `<button class="chip ${f === RS.tFilter ? "on" : ""}" data-f="${f}">${l} ${counts[f]}</button>`).join("")))
+    rsqa("#rstfilters .chip").forEach(c => c.onclick = () => { RS.tFilter = c.dataset.f; rsRenderTodos(); });
+  const q = $("#rstq").value.toLowerCase();
+  const list = inP.filter(t => (RS.tFilter === "all" || (RS.tFilter === "done") === !!t.done) &&
+    (!q || [t.text, t.notes, t.proposal, rsProjName(t.effectiveProject)].join(" ").toLowerCase().includes(q)));
+  // Open first, then by due date (undated last), then newest.
+  list.sort((a, b) => (!!a.done - !!b.done) || (a.due || "9999").localeCompare(b.due || "9999") || b.id - a.id);
+  const groups = new Map();
+  list.forEach(t => { const g = rsProjName(t.effectiveProject) || "No project"; if (!groups.has(g)) groups.set(g, []); groups.get(g).push(t); });
+  const prop = slug => { const p = RS.proposals.find(x => x.slug === slug); return p ? rsTitle(p) : rsPretty(slug); };
+  const row = t => `<div class="task rstodo ${t.done ? "done" : ""} ${RS.tEdit === t.id ? "editing" : ""}">
+    <input type="checkbox" class="rw" data-check="${t.id}"${t.done ? " checked" : ""} title="${t.done ? "Reopen" : "Mark done"}">
+    <div><div class="title">${esc(t.text)}</div>${t.notes ? `<div class="sub" style="white-space:pre-wrap">${esc(t.notes)}</div>` : ""}
+      <div class="sub">${rsDue(t.due, t.done)} ${t.proposal ? `<a href="#" data-open="${esc(t.proposal)}">↳ ${esc(prop(t.proposal))}</a> · ` : ""}#${t.id} · ${t.done ? "done " + esc(t.done) : "added " + esc(t.created)}${t.by && t.by !== "dashboard" ? " by " + esc(t.by) : ""}</div></div>
+    <div class="acts"><button class="rw" data-edit="${t.id}">Edit</button><button class="danger rw" data-del="${t.id}">${RS.tDelete === t.id ? "Click again" : "Delete"}</button></div></div>`;
+  const grouped = RS.tProj === "all" && groups.size > 1;
+  const html = list.length ? [...groups].map(([g, rows]) => `<div class="group">${grouped ? `<h3>${esc(g)} · ${rows.length}</h3>` : ""}${rows.map(row).join("")}</div>`).join("")
+    : `<div class="muted">${RS.tFilter === "open" && !counts.open ? "Nothing open. Add one, or ask a chat to “add a to-do”." : "No to-dos match."}</div>`;
+  if (!put($("#rstlist"), html)) return;
+  rsqa("#rstlist [data-check]").forEach(c => c.onchange = async () => {
+    try { await rsWrite(c, `/todos/${c.dataset.check}`, {done: c.checked}); } catch { c.checked = !c.checked; return; }
+    rsReload();
+  });
+  rsqa("#rstlist [data-edit]").forEach(b => b.onclick = () => {
+    RS.tEdit = +b.dataset.edit; rsTodoForm(RS.todos.find(x => x.id === RS.tEdit) || {}); rsRenderTodos();
+    if (rsNarrow()) $("#rstform").scrollIntoView({block: "start"});
+    $("#rsttext").focus();
+  });
+  rsqa("#rstlist [data-del]").forEach(b => b.onclick = async () => {
+    const id = +b.dataset.del;
+    if (RS.tDelete !== id) { RS.tDelete = id; rsRenderTodos(); return; }
+    RS.tDelete = null;
+    try { await rsWrite(b, `/todos/${id}/delete`); } catch { return; }
+    if (RS.tEdit === id) { RS.tEdit = null; rsTodoForm({}); }
+    rsReload();
+  });
+  rsqa("#rstlist [data-open]").forEach(a => a.onclick = e => {
+    e.preventDefault(); RS.view = "proposals"; rsSelect({type: "proposal", id: a.dataset.open}); rsRender();
+  });
+}
+$("#rstq").oninput = rsRenderTodos;
+$("#rstpf").onchange = e => { RS.tProj = e.target.value; rsRenderTodos(); };
+
+// ---- references: the source registry (sources/registry.md) plus sources cited but not in it
+const rsTierKey = r => r.section.startsWith("Cited in") ? "unregistered" : /^[ABC]/.test(r.tier) ? r.tier[0] : r.tier.trim() === "—" ? "blocked" : "other";
+const RS_RFILTERS = {all: "All", A: "Tier A", B: "Tier B", C: "Tier C", blocked: "Blocked", unregistered: "Not in registry"};
+async function rsLoadRefs() {
+  put($("#rsrlist"), '<div class="muted">Loading…</div>');
+  try { RS.refs = await rsApi("/references"); } catch (e) { put($("#rsrlist"), `<div class="err">${esc(e.message)}</div>`); return; }
+  rsRenderRefs();
+}
+function rsRenderRefs() {
+  const refs = RS.refs || [], counts = {all: refs.length};
+  refs.forEach(r => { const k = rsTierKey(r); counts[k] = (counts[k] || 0) + 1; });
+  if (put($("#rsrfilters"), Object.entries(RS_RFILTERS).filter(([k]) => counts[k])
+      .map(([k, l]) => `<button class="chip ${k === RS.rFilter ? "on" : ""}" data-f="${k}">${l} ${counts[k]}</button>`).join("")))
+    rsqa("#rsrfilters .chip").forEach(c => c.onclick = () => { RS.rFilter = c.dataset.f; rsRenderRefs(); });
+  const q = $("#rsrq").value.toLowerCase();
+  const list = refs.filter(r => (RS.rFilter === "all" || rsTierKey(r) === RS.rFilter) &&
+    (!q || [r.name, r.url, r.notes, r.section, r.citedIn.join(" ")].join(" ").toLowerCase().includes(q)));
+  $("#rsrcount").textContent = `${list.length} of ${refs.length}`;
+  const groups = new Map();
+  list.forEach(r => { if (!groups.has(r.section)) groups.set(r.section, []); groups.get(r.section).push(r); });
+  const row = r => `<div class="rsref"><div>${r.url ? `<a href="${esc(r.url)}" target="_blank" rel="noopener">${esc(r.name)}</a>` : esc(r.name)}
+      ${r.tier ? `<span class="badge">${esc(r.tier)}</span>` : ""}
+      ${r.url ? `<div class="url">${esc(r.url.replace(/^https?:\/\//, ""))}</div>` : ""}${r.notes ? `<div class="sub">${esc(r.notes)}</div>` : ""}</div>
+    <div class="meta">${r.added ? `Added ${esc(r.added)}<br>` : ""}${r.citedIn.length ? "Cited in: " + r.citedIn.slice(0, 4).map(p =>
+      `<a href="#" data-doc="${esc(p)}" title="${esc(p)}">${esc(p.replace(/^(reports\/(raw\/)?|topics\/|briefs\/)/, ""))}</a>`).join("")
+      + (r.citedIn.length > 4 ? ` +${r.citedIn.length - 4} more` : "") : ""}</div></div>`;
+  put($("#rsrlist"), list.length ? [...groups].map(([sec, rows]) => `<div class="group"><h3>${esc(sec)} · ${rows.length}</h3>${rows.map(row).join("")}</div>`).join("")
+    : '<div class="muted">No sources match.</div>');
+}
+$("#rsrq").oninput = () => RS.refs && rsRenderRefs();
+
+// ---- the header's "· K research" and the Settings field
+$("#hdr").addEventListener("click", e => {
+  if (!e.target.closest("[data-rs]")) return;
+  RS.jobs.filter(j => j.status === "running").forEach(j => RS.expanded.add(j.id));  // open on the live feeds
+  if (tab !== "research") showTab("research");
+  rsShow("run");
+});
+$("#rsrepo").onchange = () => api("/api/settings", {research_repo: $("#rsrepo").value.trim()})
+  .then(() => { $("#rsrepomsg").textContent = ""; RS.loaded = false; RS.refs = null; refresh(); })
+  .catch(e => $("#rsrepomsg").textContent = e.message);
+window.addEventListener("popstate", () => {
+  const h = location.hash;
+  if (/^#research(\/|$)/.test(h)) {
+    rsApply(h);
+    if (tab !== "research") showTab("research"); else rsRender();
+  } else if (TABS.includes(h.slice(1)) && h.slice(1) !== tab) showTab(h.slice(1));
+});
+
+if (tab === "research") rsApply(location.hash);
 showTab(tab);
 // Poll while the page is in view. A hidden tab asks nothing, and catches up as soon as it is shown again.
 refresh(); setInterval(() => { if (!document.hidden) refresh.poll(); }, 3000);
