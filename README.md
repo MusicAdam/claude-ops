@@ -127,6 +127,23 @@ several (see [Workspaces](#workspaces)). Read it, adjust it, then click **Reload
   project gets from then on: from the form, `opsd.py add`, a design chat, and the follow-ups a worker
   queues. You can still untick it on a task. Tasks already queued keep what they have. It is off until you
   turn it on.
+- **Straight to main** (`direct_main = true` in the project's toml; the daemon reads it when it reloads
+  projects or restarts). A task that passes its gate merges into dev as before, under the same lock, then moves
+  main to dev at once: the steps of a release after its gate (build main if there is an `[app] build`,
+  fast-forward, carry your uncommitted changes over), without running the gate again. So no release is queued:
+  Release after merge, the release train and the Promote button go away for the project. dev stays, equal to
+  main, so nothing that reads it changes.
+  - Something in the way of main (the main build is running, main is checked out in another worktree, or your
+    uncommitted changes can't be carried over) makes the task wait on you, `needs input`, as a release does. It
+    goes on by itself once the way is clear. Answering or Retry only moves main; the merge is done.
+  - Turned on while dev is ahead of main, the next merge brings all of dev into main with it (its gate ran on
+    all of it). Until then the card shows Promote, to release it at once.
+  - Commits made straight to main come into dev before each task's gate (a fast-forward when they can). If they
+    conflict with dev, the task fails and says to Promote once: the release has a worker merge them.
+  - Tasks move main one at a time, and never alongside a release.
+  - For claude-ops itself, every merge restarts the daemon, as a Promote does.
+  - Not for a project with `[[deploy]]` targets: a deploy moves main too, and builds from the main a release
+    checked. There the option is ignored, with a line in the daemon log.
 - Promoting claude-ops itself restarts the daemon to load the new code (`opsctl restart`: running
   tasks pause and resume). If the new daemon doesn't answer within 30 s, the release's log says so; its
   output is in `runs/<id>/restart.log`.
@@ -555,6 +572,7 @@ dev_branch = "dev"                 # created from main if missing; add-project p
 worktrees = "/Users/you/dev/mygame-wt"   # default: <repo>-wt
 # repos = ["backend", "app"]       # a workspace: repo is a folder and these folders in it are the git repos
 max_parallel = 0                   # per-project cap; 0 = only the global "Parallel" limit
+direct_main = false                # true: a merge moves main at once, no release (see Straight to main)
 chat_mcp = []                      # MCP servers a project chat loads, by name (see Chat mode); default none
 
 [worktree]

@@ -724,6 +724,7 @@ function renderProjects() {
 function syncRelease() {
   const name = pf || $("#tproj").value, on = !!P(name).auto_release, k = `${name}:${on}`, el = $("#autorel");
   if (el.dataset.k !== k) { el.checked = on; el.dataset.k = k; }
+  el.parentElement.classList.toggle("hidden", !!P(name).direct_main);  // its merges move main themselves
   // Warn, don't block: work only in your checkout is not in what a worker starts from.
   const n = dirtyCount(P(name)), w = $("#dirtywarn");
   w.textContent = n ? `Workers start from dev and won't see your ${n} uncommitted ${n === 1 ? "file" : "files"}.` : "";
@@ -853,7 +854,8 @@ function projStats(g) {
     g.running ? `<span class="s-running">running: ${esc(g.main_branch)}</span>` : "",
     g.dev_running ? `<span class="s-running">running: ${esc(g.dev_branch)}</span>` : "",
     g.play && g.play.phase ? `<span class="s-running">${esc(g.play.phase)}</span>` : "",
-    g.auto_release ? `<span title="New tasks release after they merge">auto release</span>` : "",
+    g.direct_main ? `<span title="direct_main is on: a task that passes its gate moves ${esc(g.main_branch)} at once, with no release">straight to ${esc(g.main_branch)}</span>`
+      : g.auto_release ? `<span title="New tasks release after they merge">auto release</span>` : "",
     dirtyCount(g) ? `<span class="s-review" title="Files in your checkout that are not on ${esc(g.dev_branch)}">${files(dirtyCount(g))} uncommitted</span>` : "",
   ].filter(Boolean).join(" · ") || (g.error ? "" : "idle");
 }
@@ -877,9 +879,9 @@ function projBody(g) {
       ${g.can_launch ? `<button data-p="${g.name}" data-a="play" data-where="dev" title="Run ${esc(g.dev_branch)} in its worktree, to try it before you promote${g.has_app ? `. Builds it first if it moved since its last build` : ""}" ${playing ? "disabled" : ""}>Play ${esc(g.dev_branch)}</button>` : ""}
       ${g.running ? `<button data-p="${g.name}" data-a="stop" title="Quit ${esc(g.title)} running from ${esc(g.main_branch)}" ${playing ? "disabled" : ""}>■ Stop ${esc(g.main_branch)}</button>` : ""}
       ${g.dev_running ? `<button data-p="${g.name}" data-a="stop" data-where="dev" title="Quit ${esc(g.title)} running from ${esc(g.dev_branch)}" ${playing ? "disabled" : ""}>■ Stop ${esc(g.dev_branch)}</button>` : ""}
-      <button data-p="${g.name}" data-a="promote" title="Queues a release: if the gate passes on ${esc(g.dev_branch)}, ${esc(g.main_branch)} moves to it" ${busy || (!g.ahead.length && (!g.has_app || (g.has_build && !g.stale))) ? "disabled" : ""}>${busy ? `Release #${r.id} in progress` : `Promote ${esc(g.dev_branch)} → ${esc(g.main_branch)}`}</button>
+      ${!g.direct_main || busy || g.ahead.length || (g.has_app && (!g.has_build || g.stale)) ? `<button data-p="${g.name}" data-a="promote" title="Queues a release: if the gate passes on ${esc(g.dev_branch)}, ${esc(g.main_branch)} moves to it" ${busy || (!g.ahead.length && (!g.has_app || (g.has_build && !g.stale))) ? "disabled" : ""}>${busy ? `Release #${r.id} in progress` : `Promote ${esc(g.dev_branch)} → ${esc(g.main_branch)}`}</button>` : ""}
       <button data-p="${g.name}" data-a="${g.paused ? "resume" : "pause"}" title="Pause or resume this project's tasks">${g.paused ? "▶ Resume" : "❚❚ Pause"}</button>
-      <label title="New tasks start with &quot;Release after merge&quot; ticked: once one merges into dev, the queue queues a release, as Promote does. You can still untick it on a task. Tasks already queued keep theirs."><input type="checkbox" data-rel="${g.name}" ${g.auto_release ? "checked" : ""}> Release after merge by default</label>
+      ${g.direct_main ? `<span class="muted" title="Set by direct_main = true in the project's toml">Merges go straight to ${esc(g.main_branch)}</span>` : `<label title="New tasks start with &quot;Release after merge&quot; ticked: once one merges into dev, the queue queues a release, as Promote does. You can still untick it on a task. Tasks already queued keep theirs."><input type="checkbox" data-rel="${g.name}" ${g.auto_release ? "checked" : ""}> Release after merge by default</label>`}
       <span style="flex:1"></span>${archiveBtn(g)}
     </div>` + archiveAskHtml(g) + (msg ? `<div class="muted" style="margin-top:8px;white-space:pre-wrap">${msg}</div>` : "") + projTasksHtml(g) + deploysHtml(g);
 }
@@ -1237,7 +1239,7 @@ async function loadDetail(id, fresh) {
   if (t.state === "paused") actions += btn("resume", "▶ Resume", "primary");
   if (["failed", "cancelled"].includes(t.state)) actions += btn("retry", "Retry");
   if (!["done", "cancelled"].includes(t.state)) actions += btn("cancel", "Cancel", "danger");
-  if ((t.kind === "task" || t.kind === "senddev") && !["done", "failed", "cancelled"].includes(t.state))
+  if ((t.kind === "task" || t.kind === "senddev") && !P(t.project).direct_main && !["done", "failed", "cancelled"].includes(t.state))
     actions += `<label title="Once it merges into dev, queue a release, as Promote does"><input type="checkbox" data-act="release" ${t.auto_release ? "checked" : ""}> Release after merge</label>`;
 
   const html = `
@@ -1245,7 +1247,7 @@ async function loadDetail(id, fresh) {
     <div style="font-weight:600;font-size:15px">${esc(t.title)}</div>
     ${originLine(t.origin, "Sent by")}
     ${timeLine(t, live)}
-    <div class="muted mono" style="margin:4px 0">${esc(P(t.project).title)} · ${esc(t.branch || "")}${t.merged ? ` → ${esc(t.kind === "release" ? P(t.project).main_branch || "main" : P(t.project).dev_branch || "dev")} ${esc(t.merged_show || shas(t.merged))}` : ""}${t.kind === "release" && t.base && !t.merged ? `checking ${esc(t.base_show || shas(t.base))}` : ""}${t.kind === "deploy" && t.base ? `deploying ${esc(t.base_show || shas(t.base))}` : ""}${t.rounds ? ` · fix rounds: ${t.rounds}` : ""}${t.session_model ? ` · model: ${esc(t.session_model)}` : t.model ? ` · model: ${esc(t.model)} (not started)` : ""}${t.effort ? ` · effort: ${esc(t.effort)}` : ""}</div>
+    <div class="muted mono" style="margin:4px 0">${esc(P(t.project).title)} · ${esc(t.branch || "")}${t.merged ? ` → ${esc(t.kind === "release" || P(t.project).direct_main ? P(t.project).main_branch || "main" : P(t.project).dev_branch || "dev")} ${esc(t.merged_show || shas(t.merged))}` : ""}${t.kind === "release" && t.base && !t.merged ? `checking ${esc(t.base_show || shas(t.base))}` : ""}${t.kind === "deploy" && t.base ? `deploying ${esc(t.base_show || shas(t.base))}` : ""}${t.rounds ? ` · fix rounds: ${t.rounds}` : ""}${t.session_model ? ` · model: ${esc(t.session_model)}` : t.model ? ` · model: ${esc(t.model)} (not started)` : ""}${t.effort ? ` · effort: ${esc(t.effort)}` : ""}</div>
     ${t.question ? `<div class="callout"><b>Question:</b> ${esc(t.question)}</div>
       <textarea id="answer" placeholder="Your answer (drop or paste screenshots to attach them)" style="min-height:70px"></textarea>
       <div class="row">${btn("answer", "Send answer", "primary")}</div>` : ""}
