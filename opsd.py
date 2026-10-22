@@ -64,9 +64,9 @@ RESULT_FILE = ".ops-result.json"
 ACTIVE = ("running", "gating", "merging")
 STOPPED = ("cancelled", "paused")  # set by you; the pipeline stops at its next step and never overrides them
 ENDED = ("done", "failed", "cancelled")
-MERGES = ("task", "senddev")  # kinds that go through the gate into dev: they can release after merge
+MERGES = ("task", "senddev")  # kinds that go through the gate into dev: they can promote after merge
 RELEASE_LOCK = threading.Lock()  # one release queued at a time, when tasks finish together
-TRAIN = {}  # project -> {"ids", "by"}: merged tasks waiting for the release train (auto_release), for the dashboard
+TRAIN = {}  # project -> {"ids", "by"}: merged tasks waiting for the promote train (auto_release), for the dashboard
 IN_MAIN = set()  # ids of merged tasks main contains: main only moves forward, so auto_release checks each once
 DBL = threading.RLock()
 PROCS = {}  # task id -> current Popen (claude or a gate step), for cancel
@@ -798,12 +798,12 @@ def init_model(e):
 
 
 def release_default(p):
-    """Whether new tasks of p are marked "Release after merge" unless you say otherwise."""
+    """Whether new tasks of p are marked "Promote after merge" unless you say otherwise."""
     return setting(f"auto_release:{p.name}") == "1"
 
 
 def release_wait():
-    """Minutes the release train waits at most for p's queue to go quiet, after the first of its tasks merges."""
+    """Minutes the promote train waits at most for p's queue to go quiet, after the first of its tasks merges."""
     try:
         return max(0.0, float(setting("release_wait") or 180))
     except ValueError:
@@ -845,7 +845,7 @@ def ev(tid, text):
 
 def add_task(project, body, title="", priority=0, hold=0, depends_on=None, parent=None, kind="task", auto_release=None,
              deploy=None, origin=None, senddev=None, model=None, effort=None):
-    """auto_release None takes the project's default ("Release after merge" on the project).
+    """auto_release None takes the project's default ("Promote after merge" on the project).
     A deploy (kind "deploy") is made only by queue_deploy: you clicked Deploy, or ran `opsd.py deploy`.
     origin: the session in another project that sent it (see send_peer).
     senddev: the snapshot a Send to dev task (kind "senddev", made by queue_senddev) lands on dev.
@@ -2080,7 +2080,7 @@ def finish(p, tid, merged, note):
         remove_worktree(p, t["worktree"])
     notify(f"{p.title}: task done", f"#{tid}: {t['title']}")
     tell_sender(tid, f"is done ({note}): " + (task(tid)["summary"] or "no summary"))
-    if merged:  # a task marked "Release after merge", or a release that ends with more of them in dev
+    if merged:  # a task marked "Promote after merge", or a release that ends with more of them in dev
         auto_release(p)
 
 
@@ -2138,11 +2138,11 @@ def root_of(t):
 
 
 def auto_release(p):
-    """Queue a release for tasks marked "Release after merge" once they are in dev and not yet in main, as a train:
+    """Queue a release (what Promote queues) for tasks marked "Promote after merge" once they are in dev and not yet in main, as a train:
     when the project is quiet (none of its tasks or Send to devs queued, running, gating or merging; ones waiting
     on you don't count), or once the first of them merged release_wait minutes ago. The scheduler calls this every
     minute, and a merge at its end. With a release already open this waits: the release's own end calls it again,
-    so anything that merged after its snapshot gets the next one. The tasks of one split release together, after
+    so anything that merged after its snapshot gets the next one. The tasks of one split are promoted together, after
     the last of them merges."""
     with RELEASE_LOCK:
         TRAIN.pop(p.name, None)
@@ -2172,7 +2172,7 @@ def auto_release(p):
     for t in ready:
         ev(t["id"], f"queued release #{rid}")
     why = "the queue is quiet" if quiet else f"the first merged {round((time.time() - first) / 60)} min ago"
-    ev(rid, "queued after " + ", ".join(f"#{t['id']}" for t in ready) + f" merged (release after merge; {why})")
+    ev(rid, "queued after " + ", ".join(f"#{t['id']}" for t in ready) + f" merged (promote after merge; {why})")
     return rid
 
 
@@ -2183,7 +2183,7 @@ def release_trains():
         try:
             auto_release(p)
         except Exception as e:  # one project's git trouble must not stop the others' trains
-            print(f"release train {p.name}:", e, flush=True)
+            print(f"promote train {p.name}:", e, flush=True)
 
 
 ANSWERED = "The user answered your question:"  # how an answer reaches a task's next turn
@@ -2574,7 +2574,7 @@ def scheduler():
             schedule_once()
             if n % 3 == 0:  # every 6 s: a scan for a running build takes up to 0.4 s
                 unblock_releases()
-            if n % 30 == 0 and not STOPPING.is_set():  # every minute: release trains whose time is up
+            if n % 30 == 0 and not STOPPING.is_set():  # every minute: promote trains whose time is up
                 release_trains()
         except Exception as e:
             print("scheduler error:", e, flush=True)
@@ -2765,7 +2765,7 @@ def main_info(p, s=None):
             "dev_stale": bool(p.build) and (dev_built != f["dev"] or not f.get("dev_has_build")),
             "paused": s.get(f"paused:{p.name}") == "1",
             "auto_release": s.get(f"auto_release:{p.name}") == "1",  # release_default(p), from the snapshot
-            "train": TRAIN.get(p.name),  # merged tasks waiting for the release train: {"ids", "by"}
+            "train": TRAIN.get(p.name),  # merged tasks waiting for the promote train: {"ids", "by"}
             "gate": [g["name"] for g in p.gate], "release": rel,
             "deploys": deploys, "deploys_loading": bool(p.deploys) and f.get("deploys") is None,
             "deploy_open": opens[0]["id"] if opens else None, "uncommitted": f.get("uncommitted") or [],
@@ -4253,7 +4253,7 @@ def ops_note(p, did, extra=""):
     live = q("SELECT id,state,title FROM tasks WHERE project=? AND state NOT IN ('done','cancelled') ORDER BY id",
              (p.name,))
     parts = ["queue: " + ("; ".join(f"#{t['id']} {t['state']} {t['title']}" for t in live[:25]) or "empty"),
-             "release after merge: " + ("on" if release_default(p) else "off") + " by default for this project"]
+             "promote after merge: " + ("on" if release_default(p) else "off") + " by default for this project"]
     dirty = facts(p).get("uncommitted") or []
     if dirty:
         parts.append("checkout: " + "; ".join(
@@ -4997,7 +4997,7 @@ def spec_brief(p, r, name, title, group=None, k=0, n=1):
 
 def spec_queue(did, plan, hold=False, release=None):
     """Queue a chat's change as one task, or one task per phase chained in order. Returns the new ids.
-    release: None takes the project's default; only the last task of a chain releases."""
+    release: None takes the project's default; only the last task of a chain is promoted."""
     d = design(did)
     if not d or not d["spec"]:
         raise ValueError("this chat is not about an OpenSpec change")
@@ -6099,7 +6099,7 @@ class H(BaseHTTPRequestHandler):
                 tid = queue_senddev(p)
                 stale_facts(p.name)
                 return {"id": tid}
-            if act == "release":  # the project's "Release after merge" default, for tasks queued from now on
+            if act == "release":  # the project's "Promote after merge" default, for tasks queued from now on
                 set_setting(f"auto_release:{p.name}", "1" if b.get("on") else "0")
             elif act == "promote":
                 return {"id": queue_release(p)}
@@ -6174,11 +6174,11 @@ class H(BaseHTTPRequestHandler):
             tell_sender(tid, "was cancelled by the owner")
             if p and t["kind"] in MERGES and t["auto_release"]:  # its split's other tasks may be waiting for it
                 auto_release(p)
-        elif action == "release":  # the "Release after merge" toggle
+        elif action == "release":  # the "Promote after merge" toggle
             if t["kind"] not in MERGES or st in ENDED:
                 raise ValueError(f"task is {st}" if st in ENDED else "a release releases itself")
             upd(tid, auto_release=int(bool(b.get("on"))))
-            ev(tid, "will release after it merges" if b.get("on") else "will not release after it merges")
+            ev(tid, "will be promoted after it merges" if b.get("on") else "will not be promoted after it merges")
         elif action == "pause":
             pause_task(tid)
         elif action == "resume":
