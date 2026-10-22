@@ -162,7 +162,15 @@ class Project:
         self.main_wt = self.wt / "main"
         self.deploy_wt = self.wt / "deploy"  # persistent: build output survives from one deploy to the next
         self.deploys = deploy_targets(self, c.get("deploy", []))
+        # direct_main: a task's merge goes on to move main at once (see land), with no release. Not with [[deploy]]:
+        # a deploy moves main too, and its targets build from the main a release checked.
+        self.direct_main = bool(c.get("direct_main", False))
+        if self.direct_main and self.deploys:
+            print(f"project {path.name}: direct_main is off: a project with [[deploy]] targets keeps {self.dev} "
+                  "and Promote", flush=True)
+            self.direct_main = False
         self.lock = threading.Lock()  # merges into dev and promotes
+        self.main_lock = threading.Lock()  # building main and moving it: a release and direct merges take turns
         self.checkout_lock = threading.Lock()  # moving main in your checkout, and clearing what Send to dev landed
 
     def target(self, name):
@@ -273,7 +281,7 @@ def load_projects():
                     print(f"project {f.name}: deploy target {t.name}: {t.error}", flush=True)
             old = PROJECTS.get(p.name)
             if old:
-                p.lock, p.checkout_lock = old.lock, old.checkout_lock
+                p.lock, p.checkout_lock, p.main_lock = old.lock, old.checkout_lock, old.main_lock
             found[p.name] = p
         except Exception as e:
             print(f"project {f.name}: {e}", flush=True)
@@ -1836,6 +1844,8 @@ def _pipeline(p, tid):
     sending = t["kind"] == "senddev"
     if sending and senddev_of(t).get("landed"):  # merged before a restart, a retry or a cancel: clear now
         return senddev_landed(p, tid, t["merged"], f"merged into {p.dev} earlier")
+    if t["start_at"] == "main":  # direct_main: merged into dev before a wait, a restart or a retry; main moves now
+        return land_on_main(p, tid)
     ensure_worktree(p, tid)
     t = task(tid)
     wt = t["worktree"]
@@ -1890,6 +1900,12 @@ def _pipeline(p, tid):
 
         # Rebase onto the latest dev, gate, then merge (or hold for review).
         upd(tid, state="gating", phase=f"rebasing onto {p.dev}")
+        if p.direct_main:  # commits made straight to main come into dev first, so the gate checks them too
+            with p.lock:
+                err = catch_up_dev(p)
+            if err:
+                return fail(p, tid, err + f"\n\nPromote once: the release has a worker merge {p.main} into "
+                                          f"{p.dev}. Then Retry this task.")
         base = p.revs(p.dev)
         for part in p.parts:  # every repo, so the gate checks the latest dev of each
             r = subprocess.run(["git", "rebase", p.dev], cwd=part.at(wt), capture_output=True, text=True)
@@ -1971,7 +1987,58 @@ def _pipeline(p, tid):
         where = ", ".join(f"{r.sub} {sha[:8]}" if r.sub else sha[:8] for r, sha in done)
         if sending:
             return senddev_landed(p, tid, merged, f"merged into {p.dev} at {where}")
-        return finish(p, tid, merged=merged, note=f"merged into {p.dev} at {where}")
+        return land(p, tid, merged, f"merged into {p.dev} at {where}")
+
+
+def land(p, tid, merged, note):
+    """A merge into dev is done: finish, or with direct_main move main to it first (land_on_main)."""
+    if not (p.direct_main and merged):
+        return finish(p, tid, merged=merged, note=note)
+    upd(tid, merged=merged, start_at="main")  # a wait, a restart or a retry goes on from here, not from the merge
+    ev(tid, note)
+    return land_on_main(p, tid)
+
+
+def land_on_main(p, tid):
+    """direct_main: move main to dev, which has this task's merge (and any that merged after it), the way a release
+    does after its gate: build main if the project has an app, carry your uncommitted changes over, and wait for you
+    while something only you can clear is in the way (unblock_releases goes on once it is clear). The gate is not
+    run again: dev is what this task's gate passed on. One task at a time moves main (p.main_lock)."""
+    t = task(tid)
+    resume = t["next_prompt"]
+    upd(tid, next_prompt=None, error=None, state="merging", phase=f"moving {p.main}")
+    with p.main_lock:
+        if stopped(tid):
+            return
+        if all(any(is_ancestor(r, sha, p.main) for r in p.parts if r.has(sha)) for sha in t["merged"].split()):
+            upd(tid, start_at="claude")  # a later merge already took it to main
+            return finish(p, tid, merged=t["merged"], note=f"in {p.main} already")
+        with p.lock:  # a commit made straight to main since: dev takes it in, or main could not fast-forward
+            err = catch_up_dev(p)
+            commit = p.revs(p.dev)
+        if err:
+            return fail(p, tid, f"{p.dev} has the merge, but {p.main} could not move to it. {err}\n\nPromote "
+                                f"once: the release has a worker merge {p.main} into {p.dev}.")
+        why = promote_blocker(p, commit, "merge")
+        if why:
+            return wait_for_you(p, tid, why, WAIT)
+        n = sum(len(first_parent_log(r, r.rev(p.main), sha)) for r, sha in p.pairs(commit))
+        if n > 1:
+            ev(tid, f"{p.main} moves {n} merges: {p.dev} had ones not in {p.main} yet")
+        before = p.revs(p.main)
+        try:  # your answer, when the merge needed you, guides the worker that carries your changes over
+            err = promote(p, tid, commit, note=resume if resume and resume.startswith(ANSWERED) else "")
+        except NeedsYou as e:
+            return wait_for_you(p, tid, str(e), WAIT_CHANGES)
+    if stopped(tid):
+        return
+    if err:
+        return fail(p, tid, f"{p.dev} has the merge, but {p.main} did not move. Retry moves it again.\n{err}")
+    upd(tid, start_at="claude")
+    stale_facts(p.name)
+    finish(p, tid, merged=t["merged"], note=f"{p.main} is now {p.show(commit)}")
+    if Path(p.repo).resolve() == CODE and p.revs(p.main) != before:
+        restart_self(tid)
 
 
 def ask_owner(p, tid, question):
@@ -2079,6 +2146,8 @@ def auto_release(p):
     the last of them merges."""
     with RELEASE_LOCK:
         TRAIN.pop(p.name, None)
+        if p.direct_main:  # its merges move main themselves (land_on_main)
+            return None
         if q("SELECT id FROM tasks WHERE project=? AND kind='release' AND state NOT IN (?,?,?)",
              (p.name, *ENDED), one=True):
             return None
@@ -2150,6 +2219,18 @@ def unblock_releases():
             continue
         if q("UPDATE tasks SET state='queued', phase='', question=NULL WHERE id=? AND state='needs_input' "
              "RETURNING id", (t["id"],)):  # unless you answered or cancelled it just now
+            ev(t["id"], "the way is clear; going on")
+    for t in q(f"SELECT * FROM tasks WHERE kind IN ({','.join('?' * len(MERGES))}) AND state='needs_input' AND "
+               "start_at='main' AND phase IN (?,?)", (*MERGES, WAIT, WAIT_CHANGES)):  # direct_main merges
+        p = PROJECTS.get(t["project"])
+        try:
+            if not p or promote_blocker(p, p.revs(p.dev)) or (t["phase"] == WAIT_CHANGES and clashing(p, p.revs(p.dev))):
+                continue
+        except Exception as e:
+            print(f"unblock #{t['id']}:", e, flush=True)
+            continue
+        if q("UPDATE tasks SET state='queued', phase='', question=NULL WHERE id=? AND state='needs_input' "
+             "RETURNING id", (t["id"],)):
             ev(t["id"], "the way is clear; going on")
     for t in q("SELECT * FROM tasks WHERE kind='deploy' AND state='needs_input' AND phase IN (?,?,?)",
                (WAIT, WAIT_CHANGES, WAIT_MAIN)):  # a deploy whose commits are waiting to move main
@@ -2243,7 +2324,8 @@ def release_pipeline(p, tid):
     upd(tid, state="merging")
     before = p.revs(p.main)
     try:  # your answer, when the release needed you, guides the worker that carries your changes over
-        err = promote(p, tid, t["base"], note=resume if resume and resume.startswith(ANSWERED) else "")
+        with p.main_lock:  # never alongside a direct_main merge moving main
+            err = promote(p, tid, t["base"], note=resume if resume and resume.startswith(ANSWERED) else "")
     except NeedsYou as e:
         return wait_for_you(p, tid, str(e), WAIT_CHANGES)
     if stopped(tid):
@@ -2674,7 +2756,7 @@ def main_info(p, s=None):
               "ORDER BY state='queued', priority DESC, id", (p.name, *ENDED))  # the one under way first
     deploys = [dict(x, open=next((o["id"] for o in opens if json.loads(o["deploy"] or "{}").get("target") == x["name"]),
                                  None)) for x in f.get("deploys") or []]
-    return {"name": p.name, "title": p.title, "main_branch": p.main, "dev_branch": p.dev,
+    return {"name": p.name, "title": p.title, "main_branch": p.main, "dev_branch": p.dev, "direct_main": p.direct_main,
             "main": p.show(f["main"]), "built": p.show(built), "dev": p.show(f["dev"]), "ahead": f["ahead"],
             "has_app": bool(p.build), "can_launch": bool(p.launch),
             "stale": bool(p.build) and built != f["main"], "running": f["running"],
@@ -2878,18 +2960,18 @@ def stale_facts(name):
             refresh_facts(p)
 
 
-def promote_blocker(p, commit):
-    """What only you can clear before main moves to commit, or None. The release needs you while there is one.
-    Your uncommitted changes are not one: move_main carries them over."""
+def promote_blocker(p, commit, what="release"):
+    """What only you can clear before main moves to commit, or None. The release (or a direct_main merge: what)
+    needs you while there is one. Your uncommitted changes are not one: move_main carries them over."""
     if app_running(p, p.main_wt):
-        return (f"Quit the {p.main} build: it is rebuilt in {p.main_wt}. The release goes on by itself once it "
+        return (f"Quit the {p.main} build: it is rebuilt in {p.main_wt}. The {what} goes on by itself once it "
                 "has quit.")
     for r, sha in p.pairs(commit):
         if r.git("branch", "--show-current", check=False) != p.main:  # main moves as a branch; your checkout stays
             wt = r.git("worktree", "list", "--porcelain", check=False).split("\n\n")
             held = [w.split("\n")[0][9:] for w in wt if f"branch refs/heads/{p.main}" in w.split("\n")]
             if held:
-                return (f"{p.main} is checked out in {held[0]}. Switch that one off it, and the release goes on "
+                return (f"{p.main} is checked out in {held[0]}. Switch that one off it, and the {what} goes on "
                         "by itself.")
     return None
 
@@ -3115,6 +3197,15 @@ def _move_main(p, tid, commit, note, left):
     if left is not None:
         left[:] = [(r, paths, touched if r in carried else []) for r, paths, touched in kept]
     return None
+
+
+def catch_up_dev(p):
+    """direct_main: dev takes in commits made straight to main, by a fast-forward when dev has nothing main lacks
+    (the usual case: main moves to dev after every merge). Returns an error or None. Call with p.lock held."""
+    for part in p.parts:
+        if not is_ancestor(part, p.main, p.dev) and is_ancestor(part, p.dev, p.main):
+            part.git("merge", "--ff-only", "-q", p.main, cwd=part.at(p.dev_wt))
+    return merge_main_into_dev(p)
 
 
 def merge_main_into_dev(p):
@@ -3572,7 +3663,7 @@ def senddev_landed(p, tid, merged, note):
         senddev_save(tid, d)
     upd(tid, summary=d.get("summary"))
     stale_facts(p.name)
-    finish(p, tid, merged=merged, note=note)
+    land(p, tid, merged, note)
 
 
 def clear_checkout(r, x):
