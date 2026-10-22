@@ -322,10 +322,62 @@ def load_projects() -> dict:
     return data
 
 
+def code_projects() -> dict:
+    """The claude-ops projects a research project can link to (`repo`): the queue's own, by id."""
+    return getattr(ops, "PROJECTS", None) or {}
+
+
+def check_link(raw) -> str:
+    """A research project's `repo`: "" (standalone) or a configured claude-ops project id."""
+    if raw is None:
+        return ""
+    if not isinstance(raw, str):
+        raise ValueError("repo must be a claude-ops project id")
+    rid = raw.strip()
+    if rid and rid not in code_projects():
+        raise ValueError(f"{rid} is not a claude-ops project")
+    return rid
+
+
+def set_link(proj: dict, raw) -> None:
+    rid = check_link(raw)
+    if rid:
+        proj["repo"] = rid
+    else:
+        proj.pop("repo", None)
+
+
+def code_project(pid: str | None):
+    """The claude-ops project a research project links to, when the link is live and its checkout exists. A stale
+    link (the project is gone) or a missing path gives None: no repo context, never an error."""
+    proj = load_projects()["projects"].get(pid) if pid else None
+    rid = (proj or {}).get("repo")
+    p = code_projects().get(rid) if isinstance(rid, str) and rid else None
+    return p if p is not None and Path(p.repo).is_dir() else None
+
+
+def repo_block(p) -> str:
+    return (f"This research project is the code project '{p.title}' (claude-ops project `{p.name}`) at {p.repo}.\n"
+            f"Before answering, read {p.repo}/CLAUDE.md (and the design doc it names) for what is already built.\n"
+            f"That repo is read-only context: research never edits files there.")
+
+
+def links() -> dict:
+    """Per claude-ops project id, the research projects linked to it: [{id, name}]. Stale links included (the
+    dashboard only looks up live projects)."""
+    out = {}
+    for pid, p in load_projects()["projects"].items():
+        if isinstance(p.get("repo"), str) and p["repo"]:
+            out.setdefault(p["repo"], []).append({"id": pid, "name": p.get("name") or pid})
+    for v in out.values():
+        v.sort(key=lambda r: r["name"].lower())
+    return out
+
+
 def project_list() -> dict:
     data = load_projects()
     counts = Counter(data["members"].values())
-    projects = [{"id": pid, **p, "count": counts[pid],
+    projects = [{"id": pid, **p, "repo": p.get("repo") or None, "count": counts[pid],
                  "notes": rel(notes_path(pid)) if notes_path(pid).is_file() else None}
                 for pid, p in data["projects"].items()]
     projects.sort(key=lambda p: p["name"].lower())
@@ -336,6 +388,7 @@ def create_project(body: dict) -> dict:
     name = (body.get("name") or "").strip()
     if not name:
         raise ValueError("Give the project a name.")
+    check_link(body.get("repo"))
     with lock:
         data = load_projects()
         base = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")[:40] or "project"
@@ -344,6 +397,7 @@ def create_project(body: dict) -> dict:
             pid, n = f"{base}-{n}", n + 1
         data["projects"][pid] = {"name": name, "description": (body.get("description") or "").strip(),
                                  "created": today()}
+        set_link(data["projects"][pid], body.get("repo"))
         save_json(PROJECTS_FILE, data)
     return {"id": pid, **data["projects"][pid]}
 
@@ -360,6 +414,8 @@ def update_project(pid: str, body: dict) -> dict:
             proj["name"] = body["name"].strip()
         if "description" in body:
             proj["description"] = body["description"].strip()
+        if "repo" in body:
+            set_link(proj, body["repo"])
         save_json(PROJECTS_FILE, data)
     return {"id": pid, **proj}
 
@@ -731,7 +787,7 @@ def allowed_tools() -> list[str]:
     ]
 
 
-def spawn(job: dict, prompt: str, resume: str | None = None) -> dict:
+def spawn(job: dict, prompt: str, resume: str | None = None, add_dir: Path | None = None) -> dict:
     env = run_env()
     claude = os.environ.get("RESEARCH_DASHBOARD_CLAUDE") or shutil.which("claude", path=env["PATH"]) or "claude"
     cmd = [claude, "-p", prompt, "--output-format", "stream-json", "--verbose",
@@ -740,6 +796,8 @@ def spawn(job: dict, prompt: str, resume: str | None = None) -> dict:
         cmd += ["--resume", resume]
     if job["model"] != "default":
         cmd += ["--model", job["model"]]
+    if add_dir:  # a linked code project's checkout: read-only context outside the research repo
+        cmd += ["--add-dir", str(add_dir)]
     cmd += ["--allowedTools", *allowed_tools()]
 
     job["id"] = datetime.now().strftime("%Y%m%d-%H%M%S-") + uuid.uuid4().hex[:4]
@@ -791,7 +849,7 @@ answer questions or approve anything.
 - End with the skill's final summary format."""
 
 
-def build_prompt(kind: str, slug: str, tier: str, question: str, notes: str) -> str:
+def build_prompt(kind: str, slug: str, tier: str, question: str, notes: str, code=None) -> str:
     rules = UNATTENDED.format(today=today())
     if kind == "brief":
         head = (f"Use the research skill to run the existing brief briefs/{slug}.md against {REPO}.\n"
@@ -803,6 +861,8 @@ def build_prompt(kind: str, slug: str, tier: str, question: str, notes: str) -> 
                 f"calls for one) reports/{today()}-{slug}.md with `briefs/{slug}.md` in its header.")
     if notes:
         head += f"\n\nExtra context from Adam:\n{notes}"
+    if code is not None:
+        head += f"\n\n{repo_block(code)}"
     return f"{head}\n\n{rules}"
 
 
@@ -835,7 +895,8 @@ def dispatch(body: dict) -> dict:
     job = {"kind": kind, "slug": slug, "question": question, "tier": tier,
            "model": (body.get("model") or "").strip() or "default",
            **run_size(body, TIER_SIZE.get(tier, "normal")), "notes": notes}
-    return spawn(job, build_prompt(kind, slug, tier, question, notes))
+    code = code_project(project_of("proposal", slug))
+    return spawn(job, build_prompt(kind, slug, tier, question, notes, code), add_dir=code.repo if code else None)
 
 
 def run_size(body: dict, default: str) -> dict:
@@ -1058,6 +1119,9 @@ def chat_context(kind: str, tid: str) -> str:
         lines += [proposal_line(s, reports) for s in slugs] or ["- none yet"]
         lines += ["", "Read what you need before your first answer; start with the reports."]
         parent = f"project \"{proj['name']}\""
+    code = code_project(project_of(kind, tid))
+    if code is not None:
+        lines += ["", repo_block(code)]
     lines += open_todos_lines(kind, tid)
     return "\n".join(lines) + "\n\n" + CHAT_RULES.format(today=today(), parent=parent,
                                                          notes_rule=notes_rule(kind, tid),
@@ -1110,7 +1174,8 @@ def chat(body: dict) -> dict:
                "question": message, "tier": "chat", "model": (body.get("model") or "").strip() or "default",
                **run_size(body, CHAT_SIZE), "notes": "",
                "briefsBefore": sorted(brief_slugs())}
-        view = spawn(job, prompt, resume)
+        code = code_project(project_of(kind, tid))
+        view = spawn(job, prompt, resume, add_dir=code.repo if code else None)
         thread["turns"].append(view["id"])
         save_json(THREADS_FILE, threads)
     return {"thread": thread["id"], "turn": view}
@@ -1162,13 +1227,15 @@ def thread_view(thread_id: str) -> dict | None:
 # ---------- for opsd: /api/state, routes, the watchdog thread ----------
 
 def state():
-    """/api/state's research: None while it is off, else {active: running runs and chat turns, readonly}."""
+    """/api/state's research: None while it is off, else {active: running runs and chat turns, readonly, links:
+    the research projects linked to each claude-ops project}."""
     if not current():
         return None
-    out = {"active": 0, "readonly": old_running()}
+    out = {"active": 0, "readonly": old_running(), "links": {}}
     try:
         with lock:
             out["active"] = sum(running(j) for j in load_jobs())
+            out["links"] = links()
     except Exception as e:
         out["error"] = str(e)
     return out

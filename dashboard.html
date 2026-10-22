@@ -297,6 +297,7 @@ a.origin { color: var(--accent); cursor: pointer; text-decoration: underline; }
 .phead:hover { background: var(--bg); }
 .phead .pname { font-weight: 600; white-space: nowrap; }
 .phead .pstats { flex: 1; color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.phead .rschip { font-size: 11px; padding: 0 8px; white-space: nowrap; }
 .phead .caret { color: var(--muted); font-size: 10px; }
 .pbody { padding: 0 10px 10px; font-size: 13px; }
 .pbody .row { margin-top: 8px; }
@@ -1065,6 +1066,11 @@ document.addEventListener("keydown", e => {
   if (e.key === "Escape") closeDeploy();
   else if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) confirmDeploy();
 });
+// The research projects linked to a claude-ops project (README ## Research): one chip each, while research is on.
+function researchChips(name) {
+  const ls = (state.research && state.research.links && state.research.links[name]) || [];
+  return ls.map(r => `<button class="chip rschip" data-rsproj="${esc(r.id)}" title="Open the research project">Research: ${esc(r.name)}</button>`).join("");
+}
 function renderMains() {
   const ps = state.projects.filter(p => inView(p.name)), fx = focus;
   // Keep an open changelog or list of uncommitted files open across the 3-second refresh.
@@ -1072,13 +1078,18 @@ function renderMains() {
   let html = ps.length ? `<div class="card projs"><h2>Projects</h2>` + ps.map(g => {
     const on = g.name === fx;
     return `<div class="prow ${on ? "on" : ""}" data-proj="${esc(g.name)}">
-      <div class="phead" title="${on ? "Collapse" : "Show this project's details"}"><span class="pname">${esc(g.title)}</span>
+      <div class="phead" title="${on ? "Collapse" : "Show this project's details"}"><span class="pname">${esc(g.title)}</span>${researchChips(g.name)}
         <span class="pstats">${projStats(g)}</span><span class="caret">${on ? "▼" : "▶"}</span></div>
       ${on ? `<div class="pbody">${projBody(g)}</div>` : ""}</div>`;
   }).join("") + `</div>` : `<div class="card"><h2>No projects yet</h2>Click <b>+ Project</b> and give the path of a git repository, or of a folder that holds several.</div>`;
   html += archivedHtml();
   if (!put($("#mains"), html)) return;  // nothing changed: leave the page (and its open sections) alone
   document.querySelectorAll("#mains .prow.on details").forEach(d => { if (open.includes(d.dataset.k)) d.open = true; });
+  document.querySelectorAll("#mains [data-rsproj]").forEach(c => c.onclick = e => {
+    e.stopPropagation();  // the chip sits in the project's header, which would expand it
+    const h = "#research/project/" + encodeURIComponent(c.dataset.rsproj);
+    history.pushState(null, "", h); rsApply(h); RS.pProject = c.dataset.rsproj; showTab("research");
+  });
   document.querySelectorAll("#mains .phead").forEach(h => h.onclick = () => {
     const name = h.parentElement.dataset.proj;
     // Opening a project only expands it: the project picker in the header is the one filter.
@@ -2407,6 +2418,21 @@ function rsRenderProjects() {
   }
   rsRenderProjPanel();
 }
+// A research project's link to a claude-ops project (`repo`). A stale one (the project is gone) shows muted.
+const rsCodeProj = id => id && state && state.projects.find(p => p.name === id);
+function rsRepoOpts(cur) {
+  const stale = cur && !rsCodeProj(cur) ? `<option value="${esc(cur)}">${esc(cur)} (not a project)</option>` : "";
+  return [`<option value="">— none (standalone)</option>`, stale,
+    ...[...state.projects].sort((a, b) => a.title.localeCompare(b.title))
+      .map(p => `<option value="${esc(p.name)}">${esc(p.title)}</option>`)].join("")
+    .replace(`value="${esc(cur || "")}"`, `value="${esc(cur || "")}" selected`);
+}
+function rsCodeLine(id) {
+  if (!id) return "";
+  const p = rsCodeProj(id);
+  return p ? `<div>Code: <a href="#projects" id="rspjcode" data-p="${esc(p.name)}">${esc(p.title)}</a></div>`
+    : `<div class="muted">Code: ${esc(id)} (not a project)</div>`;
+}
 function rsRenderProjPanel(force) {
   const el = $("#rsprojpanel"), proj = RS.projects.find(p => p.id === RS.pProject), f = RS.projForm;
   if (!force && f && f.mode !== "delete" && $("#rspform")) return;  // a poll keeps what you typed
@@ -2416,11 +2442,13 @@ function rsRenderProjPanel(force) {
       <label>${editing ? "Name" : "New project"}${f.assignSlug ? ` <span class="muted">for ${esc(f.assignSlug)}</span>` : ""}
         <input id="rspfname" placeholder="Name, e.g. Construction software" value="${esc(editing ? proj.name : "")}"></label>
       <label>Description <textarea id="rspfdesc" rows="2" placeholder="What this project is for (the chat agent reads this)">${esc(editing ? proj.description || "" : "")}</textarea></label>
+      <label>Code project <select id="rspfrepo">${rsRepoOpts(editing ? proj.repo : "")}</select></label>
       <div class="row"><button class="primary rw" type="submit" id="rspfsave">${editing ? "Save" : "Create"}</button><button type="button" id="rspfcancel">Cancel</button></div></form>`;
     $("#rspfcancel").onclick = () => { RS.projForm = null; rsRenderProjPanel(true); };
     $("#rspform").onsubmit = async e => {
       e.preventDefault();
-      const body = {name: $("#rspfname").value, description: $("#rspfdesc").value};
+      const body = {name: $("#rspfname").value, description: $("#rspfdesc").value}, repo = $("#rspfrepo").value;
+      if (repo !== ((editing && proj.repo) || "")) body.repo = repo;  // an unchanged stale link stays as it is
       try {
         if (editing) await rsWrite($("#rspfsave"), "/projects/" + proj.id, body);
         else {
@@ -2437,10 +2465,13 @@ function rsRenderProjPanel(force) {
   const confirming = f && f.mode === "delete";
   el.innerHTML = `<div style="margin-top:12px"><b>${esc(proj.name)}</b>
     <div class="muted">${proj.description ? esc(proj.description) : "No description."} · created ${esc(proj.created)}</div>
+    ${rsCodeLine(proj.repo)}
     <div class="row"><button class="primary" id="rspjopen">Open and chat</button><button class="rw" id="rspjedit">Edit</button>
       <button class="danger rw" id="rspjdel">${confirming ? "Click again to delete" : "Delete"}</button>
       ${confirming ? '<span class="muted">Files stay; its proposals become unsorted.</span>' : ""}</div></div>`;
   $("#rspjopen").onclick = () => rsSelect({type: "project", id: proj.id}, "chat");
+  const code = $("#rspjcode");
+  if (code) code.onclick = e => { e.preventDefault(); showTab("projects"); setFocus(code.dataset.p); };
   $("#rspjedit").onclick = () => { RS.projForm = {mode: "edit"}; rsRenderProjPanel(true); };
   $("#rspjdel").onclick = async e => {
     if (!confirming) { RS.projForm = {mode: "delete"}; rsRenderProjPanel(true); return; }
