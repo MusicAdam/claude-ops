@@ -414,7 +414,8 @@ a[data-task] { color: var(--accent); cursor: pointer; }
 .rsdrawerbg { position: fixed; inset: 0; background: rgba(0, 0, 0, .3); z-index: 29; }
 .rsdrawer { position: fixed; top: 0; right: 0; bottom: 0; width: min(780px, 100vw); overflow: auto; z-index: 30; padding: 16px;
             background: var(--panel); border-left: 1px solid var(--line); box-shadow: -6px 0 24px rgba(0, 0, 0, .2); }
-#hdr .rsn { cursor: pointer; color: var(--accent); }
+#hdr .rsn, #hdr [data-need] { cursor: pointer; }
+#hdr .rsn { color: var(--accent); }
 #researchview a, .rsdrawer a { color: var(--accent); }
 </style>
 </head>
@@ -747,9 +748,10 @@ function renderHeader() {
       + (rsn ? ` Plus ${plural(rsn, "research run", "research runs")}, counted apart: they take no task slot. Click “research” to see them.` : "")),
     chip(n(["queued"]) ? "" : "zero", `<b>${n(["queued"])}</b> queued`,
       `${plural(n(["queued"]), "task waits", "tasks wait")} for a free worker${pf ? ` in ${P(pf).title || pf}` : ""}.`),
-    chip(need ? "alert" : "zero", `<b>${need}</b> need${need === 1 ? "s" : ""} you`,
+    chip(need ? "alert" : "zero", need ? `<span data-need><b>${need}</b> need${need === 1 ? "s" : ""} you</span>` : `<b>0</b> need you`,
       need ? [ask && plural(ask, "question to answer", "questions to answer"), rev && plural(rev, "task to review", "tasks to review"),
               bad && plural(bad, "failed task", "failed tasks")].filter(Boolean).join(", ") + ". They stay put until you act."
+          + (need > 1 ? " Click to go to each in turn." : " Click to go to it.")
         : "Nothing waits on you: no question, review or failure."),
     n(["paused"]) ? chip("", `<b>${n(["paused"])}</b> paused`, `${plural(n(["paused"]), "task is", "tasks are")} paused. Resume to put them back in the queue.`) : "",
   ].join(""));
@@ -2958,6 +2960,17 @@ function rsRenderRefs() {
 $("#rsrq").oninput = () => RS.refs && rsRenderRefs();
 
 // ---- the header's "· K research" and the Settings field
+// ---- the header's "N need you": open the task that waits on you; each further click goes to the next one
+$("#hdr").addEventListener("click", e => {
+  if (!e.target.closest("[data-need]")) return;
+  const ts = state.tasks.filter(t => ["needs_input", "review", "failed"].includes(t.state) && inView(t.project));
+  if (!ts.length) return;
+  const t = ts[(ts.findIndex(x => x.id === sel) + 1) % ts.length];  // same order as the list's "Needs you" group
+  if (tab !== "tasks") showTab("tasks");
+  selectTask(t.id);
+  const row = document.querySelector(`.task[data-id="${t.id}"]`);
+  if (row) row.scrollIntoView({block: "nearest"});
+});
 $("#hdr").addEventListener("click", e => {
   if (!e.target.closest("[data-rs]")) return;
   RS.jobs.filter(j => j.status === "running").forEach(j => RS.expanded.add(j.id));  // open on the live feeds
