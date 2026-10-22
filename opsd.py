@@ -1042,7 +1042,7 @@ def play_run(p, where):
             prepare_main(p, phase, f"play-{p.name}")
             if not p.build:  # no build pins main's worktree to what was built: play main as it is now
                 for r in p.parts:
-                    r.git("checkout", "--detach", p.main, cwd=r.at(path), check=False)
+                    checkout_main(p, r, p.main, check=False)
         phase(f"launching {p.dev if where == 'dev' else p.main}")
         launch_app(p, path)
         PLAYS.pop(p.name, None)
@@ -3320,7 +3320,7 @@ def promote(p, tid, commit, note=""):
 
     def undo():
         for r, sha in old:
-            r.git("checkout", "--detach", sha, cwd=r.at(p.main_wt), check=False)
+            checkout_main(p, r, sha, tid, check=False)
         if prev and prev.exists():
             shutil.rmtree(art, ignore_errors=True)
             prev.rename(art)
@@ -3336,7 +3336,7 @@ def promote(p, tid, commit, note=""):
                 clone_tree(art, prev)
         old = [(r, r.git("rev-parse", "HEAD", cwd=r.at(p.main_wt))) for r in p.parts]
         for r, sha in p.pairs(commit):
-            r.git("checkout", "--detach", sha, cwd=r.at(p.main_wt))
+            checkout_main(p, r, sha, tid)
         try:
             prepare_main(p, lambda text: upd(tid, phase=text), tid)
         except SetupFailed as e:
@@ -3905,6 +3905,22 @@ def peek_version(p, t, revs):
         VERSIONS.clear()
     VERSIONS[key] = (time.time(), v)
     return v
+
+
+def checkout_main(p, r, sha, tid=None, check=True):
+    """Put repo r's part of p's main worktree at sha, detached. opsd owns that worktree and only builds there, so a
+    tracked file a build rewrote (pod install's Podfile.lock) is no one's work: it is discarded, and named in task
+    tid's log so the side effect shows. Never `git clean`: cloned node_modules, .env files and the build stay."""
+    wt = r.at(p.main_wt)
+    dirty = r.git("diff", "--name-only", "HEAD", cwd=wt, check=False).splitlines()
+    if dirty:
+        text = f"discarding build changes to tracked files in {wt}: {', '.join(dirty[:20])}" + (
+            f" and {len(dirty) - 20} more" if len(dirty) > 20 else "")
+        if isinstance(tid, int):
+            ev(tid, text)
+        else:
+            print(text, flush=True)
+    return r.git("checkout", "--force", "--detach", sha, cwd=wt, check=check)
 
 
 def checkout_detached(r, wt, sha):
