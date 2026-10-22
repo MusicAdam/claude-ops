@@ -812,6 +812,7 @@ function renderUsage() {
   el.className = "stats" + (u.windows.length ? "" : " hidden");
 }
 // The Design and Chat tabs show how many open chats have a new reply for you, and ● while Claude is replying in one.
+// The Research tab shows ● while research runs.
 function renderTabCounts() {
   for (const [t, kind, name] of [["design", "design", "Design"], ["chat", "project", "Chat"]]) {
     const cs = (state.chats || []).filter(c => c.kind === kind && inView(c.project));
@@ -820,6 +821,10 @@ function renderTabCounts() {
     $(`#tab-${t}`).dataset.tip = $(`#tab-${t}`).dataset.tip || $(`#tab-${t}`).title;
     $(`#tab-${t}`).title = [unread && `${unread} with a new reply for you`, replying && `Claude is replying in ${replying}`].filter(Boolean).join(", ") || $(`#tab-${t}`).dataset.tip;
   }
+  const rb = $("#tab-research"), rsn = (state.research && state.research.active) || 0;
+  put(rb, "Research" + (rsn ? `<span class="busy pulse"></span>` : ""));
+  rb.dataset.tip = rb.dataset.tip || rb.title;
+  rb.title = rsn ? `${rsn === 1 ? "1 research run" : rsn + " research runs"} going` : rb.dataset.tip;
 }
 
 const mainMsg = {};  // project -> error from a click, shown until the next success
