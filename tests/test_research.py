@@ -640,6 +640,96 @@ class Research(unittest.TestCase):
         opsd.set_setting("research_repo", "")
         self.assertIsNone(self.state()["research"])
 
+    # ---- to-do -> task
+
+    def queue(self, tid=1, **kw):
+        body = {"project": "plugins", "title": "Email it", "body": "Email the vendor\nFrom research to-do #1",
+                "priority": "high", "hold": True, "release": False, **kw}
+        code, out = self.post(f"/api/research/todos/{tid}/task", body)
+        if code == 200:  # its fake project would trip /api/state in later tests
+            self.addCleanup(opsd.q, "DELETE FROM tasks WHERE id=?", (out["id"],))
+        return code, out
+
+    def set_task(self, tid, **kw):
+        opsd.upd(tid, **kw)
+
+    def test_queue_task_creates_and_links(self):
+        self.fake_projects()
+        before = self.file("dashboard/todos.json")["todos"][0]
+        code, out = self.queue()
+        self.assertEqual(code, 200, out)
+        t = opsd.task(out["id"])
+        self.assertEqual((t["project"], t["title"], t["body"], t["priority"], t["hold"], t["auto_release"]),
+                         ("plugins", "Email it", "Email the vendor\nFrom research to-do #1", 1, 1, 0))
+        after = self.file("dashboard/todos.json")["todos"][0]
+        self.assertEqual(after, {**before, "task": out["id"]})
+        self.assertEqual(len(self.backups()), 1)
+        todo = self.get("/api/research/todos")[1][0]
+        self.assertEqual(todo["taskState"], {"state": "queued", "merged": False})
+        # A later edit through todos.update() keeps `task`.
+        self.assertEqual(self.post("/api/research/todos/1", {"text": "Email the vendor again"})[0], 200)
+        after = self.file("dashboard/todos.json")["todos"][0]
+        self.assertEqual((after["text"], after["task"]), ("Email the vendor again", out["id"]))
+
+    def test_queue_task_refusals(self):
+        self.fake_projects()
+        code, out = self.queue(project="nope")
+        self.assertEqual(code, 400, out)
+        self.assertIn("nope", out["error"])
+        _, first = self.queue()
+        code, out = self.queue()  # live task
+        self.assertEqual(code, 400, out)
+        self.assertIn(f"#{first['id']}", out["error"])
+        self.set_task(first["id"], state="cancelled")
+        code, second = self.queue(priority="normal", hold=False, release=None)
+        self.assertEqual(code, 200, second)
+        self.assertEqual(self.file("dashboard/todos.json")["todos"][0]["task"], second["id"])
+        t = opsd.task(second["id"])
+        self.assertEqual((t["priority"], t["hold"]), (0, 0))
+        self.post("/api/research/todos/1", {"done": True})
+        self.set_task(second["id"], state="failed")
+        code, out = self.queue()  # done to-do
+        self.assertEqual(code, 400, out)
+        self.assertIn("done", out["error"])
+        self.listen_old()
+        snapshot = (self.repo / "dashboard/todos.json").read_bytes()
+        code, out = self.queue()
+        self.assertEqual(code, 409, out)
+        self.assertEqual((self.repo / "dashboard/todos.json").read_bytes(), snapshot)
+
+    def test_gone_task_reads_as_none(self):
+        data = self.file("dashboard/todos.json")
+        data["todos"][0]["task"] = 999999
+        (self.repo / "dashboard/todos.json").write_text(json.dumps(data))
+        self.assertIsNone(self.get("/api/research/todos")[1][0]["taskState"])
+
+    def test_watchdog_closes_a_todo_when_its_task_merges(self):
+        self.fake_projects()
+        _, out = self.queue()
+        tid = out["id"]
+        self.set_task(tid, state="done", merged="", finished=time.time())  # done without a merge
+        research.watchdog_pass()
+        self.assertIsNone(self.file("dashboard/todos.json")["todos"][0]["done"])
+        finished = datetime(2026, 10, 20, 23, 30).timestamp()
+        self.set_task(tid, merged='{"main": "abc"}', finished=finished)
+        snapshot = (self.repo / "dashboard/todos.json").read_bytes()
+        old = self.listen_old()
+        research.watchdog_pass()  # read-only: nothing
+        self.assertEqual((self.repo / "dashboard/todos.json").read_bytes(), snapshot)
+        old.close()
+        research.watchdog_pass()
+        research.watchdog_pass()
+        todo = self.file("dashboard/todos.json")["todos"][0]
+        self.assertEqual(todo["done"], "2026-10-20")
+        self.assertEqual(todo["notes"], f"Closed by task #{tid}, merged 2026-10-20.")
+        self.assertEqual(self.get("/api/research/todos")[1][0]["taskState"], {"state": "done", "merged": True})
+        # Reopened by hand: it stays open.
+        self.post("/api/research/todos/1", {"done": False})
+        research.watchdog_pass()
+        todo = self.file("dashboard/todos.json")["todos"][0]
+        self.assertIsNone(todo["done"])
+        self.assertEqual(todo["notes"].count("Closed by"), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

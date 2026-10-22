@@ -485,6 +485,19 @@ and `chat`. `file` serves only `.md` files inside the research repo.
   answering, and treat the repo as read-only context, never editing files there. That run or chat turn also gets
   `--add-dir <repo>` so it may read there; tools and flags are otherwise unchanged. A standalone project, a stale
   link or a checkout path that doesn't exist gets neither.
+- **To-do → task.** `POST /api/research/todos/<id>/task` with `{project, title, body, priority, hold, release}`
+  queues a task from a to-do. It is a research write (research on, not read-only or 409, backup first). It
+  refuses, with a 400 that names the task or project, a to-do that is done, one whose `task` is still live (any
+  state but failed or cancelled), and a project that isn't configured. It creates the task as `/api/tasks` does
+  (`priority` 1, 0 or -1; `release` null takes the project default), stores `task: <id>` on the to-do under
+  `todos._locked()` (so the lock stays shared with `bin/todo`; `todos.update()` keeps the key but can't set
+  it), and returns `{id}`. Queueing again after the task failed or was cancelled replaces `task`. `todos` adds
+  `taskState: {state, merged}` to each to-do with a `task`, read from the tasks table, or null if that row is gone.
+- **Closing on merge.** Each watchdog pass closes every open to-do whose `task` is done with a non-empty
+  `merged`: `done` becomes the date the task finished (local time) and notes get the line
+  `Closed by task #N, merged <date>.` A task done without a merge closes nothing. A to-do is closed only while
+  `done` is null and its notes lack that line, so one you reopen by hand stays open. The pass is skipped while
+  read-only, like the rest of the watchdog.
 
 ### The Research tab
 
@@ -506,6 +519,13 @@ Stop button; to-dos; and the source registry. Reports render with the dashboard'
   research project linked to it. Click one to open `#research/project/<id>`. No chips while research is off.
 - **Header count.** While research runs or chat turns are under way, the header's working chip adds
   `· K research`. They take no task slot, so they are not in `N/max`. Click it to open the tab on the runs.
+- **Queue task.** Each open to-do has a **Queue task** button beside Edit and Delete (a write control, so
+  disabled while read-only). It opens an inline form: title (the to-do text), body (the text, its notes and
+  `From research to-do #<id>`, plus `, proposal <slug>` if it has one), code project (the one the to-do's
+  research project links to, or none if unlinked or stale), Hold, priority and Release after merge. Changing the
+  code project there doesn't change the link. The to-do then shows `↳ task #N · <state>`; click it to open the
+  task. A task that no longer exists shows muted as `task #N (gone)`. Once the task fails or is cancelled the
+  button comes back.
 
 ### Cutover from the old server
 
