@@ -430,7 +430,7 @@ a[data-task] { color: var(--accent); cursor: pointer; }
   <h1>Claude Ops</h1>
   <select id="proj" title="Project"></select>
   <button id="addproj" title="Add a git repository, or a folder of git repos, as a project">+ Project</button>
-  <div class="tabs"><button id="tab-projects" title="Every project: branches, Promote, Play, Deploys, Archive, and its tasks">Projects</button><button id="tab-tasks">Tasks</button><button id="tab-design" title="Plan work with Claude">Design</button><button id="tab-chat" title="Talk to Claude in the project folder, as in a terminal">Chat</button><button id="tab-analyze" title="Where time and money went: run times and costs of tasks, and how to make them cheaper and faster">Analyze</button><button id="tab-research" class="hidden" title="The research repo: proposals, reports, projects, to-dos, sources and runs">Research</button><button id="tab-settings" title="Parallel, release wait, usage brake, models, effort, and what Claude has cost">Settings</button></div>
+  <div class="tabs"><button id="tab-projects" title="Every project: branches, Promote, Play, Deploys, Archive, and its tasks">Projects</button><button id="tab-tasks">Tasks</button><button id="tab-design" title="Plan work with Claude">Design</button><button id="tab-chat" title="Talk to Claude in the project folder, as in a terminal">Chat</button><button id="tab-analyze" title="Where time and money went: run times and costs of tasks, and how to make them cheaper and faster">Analyze</button><button id="tab-research" class="hidden" title="The research repo: proposals, reports, projects, to-dos, sources and runs">Research</button><button id="tab-settings" title="Parallel, promote wait, usage brake, models, effort, and what Claude has cost">Settings</button></div>
   <span class="grow" style="flex:1"></span>
   <span class="stats" id="hdr"></span>
   <span class="stats hidden" id="usage"></span>
@@ -447,8 +447,8 @@ a[data-task] { color: var(--accent); cursor: pointer; }
       <h2>Queue</h2>
       <label><span>Parallel</span><input id="par" type="number" min="1" max="8" style="width:64px">
         <span class="why">How many workers run at once, across every project.</span></label>
-      <label><span>Release wait</span><span><input id="relwait" type="number" min="0" step="15" style="width:64px"> min</span>
-        <span class="why">Release train: a task marked Release after merge releases once its project's queue is quiet (nothing queued, running, checking or merging), or at most this many minutes after the first such task merged. Promote releases at once.</span></label>
+      <label><span>Promote wait</span><span><input id="relwait" type="number" min="0" step="15" style="width:64px"> min</span>
+        <span class="why">Promote train: a task marked Promote after merge is promoted once its project's queue is quiet (nothing queued, running, checking or merging), or at most this many minutes after the first such task merged. The Promote button promotes at once.</span></label>
       <label><span>Usage brake</span><span><input id="brake" type="number" min="0" max="100" step="5" style="width:64px"> %</span>
         <span class="why">At this percent of the 5-hour or 7-day usage window, start no new task that needs Claude until it resets (0 = off). Deploys, promotes and gates still start; chats are never held.</span></label>
     </div>
@@ -581,7 +581,7 @@ a[data-task] { color: var(--accent); cursor: pointer; }
         <label title="The model its worker starts on. Default: the Tasks model setting (per kind, on the Settings tab)">Model <select id="tmodel"><option value="">Default</option><option value="opus">Opus</option><option value="sonnet">Sonnet</option><option value="haiku">Haiku</option></select></label>
         <label title="How hard its worker thinks (--effort). Default: the Effort setting on the Settings tab">Effort <select id="teffort"><option value="">Default</option><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option><option value="xhigh">Extra high</option><option value="max">Max</option></select></label>
         <label title="Build it and wait for you to play and approve before merging"><input type="checkbox" id="hold"> Hold for my review</label>
-        <label title="Once it merges into dev, queue a release, as Promote does. Tasks it splits into release together, after the last one merges. Starts as the project's default, set on its card."><input type="checkbox" id="autorel"> Release after merge</label>
+        <label title="Once it merges into dev, promote dev to main, as the Promote button does. Tasks it splits into are promoted together, after the last one merges. Starts as the project's default, set on its card."><input type="checkbox" id="autorel"> Promote after merge</label>
       </div>
       <div class="callout hidden" id="dirtywarn"></div>
       <div class="row"><button class="primary" id="submit">Queue task</button> <span class="muted">⌘↩</span><span id="formmsg" class="err"></span></div>
@@ -726,7 +726,7 @@ function renderProjects() {
   $("#cprojwrap").classList.toggle("hidden", !!pf || !!chatSel);
   syncRelease();
 }
-// "Release after merge" on the form starts as the project's default. It resets when the project or its default
+// "Promote after merge" on the form starts as the project's default. It resets when the project or its default
 // changes, or after you queue, so a box you changed stays as you set it until then.
 function syncRelease() {
   const name = pf || $("#tproj").value, on = !!P(name).auto_release, k = `${name}:${on}`, el = $("#autorel");
@@ -833,11 +833,11 @@ function renderTabCounts() {
 }
 
 const mainMsg = {};  // project -> error from a click, shown until the next success
-// The release train: merged tasks marked Release after merge wait until their project's queue is quiet, or until by.
+// The promote train: merged tasks marked Promote after merge wait until their project's queue is quiet, or until by.
 const clock = ts => { const d = new Date(ts * 1000), today = d.toDateString() === new Date().toDateString();
   return (today ? "" : d.toLocaleDateString([], {weekday: "short"}) + " ") +
     d.toLocaleTimeString([], {hour: "numeric", minute: "2-digit"}).replace(/\s*([AP])M$/i, (_, x) => ` ${x.toLowerCase()}m`); };
-const trainWords = tr => tr.by * 1000 <= Date.now() ? "releases within a minute" : `releases when the queue is quiet, or by ${clock(tr.by)}`;
+const trainWords = tr => tr.by * 1000 <= Date.now() ? "promotes within a minute" : `promotes when the queue is quiet, or by ${clock(tr.by)}`;
 const trainOf = t => { const tr = t.state === "done" && (P(t.project).train || null); return tr && tr.ids.includes(t.id) ? tr : null; };
 const LIVE = ["running", "gating", "merging"], NEEDS = ["needs_input", "review", "failed"];
 // The focused project is the one expanded in the project list. Clicking a task focuses its project.
@@ -868,7 +868,7 @@ function projStats(g) {
     g.dev_running ? `<span class="s-running">running: ${esc(g.dev_branch)}</span>` : "",
     g.play && g.play.phase ? `<span class="s-running">${esc(g.play.phase)}</span>` : "",
     g.direct_main ? `<span title="direct_main is on: a task that passes its gate moves ${esc(g.main_branch)} at once, with no release">straight to ${esc(g.main_branch)}</span>`
-      : g.auto_release ? `<span title="New tasks release after they merge">auto release</span>` : "",
+      : g.auto_release ? `<span title="New tasks are promoted after they merge">auto promote</span>` : "",
     dirtyCount(g) ? `<span class="s-review" title="Files in your checkout that are not on ${esc(g.dev_branch)}">${files(dirtyCount(g))} uncommitted</span>` : "",
   ].filter(Boolean).join(" · ") || (g.error ? "" : "idle");
 }
@@ -884,7 +884,7 @@ function projBody(g) {
     mainLogHtml(g) +
     `<div>${esc(g.dev_branch)}: <span class="mono">${esc(g.dev)}</span> · ${g.ahead.length ? `${g.ahead.length} merge(s) waiting to promote` : "nothing waiting"}${g.dev_running ? ' · <span class="s-running">running now</span>' : ""}</div>` +
     (g.can_launch && g.dev_stale ? `<div class="s-review">${esc(g.dev_branch)} needs build: it moved since its last build. Play ${esc(g.dev_branch)} builds it first.</div>` : "") +
-    (g.train ? `<div class="s-review">Release after merge: ${g.train.ids.map(taskLink).join(", ")} ${trainWords(g.train)}.</div>` : "") +
+    (g.train ? `<div class="s-review">Promote after merge: ${g.train.ids.map(taskLink).join(", ")} ${trainWords(g.train)}.</div>` : "") +
     devLogHtml(g) +
     `<div class="muted" style="font-size:12px;margin-top:4px">gate: ${g.gate.length ? esc(g.gate.join(", ")) : "none configured"}</div>
     <div class="row">
@@ -894,7 +894,7 @@ function projBody(g) {
       ${g.dev_running ? `<button data-p="${g.name}" data-a="stop" data-where="dev" title="Quit ${esc(g.title)} running from ${esc(g.dev_branch)}" ${playing ? "disabled" : ""}>■ Stop ${esc(g.dev_branch)}</button>` : ""}
       ${!g.direct_main || busy || g.ahead.length || (g.has_app && (!g.has_build || g.stale)) ? `<button data-p="${g.name}" data-a="promote" title="Queues a release: if the gate passes on ${esc(g.dev_branch)}, ${esc(g.main_branch)} moves to it" ${busy || (!g.ahead.length && (!g.has_app || (g.has_build && !g.stale))) ? "disabled" : ""}>${busy ? `Release #${r.id} in progress` : `Promote ${esc(g.dev_branch)} → ${esc(g.main_branch)}`}</button>` : ""}
       <button data-p="${g.name}" data-a="${g.paused ? "resume" : "pause"}" title="Pause or resume this project's tasks">${g.paused ? "▶ Resume" : "❚❚ Pause"}</button>
-      ${g.direct_main ? `<span class="muted" title="Set by direct_main = true in the project's toml">Merges go straight to ${esc(g.main_branch)}</span>` : `<label title="New tasks start with &quot;Release after merge&quot; ticked: once one merges into dev, the queue queues a release, as Promote does. You can still untick it on a task. Tasks already queued keep theirs."><input type="checkbox" data-rel="${g.name}" ${g.auto_release ? "checked" : ""}> Release after merge by default</label>`}
+      ${g.direct_main ? `<span class="muted" title="Set by direct_main = true in the project's toml">Merges go straight to ${esc(g.main_branch)}</span>` : `<label title="New tasks start with &quot;Promote after merge&quot; ticked: once one merges into dev, the queue promotes dev to main, as the Promote button does. You can still untick it on a task. Tasks already queued keep theirs."><input type="checkbox" data-rel="${g.name}" ${g.auto_release ? "checked" : ""}> Promote after merge by default</label>`}
       <span style="flex:1"></span>${archiveBtn(g)}
     </div>` + archiveAskHtml(g) + (msg ? `<div class="muted" style="margin-top:8px;white-space:pre-wrap">${msg}</div>` : "") + projTasksHtml(g) + deploysHtml(g);
 }
@@ -1191,8 +1191,8 @@ function renderList() {
         t.parent ? `from #${t.parent}` : "",
         t.origin ? `sent by ${esc(t.origin.words)}` : "",
         t.hold ? "hold for review" : "",
-        trainOf(t) ? `<span class="s-review" title="Release after merge waits for the release train">${trainWords(trainOf(t))}</span>`
-          : t.auto_release ? "release after merge" : "",
+        trainOf(t) ? `<span class="s-review" title="Promote after merge waits for the promote train">${trainWords(trainOf(t))}</span>`
+          : t.auto_release ? "promote after merge" : "",
         t.priority > 0 ? "high priority" : t.priority < 0 ? "low priority" : "",
         live ? `${took(t, now)} running` : t.finished ? `${ago(t.finished, now)} ago${t.started ? ` · took ${took(t, now)}` : ""}`
           : t.started && t.state !== "queued" ? `started ${took(t, now)} ago` : `queued ${ago(t.created, now)} ago`,
@@ -1263,7 +1263,7 @@ async function loadDetail(id, fresh) {
   if (["failed", "cancelled"].includes(t.state)) actions += btn("retry", "Retry");
   if (!["done", "cancelled"].includes(t.state)) actions += btn("cancel", "Cancel", "danger");
   if ((t.kind === "task" || t.kind === "senddev") && !P(t.project).direct_main && !["done", "failed", "cancelled"].includes(t.state))
-    actions += `<label title="Once it merges into dev, queue a release, as Promote does"><input type="checkbox" data-act="release" ${t.auto_release ? "checked" : ""}> Release after merge</label>`;
+    actions += `<label title="Once it merges into dev, promote dev to main, as the Promote button does"><input type="checkbox" data-act="release" ${t.auto_release ? "checked" : ""}> Promote after merge</label>`;
 
   const html = `
     <h2>#${t.id} · <span class="s-${t.state}">${LABEL[t.state] || t.state}</span>${live && t.phase ? ` · ${esc(t.phase)}` : ""}</h2>
@@ -1958,7 +1958,7 @@ function readerHead(d) {
     ${s.why ? `<div class="why">${esc(s.why)}</div>` : ""}
     <div class="row">${s.open || !s.has_tasks
       ? btn("whole", "Queue as one task", "One worker builds the whole change") + phases
-        + `<label><input type="checkbox" id="spechold" ${specOpts.hold ? "checked" : ""}> Hold for review</label><label><input type="checkbox" id="specrel" ${(specOpts.release ?? P(d.project).auto_release) ? "checked" : ""}> Release after merge</label>`
+        + `<label><input type="checkbox" id="spechold" ${specOpts.hold ? "checked" : ""}> Hold for review</label><label><input type="checkbox" id="specrel" ${(specOpts.release ?? P(d.project).auto_release) ? "checked" : ""}> Promote after merge</label>`
       : `<span class="muted">Every item in tasks.md is ticked. Ask Claude to queue archiving it when you're happy.</span>`}</div>
     ${s.open ? `<div class="advice">${advice}</div>` : ""}<div id="rcmds" class="row">${specCmds(s).map(c =>
       `<button data-cmd="${esc(c.id)}" title="${esc(c.tip)}" ${d.state === "thinking" ? "disabled" : ""}>${esc(c.label)}</button>`).join("")}${
@@ -2936,7 +2936,7 @@ function rsQueueHtml(t) {
     <label>Body <textarea id="rsqbody" rows="5">${esc(f.body)}</textarea></label>
     <div class="row"><label>Code project <select id="rsqproj">${o("", "Pick a project", f.project)}${state.projects.map(p => o(p.name, p.title, f.project)).join("")}</select></label>
       <label>Priority <select id="rsqprio">${["high", "normal", "low"].map(x => o(x, x, f.prio)).join("")}</select></label>
-      <label>Release after merge <select id="rsqrel">${o("", "project default", f.release)}${o("1", "on", f.release)}${o("0", "off", f.release)}</select></label></div>
+      <label>Promote after merge <select id="rsqrel">${o("", "project default", f.release)}${o("1", "on", f.release)}${o("0", "off", f.release)}</select></label></div>
     <div class="checks"><label><input type="checkbox" id="rsqhold"${f.hold ? " checked" : ""}> Hold</label></div>
     <div class="row" style="margin:0"><button class="primary rw" id="rsqgo" type="submit">Queue</button><button type="button" id="rsqcancel">Cancel</button></div></form>`;
 }

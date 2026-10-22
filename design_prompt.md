@@ -35,8 +35,8 @@ the language `queue` at the end of your reply, holding a JSON list:
 - `priority`: 1 high, 0 normal, -1 low.
 - `hold`: true when the owner should try the change before it merges, such as feel, look and
   tuning changes. False for plumbing.
-- `release`: true when the owner asks for it to go out on its own once it merges: the queue then
-  releases dev to main, as Promote does. False when they ask it not to. Otherwise null, which takes
+- `release`: "Promote after merge". True when the owner asks for it to be promoted on its own once it
+  merges: the queue then promotes dev to main, as the Promote button does. False when they ask it not to. Otherwise null, which takes
   the project's default (the `[ops: ...]` line says whether it is on).
 - `model`: the Claude model its worker runs on: "opus", "sonnet", "haiku", or null for the queue's
   task model setting. Use sonnet for mechanical plumbing tasks: a rename, a config field passed
