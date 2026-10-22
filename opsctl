@@ -45,7 +45,8 @@ write_plist() {
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
   <key>ExitTimeOut</key><integer>60</integer>
-  <key>ProcessType</key><string>Background</string>
+  <!-- not Background: macOS throttles that to efficiency cores and slow I/O, and every gate and worker inherits it -->
+  <key>ProcessType</key><string>Standard</string>
   <key>StandardOutPath</key><string>$DATA/opsd.log</string>
   <key>StandardErrorPath</key><string>$DATA/opsd.log</string>
 </dict></plist>
