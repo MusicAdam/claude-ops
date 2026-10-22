@@ -4067,8 +4067,9 @@ def deploy_run(p, tid, tg, d):
     fresh = not all(r.at(path).exists() for r in p.parts)
     for r, sha in p.pairs(revs):
         checkout_detached(r, r.at(path), sha)
-    if fresh:
-        prepare_worktree(p, path, setup=False)  # the clone list; setup runs below, where its output is logged
+    # The clone list, every time: it skips files already there, so entries added since the worktree was made
+    # (a signing key the first deploy lacked) reach it. Setup runs below, where its output is logged.
+    prepare_worktree(p, path, setup=False)
     ev(tid, f"deploying {target_show(p, tg, target_commit(p, tg, revs))} in {path}")
     key = f"deploy_setup:{p.name}"
     if p.setup and (fresh or setting(key) != revs):  # setup again only when the commit changed
