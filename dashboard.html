@@ -408,6 +408,11 @@ a[data-task] { color: var(--accent); cursor: pointer; }
 .rstodo.done .title { text-decoration: line-through; color: var(--muted); }
 .rstodo.editing { border-color: var(--accent); }
 .rstodo .acts { display: flex; gap: 6px; flex: none; }
+.rsqform { margin: -2px 0 8px 26px; border-color: var(--accent); }
+.rsqform .row { margin: 0 0 10px; }
+.rsqform .checks { display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: center; margin: 0 0 10px; }
+.rsqform .checks label { flex-direction: row; align-items: center; margin: 0; gap: 6px; }
+.rsqform .checks input { width: auto; }
 .rsref { padding: 8px 0; border-top: 1px solid var(--line); display: grid; grid-template-columns: 1fr minmax(120px, 260px); gap: 12px; }
 .rsref .url, .rsref .meta { color: var(--muted); font-size: 12px; word-break: break-all; }
 .rsref .meta a { margin-right: 6px; }
@@ -2240,7 +2245,7 @@ document.addEventListener("paste", e => {
 // back button and links from a phone work.
 const RS = {view: "proposals", proposals: [], projects: [], todos: [], refs: null, jobs: [], loaded: false,
   sel: null, rtab: null, detail: false, readerKey: "", pProject: "all", pFilter: "all", projForm: null, lastArchived: null,
-  tFilter: "open", tProj: "all", tEdit: null, tDelete: null, rFilter: "all", expanded: new Set(), showArchived: false,
+  tFilter: "open", tProj: "all", tEdit: null, tDelete: null, tQueue: null, rFilter: "all", expanded: new Set(), showArchived: false,
   chats: {}, openSteps: new Set(), sig: "", sizeTouched: false};
 const rsq = (s, el = document) => el.querySelector(s);
 const rsqa = (s, el = document) => [...el.querySelectorAll(s)];
@@ -2915,6 +2920,51 @@ function rsDue(due, done) {
   const cls = done ? "" : days < 0 ? "s-failed" : days <= 2 ? "s-review" : "";
   return `<span class="badge ${cls}">${esc(done ? `due ${due}` : days < 0 ? `overdue · ${due}` : days === 0 ? "due today" : `due ${due}`)}</span>`;
 }
+// ---- Queue task: a to-do becomes a claude-ops task. RS.tQueue = {id, init, v}: init builds the form's HTML, so a poll
+// that redraws the list keeps it the same; v is what you have typed, put back after a redraw.
+const rsTaskLive = t => t.task && t.taskState && !["failed", "cancelled"].includes(t.taskState.state);
+function rsQueueOpen(t) {
+  const rp = RS.projects.find(p => p.id === t.effectiveProject), repo = rp && rp.repo;
+  const body = [t.text, t.notes, `From research to-do #${t.id}${t.proposal ? `, proposal ${t.proposal}` : ""}`].filter(Boolean).join("\n\n");
+  const init = {title: t.text, body, project: state.projects.some(p => p.name === repo) ? repo : "", hold: false, prio: "normal", release: ""};
+  RS.tQueue = {id: t.id, init, v: {...init}};
+}
+function rsQueueHtml(t) {
+  const f = RS.tQueue.init, o = (v, l, cur) => `<option value="${esc(v)}"${v === cur ? " selected" : ""}>${esc(l)}</option>`;
+  return `<form class="card rsform rsqform" id="rsqform" autocomplete="off"><h2>Queue task from to-do #${t.id}</h2>
+    <label>Title <input id="rsqtitle" value="${esc(f.title)}"></label>
+    <label>Body <textarea id="rsqbody" rows="5">${esc(f.body)}</textarea></label>
+    <div class="row"><label>Code project <select id="rsqproj">${o("", "Pick a project", f.project)}${state.projects.map(p => o(p.name, p.title, f.project)).join("")}</select></label>
+      <label>Priority <select id="rsqprio">${["high", "normal", "low"].map(x => o(x, x, f.prio)).join("")}</select></label>
+      <label>Release after merge <select id="rsqrel">${o("", "project default", f.release)}${o("1", "on", f.release)}${o("0", "off", f.release)}</select></label></div>
+    <div class="checks"><label><input type="checkbox" id="rsqhold"${f.hold ? " checked" : ""}> Hold</label></div>
+    <div class="row" style="margin:0"><button class="primary rw" id="rsqgo" type="submit">Queue</button><button type="button" id="rsqcancel">Cancel</button></div></form>`;
+}
+const rsQueueRead = () => ({title: $("#rsqtitle").value, body: $("#rsqbody").value, project: $("#rsqproj").value,
+  hold: $("#rsqhold").checked, prio: $("#rsqprio").value, release: $("#rsqrel").value});
+function rsQueueBind() {
+  const form = $("#rsqform");
+  if (!form) return;
+  const v = RS.tQueue.v;
+  $("#rsqtitle").value = v.title; $("#rsqbody").value = v.body; $("#rsqproj").value = v.project;
+  $("#rsqhold").checked = v.hold; $("#rsqprio").value = v.prio; $("#rsqrel").value = v.release;
+  form.oninput = form.onchange = () => { RS.tQueue.v = rsQueueRead(); };
+  $("#rsqcancel").onclick = () => { RS.tQueue = null; rsRenderTodos(); };
+  form.onsubmit = async e => {
+    e.preventDefault();
+    const v = rsQueueRead(), btn = $("#rsqgo");
+    if (!v.project) { rsErr(btn, new Error("Pick a code project.")); return; }
+    const body = {project: v.project, title: v.title, body: v.body, priority: v.prio, hold: v.hold, release: v.release === "" ? null : v.release === "1"};
+    try { await rsWrite(btn, `/todos/${RS.tQueue.id}/task`, body); } catch { return; }
+    RS.tQueue = null; rsReload(); refresh();
+  };
+}
+function rsTaskLine(t) {
+  if (!t.task) return "";
+  if (!t.taskState) return `<span class="muted">task #${t.task} (gone)</span> · `;
+  const s = t.taskState.state;
+  return `<a href="#" data-task="${t.task}">↳ task #${t.task} · ${esc(LABEL[s] || s)}${s === "done" && t.taskState.merged ? ", merged" : ""}</a> · `;
+}
 function rsRenderTodos() {
   if (!["all", "none"].includes(RS.tProj) && !RS.projects.some(p => p.id === RS.tProj)) RS.tProj = "all";
   $("#rstpf").value = RS.tProj;
@@ -2931,15 +2981,28 @@ function rsRenderTodos() {
   const groups = new Map();
   list.forEach(t => { const g = rsProjName(t.effectiveProject) || "No project"; if (!groups.has(g)) groups.set(g, []); groups.get(g).push(t); });
   const prop = slug => { const p = RS.proposals.find(x => x.slug === slug); return p ? rsTitle(p) : rsPretty(slug); };
+  if (RS.tQueue && !RS.todos.some(t => t.id === RS.tQueue.id && !t.done && !rsTaskLive(t))) RS.tQueue = null;
   const row = t => `<div class="task rstodo ${t.done ? "done" : ""} ${RS.tEdit === t.id ? "editing" : ""}">
     <input type="checkbox" class="rw" data-check="${t.id}"${t.done ? " checked" : ""} title="${t.done ? "Reopen" : "Mark done"}">
     <div><div class="title">${esc(t.text)}</div>${t.notes ? `<div class="sub" style="white-space:pre-wrap">${esc(t.notes)}</div>` : ""}
-      <div class="sub">${rsDue(t.due, t.done)} ${t.proposal ? `<a href="#" data-open="${esc(t.proposal)}">↳ ${esc(prop(t.proposal))}</a> · ` : ""}#${t.id} · ${t.done ? "done " + esc(t.done) : "added " + esc(t.created)}${t.by && t.by !== "dashboard" ? " by " + esc(t.by) : ""}</div></div>
-    <div class="acts"><button class="rw" data-edit="${t.id}">Edit</button><button class="danger rw" data-del="${t.id}">${RS.tDelete === t.id ? "Click again" : "Delete"}</button></div></div>`;
+      <div class="sub">${rsDue(t.due, t.done)} ${rsTaskLine(t)}${t.proposal ? `<a href="#" data-open="${esc(t.proposal)}">↳ ${esc(prop(t.proposal))}</a> · ` : ""}#${t.id} · ${t.done ? "done " + esc(t.done) : "added " + esc(t.created)}${t.by && t.by !== "dashboard" ? " by " + esc(t.by) : ""}</div></div>
+    <div class="acts">${!t.done && !rsTaskLive(t) ? `<button class="rw" data-queue="${t.id}">Queue task</button>` : ""}<button class="rw" data-edit="${t.id}">Edit</button><button class="danger rw" data-del="${t.id}">${RS.tDelete === t.id ? "Click again" : "Delete"}</button></div></div>`
+    + (RS.tQueue && RS.tQueue.id === t.id ? rsQueueHtml(t) : "");
   const grouped = RS.tProj === "all" && groups.size > 1;
   const html = list.length ? [...groups].map(([g, rows]) => `<div class="group">${grouped ? `<h3>${esc(g)} · ${rows.length}</h3>` : ""}${rows.map(row).join("")}</div>`).join("")
     : `<div class="muted">${RS.tFilter === "open" && !counts.open ? "Nothing open. Add one, or ask a chat to “add a to-do”." : "No to-dos match."}</div>`;
   if (!put($("#rstlist"), html)) return;
+  rsQueueBind();
+  rsqa("#rstlist [data-queue]").forEach(b => b.onclick = () => {
+    const t = RS.todos.find(x => x.id === +b.dataset.queue);
+    if (!t) return;
+    if (RS.tQueue && RS.tQueue.id === t.id) RS.tQueue = null; else rsQueueOpen(t);
+    rsRenderTodos();
+    if ($("#rsqtitle")) $("#rsqtitle").focus();
+  });
+  rsqa("#rstlist [data-task]").forEach(a => a.onclick = e => {
+    e.preventDefault(); showTab("tasks"); selectTask(+a.dataset.task); refresh();
+  });
   rsqa("#rstlist [data-check]").forEach(c => c.onchange = async () => {
     try { await rsWrite(c, `/todos/${c.dataset.check}`, {done: c.checked}); } catch { c.checked = !c.checked; return; }
     rsReload();

@@ -925,6 +925,91 @@ def stop_job(job_id: str) -> dict:
     return job_view(job)
 
 
+# ---------- to-dos that become queue tasks ----------
+# A to-do's `task` is a claude-ops task id. todos.update() writes only its FIELDS, so `task` (and closing a to-do)
+# is written here, under the repo's own todos._locked(): the lock stays shared with bin/todo.
+
+PRIORITY = {"high": 1, "normal": 0, "low": -1}
+DEAD = ("failed", "cancelled")  # a linked task in any other state is live: no second one
+
+
+def task_rows(ids) -> dict:
+    ids = sorted({i for i in ids if isinstance(i, int)})
+    if not ids:
+        return {}
+    rows = ops.q(f"SELECT id, state, merged, finished FROM tasks WHERE id IN ({','.join('?' * len(ids))})", ids)
+    return {r["id"]: r for r in rows}
+
+
+def todo_list() -> list[dict]:
+    """todos.list_todos() plus `taskState` on each to-do with a `task`: {state, merged}, or None if the row is gone."""
+    out = todos.list_todos()
+    rows = task_rows(t.get("task") for t in out)
+    for t in out:
+        if isinstance(t.get("task"), int):
+            r = rows.get(t["task"])
+            t["taskState"] = {"state": r["state"], "merged": bool(r["merged"])} if r else None
+    return out
+
+
+def todo_task(tid: int, body: dict) -> dict:
+    """Queue a claude-ops task from to-do tid, as /api/tasks would, and store its id as the to-do's `task`."""
+    project = (body.get("project") or "").strip() if isinstance(body.get("project"), str) else ""
+    if not project:
+        raise ValueError("Pick a code project.")
+    if project not in code_projects():
+        raise ValueError(f"{project} is not a claude-ops project")
+    text = (body.get("body") or "").strip()
+    if not text:
+        raise ValueError("describe the task")
+    prio = body.get("priority", 0)
+    prio = PRIORITY[prio] if prio in PRIORITY else int(prio or 0)
+    if prio not in (1, 0, -1):
+        raise ValueError("priority must be high, normal or low")
+    release = body.get("release")
+    with todos._locked() as data:
+        todo = next((t for t in data["todos"] if t["id"] == tid), None)
+        if not todo:
+            raise ValueError(f"No to-do #{tid}")
+        if todo.get("done"):
+            raise ValueError(f"To-do #{tid} is done.")
+        old = todo.get("task")
+        if isinstance(old, int) and (r := task_rows([old]).get(old)) and r["state"] not in DEAD:
+            raise ValueError(f"To-do #{tid} already has task #{old} ({r['state']}).")
+        new = ops.add_task(project, text, body.get("title") or "", prio, bool(body.get("hold")),
+                           auto_release=None if release is None or release == "" else bool(release))
+        todo["task"] = new
+    return {"id": new}
+
+
+def close_line(task_id: int, date: str) -> str:
+    return f"Closed by task #{task_id}, merged {date}."
+
+
+def close_merged() -> None:
+    """Close each open to-do whose task is done and merged: done is the day it finished, plus a line in notes.
+    A to-do already carrying that task's line stays as it is, so one reopened by hand stays open."""
+    def due(data):
+        rows = task_rows(t.get("task") for t in data["todos"] if not t.get("done"))
+        for t in data["todos"]:
+            r = rows.get(t.get("task")) if isinstance(t.get("task"), int) else None
+            if (not t.get("done") and r and r["state"] == "done" and r["merged"]
+                    and f"Closed by task #{r['id']}," not in (t.get("notes") or "")):
+                yield t, r
+    if not any(due(todos._load())):
+        return
+    try:
+        writable()
+    except Refused as e:
+        print("research watchdog:", e, flush=True)
+        return
+    with todos._locked() as data:
+        for t, r in list(due(data)):
+            date = datetime.fromtimestamp(r["finished"]).strftime("%Y-%m-%d") if r["finished"] else today()
+            t["done"] = date
+            t["notes"] = (t["notes"].rstrip() + "\n" if t.get("notes") else "") + close_line(r["id"], date)
+
+
 # ---------- watchdog: time limits, the usage meter, notifications ----------
 
 def watchdog() -> None:
@@ -941,6 +1026,10 @@ def watchdog_pass(now=None) -> None:
     survives restarts. Nothing at all while the old server runs: its own watchdog covers it."""
     if not current() or old_running():
         return
+    try:
+        close_merged()
+    except Exception as e:
+        print("research watchdog: closing to-dos:", e, flush=True)
     now = now or datetime.now()
     with lock:
         jobs = load_jobs()
@@ -1263,7 +1352,7 @@ def get(path: str, query: str):
         if path == "/references":
             return 200, list_references()
         if path == "/todos":
-            return 200, todos.list_todos()
+            return 200, todo_list()
         if path == "/jobs":
             return 200, list(reversed(research_jobs()))
         if path.startswith("/jobs/"):
@@ -1329,6 +1418,9 @@ def route(path: str, body: dict):
         return lambda: update_project(pid, body)
     if path == "/todos":
         return lambda: todos.add(body)
+    m = re.fullmatch(r"/todos/(\d+)/task", path)
+    if m:
+        return lambda: todo_task(int(m.group(1)), body)
     m = re.fullmatch(r"/todos/(\d+)(/delete)?", path)
     if m:
         tid = int(m.group(1))
