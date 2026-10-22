@@ -453,7 +453,7 @@ class Research(unittest.TestCase):
         self.assertEqual(code, 200, job)
         self.mine.append(job["pid"])
         s = self.state()
-        self.assertEqual(s["research"], {"active": 1, "readonly": False})
+        self.assertEqual(s["research"], {"active": 1, "readonly": False, "links": {}})
         self.assertEqual(s["active"], len(opsd.THREADS))
 
         # With max_parallel 1 and a research run going, a queued task still starts.
@@ -535,6 +535,110 @@ class Research(unittest.TestCase):
         saved = {j["id"]: j for j in self.file("logs/dashboard/jobs.json")}
         self.assertTrue(saved["finished"]["notified"] and saved["chat-bad"]["notified"])
         self.assertNotIn("notified", saved["20261004-100000-aaaa"])  # history doesn't replay
+
+
+    # ---- links to claude-ops projects
+
+    def fake_projects(self):
+        """Two configured claude-ops projects: `plugins` with a real checkout, `ghost` whose checkout is missing."""
+        from types import SimpleNamespace
+        code = SCRATCH / f"code-{self.id().rsplit('.', 1)[1]}"
+        code.mkdir(exist_ok=True)
+        real = opsd.PROJECTS
+        opsd.PROJECTS = {"plugins": SimpleNamespace(name="plugins", title="Audio Plugins", repo=code),
+                         "ghost": SimpleNamespace(name="ghost", title="Ghost", repo=SCRATCH / "no-such-dir")}
+        self.addCleanup(setattr, opsd, "PROJECTS", real)
+        return code
+
+    def link(self, repo):
+        data = self.file("dashboard/projects.json")
+        data["projects"]["ai-search"]["repo"] = repo
+        (self.repo / "dashboard/projects.json").write_text(json.dumps(data))
+
+    def test_create_and_update_store_and_clear_repo(self):
+        self.fake_projects()
+        code, made = self.post("/api/research/projects", {"name": "Audio", "repo": "plugins"})
+        self.assertEqual(code, 200, made)
+        self.assertEqual(self.file("dashboard/projects.json")["projects"][made["id"]]["repo"], "plugins")
+        code, out = self.post("/api/research/projects/ai-search", {"repo": " plugins "})
+        self.assertEqual(code, 200, out)
+        self.assertEqual(self.file("dashboard/projects.json")["projects"]["ai-search"]["repo"], "plugins")
+        for empty in ("", None):
+            self.post("/api/research/projects/ai-search", {"repo": "plugins"})
+            code, out = self.post("/api/research/projects/ai-search", {"repo": empty})
+            self.assertEqual(code, 200, out)
+            self.assertNotIn("repo", self.file("dashboard/projects.json")["projects"]["ai-search"])
+
+    def test_unknown_repo_is_refused(self):
+        self.fake_projects()
+        for path, body in (("/api/research/projects", {"name": "X", "repo": "nope"}),
+                           ("/api/research/projects/ai-search", {"repo": "nope"})):
+            code, out = self.post(path, body)
+            self.assertEqual(code, 400, out)
+            self.assertIn("nope", out["error"])
+        data = self.file("dashboard/projects.json")
+        self.assertEqual(list(data["projects"]), ["ai-search"])
+        self.assertNotIn("repo", data["projects"]["ai-search"])
+
+    def test_unknown_keys_survive_an_update(self):
+        self.fake_projects()
+        data = self.file("dashboard/projects.json")
+        data["projects"]["ai-search"]["color"] = "teal"
+        (self.repo / "dashboard/projects.json").write_text(json.dumps(data))
+        self.assertEqual(self.post("/api/research/projects/ai-search", {"name": "AI", "repo": "plugins"})[0], 200)
+        proj = self.file("dashboard/projects.json")["projects"]["ai-search"]
+        self.assertEqual((proj["color"], proj["name"], proj["repo"]), ("teal", "AI", "plugins"))
+
+    def test_project_list_returns_repo(self):
+        self.fake_projects()
+        self.assertIsNone(self.get("/api/research/projects")[1]["projects"][0]["repo"])
+        self.link("gone")  # a stale link is kept and returned
+        self.assertEqual(self.get("/api/research/projects")[1]["projects"][0]["repo"], "gone")
+
+    def test_prompts_get_the_repo_block_only_for_a_live_link(self):
+        code = self.fake_projects()
+        research.current()
+
+        def prompts():
+            return (research.build_prompt("brief", "llm-search-tools", "T1", "q", "",
+                                          research.code_project(research.project_of("proposal", "llm-search-tools"))),
+                    research.chat_context("project", "ai-search"),
+                    research.chat_context("proposal", "llm-search-tools"))
+        for p in prompts():  # standalone
+            self.assertNotIn("code project", p)
+        self.link("plugins")
+        for p in prompts():
+            self.assertIn(f"code project 'Audio Plugins' (claude-ops project `plugins`) at {code}", p)
+            self.assertIn(f"{code}/CLAUDE.md", p)
+            self.assertIn("read-only context", p)
+        for stale in ("gone", "ghost"):  # not a project; a project whose checkout is missing
+            self.link(stale)
+            for p in prompts():
+                self.assertNotIn("code project", p)
+
+    def test_runs_and_chats_on_a_linked_project_add_the_repo_dir(self):
+        code = self.fake_projects()
+        self.link("plugins")
+        _, job = self.post("/api/research/dispatch", {"question": "Which plugin next?", "project": "ai-search"})
+        self.wait_done(job["id"])
+        args = (SCRATCH / "args").read_text().split("\n")
+        self.assertEqual(args[args.index("--add-dir") + 1], str(code))
+        self.assertIn("code project 'Audio Plugins'", (SCRATCH / "args").read_text())
+        _, out = self.post("/api/research/chat", {"target": "proposal:llm-search-tools", "message": "Hi"})
+        self.wait_done(out["turn"]["id"])
+        args = (SCRATCH / "args").read_text().split("\n")
+        self.assertEqual(args[args.index("--add-dir") + 1], str(code))
+        self.link("")
+        _, job = self.post("/api/research/dispatch", {"question": "Standalone now?", "project": "ai-search"})
+        self.wait_done(job["id"])
+        self.assertNotIn("--add-dir", (SCRATCH / "args").read_text().split("\n"))
+
+    def test_state_lists_linked_research_projects(self):
+        self.fake_projects()
+        self.link("plugins")
+        self.assertEqual(self.state()["research"]["links"], {"plugins": [{"id": "ai-search", "name": "AI search"}]})
+        opsd.set_setting("research_repo", "")
+        self.assertIsNone(self.state()["research"])
 
 
 if __name__ == "__main__":

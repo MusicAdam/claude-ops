@@ -469,6 +469,22 @@ and `chat`. `file` serves only `.md` files inside the research repo.
   hour ago never notifies, so turning research on doesn't replay its history.
 - **The brake.** While the usage brake holds the queue, dispatch refuses a new run with a 409 that gives the
   brake's words. Chats are never held.
+- **Linked code project.** A research project in `projects.json` may carry `repo`: the id of a claude-ops
+  project (a name `opsd.py send` accepts, such as `plugins`, `ballup-monorepo` or `claude-ops`). Without it, or
+  with it empty, the project stands alone; nothing is migrated. Each research project links to at most one code
+  project, and several can link to the same one. Create and update (`/projects`, `/projects/<id>`) take `repo`;
+  `""` or null clears it, and an id that isn't a configured claude-ops project is refused with a 400 that names it.
+  Other keys on a project are kept. `projects` returns `repo` (or null) for each project, and `/api/state` has
+  `research.links`: for each claude-ops project, the `{id, name}` research projects linked to it (read from
+  `projects.json` on each call; reports aren't scanned).
+- **Stale links.** If the linked claude-ops project is later removed or archived, the stored `repo` stays. The
+  Research tab shows it muted as `<id> (not a project)` and runs get no repo context for it. It is never an error.
+- **Repo context.** A run assigned to a linked research project, and a chat about a linked project or about a
+  proposal in one, get a short block in their prompt: the project is the code project '<title>' at its checkout
+  (the toml's `repo`), read that repo's CLAUDE.md and the design doc it names for what is already built before
+  answering, and treat the repo as read-only context, never editing files there. That run or chat turn also gets
+  `--add-dir <repo>` so it may read there; tools and flags are otherwise unchanged. A standalone project, a stale
+  link or a checkout path that doesn't exist gets neither.
 
 ### The Research tab
 
@@ -483,6 +499,11 @@ Stop button; to-dos; and the source registry. Reports render with the dashboard'
 - **Read-only.** While the old server runs, a banner at the top says "The old research dashboard is running.
   Stop it to make changes here." and every write control is disabled. Reads keep working. A refused write shows
   the server's words next to its button, as does a run the usage brake holds.
+- **Code project.** A project's new/edit form has a **Code project** select: `— none (standalone)` or one of
+  the claude-ops projects by title. The project panel shows `Code: <title>` for a linked project; click it to open
+  that project on the Projects tab. A stale link shows muted as `<id> (not a project)`.
+- **Research chips.** On the Projects tab, each claude-ops project shows a small `Research: <name>` chip per
+  research project linked to it. Click one to open `#research/project/<id>`. No chips while research is off.
 - **Header count.** While research runs or chat turns are under way, the header's working chip adds
   `· K research`. They take no task slot, so they are not in `N/max`. Click it to open the tab on the runs.
 
