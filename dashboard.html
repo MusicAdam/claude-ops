@@ -563,6 +563,9 @@ a[data-task] { color: var(--accent); cursor: pointer; }
   #tdstep { flex: 0 1 auto; min-height: 0; max-height: none; overflow: auto; padding-top: 6px; }
   #tdcentre #chat { flex: 1 0 auto; min-height: 60vh; }
   @supports (height: 100dvh) { #tdcentre #chat { min-height: 60dvh; } }
+  #tdsecbar .tdchips { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; margin-bottom: 6px; }
+  #tdsecbar .tdchips::-webkit-scrollbar { display: none; }
+  #tdsecbar .tdchips button { flex: none; white-space: nowrap; }
   .stepcard { padding: 6px 10px 8px; margin-bottom: 6px; }
   .stepcard .ph { display: inline-flex; }
   .stepcard .top { display: flex; align-items: center; gap: 6px; }
