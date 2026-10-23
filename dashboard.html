@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Claude Ops</title>
 <style>
 :root {
@@ -518,6 +518,86 @@ a[data-task] { color: var(--accent); cursor: pointer; }
 .stages span:first-child { border-radius: 6px 0 0 6px; } .stages span:last-child { border-radius: 0 6px 6px 0; }
 .stages span.past { color: var(--ink); }
 .stages span.now { background: var(--accent); color: #fff; font-weight: 600; }
+/* Today on a phone (README "Today on a phone"): one column at a time under a one-row header, switched by a bottom
+   bar; the page fits the visible viewport. The phone-only parts of the step card are hidden on wider screens. */
+#tdnav, .stepcard .ph { display: none; }
+@media (max-width: 699px) {
+  body.td { overflow: hidden; }
+  body.td header { flex-wrap: nowrap; gap: 8px; min-height: 40px; padding: 4px max(10px, env(safe-area-inset-right)) 4px max(10px, env(safe-area-inset-left));
+                   padding-top: max(4px, env(safe-area-inset-top)); }
+  body.td header > :is(.grow, #hdr, #usage, #pause, #pauseall, #resumeall), body.td #tab-today { display: none !important; }
+  body.td header h1 { font-size: 15px; white-space: nowrap; }
+  body.td #proj { flex: 1 1 0; min-width: 0; padding: 4px 6px; }
+  body.td #morebtn { white-space: nowrap; padding: 4px 10px; }
+  body.td #limitbar { position: fixed; left: 8px; right: 8px; top: calc(var(--hdr-h, 40px) + 4px); z-index: 4; background: var(--panel);
+                      border: 1px solid var(--warn); flex-wrap: wrap; }
+  body.td :is(input, select, textarea) { font-size: 16px; }  /* below 16px iOS zooms in on focus */
+  #todayview { --tdh: calc(100vh - var(--hdr-h, 40px) - 56px - env(safe-area-inset-bottom));
+               display: block; padding: 0 max(10px, env(safe-area-inset-right)) 0 max(10px, env(safe-area-inset-left)); overflow: hidden; }
+  @supports (height: 100dvh) { #todayview { --tdh: calc(100dvh - var(--hdr-h, 40px) - 56px - env(safe-area-inset-bottom)); } }
+  #todayview, #todayview > *, #tdright { height: var(--tdh); }
+  #todayview > * { display: none; }
+  #todayview[data-pane="todo"] > #tdleft, #todayview[data-pane="activity"] > #tdright { display: block; overflow: auto; overflow-x: hidden; padding: 10px 0 16px; }
+  #todayview[data-pane="now"] > #tdcentre { display: flex; overflow: hidden; }
+  #tdright.panel-open { display: block; }
+  #tdpanel { position: fixed; inset: 0; z-index: 6; padding: max(10px, env(safe-area-inset-top)) max(12px, env(safe-area-inset-right))
+             max(12px, env(safe-area-inset-bottom)) max(12px, env(safe-area-inset-left)); overscroll-behavior: contain; }
+  #tdpanel .stages { font-size: 10px; }
+  #tdnav { display: flex; position: fixed; left: 0; right: 0; bottom: 0; z-index: 5; height: calc(56px + env(safe-area-inset-bottom));
+           padding: 0 env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+           background: var(--panel); border-top: 1px solid var(--line); }
+  #tdnav button { flex: 1; border: 0; border-radius: 0; background: none; color: var(--muted); font-size: 13px; padding: 0;
+                  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px; }
+  #tdnav button i { font-style: normal; font-size: 18px; line-height: 1; position: relative; }
+  #tdnav button.on { color: var(--accent); font-weight: 600; }
+  #tdnav .badge { position: absolute; top: -6px; left: 14px; min-width: 18px; padding: 0 5px; border-radius: 99px; background: var(--bad);
+                  color: #fff; font-size: 11px; font-weight: 600; line-height: 18px; }
+  /* The step: compact, at most what leaves the conversation 60% of the screen */
+  #tdstep { flex: 0 1 auto; min-height: 0; max-height: none; overflow: auto; padding-top: 6px; }
+  #tdcentre #chat { flex: 1 0 auto; min-height: 60vh; }
+  @supports (height: 100dvh) { #tdcentre #chat { min-height: 60dvh; } }
+  .stepcard { padding: 6px 10px 8px; margin-bottom: 6px; }
+  .stepcard .ph { display: inline-flex; }
+  .stepcard .top { display: flex; align-items: center; gap: 6px; }
+  .stepcard .top .k { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-transform: none; letter-spacing: 0; }
+  .stepcard .top button { flex: none; padding: 1px 8px; font-size: 13px; white-space: nowrap; }
+  .stepcard .top .back, .stepcard .top .skip { border-color: transparent; background: none; color: var(--accent); padding: 2px 4px; }
+  .stepcard .top .skip { margin: 0; color: var(--muted); }
+  .stepcard h2 { font-size: 15px; line-height: 1.3; margin: 2px 0 0; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+  .stepcard h2 .verb { margin-right: 6px; }
+  .stepcard .dets { display: none; }
+  .stepcard.open .dets { display: block; }
+  .stepcard .why { max-height: 6em; font-size: 13px; }
+  .stepcard .row { margin-top: 6px; flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; gap: 6px; }
+  .stepcard .row::-webkit-scrollbar { display: none; }
+  .stepcard .row > button { flex: none; white-space: nowrap; padding: 4px 12px; }
+  .stepcard .row > .skip { display: none; }
+  /* The conversation: messages may wrap anywhere, never widen the page */
+  #tdcentre #chathead { margin: 0 0 6px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #tdcentre #msgs { overflow-x: hidden; }
+  #tdcentre .msg { overflow-wrap: anywhere; padding: 8px 10px; }
+  #tdcentre .msg table { display: block; overflow-x: auto; }
+  /* The composer: attach, the box (up to 4 lines), send; the mode line and project picker above */
+  #tdcentre .composer { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 6px; padding: 6px 0 8px; }
+  #tdcentre .composer > .row { display: contents; }
+  #tdcentre .composer #convmodes { order: 0; flex-basis: 100%; min-width: 0; }
+  #tdcentre .composer #convmodes .row { flex-wrap: nowrap; gap: 6px; margin: 0; }
+  #tdcentre .composer .convchips { flex: 0 1 auto; min-width: 0; flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; }
+  #tdcentre .composer .convchips::-webkit-scrollbar { display: none; }
+  #tdcentre .composer .convchips button { flex: none; white-space: nowrap; }
+  #tdcentre .composer #convmodes #newtopic { flex: none; white-space: nowrap; }
+  #tdcentre .composer #saymode, #tdcentre .composer #cprojwrap, #tdcentre .composer #chatmsg:not(:empty) { order: 0; flex-basis: 100%; margin: 0; }
+  #tdcentre .composer #chatmsg:empty, #tdcentre .composer .row > .muted, #tdcentre .composer .row > span[style],
+  #tdcentre .composer :is(#endchat, #reopenchat) { display: none; }
+  #tdcentre .composer #clip { order: 1; }
+  #tdcentre .composer #say { order: 2; flex: 1; min-width: 0; min-height: 0; height: 40px; max-height: calc(4 * 1.45em + 18px);
+                             resize: none; padding: 8px 12px; border-radius: 18px; }
+  #tdcentre .composer #say::placeholder { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #tdcentre .composer #send { order: 3; font-size: 0; width: 40px; height: 40px; padding: 0; border-radius: 50%; }
+  #tdcentre .composer #send::after { content: "↑"; font-size: 20px; font-weight: 700; }
+  #tdcentre .composer #stopchat { order: 4; }
+  #tdcentre .composer :is(#clip, #stopchat) { height: 40px; }
+}
 </style>
 </head>
 <body>
@@ -536,12 +616,13 @@ a[data-task] { color: var(--accent); cursor: pointer; }
     <button id="trynow" title="Stop waiting for the reset: resume the tasks the usage limit paused and start queued ones">Try now</button></div>
 </header>
 <div id="tip" class="hidden"></div>
-<div id="todayview" class="hidden">
+<div id="todayview" class="hidden" data-pane="todo">
   <aside class="side" id="tdleft"></aside>
   <section id="tdcentre"><div id="tdstep"></div></section>
   <aside class="side" id="tdright"><div class="tl" id="tdtl"></div>
     <div id="tdpanel" class="hidden"><div id="tdphead"></div><div id="tdpother"></div><div id="tdpdet"></div></div></aside>
 </div>
+<nav id="tdnav" class="hidden"><button data-pane="todo"><i>☰<span class="badge hidden"></span></i>To-do</button><button data-pane="now"><i>▶</i>Now</button><button data-pane="activity"><i>◷</i>Activity</button></nav>
 <main id="settingsview" class="hidden">
   <section>
     <div class="card settings">
@@ -1697,7 +1778,8 @@ function showTab(t) {
   if (was === "today" && t !== "today") tdLeave();
   if (t === "today") $("#tdcentre").appendChild($("#chat"));
   else if ($("#chat").parentElement !== $("#panes")) $("#panes").appendChild($("#chat"));
-  $("#todayview").classList.toggle("hidden", t !== "today");
+  $("#todayview").classList.toggle("hidden", t !== "today"); $("#tdnav").classList.toggle("hidden", t !== "today");
+  document.body.classList.toggle("td", t === "today");
   renderSayMode();
   $("#tasksview").classList.toggle("hidden", t !== "tasks");
   $("#projectsview").classList.toggle("hidden", t !== "projects");
@@ -2639,7 +2721,8 @@ new ResizeObserver(() => document.documentElement.style.setProperty("--hdr-h", $
 // from the Design tab); the right column is read-only status, and a click opens a panel over it, the task page
 // among them (moved here from History). See README "Today view".
 const TD = {key: "", filter: "all", skip: {}, order: [], item: null, convKey: null, task: null, mode: null, busy: "",
-            msg: "", note: "", panel: null, cv: null, rs: null, over: null, applied: "", starter: "", earlierOpen: false};
+            msg: "", note: "", panel: null, cv: null, rs: null, over: null, applied: "", starter: "", earlierOpen: false,
+            pane: "todo", dets: false};
 try {
   TD.key = localStorage.getItem("ops-todo") || "";
   TD.filter = localStorage.getItem("ops-todo-filter") || "all";
@@ -2654,6 +2737,20 @@ const tdSave = () => { try { localStorage.setItem("ops-todo", TD.key); localStor
 const verbPill = x => `<span class="verb g-${esc(x.group)}">${esc(x.verb)}</span>`;
 const tdDoneToday = () => state.tasks.filter(t => t.state === "done" && t.finished >= midnight() && inView(t.project))
   .sort((a, b) => b.finished - a.finished);
+// Below 700px Today shows one column at a time (README "Today on a phone"). Opening a column, a step or a panel
+// there adds a history entry, so the phone's back gesture closes one level: the panel, then the step.
+const phone = () => matchMedia("(max-width: 699px)").matches;
+function tdGo(pane) {
+  if (pane === TD.pane) return;
+  if (pane === "todo" && history.state?.td === "pane") return history.back();
+  if (pane !== "todo" && TD.pane === "todo" && phone()) history.pushState({td: "pane"}, "", location.hash);
+  TD.pane = pane; renderToday();
+}
+function tdBackOne() {
+  if (TD.panel) tdClosePanelNow();
+  else if (TD.pane !== "todo") { TD.pane = "todo"; renderToday(); }
+}
+document.querySelectorAll("#tdnav [data-pane]").forEach(b => b.onclick = () => tdGo(b.dataset.pane));
 const convBusy = () => !!((chatData && chatData.state === "thinking") || (TD.rs && TD.rs.running));
 
 // The items in view, skipped ones last in the order you skipped them. A skip lasts until midnight.
@@ -2681,12 +2778,15 @@ function renderToday() {
   TD.item = it;
   if ((it ? it.key : "") !== TD.convKey) tdChanged(it);
   tdLeft(all, shown); tdStep(it, shown); tdTimeline(); tdPanel(); renderSayMode();
+  $("#todayview").dataset.pane = TD.pane;
+  document.querySelectorAll("#tdnav [data-pane]").forEach(b => b.classList.toggle("on", b.dataset.pane === TD.pane));
+  const badge = $("#tdnav .badge"); badge.textContent = all.length; badge.classList.toggle("hidden", !all.length);
 }
 // A new item under the step: its own message-box mode, facts and conversation.
 function tdChanged(it) {
   TD.convKey = it ? it.key : "";
   TD.mode = it && it.verb === "Answer" ? tdAnswerMode(it) : null;
-  TD.task = null; TD.over = null; TD.msg = ""; TD.note = ""; chatKey = ""; tdClearStarter();
+  TD.task = null; TD.over = null; TD.msg = ""; TD.note = ""; chatKey = ""; TD.dets = false; tdClearStarter();
   refreshDesign();
 }
 const tdAnswerMode = it => ({a: "answer", id: it.source.id, words: `Your message answers #${it.source.id}'s question.`});
@@ -2705,7 +2805,7 @@ function tdLeft(all, shown) {
       || `<div class="muted">${all.length ? "Nothing under this filter." : "Nothing needs you right now."}</div>`);
   if (!put($("#tdleft"), html)) return;
   $("#tdleft").querySelectorAll("[data-f]").forEach(b => b.onclick = () => { TD.filter = b.dataset.f; tdSave(); renderToday(); });
-  $("#tdleft").querySelectorAll("[data-key]").forEach(el => el.onclick = () => { TD.key = el.dataset.key; tdSave(); renderToday(); });
+  $("#tdleft").querySelectorAll("[data-key]").forEach(el => el.onclick = () => { TD.key = el.dataset.key; tdSave(); if (TD.pane === "todo") tdGo("now"); else renderToday(); });
 }
 
 // What the step can do: one primary action, then the others. Each calls an endpoint the older pages use.
@@ -2753,17 +2853,24 @@ function tdStep(it, shown) {
     return;
   }
   const busy = TD.busy === it.key, acts = tdActions(it), facts = tdFacts(it);
-  const html = `<div class="stepcard"><div class="k">Step ${shown.indexOf(it) + 1} of ${shown.length} · ${esc(P(it.project).title)}</div>
+  // On a phone the top row also has ‹ To-do, Details ▾ (the why and the facts, closed at first) and Skip →
+  const dets = !!(it.why || facts);
+  const html = `<div class="stepcard${TD.dets ? " open" : ""}"><div class="top"><button class="ph back" data-back title="Back to the list">‹ To-do</button>
+    <div class="k">Step ${shown.indexOf(it) + 1} of ${shown.length} · ${esc(P(it.project).title)}</div>
+    ${dets ? `<button class="ph" data-dets aria-expanded="${TD.dets}">Details ${TD.dets ? "▴" : "▾"}</button>` : ""}
+    <button class="ph skip" data-skip title="Move it to the end of the list, in this browser, until midnight">Skip →</button></div>
     <h2>${verbPill(it)}<span>${esc(it.title)}</span></h2>
-    ${it.why ? `<div class="why">${esc(it.why)}</div>` : ""}
-    ${facts ? `<div class="facts">${facts}</div>` : ""}
+    <div class="dets">${it.why ? `<div class="why">${esc(it.why)}</div>` : ""}
+    ${facts ? `<div class="facts">${facts}</div>` : ""}</div>
     <div class="row">${acts.map(b => `<button data-ta="${esc(b.a)}" class="${b.primary ? "primary" : ""}" ${busy || b.disabled ? "disabled" : ""} title="${esc(b.title || "")}">${esc(b.label)}</button>`).join("")}
       <button class="skip" data-skip title="Move it to the end of the list, in this browser, until midnight">Skip for now →</button></div>
     ${TD.msg ? `<div class="err" style="margin-top:8px;white-space:pre-wrap">${esc(TD.msg)}</div>` : TD.note ? `<div class="muted" style="margin-top:8px">${esc(TD.note)}</div>` : ""}</div>`;
   if (!put($("#tdstep"), html)) return;
   $("#tdstep").querySelectorAll("[data-ta]").forEach(b => b.onclick = () => tdDo(b.dataset.ta));
   $("#tdstep").querySelectorAll("[data-files]").forEach(a => a.onclick = () => tdOpenTask(+a.dataset.files, true));
-  $("#tdstep [data-skip]").onclick = tdSkip;
+  $("#tdstep").querySelectorAll("[data-skip]").forEach(b => b.onclick = tdSkip);
+  $("#tdstep [data-back]").onclick = () => tdGo("todo");
+  if ($("#tdstep [data-dets]")) $("#tdstep [data-dets]").onclick = () => { TD.dets = !TD.dets; renderToday(); };
 }
 function tdSkip() {
   const it = TD.item; if (!it) return;
@@ -2811,8 +2918,16 @@ function tdPlaceholder() {
     + ". Drop or paste screenshots to attach them. (⌘↩ sends)";
   return CONV_SAY[TD.cv ? TD.cv.mode : "design"];
 }
+// On a phone's Today the message box is one line that grows with what you type, to at most 4 lines (the CSS caps it).
+function sayFit() {
+  const el = $("#say");
+  if (!(tab === "today" && phone())) { if (el.style.height) el.style.height = ""; return; }
+  el.style.height = "0px"; el.style.height = (el.value ? Math.max(40, el.scrollHeight + 2) : 40) + "px";  // not the placeholder's height
+}
+$("#say").addEventListener("input", sayFit);
 // The line over the message box that says where a message goes, when it isn't the conversation above it.
 function renderSayMode() {
+  sayFit();
   const today = tab === "today", m = today && TD.mode, el = $("#saymode");
   el.classList.toggle("hidden", !m);
   if (put(el, m ? `<span>${esc(m.words)}</span><button id="saycancel">Cancel</button>` : "") && m)
@@ -2980,12 +3095,12 @@ function tdTimeline() {
   });
 }
 function tdOpenPanel(panel) {
-  tdPanelTask(false); TD.panel = panel; $("#tdpanel").scrollTop = 0; renderToday();
+  tdPanelPush(); tdPanelTask(false); TD.panel = panel; $("#tdpanel").scrollTop = 0; renderToday();
 }
 
 // ---- the panel over the timeline: a task's page, the promote train, or the research runs
 function tdOpenTask(id, filesOpen) {
-  tdPanelTask(true);
+  tdPanelPush(); tdPanelTask(true);
   TD.panel = {kind: "task", id};
   $("#tdpanel").scrollTop = 0;
   renderToday();
@@ -3001,7 +3116,9 @@ function tdPanelTask(on) {
   if (on) $("#tdpdet").appendChild($("#detail"));
   else if ($("#detail").parentElement !== $("#detailcol")) { $("#detailcol").appendChild($("#detail")); clearSelection(); }
 }
-function tdClosePanel() { tdPanelTask(false); TD.panel = null; renderToday(); }
+function tdPanelPush() { if (!TD.panel && phone()) history.pushState({td: "panel"}, "", location.hash); }
+function tdClosePanel() { if (history.state?.td === "panel") history.back(); else tdClosePanelNow(); }
+function tdClosePanelNow() { tdPanelTask(false); TD.panel = null; renderToday(); }
 function tdLeave() { if (TD.panel) { tdPanelTask(false); TD.panel = null; } TD.mode = null; }
 function stageOf(t) {
   if (!t) return -1;
@@ -3019,7 +3136,7 @@ function tdPanel() {
   $("#tdright").classList.toggle("panel-open", !!p); $("#tdpanel").classList.toggle("hidden", !p);
   $("#tdpdet").classList.toggle("hidden", !p || p.kind !== "task");
   if (!p) return;
-  let head = `<div class="tdphead"><button id="tdpclose">← Timeline</button><span style="flex:1"></span>
+  let head = `<div class="tdphead"><button id="tdpclose">${phone() ? "‹ Back" : "← Timeline"}</button><span style="flex:1"></span>
     <button id="tdpask" title="Put a first line about this in the message box">Ask Claude about this</button></div>`, other = "";
   if (p.kind === "task") {
     const t = state.tasks.find(x => x.id === p.id), k = stageOf(t);
@@ -3076,12 +3193,13 @@ async function tdAsk() {
     : p.kind === "schedule" ? `About the schedule “${(sch || {}).title || "#" + p.id}” (${(sch || {}).every || ""}): `
     : "About the research runs: ";
   TD.mode = null; tdClearStarter();
+  if (phone()) { tdClosePanel(); TD.pane = "now"; }  // the message box is under the step
   // To the plan & design topic of the project it is about: the current one, the latest, or a new one
   const project = p.kind === "task" ? (t ? t.project : "") : p.kind === "train" ? p.project : sch ? sch.project : "";
   if (project && project !== convProject()) TD.over = {key: TD.convKey, project};
   await convOpen({how: "task"});
   renderSayMode();
-  const say = $("#say"); say.value = start + say.value; say.focus(); say.setSelectionRange(start.length, start.length);
+  const say = $("#say"); say.value = start + say.value; say.focus(); say.setSelectionRange(start.length, start.length); sayFit();
 }
 
 // ---- the header's More menu
@@ -3991,6 +4109,7 @@ $("#rsrepo").onchange = () => api("/api/settings", {research_repo: $("#rsrepo").
   .catch(e => $("#rsrepomsg").textContent = e.message);
 window.addEventListener("popstate", () => {
   const h = location.hash;
+  if (tab === "today" && h === "#today") return tdBackOne();  // a step or panel opened on a phone
   if (/^#research(\/|$)/.test(h)) {
     rsApply(h);
     if (tab !== "research") showTab("research"); else rsRender();

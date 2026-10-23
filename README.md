@@ -591,8 +591,33 @@ Their routes (`#tasks`, `#projects`, `#schedules`, …) still open them. The que
   chats once when an item has no chat of its own. `GET /api/tasks/<id>` gains `chat_from`, the design chat that
   queued the task or its parent. The conversation reads `GET /api/conversation?project=<name>` with each poll,
   and the current topic (`GET /api/designs/<id>`, or `/api/research/threads/<id>`).
-- **Layout.** Desktop, 1100px and wider, has the three columns. Narrower windows stack them; the phone layout is
-  a later task.
+- **Layout.** Desktop, 1100px and wider, has the three columns. Narrower windows stack them. Below 700px the
+  phone layout below takes over.
+
+### Today on a phone
+
+Below 700px Today is phone-first. The rules:
+
+- **PHONE-1 One column at a time.** A bottom bar switches between **To-do** (with a red count badge), **Now** (the
+  step and its conversation) and **Activity** (the timeline). The page opens on To-do. Tapping a to-do opens it in
+  Now. Task details, and the other timeline panels, open full screen.
+- **HDR-1 Header.** One row, about 40px: the name, the project switcher and **More**. The Today button, the queue
+  readouts and the pause buttons are left out on Today; the other pages still show them. The usage-limit bar
+  still shows when the limit is hit.
+- **HDR-2 Step card.** Compact by default, about 100px: one top row with **‹ To-do**, **Step k of n · project**,
+  **Details ▾** and **Skip →**; then the title; then one row of action buttons that scrolls sideways. The why and
+  the facts open under **Details ▾**.
+- **HDR-3 Composer.** One row: attach (📎), the message box (it grows to at most 4 lines) and an **↑** send
+  button. The mode chips (with **New topic**), the line that says where a message goes, and the project picker sit
+  above it.
+- **HDR-4 Room to talk.** While a step is open the conversation gets at least 60% of the screen height; the step
+  card scrolls inside what is left.
+- **PHONE-2 Back.** **‹ To-do** returns to the list, and so does the phone's back gesture: opening a step or a
+  details panel adds a history entry, and going back closes one level (the panel, then the step).
+- **PHONE-3 Fits the screen.** The page is sized to the visible viewport (`100dvh`, falling back to `100vh`), so
+  the bottom bar is never under the browser's toolbar, and it keeps clear of the notch and home indicator
+  (safe-area insets). Nothing scrolls sideways except the step's action row; tab rows that could overflow hide
+  their scrollbar and still scroll sideways.
 
 ## Chat mode
 
