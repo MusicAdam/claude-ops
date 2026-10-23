@@ -2673,7 +2673,8 @@ function tdActions(it) {
     // Send to dev underneath. It reaches main by itself when its task promotes after merge (the project's default)
     case "Commit": return [g.senddev_open ? A("details:" + g.senddev_open, `Sending… #${g.senddev_open}`, {primary: 1, title: "Open the task sending these files"})
       : A("senddev", "Commit these", {primary: 1, title: `Lands these files on ${g.direct_main || g.auto_release ? g.main_branch : g.dev_branch} through the gate, then clears them from your checkout`})];
-    case "Read": return it.report ? [A("report", "Open report", {primary: 1, title: `Read ${it.report.path} as on ${g.dev_branch || "dev"}. Opening it takes it off your list`}), A("details", "Details")]
+    case "Read": return it.report ? [A("report", "Open report", {primary: 1, title: `Read ${it.report.path} as on ${g.dev_branch || "dev"}. Opening it takes it off your list`}),
+        A("markreport", "Mark read", {title: "Take it off your list without opening it"}), A("details", "Details")]
       : it.unread ? [A("read", "Mark read", {primary: 1, title: "The reply is below. It stays on your list until you end the topic"}), A("endtopic", "End topic", {title: "Done with it: off your list, under Ended in Earlier topics"})]
       : [A("endtopic", "End topic", {primary: 1, title: "Done with it: off your list, under Ended in Earlier topics"}), A("reply", "Reply", {title: "Answer Claude in the message box below"})];
     case "Agree": return [A("reply", "Reply", {primary: 1, title: "Answer Claude in the message box below"})].concat(it.todo ? [A("done", "Done")] : []);
@@ -2948,7 +2949,7 @@ async function tdDo(a) {
   if (a === "read") return run(() => api(`/api/designs/${s.id}/seen`, {}));
   if (a === "endtopic") return run(() => api("/api/conversation/end", {project: it.project, ref: s.id}).then(cv => { if (convProject() === it.project) TD.cv = cv; }));
   if (a === "done") return run(() => api(`/api/todos/${it.todo}/done`, {}));
-  if (a === "report") return run(() => tdOpenReport(it.project, it.report.path));
+  if (a === "report" || a === "markreport") return tdOpenReport(it.project, it.report.path, a === "report");
 }
 async function tdSend(text) {
   const m = TD.mode;
@@ -3232,9 +3233,20 @@ function tdResearchList(sd) {
     + `<h3>Reports</h3>${reps || `<div class="muted">No reports yet on ${dev}. New research writes one to docs/research/.</div>`}`
     + `<h3>Recurring research</h3>${sch || `<div class="muted">None. Pick a repeat in New research to add one.</div>`}`;
 }
-async function tdOpenReport(project, path) {
-  try { await api(`/api/projects/${encodeURIComponent(project)}/research/read`, {path}); } catch {}
-  openRepoFile(project, path);
+// Open report and Mark read (RES-5): the report's Read step leaves the list at once; if marking it read fails, it
+// comes back, with the error where the other to-do actions show theirs. The server also marks it read when it serves it.
+async function tdOpenReport(project, path, open = true) {
+  const mine = x => x.report && x.report.path === path && x.project === project;
+  const gone = (state.todos || []).filter(mine), was = TD.key;
+  if (gone.length) { state.todos = state.todos.filter(x => !mine(x)); TD.msg = ""; renderToday(); }
+  if (open) openRepoFile(project, path);
+  try { await api(`/api/projects/${encodeURIComponent(project)}/research/read`, {path}); }
+  catch (e) {
+    const back = gone.filter(x => !tdItem(x.key));
+    state.todos = (state.todos || []).concat(back);
+    if (back.some(x => x.key === was)) TD.key = was;
+    TD.msg = `Couldn't mark ${path} read: ${e.message}`; renderToday(); return;
+  }
   if (TD.sd && TD.sd.project === project) tdReload("research");
   refresh();
 }

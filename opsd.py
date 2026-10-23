@@ -3156,12 +3156,24 @@ def research_reports(p):
     return sorted(out, key=lambda x: (-(x["date"] or 0), x["path"]))
 
 
-def report_read(project, path):
-    """Mark the report at path read: every research task of project that wrote it. Returns their ids (RES-5)."""
+def report_read(project, path, merged_only=False):
+    """Mark the report at path read: every research task of project that wrote it (with merged_only, only those done
+    and merged). Returns their ids (RES-5)."""
     proj(project)
+    only = " AND state='done' AND merged IS NOT NULL AND merged!=''" if merged_only else ""
     return [r["id"] for r in q("UPDATE tasks SET research=json_set(research, '$.read', ?) WHERE project=? AND "
                                "research IS NOT NULL AND json_extract(research, '$.path')=? AND "
-                               "json_extract(research, '$.read') IS NULL RETURNING id", (time.time(), project, path))]
+                               f"json_extract(research, '$.read') IS NULL{only} RETURNING id",
+                               (time.time(), project, path))]
+
+
+def serve_repo_file(p, rel):
+    """GET /api/files: repo_file, and a merged research report served this way counts as read (RES-5), whichever
+    dashboard view opened it."""
+    f, why = repo_file(p, rel)
+    if f:
+        report_read(p.name, os.path.relpath(f, os.path.realpath(p.dev_wt)), merged_only=True)
+    return f, why
 
 
 def project_research(project):
@@ -7667,7 +7679,7 @@ class H(BaseHTTPRequestHandler):
         if path == "/api/files":  # a repo file as on the project's dev worktree, for a link in a chat
             qs = parse_qs(urlparse(self.path).query)
             p = PROJECTS.get(qs.get("project", [""])[0])
-            f, why = repo_file(p, qs.get("path", [""])[0]) if p else (None, "unknown project")
+            f, why = serve_repo_file(p, qs.get("path", [""])[0]) if p else (None, "unknown project")
             if not f:
                 return self.send(404, {"error": why})
             return self.send(200, f.read_bytes(), FILE_TYPES.get(f.suffix.lower(), FILE_TEXT),
