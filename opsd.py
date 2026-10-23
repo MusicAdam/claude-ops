@@ -6,6 +6,8 @@
   opsd.py add -p NAME [--model M] [--effort E] "text..."   queue a task through the running daemon; --model opus,
                                        sonnet, haiku or a full model id (else the setting model:task, then model);
                                        --effort low, medium, high, xhigh or max (else the setting effort)
+  opsd.py schedule add -p NAME --every 'mon 09:00' [--body TEXT] [--hold] [--model M] [--effort E] "title..."
+                                       a recurring job: queue that task on that timetable (README: Recurring jobs)
   opsd.py deploy -p NAME TARGET [--version same|patch|minor|major|X.Y.Z] [--note TEXT]   deploy a [[deploy]] target
   opsd.py send NAME [--design|--chat] [--title T] [--hold] [--model M] [--effort E] "text..."
                                        from a session the queue started: a task (or chat) in another project
@@ -27,7 +29,7 @@ app. Each of the paths above is then a folder with a copy of the workspace's own
 and every repo has its own main, dev and task branches.
 """
 from contextlib import nullcontext
-import base64, ctypes, fnmatch, json, os, re, secrets, shlex, shutil, signal, sqlite3, subprocess, sys, threading, time, tomllib
+import base64, ctypes, datetime, fnmatch, json, os, re, secrets, shlex, shutil, signal, sqlite3, subprocess, sys, threading, time, tomllib
 import xml.etree.ElementTree as ET
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
@@ -708,6 +710,9 @@ def init_db():
     q("CREATE INDEX IF NOT EXISTS task_msgs_task ON task_msgs (task_id, id)")
     if "delivered" not in {r["name"] for r in q("PRAGMA table_info(task_msgs)")}:  # databases from before steering
         q("ALTER TABLE task_msgs ADD COLUMN delivered REAL")
+    q("""CREATE TABLE IF NOT EXISTS schedules (id INTEGER PRIMARY KEY, project TEXT, title TEXT, body TEXT,
+        every TEXT, next_at REAL, paused INTEGER DEFAULT 0, last_task INTEGER, created REAL, model TEXT, effort TEXT,
+        hold INTEGER DEFAULT 0, priority INTEGER DEFAULT 0)""")  # recurring jobs: see ## Recurring jobs
     q("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)")
     q("CREATE TABLE IF NOT EXISTS session_costs (session_id TEXT PRIMARY KEY, total REAL)")  # see cost_added
     for k, v in {"max_parallel": "3", "paused": "0", "model": "", "usage_brake": "85", "model:release": "sonnet",
@@ -2577,6 +2582,7 @@ def scheduler():
     n = 0
     while True:
         try:
+            run_schedules()  # before schedule_once, so a task a schedule queues can start in the same pass
             schedule_once()
             if n % 3 == 0:  # every 6 s: a scan for a running build takes up to 0.4 s
                 unblock_releases()
@@ -2639,6 +2645,171 @@ def exclusive_blocker(t):
         if o["state"] != "queued" or (-o["priority"], o["id"]) < (-t["priority"], t["id"]):
             return o
     return None
+
+
+# ---------------------------------------------------------------- recurring jobs (README: ## Recurring jobs)
+# A schedule queues an ordinary task on a timetable. Its `every` is local wall-clock time; next_at is an epoch.
+
+DAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")  # index = date.weekday()
+EVERY_FORMS = "'day HH:MM', 'weekday HH:MM', 'mon HH:MM' (any of mon..sun, or a list such as 'mon,thu HH:MM'), 'hour'"
+EVERY_RE = re.compile(r"(day|weekday|[a-z]{3}(?:,[a-z]{3})*) (\d{1,2}):(\d{2})")
+
+
+def parse_every(text):
+    """(days, hour, minute) for an `every`, days a tuple of weekdays (0 = Monday); (None, None, 0) for 'hour'.
+    ValueError, naming the accepted forms, for anything else."""
+    t = " ".join(str(text or "").lower().replace(", ", ",").split())
+    if t == "hour":
+        return None, None, 0
+    m = EVERY_RE.fullmatch(t)
+    if m and int(m.group(2)) < 24 and int(m.group(3)) < 60:
+        w = m.group(1)
+        days = tuple(range(7)) if w == "day" else tuple(range(5)) if w == "weekday" else \
+            tuple(sorted({DAYS.index(d) for d in w.split(",") if d in DAYS}))
+        if w in ("day", "weekday") or len(days) == len(w.split(",")):
+            return days, int(m.group(2)), int(m.group(3))
+    raise ValueError(f"every {text!r} is not a schedule: use one of {EVERY_FORMS}, in local time")
+
+
+def every_text(text):
+    """An `every` in its tidy form: 'mon,thu 09:00'. ValueError as parse_every."""
+    days, h, m = parse_every(text)
+    if days is None:
+        return "hour"
+    w = "day" if len(days) == 7 else "weekday" if days == tuple(range(5)) else ",".join(DAYS[d] for d in days)
+    return f"{w} {h:02d}:{m:02d}"
+
+
+def next_slot(every, after):
+    """The first slot of `every` strictly after epoch `after`, in local time. A day's HH:MM is made with mktime from
+    the local date, so it stays HH:MM across a daylight-saving change (a time the change skips comes out an hour
+    later). 'hour' is the next local :00, counted in real seconds, so an hour repeated in autumn runs twice."""
+    days, h, mi = parse_every(every)
+    lt = time.localtime(after)
+    if days is None:
+        return after - lt.tm_min * 60 - lt.tm_sec - (after % 1) + 3600
+    d0 = datetime.date(lt.tm_year, lt.tm_mon, lt.tm_mday)
+    for i in range(9):
+        d = d0 + datetime.timedelta(days=i)
+        if d.weekday() not in days:
+            continue
+        at = time.mktime((d.year, d.month, d.day, h, mi, 0, 0, 0, -1))
+        if at > after:
+            return at
+    raise ValueError(f"no slot for {every!r}")  # unreachable: every form has a day within a week
+
+
+def schedule(sid):
+    return q("SELECT * FROM schedules WHERE id=?", (sid,), one=True)
+
+
+def schedule_fields(b, old=None):
+    """The schedules row a create or edit body makes, checked: a known project, a title or body, a valid every."""
+    s = dict(old or {})
+    for k in ("project", "title", "body", "every", "model", "effort", "hold", "priority"):
+        if k in b:
+            s[k] = b[k]
+    proj(s.get("project") or "")
+    s["title"], s["body"] = (s.get("title") or "").strip()[:120], (s.get("body") or "").strip()
+    if not s["title"] and not s["body"]:
+        raise ValueError("give the schedule a title or a body")
+    s["title"] = s["title"] or title_of(s["body"])
+    s["every"] = every_text(s.get("every"))
+    s["model"], s["effort"] = model_name(s.get("model")), effort_name(s.get("effort"))
+    s["hold"], s["priority"] = int(bool(s.get("hold"))), int(s.get("priority") or 0)
+    return s
+
+
+def add_schedule(b, now=None):
+    s = schedule_fields(b)
+    return q("INSERT INTO schedules (project, title, body, every, next_at, paused, created, model, effort, hold, "
+             "priority) VALUES (?,?,?,?,?,0,?,?,?,?,?)",
+             (s["project"], s["title"], s["body"], s["every"], next_slot(s["every"], now or time.time()),
+              time.time(), s["model"], s["effort"], s["hold"], s["priority"]))
+
+
+def edit_schedule(sid, b, now=None):
+    old = schedule(sid)
+    if not old:
+        raise ValueError(f"no schedule #{sid}")
+    s = schedule_fields(b, old)
+    nxt = next_slot(s["every"], now or time.time()) if s["every"] != old["every"] else old["next_at"]
+    q("UPDATE schedules SET project=?, title=?, body=?, every=?, next_at=?, model=?, effort=?, hold=?, priority=? "
+      "WHERE id=?", (s["project"], s["title"], s["body"], s["every"], nxt, s["model"], s["effort"], s["hold"],
+                     s["priority"], sid))
+
+
+def queue_scheduled(s, why):
+    """Queue schedule s's task, as /api/tasks would, and make it the schedule's last task."""
+    tid = add_task(s["project"], s["body"] or s["title"], s["title"], s["priority"], s["hold"], model=s["model"],
+                   effort=s["effort"], origin={"ref": f"schedule:{s['id']}", "kind": "schedule", "id": s["id"],
+                                               "project": s["project"], "title": s["title"]})
+    ev(tid, f"queued by schedule #{s['id']} ({s['every']}): {why}")
+    q("UPDATE schedules SET last_task=? WHERE id=?", (tid, s["id"]))
+    return tid
+
+
+def run_schedules(now=None):
+    """Queue the task of every schedule that is due. One whose last task is still open skips the slot (no pile-up).
+    next_at moves to the first slot after now, so slots missed while the daemon was down run once, not once each."""
+    if STOPPING.is_set():
+        return []
+    now = now or time.time()
+    ids = []
+    for s in q("SELECT * FROM schedules WHERE paused=0 AND next_at<=? ORDER BY next_at, id", (now,)):
+        try:
+            nxt = next_slot(s["every"], now)
+        except ValueError:  # a row edited by hand: park it rather than fail every pass
+            q("UPDATE schedules SET paused=1 WHERE id=?", (s["id"],))
+            print(f"schedule #{s['id']}: bad every {s['every']!r}, paused", flush=True)
+            continue
+        q("UPDATE schedules SET next_at=? WHERE id=?", (nxt, s["id"]))  # first: an error below never repeats a slot
+        last = task(s["last_task"]) if s["last_task"] else None
+        slot = time.strftime("%a %H:%M", time.localtime(s["next_at"]))
+        if last and last["state"] not in ENDED:
+            ev(last["id"], f"schedule #{s['id']} skipped its {slot} slot: this task is still {last['state']}")
+            continue
+        try:
+            ids.append(queue_scheduled(s, f"its {slot} slot" + (" (missed while the queue was down)"
+                                                                 if now - s["next_at"] > 120 else "")))
+        except Exception as e:  # its project was archived, say: the slot passes, and the next one tries again
+            print(f"schedule #{s['id']}: not queued: {e}", flush=True)
+    return ids
+
+
+def schedules_view():
+    return q("SELECT s.*, t.state AS last_state, t.title AS last_title FROM schedules s "
+             "LEFT JOIN tasks t ON t.id = s.last_task ORDER BY s.project, s.next_at")
+
+
+SCHEDULE_BLOCK = re.compile(r"```schedule[ \t]*\n(.*?)```", re.S)
+
+
+def schedules_from_reply(p, reply, did):
+    """Create every schedule in the reply's ```schedule blocks. Returns (reply without blocks, note for Claude)."""
+    made, notes = [], []
+    for block in SCHEDULE_BLOCK.findall(reply):
+        try:
+            items = json.loads(block)
+            items = items if isinstance(items, list) else [items]
+        except ValueError as e:
+            notes.append(f"your last schedule block was not valid JSON ({e}); no schedule was made from it")
+            continue
+        for it in items:
+            try:
+                if not isinstance(it, dict):
+                    raise ValueError("each schedule is a JSON object")
+                sid = add_schedule({"project": p.name, **it})
+                s = schedule(sid)
+                made.append(f"#{sid} {s['title']!r} ({s['every']}, next "
+                            f"{time.strftime('%a %d %b %H:%M', time.localtime(s['next_at']))})")
+            except Exception as e:
+                notes.append(f"schedule {str((it or {}).get('title', '') if isinstance(it, dict) else it)[:60]!r} "
+                             f"was not made: {e}")
+    if made:
+        print(f"chat #{did} made schedules {', '.join(made)}", flush=True)
+        notes.insert(0, "your last reply made schedule " + "; ".join(made))
+    return SCHEDULE_BLOCK.sub("", reply).strip(), "; ".join(notes)
 
 
 RESTART_NOTE = ("The task queue restarted while you were working. Any command you were running was stopped. "
@@ -4551,7 +4722,8 @@ def design_turn(did, text, fresh_why=None):
         saved = spec_land(p, design(did)) if d["spec"] or attached else ""  # before any task it queues starts from dev
         reply, ids, note = (reply, [], "") if chat else queue_from_reply(p, reply, did)
         reply, todo_note = todos_from_reply(p, reply, did)
-        note = "; ".join(x for x in (note, todo_note) if x)
+        reply, snote = schedules_from_reply(p, reply, did)  # design and project chats alike
+        note = "; ".join(x for x in (note, todo_note, snote) if x)
         first = not q("SELECT id FROM design_msgs WHERE design_id=? AND role='assistant' LIMIT 1", (did,))
         q("INSERT INTO design_msgs (design_id, role, text, ts, task_ids, note) VALUES (?,?,?,?,?,?)",
           (did, "assistant", reply, time.time(), json.dumps(ids), note))
@@ -5192,7 +5364,12 @@ PROJECT_CHAT_PROMPT = ("You are talking with the owner through the claude-ops da
                        "that needs their password), or you proposed something and wait for their yes, add it to their "
                        "to-do list: a fenced block in the language `todo` holding a JSON list of "
                        '{"verb": "Do" or "Agree", "title", "why"}. Never add work a task or you could do. Close an '
-                       'item that is settled with {"close": <id>} in a `todo` block; the dashboard tells you the ids.')
+                       'item that is settled with {"close": <id>} in a `todo` block; the dashboard tells you the ids. '
+                       "When the owner asks for work that repeats (\"every Monday, check the dependencies\"), add a "
+                       "fenced block with the language `schedule` holding a JSON list of {project, title, body, every, "
+                       "hold?, model?, effort?}; every is local time: 'day HH:MM', 'weekday HH:MM', 'mon HH:MM' (any of "
+                       "mon..sun, or 'mon,thu HH:MM') or 'hour'. Each slot queues a task with that body for an "
+                       "unattended worker, so the body must stand alone.")
 CHAT_STATES = ("review", "needs_input", "failed", "done", "cancelled", "paused")  # the worker is not running
 CHAT_NEXT = {"review": "Approve merges the branch with your commits (the gate runs again first); Send back with "
                        "feedback sends the worker back to work",
@@ -5364,6 +5541,8 @@ def origin_place(o):
 def tell_origin(o, text, ids=()):
     """Pass word back to the session that sent something: an event on its task, a note in its chat."""
     try:
+        if o["ref"].startswith("schedule:"):  # a schedule has no session to tell; its page shows the last task
+            return
         if o["ref"].startswith("task:"):
             if task(o["id"]):
                 ev(o["id"], text)
@@ -6127,7 +6306,7 @@ def state_payload():
         "active": len(THREADS), "data_dir": str(DATA),
         "research": research.state(),  # its own count: research runs take no task slot
         "design_cost": (q("SELECT SUM(cost) AS c FROM designs", one=True) or {}).get("c") or 0,
-        "chats": chat_counts(), "todos": todos_list(tasks, projects, last)}
+        "chats": chat_counts(), "todos": todos_list(tasks, projects, last), "schedules": schedules_view()}
 
 
 STATE_CACHE = {"at": 0.0, "data": None, "busy": False}
@@ -6338,6 +6517,24 @@ class H(BaseHTTPRequestHandler):
                            effort=b.get("effort"))
             p = PROJECTS.get(b["project"])
             return {"id": tid, **({"warning": w} if p and (w := uncommitted_warning(p)) else {})}
+        if path == "/api/schedules":
+            return {"id": add_schedule(b)}
+        m = re.fullmatch(r"/api/schedules/(\d+)(?:/(run|pause|resume|delete))?", path)
+        if m:
+            sid, act = int(m.group(1)), m.group(2)
+            s = schedule(sid)
+            if not s:
+                raise ValueError(f"no schedule #{sid}")
+            if not act:
+                return edit_schedule(sid, b)
+            if act == "run":  # now, whatever its last task is doing: you asked. next_at stays
+                return {"id": queue_scheduled(s, "Run now")}
+            if act == "delete":
+                q("DELETE FROM schedules WHERE id=?", (sid,))
+            else:  # resume from the next slot after now: a long pause doesn't run at once
+                q("UPDATE schedules SET paused=?, next_at=? WHERE id=?",
+                  (int(act == "pause"), s["next_at"] if act == "pause" else next_slot(s["every"], time.time()), sid))
+            return
         if path == "/api/openspec/new":  # New change: a design chat that drafts one
             return {"id": spec_new(proj(b["project"]), b.get("sub") or "", b.get("text"))}
         if path in ("/api/openspec/init", "/api/openspec/update"):  # Set up, Refresh commands
@@ -6635,6 +6832,23 @@ if __name__ == "__main__":
             sys.exit(json.loads(e.read() or b"{}").get("error") or str(e))
         if w := (json.loads(out or "{}") or {}).get("warning"):
             print(w, file=sys.stderr)
+    elif cmd == "schedule" and len(args) >= 3 and args[:2] == ["add", "-p"]:
+        words, opts, rest = [], {"project": args[2]}, args[3:]
+        while rest:
+            a = rest.pop(0)
+            if a in ("--every", "--body", "--model", "--effort", "--priority") and rest:
+                opts[a[2:]] = rest.pop(0)
+            elif a == "--hold":
+                opts["hold"] = True
+            else:
+                words.append(a)
+        opts["title"] = " ".join(words)
+        try:
+            post("/api/schedules", opts)
+        except HTTPError as e:
+            sys.exit(json.loads(e.read() or b"{}").get("error") or str(e))
+        except URLError as e:
+            sys.exit(f"the claude-ops daemon on port {PORT} did not answer ({e.reason})")
     elif cmd in ("archive-project", "unarchive-project") and len(args) == 1:
         try:
             post(f"/api/projects/{quote(args[0], safe='')}/{cmd.split('-')[0]}", {})
