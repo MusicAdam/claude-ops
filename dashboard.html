@@ -3032,7 +3032,7 @@ function renderConv() {
     if ($("#earlier")) $("#earlier").ontoggle = e => { TD.earlierOpen = e.target.open; };
   }
   const r = cv.research, from = cv.topic === null && cv.from;
-  const chips = [["design", "plan & design", "Reads dev and writes only its documents and OpenSpec changes: plans, designs, prototypes, never code"],
+  const chips = [["design", "plan & design", "Reads dev, runs commands and queues tasks; writes only its documents and OpenSpec changes: plans, designs, prototypes, never code"],
                  ["project", "edit my checkout", "Plain Claude in your checkout: it can read, edit and run commands there"]]
     .concat(r.on ? [["research", "research", r.name ? `A research chat about “${r.name}”` : `Link a research project to ${P(cv.project).title || cv.project} on the Research page first`]] : []);
   const html = `<div class="row"><span class="tdchips convchips">${chips.map(([m, l, tip]) => `<button data-mode="${m}" class="${cv.mode === m ? "on" : ""}" title="${esc(tip)}" ${m === "research" && !r.name ? "disabled" : ""}>${l}</button>`).join("")}</span>

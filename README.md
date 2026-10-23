@@ -567,9 +567,10 @@ Their routes (`#tasks`, `#projects`, `#schedules`, …) still open them. The que
     5. **Queue task**, beside New topic, skips Claude: the message box becomes the brief of a new task in the
        project (`POST /api/tasks`, as the Tasks page's form does), and the line over the box says so. Send reads
        **Queue task**; the row under the box links the new task. Cancel returns the box to the conversation.
-  - **What each mode may run.** Plan & design runs `git log/show/diff`, `ls` and `opsd.py send`, in its dev
-    worktree, and nothing else (`DESIGN_TOOLS`); its prompt says so and points to edit my checkout, which runs any
-    command you could at the CLI, past the guard, and can queue a task in its own project with `opsd.py send`.
+  - **What each mode may run.** Both plan & design and edit my checkout run any shell command you could at the
+    CLI, past the guard (`guard_settings()`). Plan & design's prompt keeps it off the project's files: it finds out,
+    checks and queues, and writes only its documents. Edit my checkout can also queue a task in its own project with
+    `opsd.py send`.
   - **Titles.** A new topic is titled from its first message, as chats are. Claude may retitle it when the
     subject clearly changes, with a fenced block in the language `topic`: `{"title": "..."}`. The design and project
     chat prompts say so (`design_prompt.md`, `PROJECT_CHAT_PROMPT`). The block is taken out of the reply, the
