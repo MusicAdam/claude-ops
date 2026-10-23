@@ -1550,14 +1550,51 @@ PID_FINDERS = {"pgrep", "pidof", "lsof", "fuser", "ps"}
 LAUNCHCTL_READ = {"print", "list", "blame", "getenv", "help", "version", "print-disabled", "print-cache"}
 
 
-def guard_settings(root):
+def guard_settings(root, p=None, chat=False):
     """--settings for a Claude session: run each Bash command past the guard. root is the session's worktree;
-    a process working or installed there counts as the session's own. None: only its descendants do."""
+    a process working or installed there counts as the session's own. None: only its descendants do. With p, the
+    project of an auto-mode session (a worker, or a chat when chat), add auto-mode rules for it (see auto_mode)."""
     cmd = [sys.executable, str(CODE / "opsd.py"), "guard", "--daemon", str(os.getpid()), "--port", str(PORT)]
     if root:
         cmd += ["--root", str(root)]
     hook = {"type": "command", "command": " ".join(shlex.quote(a) for a in cmd)}
-    return json.dumps({"hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [hook]}]}})
+    out = {"hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [hook]}]}}
+    if p:
+        out["autoMode"] = auto_mode(p, root, chat)
+    return json.dumps(out)
+
+
+# Auto mode's classifier judges each step against the owner's own autoMode settings; Claude Code appends these
+# lists to theirs. The owner's environment may name another project's repo as the trusted one and treat main as
+# protected, so in task #300 a worker's own repo looked untrusted and a commit the owner approved in their
+# checkout was denied as [Git Destructive]. These say where the session works and what its brief and the owner's
+# answers may ask for. They add no soft_deny and drop no default rule.
+
+def auto_mode(p, root, chat):
+    """The autoMode environment and allow lists for a session of project p in worktree root (None: p's repo)."""
+    repos = list(dict.fromkeys(str(r) for r in [p.repo] + [r.src for r in p.parts]))
+    environment = [
+        f"**claude-ops session**: This session is a claude-ops {'chat' if chat else 'worker'} for project "
+        f"`{p.name}`, started by the owner's claude-ops task queue.",
+        f"**Trusted repos** (claude-ops project `{p.name}`): the project's checkout {p.repo}"
+        + (f" and every repo in its workspace ({', '.join(repos)})" if len(repos) > 1 else "")
+        + f", its worktrees under {p.wt}" + (f" (this session's is {root})" if root else "")
+        + f", and their origin remotes. `{p.main}` and `{p.dev}` are ordinary branches here, not protected.",
+        f"**claude-ops state**: {DATA} is the queue's own state and config, owned by the same user.",
+    ]
+    allow = [
+        "claude-ops Trusted Repo Work: Editing, committing and pushing in any claude-ops trusted repo listed in "
+        "Environment, on any branch (`main` included), when the task brief or the owner asks for it. A plain "
+        "push, not a force push.",
+        f"claude-ops Project Config: Editing `{REPO_CONFIG}` in a project repo, or "
+        f"`{PROJECTS_DIR / (p.name + '.toml')}`, is routine project config, not Self-Modification.",
+        f"claude-ops CLI: Running `opsd.py` subcommands ({CODE / 'opsd.py'} export-config, adopt-workspace-root, "
+        "add, send and the like).",
+        f"claude-ops Owner Answers: A user turn that starts with `{ANSWERED}` quotes the question this session "
+        "asked the owner and gives the owner's answer. It counts as the user explicitly approving the action that "
+        "question named.",
+    ]
+    return {"environment": environment, "allow": allow}
 
 
 def shell_segments(cmd):
@@ -1862,9 +1899,9 @@ def handoff_note(p, t, why):
                 if '"type": "ops"' in line:
                     o = json.loads(line)
                     turn = o.get("turn") or o.get("prompt") or ""
-                    if turn.startswith(ANSWERED):
-                        said.append((o.get("ts") or 0, "The user answered your question: "
-                                     + turn[len(ANSWERED):].strip().removesuffix(ANSWER_TAIL).strip()[:2000]))
+                    if head := next((h for h in ANSWER_HEADS if turn.startswith(h)), None):
+                        said.append((o.get("ts") or 0, head + " " + turn[len(head):].strip().removesuffix(
+                            ANSWER_TAIL).strip().removesuffix(ANSWER_GO).strip()[:2000]))
     except (OSError, ValueError):
         pass
     said = "\n\n".join(s for _, s in sorted(said, key=lambda x: x[0])) or "(none)"
@@ -2446,7 +2483,7 @@ def land_on_main(p, tid):
             ev(tid, f"{p.main} moves {n} merges: {p.dev} had ones not in {p.main} yet")
         before = p.revs(p.main)
         try:  # your answer, when the merge needed you, guides the worker that carries your changes over
-            err = promote(p, tid, commit, note=resume if resume and resume.startswith(ANSWERED) else "")
+            err = promote(p, tid, commit, note=resume if resume and resume.startswith(ANSWER_HEADS) else "")
         except NeedsYou as e:
             return wait_for_you(p, tid, str(e), WAIT_CHANGES)
     if stopped(tid):
@@ -2624,8 +2661,19 @@ def release_trains():
             print(f"promote train {p.name}:", e, flush=True)
 
 
-ANSWERED = "The user answered your question:"  # how an answer reaches a task's next turn
-ANSWER_TAIL = "Continue the task and write $OPS_RESULT."  # and what follows it
+ANSWERED = "You asked the owner:"  # how an answer reaches a task's next turn (see answer_prompt)
+ANSWERED_OLD = "The user answered your question:"  # how it did before, in transcripts from then
+ANSWER_HEADS = (ANSWERED, ANSWERED_OLD)
+ANSWER_GO = ("If they agreed, that is their approval for the action you asked about: do it, including steps "
+             "outside your worktree.")
+ANSWER_TAIL = "Continue the task and write $OPS_RESULT."  # and what ends it
+
+
+def answer_prompt(question, answer):
+    """The turn that carries the owner's answer, under the question it answers: a bare "Do it" names no action,
+    and auto mode allows a step the user approved only when their words name it."""
+    asked = "\n".join("> " + line for line in (question or "(the question was not kept)").strip().splitlines())
+    return f"{ANSWERED}\n\n{asked}\n\nThe owner answered:\n\n{answer}\n\n{ANSWER_GO}\n\n{ANSWER_TAIL}"
 WAIT = "waiting on you"  # the phase of a release that needs you because something is in the way of moving main
 WAIT_CHANGES = "waiting on your changes"  # ... because your uncommitted changes could not be carried over
 WAIT_MAIN = "waiting on main"  # a deploy's commits can't fast-forward main: it moved during the deploy
@@ -2763,7 +2811,7 @@ def release_pipeline(p, tid):
     before = p.revs(p.main)
     try:  # your answer, when the release needed you, guides the worker that carries your changes over
         with p.main_lock:  # never alongside a direct_main merge moving main
-            err = promote(p, tid, t["base"], note=resume if resume and resume.startswith(ANSWERED) else "")
+            err = promote(p, tid, t["base"], note=resume if resume and resume.startswith(ANSWER_HEADS) else "")
     except NeedsYou as e:
         return wait_for_you(p, tid, str(e), WAIT_CHANGES)
     if stopped(tid):
@@ -5250,7 +5298,7 @@ def deploy_land(p, tid, tg):
     """The command succeeded and is recorded: fast-forward main to the commits it made (a build-number bump), with
     the [app] build and your uncommitted changes handled as a release does. main must not have moved meanwhile."""
     t = task(tid)
-    answer = t["next_prompt"] if (t["next_prompt"] or "").startswith(ANSWERED) else ""
+    answer = t["next_prompt"] if (t["next_prompt"] or "").startswith(ANSWER_HEADS) else ""
     upd(tid, state="merging", next_prompt=None, start_at="promote")
     todo = deploy_moves(p, t)
     if not todo:
@@ -8431,8 +8479,7 @@ class H(BaseHTTPRequestHandler):
         elif action == "answer":
             if st != "needs_input":
                 raise ValueError(f"task is {st}")
-            upd(tid, state="queued", question=None,
-                next_prompt=f"{ANSWERED}\n\n{b['answer']}\n\n{ANSWER_TAIL}")
+            upd(tid, state="queued", question=None, next_prompt=answer_prompt(t["question"], b["answer"]))
             ev(tid, "answered: " + b["answer"][:200])
         elif action == "approve":
             if st != "review":
