@@ -6027,8 +6027,13 @@ def analysis(period="7", project=""):
         total = sum(r["cost"] for r in rs)
         qs, rans = [r["queued"] for r in rs if r["queued"] is not None], [r["ran"] for r in rs if r["ran"] is not None]
         wasted = [r for r in rs if r["state"] in ("failed", "cancelled")]
-        return {**group_stats(rs, total), "chat_cost": sum(c["cost"] or 0 for c in chat_rows),
-                "queued_med": pct(qs, 50), "queued_p90": pct(qs, 90), "queued_total": sum(qs),
+        # The medians are of tasks proper: releases and Send to dev runs rarely start Claude, and their $0 and
+        # sub-second runs would pull "cost per task" and "run time" to zero. by_kind still shows them.
+        work = [r for r in rs if r["kind"] == "task"] or rs
+        wq = [r["queued"] for r in work if r["queued"] is not None]
+        meds = {k: v for k, v in group_stats(work, total).items() if k.endswith(("_med", "_p90"))}
+        return {**group_stats(rs, total), **meds, "chat_cost": sum(c["cost"] or 0 for c in chat_rows), "work_n": len(work),
+                "queued_med": pct(wq, 50), "queued_p90": pct(wq, 90), "queued_total": sum(qs),
                 "waited_total": sum(r["waited"] for r in rs), "ran_total": sum(rans),
                 "wasted": sum(r["cost"] for r in wasted), "wasted_n": len(wasted)}
 
@@ -6041,6 +6046,12 @@ def analysis(period="7", project=""):
     total = sum(r["cost"] for r in rows)
     day = lambda ts: time.strftime("%Y-%m-%d", time.localtime(ts))  # noqa: E731
     daily = {}
+    start = time.localtime(since or min((r["created"] for r in rows), default=now))
+    d0 = time.mktime((start.tm_year, start.tm_mon, start.tm_mday, 12, 0, 0, 0, 0, -1))
+    while d0 <= now + 86400 and len(daily) < 400:  # every day of the period, so a quiet day shows as a gap
+        if day(d0) <= day(now):
+            daily.setdefault(day(d0), {"day": day(d0), "cost": 0, "n": 0})
+        d0 += 86400
     for r in rows:
         d = daily.setdefault(day(r["created"]), {"day": day(r["created"]), "cost": 0, "n": 0})
         d["cost"] += r["cost"]

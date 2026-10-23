@@ -1510,10 +1510,10 @@ function renderAnalyze(a) {
     tile("Spent on tasks", money(s.cost), `+ ${money(s.chat_cost)} in chats`, "",
       "What Claude cost for the tasks created in this period, priced at API rates. Chats are design and project chats active in it."),
     tile("Tasks", s.n, `${money(s.cost / Math.max(1, a.days) * 7)} a week`, "", "Tasks, releases, deploys and Send to dev runs created in this period."),
-    tile("Cost per task", money(s.cost_med), `p90 ${money(s.cost_p90)}`, "", "Median cost of one task, and the 90th percentile: 1 in 10 costs more."),
+    tile("Cost per task", money(s.cost_med), `p90 ${money(s.cost_p90)}`, "", "Median cost of one task, and the 90th percentile: 1 in 10 costs more. Tasks only: releases and Send to dev runs are in By kind below."),
     tile("Run time", dur(s.ran_med), `p90 ${dur(s.ran_p90)} · total ${dur(s.ran_total)}`, "",
-      "From its start to its end, less the time it waited on your answer or review, a pause or the usage limit."),
-    tile("Queued", dur(s.queued_med), `p90 ${dur(s.queued_p90)}`, "", "How long a task waited for a free worker before it started (median)."),
+      "Median time from a task's start to its end, less the time it waited on your answer or review, a pause or the usage limit. Tasks only; the total counts every run."),
+    tile("Queued", dur(s.queued_med), `p90 ${dur(s.queued_p90)}`, "", "How long a task waited for a free worker before it started (median, tasks only)."),
     tile("Waited on you", dur(s.waited_total), "answers, reviews, pauses, limit", "", "Total time tasks sat idle after they started: on a question, a review, a pause or the usage limit."),
     tile("Wasted", money(s.wasted), `${s.wasted_n} failed or cancelled`, s.wasted > 0.1 * s.cost && s.wasted > 1 ? "bad" : "",
       "What failed and cancelled tasks cost: spend that merged nothing."),
@@ -1548,7 +1548,7 @@ function renderAnalyze(a) {
 
 // One bar per day of spend, in an SVG that scales to its card. Hover a bar for its day, cost and task count.
 function dailyChart(days) {
-  if (!days.length) return `<div class="muted">No spend.</div>`;
+  if (!days.some(d => d.cost > 0)) return `<div class="muted">No spend in this period.</div>`;
   const all = [], step = 86400000, last = new Date(days[days.length - 1].day + "T12:00");
   const byDay = Object.fromEntries(days.map(d => [d.day, d]));
   for (let t = new Date(days[0].day + "T12:00"); t <= last && all.length < 400; t = new Date(t.getTime() + step)) {
