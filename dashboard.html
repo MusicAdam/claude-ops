@@ -40,8 +40,6 @@ header h1 { font-size: 16px; margin: 0; }
   header { gap: 8px; padding: 10px 12px; }
   header > .grow { display: none; }
   #proj { flex: 1 1 0; min-width: 0; }
-  header > .tabs { flex-basis: 100%; overflow-x: auto; scrollbar-width: none; margin: 0 -12px; padding: 0 12px; }
-  header > .tabs::-webkit-scrollbar { display: none; }
   header > .tabs button { flex: none; white-space: nowrap; }
   header > button { white-space: nowrap; }
 }
@@ -442,14 +440,81 @@ a[data-task] { color: var(--accent); cursor: pointer; }
 #hdr .rsn, #hdr [data-need] { cursor: pointer; }
 #hdr .rsn { color: var(--accent); }
 #researchview a, .rsdrawer a { color: var(--accent); }
+
+/* The header's More menu: the older pages, under one button */
+.more { position: relative; }
+#morebtn.on { background: var(--chip); border-color: var(--line); color: var(--ink); font-weight: 600; }
+.menu { position: absolute; top: calc(100% + 4px); left: 0; z-index: 5; min-width: 180px; display: flex; flex-direction: column;
+        background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 4px; box-shadow: 0 6px 20px rgba(0, 0, 0, .15); }
+.menu button { text-align: left; border-radius: 6px; }
+.menu button:hover { background: var(--chip); color: var(--ink); }
+.menu hr { border: 0; border-top: 1px solid var(--line); margin: 4px 2px; width: auto; }
+/* Today: To-do | the step and its conversation | the timeline. Each side column scrolls on its own. */
+#todayview { display: grid; grid-template-columns: 300px minmax(0, 1fr) 320px; gap: 20px; padding: 16px 20px 0;
+             max-width: 1700px; margin: 0 auto; }
+#todayview > * { height: calc(100vh - var(--hdr-h, 64px) - 16px); min-width: 0; }
+#todayview > .side { overflow: auto; padding-bottom: 16px; }
+#tdright { position: relative; }
+#tdcentre { display: flex; flex-direction: column; }
+#tdstep { flex: none; max-height: 55%; overflow: auto; }
+#tdcentre #chat { flex: 1; min-height: 0; }
+@media (max-width: 1099px) { #todayview { grid-template-columns: 280px minmax(0, 1fr); }
+  #tdright { grid-column: 1; grid-row: 2; height: auto; } }
+@media (max-width: 900px) { #todayview { grid-template-columns: 1fr; padding: 16px; }
+  #todayview > *, #tdright { height: auto; grid-row: auto; } #tdcentre #chat { min-height: 70vh; } }
+.tdtop { font-weight: 600; font-size: 15px; }
+.tdtop .muted { font-weight: 400; }
+.tdbar { height: 6px; border-radius: 3px; background: var(--line); overflow: hidden; margin: 8px 0 4px; }
+.tdbar i { display: block; height: 100%; background: var(--ok); }
+.tdchips { display: flex; flex-wrap: wrap; gap: 4px; margin: 10px 0; }
+.tdchips button { font-size: 12px; padding: 3px 9px; border-radius: 99px; background: none; color: var(--muted); }
+.tdchips button.on { background: var(--chip); color: var(--ink); border-color: var(--accent); font-weight: 600; }
+.tdchips b { font-weight: 600; margin-left: 3px; }
+.tditem { display: grid; grid-template-columns: auto 1fr; gap: 2px 8px; align-items: baseline; padding: 8px 10px;
+          border: 1px solid var(--line); border-radius: 8px; background: var(--panel); margin-bottom: 6px; cursor: pointer; }
+.tditem.sel { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+.tditem.skipped { opacity: .65; }
+.tditem .t { font-weight: 550; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tditem .sub { grid-column: 2; color: var(--muted); font-size: 12px; }
+.verb { font-size: 11px; font-weight: 600; padding: 1px 8px; border-radius: 99px; white-space: nowrap; border: 1px solid; }
+.verb.g-unblock { color: var(--bad); } .verb.g-ship { color: var(--ok); } .verb.g-review { color: var(--warn); } .verb.g-only_me { color: var(--accent); }
+.stepcard { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px; margin-bottom: 16px; }
+.stepcard .k { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
+.stepcard h2 { font-size: 18px; margin: 6px 0; display: flex; gap: 10px; align-items: baseline; }
+.stepcard .why { white-space: pre-wrap; margin: 6px 0; max-height: 9em; overflow: auto; }
+.stepcard .facts { display: flex; flex-wrap: wrap; gap: 4px 6px; color: var(--muted); font-size: 13px; margin: 8px 0; }
+.stepcard .facts > * + *::before { content: "·"; margin-right: 6px; color: var(--muted); }
+.stepcard .facts a { cursor: pointer; color: var(--accent); }
+.stepcard .row { margin-top: 12px; }
+.stepcard .skip { margin-left: auto; background: none; border-color: transparent; color: var(--muted); }
+#saymode { font-size: 12px; margin-bottom: 6px; display: flex; gap: 8px; align-items: center; color: var(--warn); }
+#saymode button { padding: 1px 8px; font-size: 12px; }
+.tl h3 { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: 16px 0 6px; }
+.tl h3:first-child { margin-top: 0; }
+.tlitem { padding: 6px 8px; border-radius: 6px; cursor: pointer; border: 1px solid transparent; }
+.tlitem:hover { background: var(--panel); border-color: var(--line); }
+.tlitem .t { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tlitem .sub { color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tlitem .id { color: var(--muted); font-family: var(--mono); font-size: 12px; margin-right: 4px; }
+#tdpanel { position: absolute; inset: 0; z-index: 3; background: var(--bg); overflow: auto; }
+#tdright.panel-open { overflow: hidden; }
+#tdright.panel-open > .tl { display: none; }
+@media (max-width: 900px) { #tdright.panel-open { height: auto; overflow: visible; } #tdpanel { position: static; } }
+#tdpanel #detail { margin: 0; }
+.tdphead { display: flex; gap: 8px; align-items: center; margin-bottom: 10px; }
+.stages { display: flex; gap: 2px; margin: 0 0 12px; font-size: 11px; }
+.stages span { flex: 1; text-align: center; padding: 4px 2px; background: var(--chip); color: var(--muted); }
+.stages span:first-child { border-radius: 6px 0 0 6px; } .stages span:last-child { border-radius: 0 6px 6px 0; }
+.stages span.past { color: var(--ink); }
+.stages span.now { background: var(--accent); color: #fff; font-weight: 600; }
 </style>
 </head>
 <body>
 <header>
   <h1>Claude Ops</h1>
   <select id="proj" title="Project"></select>
-  <button id="addproj" title="Add a git repository, or a folder of git repos, as a project">+ Project</button>
-  <div class="tabs"><button id="tab-projects" title="Every project: branches, Promote, Play, Deploys, Archive, and its tasks">Projects</button><button id="tab-tasks">Tasks</button><button id="tab-design" title="Plan work with Claude">Design</button><button id="tab-chat" title="Talk to Claude in the project folder, as in a terminal">Chat</button><button id="tab-analyze" title="Where time and money went: run times and costs of tasks, and how to make them cheaper and faster">Analyze</button><button id="tab-research" class="hidden" title="The research repo: proposals, reports, projects, to-dos, sources and runs">Research</button><button id="tab-settings" title="Parallel, promote wait, usage brake, models, effort, and what Claude has cost">Settings</button></div>
+  <nav class="tabs" id="nav"><button id="tab-today" title="What needs you, the step to take, and what is going on">Today</button><div class="more" id="more"><button id="morebtn" aria-haspopup="true" aria-expanded="false" title="The other pages">More ▾</button>
+    <div class="menu hidden" id="moremenu" role="menu"><button id="tab-tasks" title="Every task, the New task form, and each task's page">History</button><button id="tab-projects" title="Every project: branches, Promote, Play, Deploys, Archive, and its tasks">Projects</button><button id="tab-design" title="Plan work with Claude">Design</button><button id="tab-chat" title="Talk to Claude in the project folder, as in a terminal">Chat</button><button id="tab-research" class="hidden" title="The research repo: proposals, reports, projects, to-dos, sources and runs">Research</button><button id="tab-analyze" title="Where time and money went: run times and costs of tasks, and how to make them cheaper and faster">Analyze</button><button id="tab-settings" title="Parallel, promote wait, usage brake, models, effort, and what Claude has cost">Settings</button><button id="tab-schedules" title="Recurring jobs: schedules that queue a task on a timetable">Schedules</button><hr><button id="addproj" title="Add a git repository, or a folder of git repos, as a project">+ Project</button></div></div></nav>
   <span class="grow" style="flex:1"></span>
   <span class="stats" id="hdr"></span>
   <span class="stats hidden" id="usage"></span>
@@ -460,6 +525,12 @@ a[data-task] { color: var(--accent); cursor: pointer; }
     <button id="trynow" title="Stop waiting for the reset: resume the tasks the usage limit paused and start queued ones">Try now</button></div>
 </header>
 <div id="tip" class="hidden"></div>
+<div id="todayview" class="hidden">
+  <aside class="side" id="tdleft"></aside>
+  <section id="tdcentre"><div id="tdstep"></div></section>
+  <aside class="side" id="tdright"><div class="tl" id="tdtl"></div>
+    <div id="tdpanel" class="hidden"><div id="tdphead"></div><div id="tdpother"></div><div id="tdpdet"></div></div></aside>
+</div>
 <main id="settingsview" class="hidden">
   <section>
     <div class="card settings">
@@ -658,6 +729,7 @@ a[data-task] { color: var(--accent); cursor: pointer; }
     <div id="msgs"></div>
     <div class="composer">
       <div id="slash" class="hidden"></div>
+      <div id="saymode" class="hidden"></div>
       <textarea id="say"></textarea>
       <div class="row"><label id="cprojwrap">Project <select id="cproj"></select></label><button class="primary" id="send">Send</button><span class="muted">⌘↩</span>
         <button id="clip" title="Attach pictures (or paste or drop them on the message box)">📎</button><input type="file" id="clipfile" accept="image/*" multiple class="hidden">
@@ -734,6 +806,7 @@ async function loadState() {
   state = s;
   render();
   if (sel) loadDetail(sel);
+  if (tab === "today") refreshDesign.poll();  // the conversation under the step
 }
 const refresh = single(loadState);
 
@@ -744,7 +817,7 @@ function render() {
   // The header filter hides the selected task's project: drop the selection rather than show it as part of this one.
   const st = sel && state.tasks.find(t => t.id === sel);
   if (st && !inView(st.project)) clearSelection();
-  renderProjects(); renderHeader(); renderMains(); renderList(); renderSchedules();
+  renderProjects(); renderHeader(); renderMains(); renderList(); renderSchedules(); renderToday();
   $("#tab-research").classList.toggle("hidden", !state.research);
   if (tab === "research") { if (state.research) { rsLock(); refreshResearch.poll(); } else rsRender(); }
   if (tab === "analyze" && (anaKey !== `${anaPeriod}|${pf}` || Date.now() - anaAt > 60000)) refreshAnalyze();
@@ -1117,15 +1190,23 @@ async function confirmDeploy() {
     const g = P(dlg.project), d = g.deploys.find(x => x.name === dlg.target);
     if (!g.deploy_open) g.deploy_open = r.id;
     if (d && !d.open) d.open = r.id;
-    closeDeploy(); renderMains(); showTab("tasks"); selectTask(r.id); refresh();
+    closeDeploy(); renderMains();
+    if (tab !== "today") { showTab("tasks"); selectTask(r.id); }  // Today: the deploy shows under Working now
+    refresh();
   } catch (e) { $("#dmsg").textContent = e.message; syncDeploy(); }
 }
 // A task link (a deploy's #id) anywhere on the page opens that task on the Tasks tab; in the dialog it closes the dialog first.
 document.addEventListener("click", e => {
   const a = e.target.closest && e.target.closest("a[data-task], .ptask[data-task]");
   if (!a) return;
-  e.preventDefault(); if (dlg) closeDeploy(); showTab("tasks"); selectTask(+a.dataset.task);
+  e.preventDefault(); if (dlg) closeDeploy(); openTask(+a.dataset.task);
 });
+// A task link opens the task: on Today in the panel over the timeline, elsewhere on History.
+function openTask(id) {
+  if (tab === "today") return tdOpenTask(id);
+  if (tab !== "tasks") showTab("tasks");
+  selectTask(id); refresh();
+}
 document.addEventListener("keydown", e => {
   if (!dlg) return;
   if (e.key === "Escape") closeDeploy();
@@ -1396,8 +1477,8 @@ function originLine(o, verb) {
   return o ? `<div class="muted" style="margin:4px 0">${verb} <a class="origin">${esc(o.words)}</a>${o.title ? ` · ${esc(o.title)}` : ""}</div>` : "";
 }
 function openOrigin(o) {
-  if (o.ref.startsWith("schedule:")) { showTab("schedules"); return; }
-  if (o.ref.startsWith("task:")) { showTab("tasks"); selectTask(o.id); refresh(); return; }
+  if (o.ref.startsWith("schedule:")) { if (tab === "today") tdOpenPanel({kind: "schedule", id: o.id}); else showTab("schedules"); return; }
+  if (o.ref.startsWith("task:")) return openTask(o.id);
   if (!inView(o.project)) { setFilter(o.project); renderProjects(); renderHeader(); renderMains(); }
   showTab(o.kind === "project" ? "chat" : "design"); selectChat(o.id);
 }
@@ -1462,7 +1543,9 @@ function modelSelect(el, v, none) {
 // The model a task's session runs on, short: "sonnet" for claude-sonnet-4-5-20250929. Opus is the usual one.
 function modelShort(m) { const k = MODELS.find(a => String(m || "").toLowerCase().includes(a)); return k || m || ""; }
 $("#proj").onchange = () => {
-  setFilter($("#proj").value); if ($("#proj").value) setFocus($("#proj").value); if (state) render(); refresh(); if (chatTab()) refreshDesign();
+  setFilter($("#proj").value); if ($("#proj").value) setFocus($("#proj").value);
+  if (tab === "today") { TD.convKey = null; TD.pin = null; }  // the conversation follows the project
+  if (state) render(); refresh(); if (chatTab()) refreshDesign();
 };
 $("#addproj").onclick = () => { showTab("projects"); $("#addcard").classList.remove("hidden"); $("#ppath").focus(); };
 $("#pcancel").onclick = () => $("#addcard").classList.add("hidden");
@@ -1582,25 +1665,29 @@ const TABTEXT = {
            intro: "Start a design chat: describe an idea, a problem, or a feature you want. Claude reads the project docs and code, asks questions, and queues tasks when you agree. Or open an OpenSpec change on the left: read it, change it with Claude, and queue it."},
   chat: {button: "New chat", none: "No chats yet.", say: "Ask or tell Claude anything about this project. Drop or paste screenshots to attach them.",
          intro: "Talk to Claude in the project folder, as if you ran claude there. It can read, edit and run commands in your checkout. Actions that would ask for permission are denied, since nobody can answer here."}};
-let tab = "projects", chatSel = null, chatData = null, chatKey = "", chatSels = {};
-try { tab = localStorage.getItem("ops-tab") || "projects"; chatSels = JSON.parse(localStorage.getItem("ops-chats") || "{}"); } catch {}
-const TABS = ["tasks", "projects", "design", "chat", "analyze", "research", "settings", "schedules"];
-if (["#tasks", "#projects", "#design", "#queue", "#chat", "#analyze", "#settings", "#schedules"].includes(location.hash)) tab = location.hash.slice(1);
+// Today opens first. The address bar names the page you are on (#today, #tasks, …), so a reload stays there.
+TABTEXT.today = {say: TABTEXT.design.say, intro: "No design chat for this project yet. Write below to start one: describe an idea or a problem. Claude reads the project, asks questions, and queues the work when you agree."};
+KIND.today = "design";
+let tab = "today", chatSel = null, chatData = null, chatKey = "", chatSels = {};
+try { chatSels = JSON.parse(localStorage.getItem("ops-chats") || "{}"); } catch {}
+const TABS = ["today", "tasks", "projects", "design", "chat", "analyze", "research", "settings", "schedules"];
+if (TABS.includes(location.hash.slice(1))) tab = location.hash.slice(1);
+if (location.hash === "#queue") tab = "tasks";  // the old name of Tasks (History)
 if (/^#research(\/|$)/.test(location.hash)) tab = "research";
-if (!TABS.includes(tab)) tab = "tasks";  // "queue", the old name of Tasks
 const chatTab = () => tab === "design" || tab === "chat";
 
 function showTab(t) {
+  const was = tab;
   tab = t;
-  try { localStorage.setItem("ops-tab", t); } catch {}
-  for (const k of TABS) $(`#tab-${k}`)?.classList.toggle("on", t === k || (k === "settings" && t === "schedules"));
-  // On a phone the tabs scroll sideways: bring the chosen one into view, without scrolling the page.
-  const bar = $("header > .tabs"), on = $(`#tab-${t}`);
-  if (on && bar.scrollWidth > bar.clientWidth) {
-    const r = on.getBoundingClientRect(), b = bar.getBoundingClientRect();
-    if (r.left < b.left + 12) bar.scrollLeft -= b.left + 12 - r.left;
-    else if (r.right > b.right - 12) bar.scrollLeft += r.right - b.right + 12;
-  }
+  for (const k of TABS) $(`#tab-${k}`).classList.toggle("on", t === k);
+  $("#morebtn").classList.toggle("on", t !== "today");
+  closeMore();
+  // Today borrows the chat column and the task page; every other page has them back where they were.
+  if (was === "today" && t !== "today") tdLeave();
+  if (t === "today") $("#tdcentre").appendChild($("#chat"));
+  else if ($("#chat").parentElement !== $("#panes")) $("#panes").appendChild($("#chat"));
+  $("#todayview").classList.toggle("hidden", t !== "today");
+  renderSayMode();
   $("#tasksview").classList.toggle("hidden", t !== "tasks");
   $("#projectsview").classList.toggle("hidden", t !== "projects");
   $("#settingsview").classList.toggle("hidden", t !== "settings");
@@ -1614,8 +1701,9 @@ function showTab(t) {
   if (t === "analyze") refreshAnalyze();
   $("#researchview").classList.toggle("hidden", t !== "research");
   if (t === "research") { rsRender(); refreshResearch(); rsUrl(false); }
-  else if (/^#research(\/|$)/.test(location.hash)) history.replaceState(null, "", "#" + t);
+  else if (location.hash !== "#" + t) history.replaceState(null, "", "#" + t);
   $("#designview").classList.toggle("hidden", !chatTab());
+  if (t === "today") { chatSel = null; chatData = null; chatKey = ""; TD.convKey = null; if (state) { renderProjects(); renderToday(); } }
   if (!chatTab()) return;
   chatSel = chatSels[t] || null; chatData = null; chatKey = "";
   $("#newchat").textContent = TABTEXT[t].button;
@@ -1623,11 +1711,13 @@ function showTab(t) {
   if (state) renderProjects();
   refreshDesign();
 }
+$("#tab-today").onclick = () => showTab("today");
 $("#tab-tasks").onclick = () => showTab("tasks");
 $("#tab-projects").onclick = () => showTab("projects");
 $("#tab-design").onclick = () => showTab("design");
 $("#tab-chat").onclick = () => showTab("chat");
 $("#tab-settings").onclick = () => showTab("settings");
+$("#tab-schedules").onclick = () => showTab("schedules");
 $("#tab-analyze").onclick = () => showTab("analyze");
 $("#tab-research").onclick = () => showTab("research");
 
@@ -1653,7 +1743,7 @@ function renderSchedules() {
 }
 $("#schedlist").onclick = async e => {
   const a = e.target.closest("a[data-task]");
-  if (a) { showTab("tasks"); selectTask(+a.dataset.task); return; }
+  if (a) { openTask(+a.dataset.task); return; }
   const b = e.target.closest("button[data-act]"), row = e.target.closest(".sched");
   if (!b || !row) return;
   const id = +row.dataset.id, s = (state.schedules || []).find(x => x.id === id), act = b.dataset.act;
@@ -1764,7 +1854,7 @@ function inline(s, ctx = {}) {
 // says their target exists: inline() wraps each in <span class="ref" data-ref>, and chatLinks checks them all in one
 // request and turns each into a link, or greys it with ⚠ and the reason. A reference is never a link that fails.
 // Places in the app a message may name, and the route each opens. Longer names win over shorter ones.
-const APP_PLACES = {"Projects tab": "#projects", "Tasks tab": "#tasks", "Design tab": "#design", "Chat tab": "#chat",
+const APP_PLACES = {"Today view": "#today", "Projects tab": "#projects", "Tasks tab": "#tasks", "Design tab": "#design", "Chat tab": "#chat",
   "Analyze tab": "#analyze", "Research tab": "#research", "Settings tab": "#settings", "Settings": "#settings",
   "Analyze": "#analyze"};
 const reEsc = t => t.replace(/[.*+?^$()|[\]{}\\]/g, "\\$&");
@@ -1958,7 +2048,7 @@ document.addEventListener("click", e => {
   if (!a || e.metaKey || e.ctrlKey || e.shiftKey || e.button) return;
   const r = a.dataset.ref || "", val = r.slice(r.indexOf(":") + 1);
   if ("place" in a.dataset) { e.preventDefault(); rsCloseDoc(); goPlace(a.getAttribute("href")); }
-  else if (r.startsWith("task:")) { e.preventDefault(); rsCloseDoc(); if (tab !== "tasks") showTab("tasks"); selectTask(+val); refresh(); }
+  else if (r.startsWith("task:")) { e.preventDefault(); rsCloseDoc(); openTask(+val); }
   else if (r.startsWith("spec:")) { e.preventDefault(); rsCloseDoc(); openSpecLink(a.dataset.project, val); }
   else if (r.startsWith("file:") && !a.querySelector("img")) { e.preventDefault(); openRepoFile(a.dataset.project, val); }
 });
@@ -2018,6 +2108,7 @@ async function openRepoFile(project, val) {
 let endedOpen = false, chatList = [];
 const unread = c => c.state !== "thinking" && (c.replied || 0) > (c.seen || 0);
 async function loadDesigns() {
+  if (tab === "today") return loadConv();
   let chats = [];
   try { chats = await api("/api/designs"); } catch { return; }
   chats = chatList = chats.filter(c => inView(c.project) && (c.kind || "design") === KIND[tab]);
@@ -2354,6 +2445,8 @@ async function queueSpec(plan) {
   } catch (e) { $("#chatmsg").textContent = e.message; }
 }
 function selectChat(id) {
+  // Today: the chat stays under this step until you pick another item (a chat you just started, say)
+  if (tab === "today") { TD.pin = id ? {key: TD.convKey, chat: id} : null; chatSel = id; chatKey = ""; refreshDesign(); return; }
   chatSel = id; chatKey = "";
   if (state) renderProjects();
   chatSels[tab] = id; try { localStorage.setItem("ops-chats", JSON.stringify(chatSels)); } catch {}
@@ -2369,7 +2462,8 @@ function renderChat() {
   $("#endchat").classList.toggle("hidden", !d || !!d.ended);
   $("#reopenchat").classList.toggle("hidden", !d || !d.ended);
   // You are looking at it: its latest reply is read. Only while the page is in view.
-  if (d && !d.ended && !document.hidden && (d.replied || 0) > (d.seen || 0) && d.state !== "thinking") {
+  // On Today only Mark read does, so a Read item doesn't vanish while you read it.
+  if (d && tab !== "today" && !d.ended && !document.hidden && (d.replied || 0) > (d.seen || 0) && d.state !== "thinking") {
     d.seen = d.replied;
     api(`/api/designs/${d.id}/seen`, {}).then(() => { refresh(); refreshDesign(); }).catch(() => {});
   }
@@ -2378,6 +2472,7 @@ function renderChat() {
   // While Claude replies, a message waits in the chat's queue and goes when the reply ends
   $("#send").textContent = thinking ? "Queue" : "Send";
   $("#send").title = thinking ? "Claude is replying: this message goes as soon as the reply ends" : "";
+  if (tab === "today") renderSayMode();
   $("#rinfo").querySelectorAll("[data-cmd]").forEach(b => b.disabled = !!thinking);
   if (key === chatKey) return;
   // A chat you just opened, or a message you just sent, starts at the bottom
@@ -2390,6 +2485,8 @@ function renderChat() {
     : d && d.spec_view ? specGone(d)
     : d && d.spec_draft ? `<div class="spechead"><b>Drafting a new OpenSpec change</b>${d.spec_sub ? ` in <code>${esc(d.spec_sub)}/</code>` : ""}
       <div class="why">No change is attached yet. When a reply creates one folder in <code>openspec/changes/</code>, this chat becomes that change's chat and its files are saved to ${esc(P(d.project).dev_branch || "dev")}.</div></div>` : "";
+  if (d && tab === "today") $("#chathead").insertAdjacentHTML("afterbegin",
+    `<div>${d.kind === "project" ? "Chat" : "Design chat"}: <b>${esc(d.title)}</b>${pf ? "" : ` · ${esc(P(d.project).title)}`}</div>`);
   if (d && d.origin) {
     $("#chathead").insertAdjacentHTML("afterbegin", originLine(d.origin, "Started by"));
     $("#chathead").querySelector("a.origin").onclick = () => openOrigin(d.origin);
@@ -2405,7 +2502,7 @@ function renderChat() {
     + (thinking ? `<div class="live"><span class="pulse s-running">Claude is thinking</span>${d.live.map(l => `<div>  ${esc(l)}</div>`).join("")}</div>` : "")
     + (d.queued || []).map((t, k) => `<div class="msg user queued">${userMd(t, links)}<div class="qbar">Queued: sent ${thinking ? "when this reply ends" : "next"} · <button data-unq="${k}" title="Take it off the queue and put it back in the message box">Edit</button></div></div>`).join("");
   box.querySelectorAll("[data-unq]").forEach(b => b.onclick = () => unqueue(d.id, +b.dataset.unq));
-  box.querySelectorAll("[data-task]").forEach(b => b.onclick = () => { showTab("tasks"); selectTask(+b.dataset.task); refresh(); });
+  box.querySelectorAll("[data-task]").forEach(b => b.onclick = () => openTask(+b.dataset.task));
   const bottom = () => {
     if (!(stick || thinking)) return;
     toBottom(box);
@@ -2437,6 +2534,7 @@ async function sayChat(text) {  // a change's command button: sent as if typed, 
 async function sendChat() {
   const text = $("#say").value.trim();
   if (!text) return;
+  if (tab === "today" && (TD.mode || TD.conv?.task)) return tdSend(text);
   try {
     if (chatSel) await api(`/api/designs/${chatSel}/say`, {text});
     else {
@@ -2488,7 +2586,8 @@ $("#say").onkeydown = e => {
   if (open && e.key === "Escape") { e.preventDefault(); e.stopPropagation(); slash.shut = true; renderSlash(); return; }
   if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) sendChat();
 };
-$("#stopchat").onclick = () => api(`/api/designs/${chatSel}/stop`, {}).then(refreshDesign);
+$("#stopchat").onclick = () => (tab === "today" && TD.conv?.task ? api(`/api/tasks/${TD.conv.task}/stopask`, {})
+  : api(`/api/designs/${chatSel}/stop`, {})).then(refreshDesign);
 async function endChat(id) {
   const c = chatList.find(x => x.id === id);
   if (c && c.state === "thinking" && !confirm("Claude is still replying. End the chat and stop the reply?")) return;
@@ -2505,6 +2604,408 @@ $("#newchat").onclick = () => { selectChat(null); chatData = null; renderProject
 
 // The header wraps to two lines on narrow windows or when it gains buttons; keep #detailcol just below it.
 new ResizeObserver(() => document.documentElement.style.setProperty("--hdr-h", $("header").offsetHeight + "px")).observe($("header"));
+
+// ---------------------------------------------------------------- Today: To-do | the step and its conversation | timeline
+// The left column is /api/state's todos; the centre is the selected one as a step, over the chat column (moved here
+// from the Design tab); the right column is read-only status, and a click opens a panel over it, the task page
+// among them (moved here from History). See README "Today view".
+const TD = {key: "", filter: "all", skip: {}, order: [], item: null, convKey: null, conv: null, task: null, pin: null,
+            mode: null, busy: "", msg: "", note: "", panel: null, designs: null, designsAt: 0};
+try {
+  TD.key = localStorage.getItem("ops-todo") || "";
+  TD.filter = localStorage.getItem("ops-todo-filter") || "all";
+  TD.skip = JSON.parse(localStorage.getItem("ops-skip") || "{}");
+} catch {}
+const TD_FILTERS = [["all", "All"], ["review", "Review"], ["unblock", "Unblock"], ["ship", "Ship"], ["only_me", "Only me"]];
+const SEND_WORDS = {answer: "Send answer", reject: "Send back", retry: "Retry"};
+const STAGES = ["Queued", "Working", "Gate", "Review", "Merged", "Promoted"];
+const midnight = () => { const d = new Date(); d.setHours(0, 0, 0, 0); return d.getTime() / 1000; };
+const tdSave = () => { try { localStorage.setItem("ops-todo", TD.key); localStorage.setItem("ops-todo-filter", TD.filter);
+  localStorage.setItem("ops-skip", JSON.stringify(TD.skip)); } catch {} };
+const verbPill = x => `<span class="verb g-${esc(x.group)}">${esc(x.verb)}</span>`;
+const tdDoneToday = () => state.tasks.filter(t => t.state === "done" && t.finished >= midnight() && inView(t.project))
+  .sort((a, b) => b.finished - a.finished);
+const convBusy = () => !!((chatData && chatData.state === "thinking") || (TD.task && TD.conv?.task && TD.task.chat_live));
+
+// The items in view, skipped ones last in the order you skipped them. A skip lasts until midnight.
+function tdAll() {
+  const all = (state.todos || []).filter(x => inView(x.project)), keys = new Set((state.todos || []).map(x => x.key));
+  for (const k of Object.keys(TD.skip)) if (TD.skip[k] < midnight() * 1000 || !keys.has(k)) delete TD.skip[k];
+  return all.filter(x => !TD.skip[x.key]).concat(all.filter(x => TD.skip[x.key]).sort((a, b) => TD.skip[a.key] - TD.skip[b.key]));
+}
+const tdShown = all => TD.filter === "all" ? all : all.filter(x => x.group === TD.filter);
+// The selected item; when it has left the list, the one that came after it, else the first.
+function tdPick(shown) {
+  let it = shown.find(x => x.key === TD.key);
+  if (!it && shown.length) {
+    const i = TD.order.indexOf(TD.key), next = i < 0 ? null : TD.order.slice(i + 1).find(k => shown.some(x => x.key === k));
+    it = shown.find(x => x.key === next) || shown[0];
+    TD.key = it.key; tdSave();
+  }
+  TD.order = shown.map(x => x.key);
+  return it || null;
+}
+
+function renderToday() {
+  if (tab !== "today" || !state) return;
+  const all = tdAll(), shown = tdShown(all), it = tdPick(shown);
+  TD.item = it;
+  if ((it ? it.key : "") !== TD.convKey) tdChanged(it);
+  tdLeft(all, shown); tdStep(it, shown); tdTimeline(); tdPanel(); renderSayMode();
+}
+// A new item under the step: its own message-box mode, facts and conversation.
+function tdChanged(it) {
+  TD.convKey = it ? it.key : "";
+  TD.mode = it && it.verb === "Answer" ? tdAnswerMode(it) : null;
+  TD.task = null; TD.pin = null; TD.conv = null; TD.msg = ""; TD.note = ""; chatKey = "";
+  refreshDesign();
+}
+const tdAnswerMode = it => ({a: "answer", id: it.source.id, words: `Your message answers #${it.source.id}'s question.`});
+
+function tdLeft(all, shown) {
+  const done = tdDoneToday().length, open = all.length, min = all.reduce((a, x) => a + (x.est_min || 0), 0);
+  const pct = done + open ? Math.round(100 * done / (done + open)) : 100;
+  const n = g => g === "all" ? all.length : all.filter(x => x.group === g).length;
+  const html = `<div class="tdtop">${open ? `${open} thing${open === 1 ? " needs" : "s need"} you <span class="muted">· ~${min} min</span>` : "Nothing needs you"}</div>
+    <div class="tdbar" title="${done} done today, ${open} open"><i style="width:${pct}%"></i></div>
+    <div class="muted" style="font-size:12px">${done} done today</div>
+    <div class="tdchips">${TD_FILTERS.map(([k, l]) => `<button data-f="${k}" class="${TD.filter === k ? "on" : ""}">${l}<b>${n(k)}</b></button>`).join("")}</div>`
+    + (shown.map(x => `<div class="tditem ${x.key === TD.key ? "sel" : ""} ${TD.skip[x.key] ? "skipped" : ""}" data-key="${esc(x.key)}">
+        ${verbPill(x)}<span class="t" title="${esc(x.title)}">${esc(x.title)}</span>
+        <span class="sub">${[pf ? "" : esc(P(x.project).title), x.since ? `${ago(x.since, state.now)} ago` : "", TD.skip[x.key] ? "skipped" : ""].filter(Boolean).join(" · ")}</span></div>`).join("")
+      || `<div class="muted">${all.length ? "Nothing under this filter." : "Nothing needs you right now."}</div>`);
+  if (!put($("#tdleft"), html)) return;
+  $("#tdleft").querySelectorAll("[data-f]").forEach(b => b.onclick = () => { TD.filter = b.dataset.f; tdSave(); renderToday(); });
+  $("#tdleft").querySelectorAll("[data-key]").forEach(el => el.onclick = () => { TD.key = el.dataset.key; tdSave(); renderToday(); });
+}
+
+// What the step can do: one primary action, then the others. Each calls an endpoint the older pages use.
+function tdActions(it) {
+  const g = P(it.project), s = it.source || {}, A = (a, label, o = {}) => ({a, label, ...o});
+  switch (it.verb) {
+    case "Try": return [A("play", "▶ Play this build", {primary: 1, title: "Run the task's build from its worktree"}), A("approve", "Approve & merge"), A("sendback", "Send back…")];
+    case "Review": return [A("approve", "Approve & merge", {primary: 1}), A("diff", "Open diff", {title: "The files it changed, in the task's details"}), A("sendback", "Send back…")];
+    case "Answer": return [A("answer", "Answer", {primary: 1, title: "Type your answer in the message box below"}), A("details", "Details")];
+    case "Fix": return [A("retry", "Retry", {primary: 1}), A("retrynote", "Retry with a note…"), A("details", "Details")];
+    case "Promote":
+      if (s.kind === "task") return [g.running ? A("stopmain", `■ Stop ${g.main_branch}`, {primary: 1, title: `Quit ${g.title} running from ${g.main_branch}, so the release can move it`})
+        : A("answer", "Reply…", {primary: 1, title: "Answer the release in the message box below"}), A("details", "Details")];
+      return [A("promote", `Promote ${g.dev_branch} → ${g.main_branch}`, {primary: 1, title: `If the gate passes on ${g.dev_branch}, ${g.main_branch} moves to it`})];
+    case "Ship": return (g.deploys || []).map((d, i) => A("deploy:" + d.name, `Deploy ${d.name}`, {primary: !i, disabled: !!(d.error || d.blocked), title: d.error || d.blocked || ""}))
+      .concat(g.deploys && g.deploys.length ? [] : [A("projects", "Open in Projects", {primary: 1})]);
+    case "Commit": return [g.senddev_open ? A("details:" + g.senddev_open, `Sending to ${g.dev_branch}… #${g.senddev_open}`, {primary: 1})
+      : A("senddev", `Send to ${g.dev_branch}`, {primary: 1, title: `Queue a task that lands these changes on ${g.dev_branch} through the gate`})];
+    case "Read": return [A("read", "Mark read", {primary: 1, title: "The reply is below. This takes it off your list"})];
+    case "Agree": return [A("reply", "Reply", {primary: 1, title: "Answer Claude in the message box below"})].concat(it.todo ? [A("done", "Done")] : []);
+    case "Do": return [A("done", "Done", {primary: 1})];
+  }
+  return [];
+}
+// A task's facts: its number, the gate's result, the files it changed, when it was built. From its page, once read.
+function tdFacts(it) {
+  const s = it.source || {}, d = TD.task && TD.task.id === s.id ? TD.task : null;
+  if (s.kind !== "task") return "";
+  const out = [`<a data-task="${s.id}" title="Open its details">task #${s.id}</a>`];
+  if (d) {
+    const evs = d.events || [], gate = [...evs].reverse().find(e => /^gate /.test(e.text));
+    const built = [...evs].reverse().find(e => e.text === "waiting for your review" || /^gate passed/.test(e.text));
+    const nfiles = [...String(d.diffstat || "").matchAll(/(\d+) files? changed/g)].reduce((a, m) => a + +m[1], 0);
+    if (gate) out.push(`<span class="${/^gate failed/.test(gate.text) ? "err" : ""}" title="${esc(gate.text)}">${esc(gate.text.split(":")[0])}</span>`);
+    if (nfiles) out.push(`<a data-files="${s.id}" title="The files it changed">${files(nfiles)} changed</a>`);
+    if (built && ["review", "needs_input", "failed"].includes(d.state)) out.push(`<span>built ${ago(built.ts, state.now)} ago</span>`);
+    if (d.session_model) out.push(`<span>${esc(modelShort(d.session_model))}</span>`);
+  }
+  return out.join("");
+}
+function tdStep(it, shown) {
+  if (!it) {
+    put($("#tdstep"), `<div class="stepcard"><div class="k">All clear</div><h2>Nothing needs you right now</h2>
+      <div class="why muted">Questions, reviews and replies show up on the left as they come. Below is the latest design chat${pf ? ` in ${esc(P(pf).title)}` : ""}.</div></div>`);
+    return;
+  }
+  const busy = TD.busy === it.key, acts = tdActions(it), facts = tdFacts(it);
+  const html = `<div class="stepcard"><div class="k">Step ${shown.indexOf(it) + 1} of ${shown.length} · ${esc(P(it.project).title)}</div>
+    <h2>${verbPill(it)}<span>${esc(it.title)}</span></h2>
+    ${it.why ? `<div class="why">${esc(it.why)}</div>` : ""}
+    ${facts ? `<div class="facts">${facts}</div>` : ""}
+    <div class="row">${acts.map(b => `<button data-ta="${esc(b.a)}" class="${b.primary ? "primary" : ""}" ${busy || b.disabled ? "disabled" : ""} title="${esc(b.title || "")}">${esc(b.label)}</button>`).join("")}
+      <button class="skip" data-skip title="Move it to the end of the list, in this browser, until midnight">Skip for now →</button></div>
+    ${TD.msg ? `<div class="err" style="margin-top:8px;white-space:pre-wrap">${esc(TD.msg)}</div>` : TD.note ? `<div class="muted" style="margin-top:8px">${esc(TD.note)}</div>` : ""}</div>`;
+  if (!put($("#tdstep"), html)) return;
+  $("#tdstep").querySelectorAll("[data-ta]").forEach(b => b.onclick = () => tdDo(b.dataset.ta));
+  $("#tdstep").querySelectorAll("[data-files]").forEach(a => a.onclick = () => tdOpenTask(+a.dataset.files, true));
+  $("#tdstep [data-skip]").onclick = tdSkip;
+}
+function tdSkip() {
+  const it = TD.item; if (!it) return;
+  const i = TD.order.indexOf(it.key), next = TD.order[i + 1] || TD.order[0];
+  TD.skip[it.key] = Date.now(); TD.key = next && next !== it.key ? next : it.key; tdSave(); renderToday();
+}
+// The message box answers a task, sends it back, or retries it with a note, instead of talking in the chat above it.
+function tdMode(m) { TD.mode = m; renderSayMode(); $("#say").focus(); }
+async function tdDo(a) {
+  const it = TD.item; if (!it) return;
+  const s = it.source || {};
+  const run = async (fn, note = "") => {
+    TD.busy = it.key; TD.msg = ""; TD.note = ""; renderToday();
+    try { await fn(); TD.note = note; } catch (e) { TD.msg = e.message; }
+    TD.busy = ""; delete $("#tdstep").dataset.html; renderToday(); refresh();
+  };
+  if (a === "sendback") return tdMode({a: "reject", id: s.id, words: `Sends #${s.id} back to its worker: say what to change.`});
+  if (a === "retrynote") return tdMode({a: "retry", id: s.id, words: `Retries #${s.id} with this note to its worker.`});
+  if (a === "answer") return tdMode(tdAnswerMode(it));
+  if (a === "reply") { TD.mode = null; renderSayMode(); $("#say").focus(); return; }
+  if (a === "diff" || a === "details") return tdOpenTask(s.id, a === "diff");
+  if (a.startsWith("details:")) return tdOpenTask(+a.slice(8));
+  if (a.startsWith("deploy:")) return openDeploy(it.project, a.slice(7));
+  if (a === "projects") { setFocus(it.project); return showTab("projects"); }
+  if (a === "play") return run(() => api(`/api/tasks/${s.id}/play`, {}), "Starting the build. Approve it, or send it back, when you have tried it.");
+  if (a === "approve" || a === "retry") return run(() => api(`/api/tasks/${s.id}/${a}`, {}));
+  if (a === "stopmain") return run(() => api(`/api/projects/${encodeURIComponent(it.project)}/stop`, {}), "Stopped. The release goes on by itself within a minute.");
+  if (a === "promote" || a === "senddev") return run(() => api(`/api/projects/${encodeURIComponent(it.project)}/${a}`, {}));
+  if (a === "read") return run(() => api(`/api/designs/${s.id}/seen`, {}));
+  if (a === "done") return run(() => api(`/api/todos/${it.todo}/done`, {}));
+}
+async function tdSend(text) {
+  const m = TD.mode, d = TD.task;
+  let path, body;
+  if (m) { path = `/api/tasks/${m.id}/${m.a}`; body = m.a === "answer" ? {answer: text} : m.a === "reject" ? {feedback: text} : {note: text}; }
+  else {
+    const a = d && (d.can_steer && !(d.state === "paused" && d.can_chat) ? "steer" : d.can_chat ? "ask" : "");
+    if (!a) { $("#chatmsg").textContent = "This task's worker can't take a message now."; return; }
+    path = `/api/tasks/${d.id}/${a}`; body = {text};
+  }
+  try {
+    await api(path, body);
+    $("#say").value = ""; $("#chatmsg").textContent = ""; TD.mode = null; chatKey = "";
+    renderSayMode(); refresh(); refreshDesign();
+  } catch (e) { $("#chatmsg").textContent = e.message; }
+}
+function tdPlaceholder() {
+  const m = TD.mode, d = TD.conv?.task && TD.task;
+  if (m) return {answer: `Your answer to #${m.id}'s question`, reject: `What should #${m.id} change?`, retry: `A note for #${m.id}'s worker on this retry`}[m.a]
+    + ". Drop or paste screenshots to attach them. (⌘↩ sends)";
+  if (d) return d.can_steer ? "Steer the worker: change direction, add a requirement, or ask what it is doing. (⌘↩ sends)"
+    : d.can_chat ? "Ask the worker about this work. (⌘↩ sends)" : "This task's worker can't take a message now.";
+  if (chatData && chatData.kind === "project") return TABTEXT.chat.say;
+  return TABTEXT.design.say;
+}
+// The line over the message box that says where a message goes, when it isn't the chat above it.
+function renderSayMode() {
+  const today = tab === "today", m = today && TD.mode, el = $("#saymode");
+  el.classList.toggle("hidden", !m);
+  if (put(el, m ? `<span>${esc(m.words)}</span><button id="saycancel">Cancel</button>` : "") && m)
+    $("#saycancel").onclick = () => { TD.mode = null; renderSayMode(); };
+  if (!today) { $("#say").placeholder = TABTEXT[chatTab() ? tab : "design"].say; return; }
+  $("#say").placeholder = tdPlaceholder();
+  if (m) $("#send").textContent = SEND_WORDS[m.a];
+  else if (TD.conv?.task) $("#send").textContent = "Send";
+  $("#cprojwrap").classList.toggle("hidden", !!pf || !!chatSel || !!m || !!TD.conv?.task);
+}
+
+// The conversation under the step: the item's chat; for a task the chat it came from, else its own chat with its
+// worker; otherwise the project's latest open design chat.
+async function loadConv() {
+  const it = TD.item, key = TD.convKey, s = (it && it.source) || {};
+  let chat = null, task = null;
+  if (s.kind === "task") {
+    try { TD.task = await api(`/api/tasks/${s.id}`); } catch { TD.task = null; }
+    if (TD.convKey !== key) return;
+    renderToday();  // its facts
+  }
+  if (TD.pin && TD.pin.key === key) chat = TD.pin.chat;
+  else if (s.kind === "chat") chat = s.id;
+  else if (s.kind === "task" && TD.task) {
+    const o = TD.task.origin;
+    if (o && !o.ref.startsWith("task:")) chat = o.id; else if (TD.task.chat_from) chat = TD.task.chat_from; else task = TD.task;
+  }
+  if (!chat && !task && !(TD.pin && TD.pin.key === key)) chat = await tdLatestChat(it ? it.project : pf);
+  if (TD.convKey !== key) return;
+  TD.conv = task ? {task: task.id} : {chat};
+  if (task) { chatSel = null; chatData = null; renderTaskConv(task); renderSayMode(); return; }
+  if (chatSel !== chat) { chatSel = chat; chatData = null; chatKey = ""; }
+  const pinned = TD.pin && TD.pin.key === key ? TD.pin.project : "";
+  if (!chat && !pf && (pinned || it)) $("#cproj").value = pinned || it.project;  // a new design chat starts in the item's project
+  if (chat) await loadChat(); else renderChat();
+  renderSayMode();
+}
+async function tdLatestChat(project) {
+  if (!TD.designs || Date.now() - TD.designsAt > 30000) {
+    try { TD.designs = await api("/api/designs"); TD.designsAt = Date.now(); } catch { TD.designs = TD.designs || []; }
+  }
+  const c = TD.designs.filter(c => (c.kind || "design") === "design" && !c.ended && (project ? c.project === project : true))
+    .sort((a, b) => b.updated - a.updated)[0];
+  return c ? c.id : null;
+}
+// A task's own chat with its worker, drawn as the chat column draws a chat.
+function renderTaskConv(d) {
+  $("#endchat").classList.add("hidden"); $("#reopenchat").classList.add("hidden");
+  $("#stopchat").classList.toggle("hidden", !d.chat_live);
+  const key = `task:${d.id}:${d.state}:${d.can_steer}:${d.can_chat}:${JSON.stringify(d.chat.map(m => [m.ts, m.delivered]))}:${JSON.stringify(d.chat_live || null)}`;
+  if (key === chatKey) return;
+  const box = $("#msgs"), stick = atBottom(box) || !chatKey.startsWith(`task:${d.id}:`);
+  chatKey = key;
+  $("#chathead").innerHTML = `Your chat with the worker on ${taskLink(d.id)} · ${esc(d.title)}`;
+  const links = chatCtx(d.project);
+  box.innerHTML = (d.chat.map(m => m.role === "assistant" ? `<div class="msg">${md(m.text, undefined, links)}</div>`
+      : `<div class="msg user">${userMd(m.text, links)}${m.role === "steer" ? `<div class="note">${steerNote(d, m)}</div>` : ""}</div>`).join("")
+    || `<div class="muted" style="padding:20px 0">No messages with this task's worker yet.${d.can_steer || d.can_chat ? " Write below to ask it something." : ""}</div>`)
+    + (d.chat_live ? `<div class="live"><span class="pulse s-running">Claude is thinking</span>${d.chat_live.map(l => `<div>  ${esc(l)}</div>`).join("")}</div>` : "");
+  const bottom = () => { if (stick || d.chat_live) toBottom(box); };
+  bottom(); chatLinks(box, d.project).then(bottom);
+}
+
+// ---- the timeline: read-only, what runs, what waits, what got done today
+function tdTimeline() {
+  const ts = state.tasks.filter(t => inView(t.project)), now = state.now;
+  const proj = t => pf ? "" : esc(P(t.project).title);
+  const row = (t, sub) => `<div class="tlitem" data-tl="task:${t.id}" title="${esc(t.title)}"><div class="t"><span class="id">#${t.id}</span>${esc(t.title)}</div>
+    <div class="sub">${sub.filter(Boolean).join(" · ")}</div></div>`;
+  const working = ts.filter(t => LIVE.includes(t.state)), rsn = (state.research && state.research.active) || 0;
+  const waiting = ts.filter(t => ["queued", "paused"].includes(t.state)).sort((a, b) => b.priority - a.priority || a.id - b.id);
+  const trains = state.projects.filter(g => inView(g.name) && g.train), done = tdDoneToday();
+  const scheds = (state.schedules || []).filter(x => inView(x.project)).sort((a, b) => a.paused - b.paused || a.next_at - b.next_at);
+  const html = `<h3>Working now</h3>`
+    + (working.map(t => row(t, [proj(t), `<span class="s-running">${esc(t.phase || LABEL[t.state])}</span>`, took(t, now)])).join("")
+      + (rsn ? `<div class="tlitem" data-tl="research"><div class="t">${rsn} research run${rsn === 1 ? "" : "s"}</div><div class="sub">no task slot</div></div>` : "")
+      || `<div class="muted">Nothing is running.</div>`)
+    + `<h3>Scheduled</h3>`
+    + (trains.map(g => `<div class="tlitem" data-tl="train:${esc(g.name)}"><div class="t">Promote train${pf ? "" : ` · ${esc(g.title)}`}</div>
+        <div class="sub">${g.train.ids.length} task${g.train.ids.length === 1 ? "" : "s"} · ${esc(trainWords(g.train))}</div></div>`).join("")
+      + waiting.map(t => row(t, [proj(t), t.state === "paused" ? `<span class="s-paused">paused</span>` : "",
+          esc(t.state === "queued" && archivedP(t.project) ? "archived project" : t.wait || (t.state === "queued" ? "waiting for a worker" : ""))])).join("")
+      + scheds.map(x => `<div class="tlitem" data-tl="schedule:${x.id}" title="${esc(x.title)}"><div class="t">↻ ${esc(x.title)}</div>
+          <div class="sub">${[pf ? "" : esc(P(x.project).title), x.paused ? `<span class="s-paused">paused</span>` : `next ${esc(when(x.next_at))}`, esc(x.every)].filter(Boolean).join(" · ")}</div></div>`).join("")
+      || `<div class="muted">Nothing is waiting.</div>`)
+    + `<h3>Done today${done.length ? ` (${done.length})` : ""}</h3>`
+    + (done.map(t => row(t, [proj(t), clock(t.finished), t.kind !== "task" ? t.kind : ""])).join("") || `<div class="muted">Nothing yet today.</div>`);
+  if (!put($("#tdtl"), html)) return;
+  $("#tdtl").querySelectorAll("[data-tl]").forEach(el => el.onclick = () => {
+    const [k, v] = el.dataset.tl.split(/:(.*)/);
+    if (k === "task") tdOpenTask(+v); else tdOpenPanel(k === "schedule" ? {kind: k, id: +v} : {kind: k, project: v});
+  });
+}
+function tdOpenPanel(panel) {
+  tdPanelTask(false); TD.panel = panel; $("#tdpanel").scrollTop = 0; renderToday();
+}
+
+// ---- the panel over the timeline: a task's page, the promote train, or the research runs
+function tdOpenTask(id, filesOpen) {
+  tdPanelTask(true);
+  TD.panel = {kind: "task", id};
+  $("#tdpanel").scrollTop = 0;
+  renderToday();
+  sel = id; delete $("#detail").dataset.id;
+  $("#detail").innerHTML = `<span class="muted">Loading #${id}…</span>`;
+  loadDetail(id, true).then(() => {
+    const f = filesOpen && $('#detail details[data-k="files"]');
+    if (f) { f.open = true; f.scrollIntoView({block: "nearest"}); }
+  });
+}
+// The task page lives on History; the panel borrows it while it shows a task.
+function tdPanelTask(on) {
+  if (on) $("#tdpdet").appendChild($("#detail"));
+  else if ($("#detail").parentElement !== $("#detailcol")) { $("#detailcol").appendChild($("#detail")); clearSelection(); }
+}
+function tdClosePanel() { tdPanelTask(false); TD.panel = null; renderToday(); }
+function tdLeave() { if (TD.panel) { tdPanelTask(false); TD.panel = null; } TD.mode = null; }
+function stageOf(t) {
+  if (!t) return -1;
+  const st = t.state, g = P(t.project);
+  if (st === "queued" || st === "paused") return t.started ? 1 : 0;
+  if (st === "running" || st === "needs_input") return 1;
+  if (st === "gating" || st === "merging") return 2;
+  if (st === "review") return 3;
+  if (st !== "done") return -1;
+  if (t.kind !== "task" && t.kind !== "senddev") return 5;
+  return g.direct_main || !(g.dev_log || []).some(c => c.task === t.id) ? 5 : 4;
+}
+function tdPanel() {
+  const p = TD.panel;
+  $("#tdright").classList.toggle("panel-open", !!p); $("#tdpanel").classList.toggle("hidden", !p);
+  $("#tdpdet").classList.toggle("hidden", !p || p.kind !== "task");
+  if (!p) return;
+  let head = `<div class="tdphead"><button id="tdpclose">← Timeline</button><span style="flex:1"></span>
+    <button id="tdpask" title="Put a first line about this in the message box">Ask Claude about this</button></div>`, other = "";
+  if (p.kind === "task") {
+    const t = state.tasks.find(x => x.id === p.id), k = stageOf(t);
+    head += `<div class="stages">${STAGES.map((s, i) => `<span class="${i === k ? "now" : i < k ? "past" : ""}">${s}</span>`).join("")}</div>`
+      + (t && ["failed", "cancelled"].includes(t.state) ? `<div class="muted" style="margin:-6px 0 10px">${LABEL[t.state]}</div>` : "");
+  } else if (p.kind === "train") {
+    const g = P(p.project), tr = g.train;
+    other = `<div class="card"><h2>Promote train · ${esc(g.title)}</h2>` + (tr
+      ? `<div>Tasks marked Promote after merge wait here: ${esc(trainWords(tr))}.</div>
+         <ul class="ahead">${tr.ids.map(id => { const t = state.tasks.find(x => x.id === id);
+           return `<li>${taskLink(id)} ${esc(t ? t.title : "")}</li>`; }).join("")}</ul>
+         <div class="row"><button class="primary" id="tdpromote">Promote now</button><span id="tdpmsg" class="err"></span></div>`
+      : `<div class="muted">This train has left: nothing waits to be promoted.</div>`) + `</div>`;
+  } else if (p.kind === "schedule") {
+    const x = (state.schedules || []).find(y => y.id === p.id);
+    const runs = state.tasks.filter(t => t.origin && t.origin.ref === `schedule:${p.id}`).sort((a, b) => b.id - a.id).slice(0, 8);
+    other = `<div class="card"><h2>↻ ${esc(x ? x.title : `Schedule #${p.id}`)}</h2>` + (x
+      ? `<div>${esc(P(x.project).title)} · every ${esc(x.every)} · ${x.paused ? "paused" : `next ${esc(when(x.next_at))}`}</div>
+         <h3>Last runs</h3>${runs.length ? `<ul class="ahead">${runs.map(t => `<li>${taskLink(t.id)} <span class="s-${esc(t.state)}">${esc(LABEL[t.state] || t.state)}</span> · ${esc(clock(t.created))}</li>`).join("")}</ul>`
+           : `<div class="muted">${x.last_task ? `Last task ${taskLink(x.last_task)}, older than this page's list.` : "No runs yet."}</div>`}
+         <div class="row"><button class="primary" data-sact="run" title="Queue its task now. The next run stays as it is.">Run now</button>
+           <button data-sact="${x.paused ? "resume" : "pause"}">${x.paused ? "Resume" : "Pause"}</button>
+           <button data-sact="edit" title="Edit it on the Schedules page">Edit</button><span id="tdpmsg" class="err"></span></div>`
+      : `<div class="muted">This schedule is gone.</div>`) + `</div>`;
+  } else {
+    const n = (state.research && state.research.active) || 0;
+    other = `<div class="card"><h2>Research</h2><div>${n ? `${n} research run${n === 1 ? "" : "s"} going.` : "No research runs now."} They take no task slot.</div>
+      <div class="row"><button id="tdrs">Open research runs</button></div></div>`;
+  }
+  if (put($("#tdphead"), head)) {
+    $("#tdpclose").onclick = tdClosePanel;
+    $("#tdpask").onclick = tdAsk;
+  }
+  if (put($("#tdpother"), other)) {
+    if ($("#tdpromote")) $("#tdpromote").onclick = () => { $("#tdpromote").disabled = true;
+      api(`/api/projects/${encodeURIComponent(p.project)}/promote`, {}).then(() => refresh())
+        .catch(e => { $("#tdpmsg").textContent = e.message; $("#tdpromote").disabled = false; }); };
+    if ($("#tdrs")) $("#tdrs").onclick = () => { showTab("research"); rsShow("run"); };
+    $("#tdpother").querySelectorAll("[data-sact]").forEach(b => b.onclick = () => {
+      const act = b.dataset.sact;
+      if (act === "edit") { showTab("schedules"); $(`#schedlist .sched[data-id="${p.id}"] [data-act=edit]`)?.click(); return; }
+      b.disabled = true;
+      api(`/api/schedules/${p.id}/${act}`, {}).then(() => refresh()).catch(e => { $("#tdpmsg").textContent = e.message; b.disabled = false; });
+    });
+  }
+}
+// Ask Claude about this: a first line in the message box, to finish and send to the conversation shown.
+async function tdAsk() {
+  const p = TD.panel; if (!p) return;
+  const t = p.kind === "task" && state.tasks.find(x => x.id === p.id);
+  const sch = p.kind === "schedule" && (state.schedules || []).find(x => x.id === p.id);
+  const start = p.kind === "task" ? `About #${p.id}${t ? ` (${t.title})` : ""}: `
+    : p.kind === "train" ? `About the ${P(p.project).title} promote train (${(P(p.project).train || {ids: []}).ids.map(i => "#" + i).join(", ")}): `
+    : p.kind === "schedule" ? `About the schedule “${(sch || {}).title || "#" + p.id}” (${(sch || {}).every || ""}): `
+    : "About the research runs: ";
+  TD.mode = null;
+  // Not to the worker of the task under the step: to a design chat in the project, or a new one
+  if (TD.conv?.task) {
+    const project = p.kind === "task" ? (t ? t.project : pf) : p.kind === "train" ? p.project : sch ? sch.project : (TD.item ? TD.item.project : pf);
+    TD.pin = {key: TD.convKey, chat: await tdLatestChat(project), project}; TD.conv = null; chatKey = "";
+    await refreshDesign();
+  }
+  renderSayMode();
+  const say = $("#say"); say.value = start + say.value; say.focus(); say.setSelectionRange(start.length, start.length);
+}
+
+// ---- the header's More menu
+function closeMore() { $("#moremenu").classList.add("hidden"); $("#morebtn").setAttribute("aria-expanded", "false"); }
+$("#morebtn").onclick = e => {
+  e.stopPropagation();
+  const m = $("#moremenu"); m.classList.toggle("hidden");
+  $("#morebtn").setAttribute("aria-expanded", String(!m.classList.contains("hidden")));
+};
+document.addEventListener("click", e => { if (!e.target.closest || !e.target.closest("#more")) closeMore(); });
+$("#moremenu").addEventListener("click", e => { if (e.target.closest("button")) closeMore(); });
+document.addEventListener("keydown", e => {
+  if (e.key !== "Escape") return;
+  if (!$("#moremenu").classList.contains("hidden")) closeMore();
+  else if (tab === "today" && TD.panel && !dlg) tdClosePanel();
+});
 
 // ---------------------------------------------------------------- screenshots: drop or paste into any message box
 // The image is uploaded and "[image: <path>]" goes into the text at the cursor; the daemon lets Claude read it.
@@ -3408,10 +3909,10 @@ if (tab === "research") rsApply(location.hash);
 showTab(tab);
 // Poll while the page is in view. A hidden tab asks nothing, and catches up as soon as it is shown again.
 refresh(); setInterval(() => { if (!document.hidden) refresh.poll(); }, 3000);
-setInterval(() => { if (!document.hidden && chatTab()) refreshDesign.poll(); }, 1500);
+setInterval(() => { if (!document.hidden && (chatTab() || (tab === "today" && convBusy()))) refreshDesign.poll(); }, 1500);
 document.addEventListener("visibilitychange", () => {
   if (document.hidden) return;
-  refresh.poll(); if (chatTab()) refreshDesign.poll();
+  refresh.poll(); if (chatTab() || tab === "today") refreshDesign.poll();
 });
 </script>
 </body>
