@@ -696,7 +696,8 @@ def init_db():
                       ("origin", "TEXT"),  # and before peer sends
                       ("spec_draft", "INTEGER DEFAULT 0"),  # and before New change: drafting, no change yet
                       ("session_model", "TEXT"),  # and before models per kind: the model its session started on
-                      ("last_call", "REAL"), ("ctx_tokens", "INTEGER")):  # its session's last call (see chat_stale)
+                      ("last_call", "REAL"), ("ctx_tokens", "INTEGER"),  # its session's last call (see chat_stale)
+                      ("queued", "TEXT DEFAULT '[]'")):  # and before queued messages: sent while Claude replies
         if col not in dcols:
             q(f"ALTER TABLE designs ADD COLUMN {col} {decl}")
             if col == "seen":  # chats from before count as read, so they don't all show a new reply at once
@@ -4262,14 +4263,47 @@ def chat_counts():
              f"GROUP BY project, kind")
 
 
+DESIGN_LOCK = threading.Lock()  # a message sent as a reply ends: it either starts the next turn or waits in the queue
+
+
 def design_say(did, text):
-    """Start one design-chat turn in the background."""
-    d = design(did)
-    if d["state"] == "thinking":
-        raise ValueError("Claude is still replying")
-    q("INSERT INTO design_msgs (design_id, role, text, ts) VALUES (?,?,?,?)", (did, "user", text, time.time()))
-    q("UPDATE designs SET state='thinking', updated=?, ended=NULL WHERE id=?", (time.time(), did))  # reopens it
+    """Start one design-chat turn in the background. While Claude is replying, the message waits in the chat's
+    queue instead, and goes as the next turn when the reply ends (send_queued). Returns whether it was queued."""
+    with DESIGN_LOCK:
+        d = design(did)
+        if d["state"] == "thinking":
+            q("UPDATE designs SET queued=?, updated=?, ended=NULL WHERE id=?",
+              (json.dumps(queued_of(d) + [text]), time.time(), did))
+            return True
+        q("INSERT INTO design_msgs (design_id, role, text, ts) VALUES (?,?,?,?)", (did, "user", text, time.time()))
+        q("UPDATE designs SET state='thinking', updated=?, ended=NULL WHERE id=?", (time.time(), did))  # reopens it
     threading.Thread(target=design_turn, args=(did, text), daemon=True).start()
+    return False
+
+
+def queued_of(d):
+    return json.loads(d["queued"] or "[]")
+
+
+def send_queued(did):
+    """After a reply: the messages queued while it ran go as the next turn, as one message. A slash command goes on
+    its own, as the CLI runs one only from the start of the prompt. An ended chat drops its queue."""
+    with DESIGN_LOCK:
+        d = design(did)
+        waiting = queued_of(d)
+        if not waiting or d["state"] == "thinking":
+            return
+        if d["ended"]:
+            q("UPDATE designs SET queued='[]' WHERE id=?", (did,))
+            return
+        n = 1 if waiting[0].strip().startswith("/") else \
+            next((k for k, t in enumerate(waiting) if t.strip().startswith("/")), len(waiting))
+        q("UPDATE designs SET queued=? WHERE id=?", (json.dumps(waiting[n:]), did))
+        now = time.time()
+        for t in waiting[:n]:
+            q("INSERT INTO design_msgs (design_id, role, text, ts) VALUES (?,?,?,?)", (did, "user", t, now))
+        q("UPDATE designs SET state='thinking', updated=? WHERE id=?", (now, did))
+    threading.Thread(target=design_turn, args=(did, "\n\n".join(waiting[:n])), daemon=True).start()
 
 
 def ops_note(p, did, extra=""):
@@ -4426,6 +4460,7 @@ def design_turn(did, text, fresh_why=None):
               (did, "assistant", f"(chat error: could not prepare the change's worktree: {e})", time.time()))
             DESIGN_LIVE.pop(did, None)
             q("UPDATE designs SET state='idle', updated=? WHERE id=?", (time.time(), did))
+            send_queued(did)
             return
         tools += spec_tools(cwd)
     tools += f",Bash({SEND_CMD}:*)"  # read-only still: it only asks another project to do something
@@ -4536,6 +4571,8 @@ def design_turn(did, text, fresh_why=None):
           (STOPPING.is_set() or retry, now, cost, now, did))
         if retry:  # here, as the turn's early returns skip anything after the finally
             design_turn(did, orig, fresh_why="Claude could not find its session")
+        elif not STOPPING.is_set():
+            send_queued(did)
 
 
 LOST_SESSION = "No conversation found with session ID"  # claude's error when --resume names a session it has no file for
@@ -4554,15 +4591,21 @@ def resume_chats():
     """On start: answer the messages the last daemon was replying to when it stopped (a release restarts it), so
     you don't have to send them again. Chats it left replying, and the task chats shutdown listed in cut_task_chats."""
     for d in q("SELECT id, project, ended FROM designs WHERE state='thinking'"):
-        m = q("SELECT text FROM design_msgs WHERE design_id=? AND role='user' ORDER BY id DESC LIMIT 1", (d["id"],),
-              one=True)
-        if d["ended"] or not m or d["project"] not in PROJECTS:
+        # the turn's message: the user's messages since the last answer (queued ones go as one turn)
+        msgs = q("SELECT text FROM design_msgs WHERE design_id=? AND role='user' AND id>(SELECT COALESCE(MAX(id),0) "
+                 "FROM design_msgs WHERE design_id=? AND role!='user') ORDER BY id", (d["id"], d["id"])) or \
+            q("SELECT text FROM design_msgs WHERE design_id=? AND role='user' ORDER BY id DESC LIMIT 1", (d["id"],))
+        if d["ended"] or not msgs or d["project"] not in PROJECTS:
             q("UPDATE designs SET state='idle' WHERE id=?", (d["id"],))
             continue
         q("INSERT INTO design_msgs (design_id, role, text, ts) VALUES (?,?,?,?)",
           (d["id"], "ops", "claude-ops restarted while Claude was replying, which stopped the reply. Claude is picking "
                            "it up again; you don't need to resend your message.", time.time()))
-        threading.Thread(target=design_turn, args=(d["id"], resumed(m["text"])), daemon=True).start()
+        text = "\n\n".join(m["text"] for m in msgs)
+        threading.Thread(target=design_turn, args=(d["id"], resumed(text)), daemon=True).start()
+    for d in q("SELECT id, project FROM designs WHERE state!='thinking' AND ended IS NULL AND queued NOT IN ('[]', '')"):
+        if d["project"] in PROJECTS:
+            send_queued(d["id"])  # stopped between a reply and the queued messages after it
     try:
         cut = json.loads(setting("cut_task_chats") or "[]")
     except ValueError:
@@ -6115,6 +6158,7 @@ class H(BaseHTTPRequestHandler):
                 msg["tasks"] = [{"id": i, "title": t.get("title"), "state": t.get("state")}
                                 for i in ids for t in [task(i) or {}]]
             d["live"] = DESIGN_LIVE.get(did, [])[-12:]
+            d["queued"] = queued_of(d)
             d["files"] = chat_files(did) if d["kind"] != "project" else []
             return self.send(200, d)
         self.send(404, {"error": "not found"})
@@ -6232,13 +6276,21 @@ class H(BaseHTTPRequestHandler):
                     (b["project"], title_of(text)[:80], time.time(), time.time(), kind))
             design_say(did, text)
             return {"id": did}
-        m = re.fullmatch(r"/api/designs/(\d+)/(say|stop|rename|queue|seen|end|reopen)", path)
+        m = re.fullmatch(r"/api/designs/(\d+)/(say|unqueue|stop|rename|queue|seen|end|reopen)", path)
         if m:
             did = int(m.group(1))
             if not design(did):
                 raise ValueError("no such chat")
             if m.group(2) == "say":
-                design_say(did, b["text"].strip())
+                return {"queued": design_say(did, b["text"].strip())}
+            elif m.group(2) == "unqueue":  # take back a queued message, by its place in the queue
+                with DESIGN_LOCK:
+                    waiting = queued_of(design(did))
+                    k = int(b.get("index", -1))
+                    if not 0 <= k < len(waiting):
+                        raise ValueError("that message was already sent")
+                    q("UPDATE designs SET queued=? WHERE id=?", (json.dumps(waiting[:k] + waiting[k + 1:]), did))
+                    return {"text": waiting[k]}
             elif m.group(2) == "stop":
                 stop(DESIGN_PROCS.get(did))
             elif m.group(2) == "queue":
@@ -6246,7 +6298,7 @@ class H(BaseHTTPRequestHandler):
             elif m.group(2) == "seen":  # you looked at its latest reply
                 q("UPDATE designs SET seen=? WHERE id=?", (time.time(), did))
             elif m.group(2) == "end":  # off the list of chats waiting for you; a reply in progress stops
-                q("UPDATE designs SET ended=?, seen=? WHERE id=?", (time.time(), time.time(), did))
+                q("UPDATE designs SET ended=?, seen=?, queued='[]' WHERE id=?", (time.time(), time.time(), did))
                 stop(DESIGN_PROCS.get(did))
             elif m.group(2) == "reopen":
                 q("UPDATE designs SET ended=NULL WHERE id=?", (did,))

@@ -397,6 +397,10 @@ This applies to both the Design and the Chat tab.
   Nothing is deleted, and ending a chat stops any reply in progress. To put it back, click **Reopen** or send it a
   message. Opening an OpenSpec change reopens its chat as well.
 - Opening a chat marks its reply as read. Chats from before this feature start as read.
+- **Queue a message.** While Claude is replying, the **Send** button reads **Queue**. A queued message shows
+  faded at the end of the chat, and goes to Claude when the reply ends; several queued messages go together as
+  one. A slash command goes on its own. **Edit** takes a queued message back into the message box. **Stop** ends
+  the reply early, and the queue goes next; **End chat** drops the queue. Task chats don't queue yet.
 
 ## Chat mode
 
