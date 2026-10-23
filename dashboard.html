@@ -3197,7 +3197,7 @@ function tdSpecRepos(sd) {
 }
 function tdSpecsHead(sd) {
   const {repos, cli} = tdSpecRepos(sd);
-  const form = sd.form === "change" ? `<div>${repos.length > 1 ? `<label>Repo <select id="tdsnsub">${repos.map(r => `<option value="${esc(r.sub)}">${esc(r.sub || "(root)")}</option>`).join("")}</select></label>` : ""}
+  const form = sd.form === "change" ? `<div>${repos.length > 1 ? `<label>Repo <select id="tdsnsub">${repos.map(r => `<option value="${esc(r.sub)}">${esc(r.sub && r.sub !== "." ? r.sub : "(root)")}</option>`).join("")}</select></label>` : ""}
     <input type="text" id="tdsndesc" placeholder="What should the change do? One line." maxlength="2000">
     <div class="row"><button class="primary" id="tdsnstart">Start</button><button id="tdformx">Cancel</button></div></div>` : "";
   return `<div class="row">${repos.length ? `<button id="tdnewchange" ${cli ? "" : "disabled"} title="${esc(cli ? "Draft a new OpenSpec change with Claude" : NO_CLI)}">+ New change</button>` : ""}

@@ -3,6 +3,7 @@
 
   opsd.py serve                        run the dashboard + scheduler (http://127.0.0.1:8788)
   opsd.py add-project PATH [NAME]      detect PATH and write ~/.claude-ops/projects/NAME.toml
+  opsd.py adopt-workspace-root -p NAME make workspace NAME's own folder a git repo its tasks commit to ("." in repos)
   opsd.py add -p NAME [--model M] [--effort E] "text..."   queue a task through the running daemon; --model opus,
                                        sonnet, haiku or a full model id (else the setting model:task, then model);
                                        --effort low, medium, high, xhigh or max (else the setting effort);
@@ -28,7 +29,8 @@ Per project (paths come from ~/.claude-ops/projects/<name>.toml):
 
 A workspace (`repos = [...]` in its config) is a folder that holds several git repos, such as a backend and an
 app. Each of the paths above is then a folder with a copy of the workspace's own files and one worktree per repo,
-and every repo has its own main, dev and task branches.
+and every repo has its own main, dev and task branches. With "." in repos the workspace folder is a repo too: each
+path above is then a worktree of it, with the other repos' worktrees in folders it gitignores, and nothing is copied.
 """
 from contextlib import nullcontext
 import base64, ctypes, datetime, fnmatch, json, os, re, secrets, shlex, shutil, signal, sqlite3, subprocess, sys, threading, time, tomllib
@@ -96,15 +98,44 @@ def worktree_lock(repo):
 
 
 class Part:
-    """One git repo of a project: the project itself, or one folder of a workspace."""
+    """One git repo of a project: the project itself, or one folder of a workspace. A workspace whose repos list "."
+    has a root repo too: the workspace folder itself, with the other repos in folders it gitignores."""
 
     def __init__(self, p, sub):
         self.sub = sub
-        self.src = p.repo / sub if sub else p.repo  # your checkout of it
+        self.root = sub == "."
+        self.src = p.repo / sub if sub and not self.root else p.repo  # your checkout of it
+        self.name = p.repo.name if self.root else sub  # for people: a workspace's root repo goes by its folder name
+        self.prefix = f"{sub}/" if sub and not self.root else ""  # its files' paths in a project worktree
 
     def at(self, root):
         """This repo's worktree inside a project worktree."""
-        return Path(root) / self.sub if self.sub else Path(root)
+        return Path(root) / self.prefix if self.prefix else Path(root)
+
+    def present(self, root):
+        """Whether its worktree inside a project worktree exists. A root repo's folder exists before its worktree
+        does (the other repos are in it), so for it, the worktree's .git file is what counts."""
+        return (Path(root) / ".git").exists() if self.root else self.at(root).exists()
+
+    def add_worktree(self, root, *args):
+        """git worktree add args... for this repo inside project worktree root."""
+        return self.add_worktree_at(self.at(root), *args)
+
+    def add_worktree_at(self, path, *args):
+        """git worktree add args... at path, its last arg the commit. A workspace's root repo goes where the folder
+        may already hold the other repos' worktrees (a worktree made before the root was a repo): git won't add into
+        a folder that has files, so it adds the worktree beside it with no files, moves its .git in and checks the
+        files out there."""
+        path = Path(path)
+        if not self.root or not path.is_dir() or not any(path.iterdir()):
+            return self.git("worktree", "add", *args[:-1], str(path), args[-1])
+        tmp = path.with_name(path.name + ".root-tmp")
+        shutil.rmtree(tmp, ignore_errors=True)
+        self.git("worktree", "add", "--no-checkout", *args[:-1], str(tmp), args[-1])
+        (tmp / ".git").rename(path / ".git")
+        tmp.rmdir()
+        self.git("worktree", "repair", str(path))
+        self.git("reset", "-q", "--hard", cwd=path)  # its files replace the copies the folder held
 
     def git(self, *a, cwd=None, check=True):
         if a[:1] != ("worktree",) or a[1:2] == ("list",):
@@ -142,7 +173,9 @@ class Project:
         self.main = c.get("main_branch", "main")
         self.dev = c.get("dev_branch", "dev")
         self.wt = Path(c.get("worktrees", f"{self.repo}-wt")).expanduser()
-        self.repos = [r.strip("/") for r in c.get("repos", [])]  # a workspace: git repos in folders of repo
+        self.repos = [r.strip("/") or "." for r in c.get("repos", [])]  # a workspace: git repos in folders of repo
+        if "." in self.repos:  # a root repo: the workspace folder itself (revs keep repos order, so it stays put)
+            check_root_repo(self.repo, [r for r in self.repos if r != "."], self.main)
         self.parts = [Part(self, r) for r in self.repos] or [Part(self, "")]
         self.max_parallel = int(c.get("max_parallel", 0))  # 0: only the global limit applies
         w = c.get("worktree", {})
@@ -195,7 +228,7 @@ class Project:
 
     def show(self, revs, n=8):
         """A revs string for people: "abc12345", or "backend abc12345, app def67890" for a workspace."""
-        return ", ".join(f"{r.sub} {sha[:n]}" if r.sub else sha[:n] for r, sha in self.pairs(revs or ""))
+        return ", ".join(f"{r.name} {sha[:n]}" if r.sub else sha[:n] for r, sha in self.pairs(revs or ""))
 
     def label(self, shas, n=8):
         """Like show, for a list that may hold only some repos' shas, as a task's merged does."""
@@ -204,14 +237,36 @@ class Project:
             return self.show(" ".join(shas), n)
         found = [(r, self.mine(r, " ".join(shas))) for r in self.parts]
         known = {s for _, s in found if s}
-        return ", ".join([f"{r.sub} {s[:n]}" for r, s in found if s] + [s[:n] for s in shas if s not in known])
+        return ", ".join([f"{r.name} {s[:n]}" for r, s in found if s] + [s[:n] for s in shas if s not in known])
 
     def mine(self, r, shas):
         """The sha in a space-separated list that is a commit of repo r, or None."""
         return next((s for s in (shas or "").split() if r.has(s)), None)
 
+    def root_first(self, items=None):
+        """parts (or (part, x) pairs) with a root repo first, the order to make worktrees in: the others' go
+        inside its worktree. Reversed, the order to remove them."""
+        return sorted(self.parts if items is None else items,
+                      key=lambda x: not (x[0] if isinstance(x, tuple) else x).root)
+
     def port_for(self, tid):
         return self.port_base + tid % 90
+
+
+def check_root_repo(repo, subs, main):
+    """Raise ValueError unless repo (a workspace folder) is a git repo of its own with a main branch that gitignores
+    each of subs (its other repos' folders): a root repo that tracked them would hold them twice."""
+    top = sh("git", "rev-parse", "--show-toplevel", cwd=repo, check=False) if repo.is_dir() else ""
+    if not top or Path(top).resolve() != repo.resolve():
+        raise ValueError(f'repos lists ".", but {repo} is not a git repository: run '
+                         f"opsd.py adopt-workspace-root to make it one")
+    if not sh("git", "rev-parse", "--verify", "-q", f"refs/heads/{main}", cwd=repo, check=False):
+        raise ValueError(f'repos lists ".", but {repo} has no {main} branch')
+    missing = [s for s in subs if subprocess.run(["git", "check-ignore", "-q", f"{s}/"], cwd=repo).returncode != 0]
+    if missing:
+        raise ValueError(f'repos lists ".", but {repo}/.gitignore does not ignore '
+                         + ", ".join(f"{s}/" for s in missing) + ": add " + " ".join(f"/{s}/" for s in missing)
+                         + " to it and commit it")
 
 
 class Target:
@@ -273,12 +328,13 @@ def deploy_targets(p, items):
 
 
 PROJECTS = {}
+BROKEN = {}  # name -> (title, why) of a project whose config can't load: its card shows why
 
 
 def load_projects():
-    global PROJECTS
+    global PROJECTS, BROKEN
     PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
-    found = {}
+    found, broken = {}, {}
     for f in sorted(PROJECTS_DIR.glob("*.toml")):
         try:
             p = Project(f)
@@ -291,6 +347,12 @@ def load_projects():
             found[p.name] = p
         except Exception as e:
             print(f"project {f.name}: {e}", flush=True)
+            try:
+                title = str(tomllib.loads(f.read_text()).get("title") or f.stem)
+            except Exception:
+                title = f.stem
+            broken[f.stem] = (title, f"{f.name} did not load: {e}")
+    BROKEN = broken
     PROJECTS = found  # swap, never clear and refill: requests iterate PROJECTS while a reload or archive runs
     with FACTS_LOCK:
         FACTS.clear()
@@ -378,11 +440,11 @@ def archived_projects():
 def bootstrap(p):
     p.wt.mkdir(parents=True, exist_ok=True)
     copy_workspace_files(p, p.dev_wt)
-    for r in p.parts:
+    for r in p.root_first():
         if not r.git("rev-parse", "--verify", "-q", f"refs/heads/{p.dev}", check=False):
             r.git("branch", p.dev, p.main)
-        if not r.at(p.dev_wt).exists():
-            r.git("worktree", "add", str(r.at(p.dev_wt)), p.dev)
+        if not r.present(p.dev_wt):
+            r.add_worktree(p.dev_wt, p.dev)
             set_setting(f"dev_prepared:{p.name}", "")  # a new dev worktree: Play dev prepares it first
         exclude = Path(r.git("rev-parse", "--path-format=absolute", "--git-common-dir")) / "info" / "exclude"
         if RESULT_FILE not in (exclude.read_text() if exclude.exists() else ""):
@@ -391,10 +453,10 @@ def bootstrap(p):
                 f.write(f"\n{RESULT_FILE}\n")
     if p.build or p.launch:  # Play main runs it there
         copy_workspace_files(p, p.main_wt)
-        if not all(r.at(p.main_wt).exists() for r in p.parts):
-            for r in p.parts:
-                if not r.at(p.main_wt).exists():
-                    r.git("worktree", "add", "--detach", str(r.at(p.main_wt)), p.main)
+        if not all(r.present(p.main_wt) for r in p.parts):
+            for r in p.root_first():
+                if not r.present(p.main_wt):
+                    r.add_worktree(p.main_wt, "--detach", p.main)
             set_setting(f"main_prepared:{p.name}", "")  # setup can take minutes: promote or Play main does it
 
 
@@ -424,8 +486,9 @@ def clone_tree(src, dst):
 
 def copy_workspace_files(p, dest):
     """A workspace's own files (CLAUDE.md, docs, .claude, ...) are in none of its repos: copy them into dest
-    (APFS clone), replacing older copies. Edits made to them in a worktree are not kept."""
-    if not p.repos:
+    (APFS clone), replacing older copies. Edits made to them in a worktree are not kept. A workspace with a root
+    repo (repos lists ".") has none: its own files are in that repo."""
+    if not p.repos or "." in p.repos:
         return
     dest.mkdir(parents=True, exist_ok=True)
     skip = {r.split("/")[0] for r in p.repos} | {".git", RESULT_FILE}
@@ -572,6 +635,86 @@ def detect_project(path, name=None, create=False):
     lines += ["[worker]", "notes = \"\"\"", "\"\"\"", "", "[design]", "notes = \"\"\"", "\"\"\"", ""]
     out.write_text("\n".join(lines))
     return out
+
+
+ADOPT_MSG = "chore: track workspace root"
+
+
+def adopt_workspace_root(name):
+    """opsd.py adopt-workspace-root -p NAME: make workspace NAME's own folder a git repo whose edits tasks keep. In
+    your checkout: git init it if needed (on main_branch), gitignore each repo folder, commit the folder's own files,
+    branch dev from main, and add "." to repos in NAME's toml (the rest of the file as it was). Safe to run again: a
+    step already done is skipped. Refuses if the folder is a repo with uncommitted changes. Returns what it did."""
+    path = PROJECTS_DIR / f"{name}.toml"
+    if not re.fullmatch(r"[\w-]+", name or "") or not path.is_file():
+        raise ValueError(f"no project {name!r} ({path})")
+    text = path.read_text()
+    c = tomllib.loads(text)
+    repo = Path(c["repo"]).expanduser()
+    main, dev = c.get("main_branch", "main"), c.get("dev_branch", "dev")
+    listed = [r.strip("/") or "." for r in c.get("repos", [])]
+    subs = [r for r in listed if r != "."]
+    if not subs:
+        raise ValueError(f"{name} is not a workspace: its config has no repos")
+    if not repo.is_dir():
+        raise ValueError(f"{repo} does not exist")
+    did = []
+    git = lambda *a, check=True: sh("git", "-C", str(repo), *a, check=check)
+    top = git("rev-parse", "--show-toplevel", check=False) if (repo / ".git").exists() else ""
+    if (repo / ".git").exists() and (not top or Path(top).resolve() != repo.resolve()):
+        raise ValueError(f"{repo}/.git is there but {repo} is not the top of a git repo")
+    if not top:
+        git("init", "-q", "-b", main)
+        did.append(f"git init {repo} on {main}")
+    born = bool(git("rev-parse", "--verify", "-q", "HEAD", check=False))
+    head = git("symbolic-ref", "-q", "--short", "HEAD", check=False)
+    if born:
+        dirty = git("status", "--porcelain", "--", ".", *(f":(exclude){s}" for s in subs))
+        if dirty:
+            raise ValueError(f"{repo} has uncommitted changes; commit or discard them first:\n{dirty[:1000]}")
+        if not git("rev-parse", "--verify", "-q", f"refs/heads/{main}", check=False):
+            raise ValueError(f"{repo} is a git repo with commits but no {main} branch")
+    elif head != main:
+        git("symbolic-ref", "HEAD", f"refs/heads/{main}")  # an empty repo: its first commit goes on main
+        head = main
+    ignore = repo / ".gitignore"
+    missing = [s for s in subs if subprocess.run(["git", "check-ignore", "-q", f"{s}/"], cwd=repo).returncode]
+    if missing:
+        old = ignore.read_text() if ignore.exists() else ""
+        ignore.write_text(old + ("\n" if old and not old.endswith("\n") else "")
+                          + "".join(f"/{s}/\n" for s in missing))
+        did.append(f".gitignore: added " + ", ".join(f"/{s}/" for s in missing))
+    if missing or not born:
+        if born and head != main:
+            raise ValueError(f"{repo} is on {head or 'a detached HEAD'}, not {main}: check out {main} first")
+        git("add", "-A")
+        if subprocess.run(["git", "diff", "--cached", "--quiet"], cwd=repo).returncode:
+            git("commit", "-q", "-m", ADOPT_MSG)
+            did.append(f"committed the root's files on {main}: {git('rev-parse', '--short', 'HEAD')}")
+        elif not born:
+            git("commit", "-q", "--allow-empty", "-m", ADOPT_MSG)
+            did.append(f"committed an empty root on {main}")
+    if not git("rev-parse", "--verify", "-q", f"refs/heads/{dev}", check=False):
+        git("branch", dev, main)
+        did.append(f"made {dev} from {main}")
+    check_root_repo(repo, subs, main)
+    if "." not in listed:
+        m = re.search(r"^(\s*repos\s*=\s*\[)", text, re.M)
+        if not m:
+            raise ValueError(f"can't find the repos = [...] line in {path}")
+        end = text.index("]", m.end())  # last: revs strings list repos in order, so ones recorded stay right
+        head = text[:end].rstrip()
+        new = head + ("" if head.endswith("[") else " " if head.endswith(",") else ", ") + '"."' + text[end:]
+        try:
+            ok = "." in tomllib.loads(new).get("repos", [])
+        except tomllib.TOMLDecodeError:
+            ok = False
+        if not ok:
+            raise ValueError(f'the root is ready, but adding "." to repos in {path} by itself went wrong: add it '
+                             "there yourself, then run this again")
+        path.write_text(new)
+        did.append(f'added "." to repos in {path}')
+    return did
 
 
 def workspace_toml(repo, subs):
@@ -1421,6 +1564,18 @@ def workspace_note(p, branch=None):
     """How a workspace's worktree is laid out, for the briefs. Empty for a plain project."""
     if not p.repos:
         return ""
+    if "." in p.repos:
+        kids = [r for r in p.parts if not r.root]
+        names = ", ".join(f"`{r.sub}/`" for r in kids)
+        on = (f"Each is a git worktree on branch `{branch}`, branched from that repo's `{p.dev}`. Commit in each "
+              "repo you change; a repo you leave alone is not merged.") if branch else \
+            "Each is a git worktree, detached at the commit being checked."
+        return (f"## This is a workspace of {len(p.repos)} git repos\n\n"
+                f"The worktree root is itself a git repo: the workspace's own files (`CLAUDE.md`, docs, `.claude/`, "
+                f"`bin/`, `.gitignore`, ...) are tracked there. The other repos are folders inside it that it "
+                f"gitignores: {names}. {on} Run git per repo: `git status` at the root covers only the root's own "
+                f"files, `git -C {kids[0].sub if kids else '.'} status` a repo folder. Edits to the root's files are "
+                f"kept only if you commit them in the root repo, like any other repo.\n\n")
     names = ", ".join(f"`{r}/`" for r in p.repos)
     on = (f"Each is a git worktree of its own repo on branch `{branch}`, branched from that repo's `{p.dev}`. "
           "Commit in each repo you change; a repo you leave alone is not merged.") if branch else \
@@ -1484,7 +1639,7 @@ def handoff_note(p, t, why):
                 got = r.git(*a, cwd=r.at(wt), check=False)
             except OSError:
                 got = ""
-            out.append((f"{r.sub}/:\n" if r.sub else "") + (got or "(none)"))
+            out.append((f"{r.name}/:\n" if r.sub else "") + (got or "(none)"))
         return "\n".join(out)
 
     said = [(m["ts"], {"steer": "The user, by message", "user": "The user, asking about the task",
@@ -1838,7 +1993,7 @@ def failure_detail(wt, g, rc, tail):
 
 def ensure_worktree(p, tid):
     t = task(tid)
-    if t["worktree"] and all(r.at(t["worktree"]).exists() for r in p.parts):
+    if t["worktree"] and all(r.present(t["worktree"]) for r in p.parts):
         if unprepared(t["worktree"]):  # its setup failed or was stopped: run it again
             upd(tid, phase="setting up the worktree")
             prepare_worktree(p, Path(t["worktree"]), key=tid)
@@ -1848,13 +2003,13 @@ def ensure_worktree(p, tid):
     path = p.wt / f"t{tid}"
     upd(tid, phase="setting up the worktree")
     copy_workspace_files(p, path)
-    for r in p.parts:
-        if r.at(path).exists():  # a workspace worktree that was cut off half made
+    for r in p.root_first():
+        if r.present(path):  # a workspace worktree that was cut off half made
             continue
         if r.git("rev-parse", "--verify", "-q", f"refs/heads/{branch}", check=False):
-            r.git("worktree", "add", str(r.at(path)), branch)
+            r.add_worktree(path, branch)
         else:
-            r.git("worktree", "add", "-b", branch, str(r.at(path)), p.dev)
+            r.add_worktree(path, "-b", branch, p.dev)
     prepare_worktree(p, path, key=tid)
     upd(tid, branch=branch, worktree=str(path))
     ev(tid, f"worktree {path} on {branch}")
@@ -1941,7 +2096,7 @@ def _pipeline(p, tid):
                 if r.git("status", "--porcelain", cwd=r.at(wt)):
                     r.git("stash", "push", "-u", "-m", "ops-autostash: uncommitted after worker", cwd=r.at(wt))
                     ev(tid, "stashed uncommitted leftovers (git stash list in the worktree"
-                            + (f" of {r.sub})" if r.sub else ")"))
+                            + (f" of {r.name})" if r.sub else ")"))
         need_claude = True
 
         if not changed_parts(p, t["branch"]):
@@ -1966,10 +2121,10 @@ def _pipeline(p, tid):
         if stopped(tid):
             return
         if r.returncode:
-            if not bump_round(p, tid, "rebase conflict" + (f" in {part.sub}" if part.sub else "")):
+            if not bump_round(p, tid, "rebase conflict" + (f" in {part.name}" if part.sub else "")):
                 return
             run = f"git -C {part.sub} rebase {p.dev}" if part.sub else f"git rebase {p.dev}"
-            prompt = (f"The `{p.dev}` branch{f' of {part.sub}' if part.sub else ''} moved and branch "
+            prompt = (f"The `{p.dev}` branch{f' of {part.name}' if part.sub else ''} moved and branch "
                       f"`{t['branch']}` no longer rebases cleanly onto it. Run `{run}`, resolve the conflicts "
                       f"so both your change and the new {p.dev} work survive, re-run the checks, commit, and "
                       f"write $OPS_RESULT again.\n\ngit said:\n{r.stdout[-1500:]}{r.stderr[-1500:]}")
@@ -2037,7 +2192,7 @@ def _pipeline(p, tid):
             merged = " ".join(sha for _, sha in done)
             if sending:  # from here on the work is on dev: a restart or retry goes straight to clearing
                 upd(tid, merged=merged, senddev=json.dumps({**senddev_of(task(tid)), "landed": True}))
-        where = ", ".join(f"{r.sub} {sha[:8]}" if r.sub else sha[:8] for r, sha in done)
+        where = ", ".join(f"{r.name} {sha[:8]}" if r.sub else sha[:8] for r, sha in done)
         if sending:
             return senddev_landed(p, tid, merged, f"merged into {p.dev} at {where}")
         return land(p, tid, merged, f"merged into {p.dev} at {where}")
@@ -2138,7 +2293,7 @@ def finish(p, tid, merged, note):
 
 
 def remove_worktree(p, path):
-    for r in p.parts:
+    for r in reversed(p.root_first()):  # a root repo last: the others' worktrees are inside its worktree
         r.git("worktree", "remove", "--force", str(r.at(path)), check=False)
     if p.repos:  # the workspace's own files
         shutil.rmtree(path, ignore_errors=True)
@@ -2355,12 +2510,12 @@ def release_pipeline(p, tid):
     if t["base"] == p.revs(p.main):
         start_at = "promote"  # nothing new to check: this only rebuilds main
         ev(tid, f"nothing new on {p.dev}; rebuilding {p.main}")
-    if not (t["worktree"] and all(r.at(t["worktree"]).exists() for r in p.parts)):
+    if not (t["worktree"] and all(r.present(t["worktree"]) for r in p.parts)):
         path = p.wt / f"t{tid}"
         copy_workspace_files(p, path)
-        for r, sha in p.pairs(t["base"]):
-            if not r.at(path).exists():
-                r.git("worktree", "add", "--detach", str(r.at(path)), sha)
+        for r, sha in p.root_first(p.pairs(t["base"])):
+            if not r.present(path):
+                r.add_worktree(path, "--detach", sha)
         prepare_worktree(p, path, key=tid)
         upd(tid, worktree=str(path))
         ev(tid, f"worktree {path} at {p.show(t['base'])}")
@@ -2994,8 +3149,7 @@ def research_of(t):
 
 def report_rel(p, slug):
     """Where a report goes, relative to a task worktree: docs/research/<slug>.md, in the first repo of a workspace."""
-    sub = p.parts[0].sub
-    return f"{sub + '/' if sub else ''}{RESEARCH_DIR}/{slug}.md"
+    return f"{p.parts[0].prefix}{RESEARCH_DIR}/{slug}.md"
 
 
 def research_slug(p, question, dated=False):
@@ -3143,7 +3297,7 @@ def research_reports(p):
         for f in folder.glob("*.md"):
             if not f.is_file():
                 continue
-            rel = f"{part.sub + '/' if part.sub else ''}{RESEARCH_DIR}/{f.name}"
+            rel = f"{part.prefix}{RESEARCH_DIR}/{f.name}"
             try:
                 with open(f, errors="replace") as fh:
                     title, summary = report_head(fh.read(16384))
@@ -3510,7 +3664,7 @@ def read_facts(p, deploys=True):
             m, d = r.git("rev-parse", p.main, p.dev).split()
             main.append(m)
             dev.append(d)
-            ahead += [f"{r.sub + ': ' if r.sub else ''}{h} {subj}" for h, _, subj in first_parent_log(r, m, d)]
+            ahead += [f"{r.name + ': ' if r.sub else ''}{h} {subj}" for h, _, subj in first_parent_log(r, m, d)]
         exes = my_exes() if p.process and not p.running_cmd else None  # one read of the process table for both
         since, since_kind = main_since(p, settings_now())
         f = {"main": " ".join(main), "dev": " ".join(dev), "ahead": ahead[:30],
@@ -3845,7 +3999,7 @@ def move_main(p, tid, commit, note="", left=None):
 def _move_main(p, tid, commit, note, left):
     for r, sha in p.pairs(commit):
         if not is_ancestor(r, p.main, sha):
-            return f"{p.main}{f' of {r.sub}' if r.sub else ''} could not fast-forward: it has commits {p.dev} lacks."
+            return f"{p.main}{f' of {r.name}' if r.sub else ''} could not fast-forward: it has commits {p.dev} lacks."
     kept = [(r, sorted(d), sorted(d & set(r.git("diff", "--name-only", p.main, sha).splitlines())))
             for r, sha in p.pairs(commit)
             if r.git("branch", "--show-current", check=False) == p.main and (d := dirty(r))]
@@ -3866,7 +4020,7 @@ def _move_main(p, tid, commit, note, left):
             res = subprocess.run(["git", "update-ref", f"refs/heads/{p.main}", sha, r.rev(p.main)],
                                  cwd=r.src, capture_output=True, text=True)
         if res.returncode:
-            return f"{p.main}{f' of {r.sub}' if r.sub else ''} could not fast-forward:\n" + res.stderr[-1000:]
+            return f"{p.main}{f' of {r.name}' if r.sub else ''} could not fast-forward:\n" + res.stderr[-1000:]
     if left is not None:
         left[:] = [(r, paths, touched if r in carried else []) for r, paths, touched in kept]
     return None
@@ -3891,7 +4045,7 @@ def merge_main_into_dev(p):
                            cwd=part.at(p.dev_wt), capture_output=True, text=True)
         if r.returncode:
             subprocess.run(["git", "merge", "--abort"], cwd=part.at(p.dev_wt), capture_output=True)
-            return (f"{p.main}{f' of {part.sub}' if part.sub else ''} has commits that conflict with {p.dev}:\n"
+            return (f"{p.main}{f' of {part.name}' if part.sub else ''} has commits that conflict with {p.dev}:\n"
                     + r.stdout[-1500:] + r.stderr[-1500:])
     return None
 
@@ -3903,15 +4057,15 @@ def resolve_main_into_dev(p, tid, conflict):
     Returns True once dev contains main (the task's base is set); False if it failed or stopped."""
     path = p.wt / f"t{tid}"
     for _ in range(MAX_FIX_ROUNDS):  # dev can move while the worker merges; then it merges again
-        fresh = not all(r.at(path).exists() for r in p.parts)
+        fresh = not all(r.present(path) for r in p.parts)
         copy_workspace_files(p, path)
-        for r in p.parts:
-            if r.at(path).exists():
+        for r in p.root_first():
+            if r.present(path):
                 for a in (("merge", "--abort"), ("reset", "--hard"), ("clean", "-fd")):
                     subprocess.run(["git", *a], cwd=r.at(path), capture_output=True)
                 r.git("checkout", "--detach", p.dev, cwd=r.at(path))
             else:
-                r.git("worktree", "add", "--detach", str(r.at(path)), p.dev)
+                r.add_worktree(path, "--detach", p.dev)
         if fresh or unprepared(path):
             prepare_worktree(p, path, key=tid)
         upd(tid, worktree=str(path), session_id=None)
@@ -3920,7 +4074,7 @@ def resolve_main_into_dev(p, tid, conflict):
             m = subprocess.run(["git", "merge", "--no-ff", "-m", f"Merge {p.main} into {p.dev}", p.main],
                                cwd=r.at(path), capture_output=True, text=True)
             if m.returncode:
-                conflicts.append((f"In {r.sub}/:\n" if r.sub else "") + m.stdout[-2500:] + m.stderr[-1000:])
+                conflicts.append((f"In {r.name}/:\n" if r.sub else "") + m.stdout[-2500:] + m.stderr[-1000:])
         if conflicts:
             ev(tid, f"{p.main} conflicts with {p.dev}; a worker is resolving it")
             res = run_claude(p, tid, resolve_prompt(p, task(tid), "\n".join(conflicts)))
@@ -3966,7 +4120,7 @@ def resolve_main_into_dev(p, tid, conflict):
 def resolve_prompt(p, t, conflict):
     checks = ", ".join(f"`{g['run']}`" for g in p.gate) or "(none configured: run whatever tests the repo has)"
     notes = f"## Notes for {p.title}\n\n{p.worker_notes}\n\n" if p.worker_notes else ""
-    where = (" in each of its repos (" + ", ".join(f"{r.sub}/" for r in p.parts) + "), and each repo merges its "
+    where = (" in each of its repos (" + ", ".join(r.prefix or "the workspace folder itself" for r in p.parts) + "), and each repo merges its "
              "own branches") if p.repos else ""
     return (f"You are an unattended worker on the {p.title} project, started by the claude-ops task queue. "
             f"Nobody watches this session.\n\n"
@@ -4139,7 +4293,7 @@ def senddev_where(p, repos):
     "shop (backend, app)" for a workspace."""
     if not p.repos:
         return p.repo.name
-    return f"{p.repo.name} ({', '.join(x['sub'] for x in repos)})"
+    return f"{p.repo.name} ({', '.join(part_of(p, x['sub']).name for x in repos)})"
 
 
 def senddev_body(p, repos):
@@ -4282,7 +4436,7 @@ def senddev_conflict_prompt(p, t, conflicts):
     parts = []
     for x in conflicts:
         subject, body = senddev_message(x)
-        where = f"`{x['sub']}/`" if x["sub"] else "this worktree"
+        where = f"`{x['sub']}/`" if x["sub"] not in ("", ".") else "the worktree root"
         parts.append(
             f"In {where} ({x['repo']}), `git cherry-pick --no-commit {x['keep'][:12]}` stopped on conflicts in:\n\n"
             + "".join(f"- {f}\n" for f in x["conflicts"]) +
@@ -4568,7 +4722,7 @@ def peek_version(p, t, revs):
         path = p.wt / "deploy-peek"
         try:
             copy_workspace_files(p, path)
-            for r, sha in p.pairs(revs):
+            for r, sha in p.root_first(p.pairs(revs)):
                 checkout_detached(r, r.at(path), sha)
             v = run_version(t, t.folder(path))
         except (ValueError, RuntimeError) as e:
@@ -4599,9 +4753,9 @@ def checkout_main(p, r, sha, tid=None, check=True):
 def checkout_detached(r, wt, sha):
     """Put repo r's worktree wt at sha, detached, its tracked files exactly as committed. Never `git clean`:
     untracked and ignored files (a build's output) stay. Makes the worktree if it is missing."""
-    if not wt.exists():
+    if not (wt / ".git").exists():
         r.git("worktree", "prune", check=False)  # a worktree whose folder was deleted is still registered
-        r.git("worktree", "add", "--detach", str(wt), sha)
+        r.add_worktree_at(wt, "--detach", sha)
         return
     r.git("checkout", "--force", "--detach", sha, cwd=wt)
     r.git("reset", "--hard", "-q", cwd=wt)
@@ -4642,7 +4796,7 @@ def target_facts(p, t, main, s):
         out["blocked"] = str(e)  # "Deploy swish test first."
         return out
     pairs = [(r, sha) for r, sha in p.pairs(revs) if r in t.parts(p)]
-    subject = " · ".join((f"{r.sub}: " if r.sub and not t.repo else "") + r.git("log", "-1", "--format=%s", sha)
+    subject = " · ".join((f"{r.name}: " if r.sub and not t.repo else "") + r.git("log", "-1", "--format=%s", sha)
                          for r, sha in pairs)
     commit = target_commit(p, t, revs)
     out["commit"] = {"sha": commit, "show": target_show(p, t, commit), "subject": subject}
@@ -4739,8 +4893,8 @@ def deploy_run(p, tid, tg, d):
     upd(tid, base=revs, worktree=str(path), phase=f"checking out {p.show(revs)}")
     dlog(tid, f"deploy {tg.name}: checking out {p.show(revs, 12)} in {path}")
     copy_workspace_files(p, path)
-    fresh = not all(r.at(path).exists() for r in p.parts)
-    for r, sha in p.pairs(revs):
+    fresh = not all(r.present(path) for r in p.parts)
+    for r, sha in p.root_first(p.pairs(revs)):
         checkout_detached(r, r.at(path), sha)
     # The clone list, every time: it skips files already there, so entries added since the worktree was made
     # (a signing key the first deploy lacked) reach it. Setup runs below, where its output is logged.
@@ -4793,7 +4947,7 @@ def deploy_run(p, tid, tg, d):
     moved = [(r, a, b) for r, a, b in zip(p.parts, revs.split(), heads.split()) if a != b]
     for r, _, b in moved:
         r.git("update-ref", f"refs/ops/deploy-{tid}", b)
-    bad = [f"{r.sub or 'the repo'} at {b[:8]}" for r, a, b in moved if not is_ancestor(r, a, b)]
+    bad = [f"{r.name or 'the repo'} at {b[:8]}" for r, a, b in moved if not is_ancestor(r, a, b)]
     if bad:
         fail(p, tid, f"`{tg.run}` succeeded, but it left {', '.join(bad)}, which does not descend from the commit "
                      f"it deployed. The record of {tg.name} and {p.main} are unchanged; its commits are at "
@@ -4858,9 +5012,9 @@ def deploy_land(p, tid, tg):
     if clashing(p, commit):  # a worker may carry your uncommitted changes over: in a worktree of its own, never in
         path = p.wt / f"t{tid}"  # the deploy worktree, whose build output must stay
         copy_workspace_files(p, path)
-        for r, sha in p.pairs(commit):
-            if not r.at(path).exists():
-                r.git("worktree", "add", "--detach", str(r.at(path)), sha)
+        for r, sha in p.root_first(p.pairs(commit)):
+            if not r.present(path):
+                r.add_worktree(path, "--detach", sha)
         upd(tid, worktree=str(path))
     try:
         err = promote(p, tid, commit, note=answer)
@@ -4938,7 +5092,7 @@ def repo_file(p, rel):
         return None, f"Outside the project: {rel}"
     if not path.is_file():
         return None, f"Not on dev: {rel}"
-    part = max((r for r in p.parts if within(path, r.at(root))), key=lambda r: len(r.sub), default=None)
+    part = max((r for r in p.parts if within(path, r.at(root))), key=lambda r: len(r.prefix), default=None)
     if not part or subprocess.run(["git", "check-ignore", "-q", "--", os.path.realpath(path)], cwd=part.at(root),
                                   capture_output=True).returncode == 0:
         return None, f"Ignored by git: {rel}"
@@ -6058,7 +6212,7 @@ def openspec_run(p, sub, what):
     files, dropped}; raises ValueError when it is refused or the CLI fails."""
     r = spec_part(p, sub)
     argv, msg, done = OPENSPEC_RUN[what]
-    where = f"{p.name}/{r.sub}" if r.sub else p.name
+    where = f"{p.name}/{r.prefix[:-1]}" if r.prefix else p.name
     if not shutil.which("openspec"):
         raise ValueError("Install the openspec CLI: npm i -g @fission-ai/openspec")
     has = (r.at(p.dev_wt) / "openspec").exists()
@@ -6113,7 +6267,7 @@ def openspec_run(p, sub, what):
             if res.returncode:
                 raise ValueError(f"couldn't fast-forward {p.dev}: {(res.stderr or res.stdout).strip()[-300:]}")
         n = len(files)
-        print(f"project {p.name} openspec {what}{f' ({r.sub})' if r.sub else ''}: {sha[:8]}, {n} files", flush=True)
+        print(f"project {p.name} openspec {what}{f' ({r.name})' if r.sub else ''}: {sha[:8]}, {n} files", flush=True)
         return {"text": f"{done}: committed {n} file{'s' if n != 1 else ''} to {p.dev} at {sha[:8]}." + tail,
                 "sha": sha, "files": n, "dropped": dropped}
     finally:
@@ -6146,7 +6300,7 @@ def spec_new(p, sub, text):
     if not shutil.which("openspec"):
         raise ValueError("Install the openspec CLI: npm i -g @fission-ai/openspec")
     if not (r.at(p.dev_wt) / "openspec").is_dir():
-        raise ValueError(f"{(r.sub + '/') if r.sub else ''}openspec/ isn't on {p.dev}: run openspec init there first")
+        raise ValueError(f"{r.prefix}openspec/ isn't on {p.dev}: run openspec init there first")
     did = q("INSERT INTO designs (project, title, created, updated, kind, spec_sub, spec_draft) VALUES (?,?,?,?,?,?,1)",
             (p.name, f"New change: {text[:60]}", time.time(), time.time(), "design", r.sub))
     design_say(did, spec_first(p, r.sub, text))
@@ -6228,7 +6382,7 @@ def spec_view(p, d):
 
 def spec_brief(p, r, name, title, group=None, k=0, n=1):
     """The task body for a whole change, or for one group of its phases."""
-    rel = f"{r.sub}/{SPEC_DIR / name}" if r.sub else str(SPEC_DIR / name)
+    rel = f"{r.prefix}{SPEC_DIR / name}" if r.prefix else str(SPEC_DIR / name)
     if group:
         items = "\n".join(f"  - [ ] {i}" for i in group["open"])
         scope = (f"This task is part {k + 1} of {n}. It covers only these sections of `tasks.md`: "
@@ -6828,7 +6982,7 @@ def diffstat(p, t):
         base = f"{sha}^1" if sha else p.dev
         st = r.git("diff", "--stat", f"{base}...{t['branch']}", check=False)
         if st:
-            stats.append(f"{r.sub}/\n{st}" if r.sub else st)
+            stats.append(f"{r.name}/\n{st}" if r.sub else st)
     out = "\n\n".join(stats)[-3000:]
     DIFFSTATS[t["id"]] = (key, out)
     return out
@@ -7556,6 +7710,7 @@ def state_payload():
             projects.append(main_info(p, s))
         except Exception as e:
             projects.append({"name": p.name, "title": p.title, "error": str(e)})
+    projects += [{"name": n, "title": t, "error": why} for n, (t, why) in BROKEN.items()]
     return {
         "tasks": tasks, "now": time.time(), "projects": projects, "archived": archived_projects(),
         "settings": {k: s.get(k, "") for k in SETTING_KEYS},
@@ -8151,6 +8306,16 @@ if __name__ == "__main__":
         PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
         out = detect_project(str(Path(args[0]).expanduser().absolute()), args[1] if len(args) > 1 else None)
         print(f"wrote {out}. Review it, then reload projects on the dashboard (or restart the service).")
+    elif cmd == "adopt-workspace-root" and len(args) == 2 and args[0] == "-p":
+        try:
+            did = adopt_workspace_root(args[1])
+        except (ValueError, RuntimeError) as e:
+            sys.exit(f"not adopted: {e}")
+        print("\n".join(did) or f"{args[1]}: nothing to do, its root is already a repo the queue uses")
+        try:
+            post("/api/projects/reload", {})
+        except (HTTPError, URLError) as e:
+            print(f"the claude-ops daemon did not reload ({e}): reload projects on the dashboard", file=sys.stderr)
     elif cmd == "send" and args and not args[0].startswith("-"):
         send_cli(args)
     elif cmd == "add" and len(args) >= 2 and args[0] == "-p":
