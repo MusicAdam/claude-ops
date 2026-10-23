@@ -553,17 +553,21 @@ Their routes (`#tasks`, `#projects`, `#schedules`, …) still open them. The que
     Switching mode while a topic is open starts a new topic of that kind, and one line under the chips says so:
     `Switched to <mode>: your next message starts a new topic, with a short handoff of “<title>”.` Its first
     message carries that handoff (as `chat_handoff()` builds it for a fresh session, but about 2k tokens at most) to
-    Claude. A topic never changes kind: picking an older topic switches the chips to its mode.
+    Claude, as a dashboard note, and the new topic shows the line above as its first entry. Switching back before
+    you send returns to the topic you left. A topic never changes kind: picking an older topic switches the chips to
+    its mode. A research topic's handoff goes at the end of its first message, and the timeline hides it.
   - **Which topic a message goes to** (`conv_open()` in opsd.py):
     1. Opening a to-do whose source is a chat (Read, Agree, …) makes that chat the current topic.
     2. Opening a to-do whose source is a task, or **Ask Claude about this**, continues the current plan & design
        topic: the current topic if it is one, else the project's latest plan & design topic, else a new one starts
        with your next message. The message box gets the starter text (`About #231: `) when it is empty.
-    3. **New topic** starts a fresh one in the current mode: your next message opens it.
+    3. **New topic** starts a fresh one in the current mode: your next message opens it. The line under the chips
+       says so.
     4. Otherwise a message continues the current topic.
   - **Titles.** A new topic is titled from its first message, as chats are. Claude may retitle it when the
     subject clearly changes, with a fenced block in the language `topic`: `{"title": "..."}`. The design and project
-    chat prompts say so; the block is taken out of the reply and the chat notes the new title.
+    chat prompts say so (`design_prompt.md`, `PROJECT_CHAT_PROMPT`). The block is taken out of the reply, the
+    divider shows the new title, and Claude's next message says it took (`topic_from_reply()`).
   - **Queued messages.** While Claude replies, **Send** reads **Queue**, as in the Design and Chat tabs (see
     [Which chats need you](#which-chats-need-you)). A research topic doesn't queue: Send waits for its reply.
   - **Read state.** Today never marks a chat read by itself: **Mark read** does, so an item does not vanish while you

@@ -487,6 +487,17 @@ a[data-task] { color: var(--accent); cursor: pointer; }
 .stepcard .facts a { cursor: pointer; color: var(--accent); }
 .stepcard .row { margin-top: 12px; }
 .stepcard .skip { margin-left: auto; background: none; border-color: transparent; color: var(--muted); }
+/* Today's conversation: Earlier topics, the divider at the top of a topic, the mode chips */
+#convtop details { margin: 0 0 8px; }
+#convtop summary { font-size: 12px; color: var(--muted); cursor: pointer; }
+#convtop details[open] { max-height: 40vh; overflow: auto; border-bottom: 1px solid var(--line); padding-bottom: 6px; }
+.topicdiv { display: flex; align-items: center; gap: 10px; color: var(--muted); font-size: 12px; margin: 4px 0 12px; }
+.topicdiv::before, .topicdiv::after { content: ""; flex: 1; border-top: 1px solid var(--line); }
+.topicdiv span { max-width: 80%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#convmodes .row { margin: 0 0 6px; }
+.convchips { margin: 0; }
+#convmodes #newtopic { font-size: 12px; padding: 3px 10px; }
+.convnote { font-size: 12px; color: var(--muted); margin: 0 0 6px; }
 #saymode { font-size: 12px; margin-bottom: 6px; display: flex; gap: 8px; align-items: center; color: var(--warn); }
 #saymode button { padding: 1px 8px; font-size: 12px; }
 .tl h3 { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: 16px 0 6px; }
@@ -725,10 +736,12 @@ a[data-task] { color: var(--accent); cursor: pointer; }
   <div id="rtoggle" class="tabs"><button data-pane="read">Read</button><button data-pane="chat">Chat</button></div>
   <section id="reader" class="hidden"><div id="rhead"><div id="rinfo"></div><div id="rnav"></div></div><div id="rbody"></div></section>
   <section id="chat">
+    <div id="convtop" class="hidden"></div>
     <div id="chathead" class="chathead"></div>
     <div id="msgs"></div>
     <div class="composer">
       <div id="slash" class="hidden"></div>
+      <div id="convmodes" class="hidden"></div>
       <div id="saymode" class="hidden"></div>
       <textarea id="say"></textarea>
       <div class="row"><label id="cprojwrap">Project <select id="cproj"></select></label><button class="primary" id="send">Send</button><span class="muted">⌘↩</span>
@@ -1544,7 +1557,7 @@ function modelSelect(el, v, none) {
 function modelShort(m) { const k = MODELS.find(a => String(m || "").toLowerCase().includes(a)); return k || m || ""; }
 $("#proj").onchange = () => {
   setFilter($("#proj").value); if ($("#proj").value) setFocus($("#proj").value);
-  if (tab === "today") { TD.convKey = null; TD.pin = null; }  // the conversation follows the project
+  if (tab === "today") { TD.convKey = null; TD.over = null; }  // the conversation follows the project
   if (state) render(); refresh(); if (chatTab()) refreshDesign();
 };
 $("#addproj").onclick = () => { showTab("projects"); $("#addcard").classList.remove("hidden"); $("#ppath").focus(); };
@@ -1666,8 +1679,6 @@ const TABTEXT = {
   chat: {button: "New chat", none: "No chats yet.", say: "Ask or tell Claude anything about this project. Drop or paste screenshots to attach them.",
          intro: "Talk to Claude in the project folder, as if you ran claude there. It can read, edit and run commands in your checkout. Actions that would ask for permission are denied, since nobody can answer here."}};
 // Today opens first. The address bar names the page you are on (#today, #tasks, …), so a reload stays there.
-TABTEXT.today = {say: TABTEXT.design.say, intro: "No design chat for this project yet. Write below to start one: describe an idea or a problem. Claude reads the project, asks questions, and queues the work when you agree."};
-KIND.today = "design";
 let tab = "today", chatSel = null, chatData = null, chatKey = "", chatSels = {};
 try { chatSels = JSON.parse(localStorage.getItem("ops-chats") || "{}"); } catch {}
 const TABS = ["today", "tasks", "projects", "design", "chat", "analyze", "research", "settings", "schedules"];
@@ -2446,7 +2457,7 @@ async function queueSpec(plan) {
 }
 function selectChat(id) {
   // Today: the chat stays under this step until you pick another item (a chat you just started, say)
-  if (tab === "today") { TD.pin = id ? {key: TD.convKey, chat: id} : null; chatSel = id; chatKey = ""; refreshDesign(); return; }
+  if (tab === "today") { if (id) tdOpenChat(id); return; }
   chatSel = id; chatKey = "";
   if (state) renderProjects();
   chatSels[tab] = id; try { localStorage.setItem("ops-chats", JSON.stringify(chatSels)); } catch {}
@@ -2459,15 +2470,16 @@ async function loadChat() {
 function renderChat() {
   const d = chatData && chatSel === chatData.id ? chatData : null;
   const thinking = d && d.state === "thinking";
-  $("#endchat").classList.toggle("hidden", !d || !!d.ended);
-  $("#reopenchat").classList.toggle("hidden", !d || !d.ended);
+  // Today has no End chat: a topic you leave stays under Earlier topics, and a message resumes it
+  $("#endchat").classList.toggle("hidden", !d || !!d.ended || tab === "today");
+  $("#reopenchat").classList.toggle("hidden", !d || !d.ended || tab === "today");
   // You are looking at it: its latest reply is read. Only while the page is in view.
   // On Today only Mark read does, so a Read item doesn't vanish while you read it.
   if (d && tab !== "today" && !d.ended && !document.hidden && (d.replied || 0) > (d.seen || 0) && d.state !== "thinking") {
     d.seen = d.replied;
     api(`/api/designs/${d.id}/seen`, {}).then(() => { refresh(); refreshDesign(); }).catch(() => {});
   }
-  const key = d ? `${d.id}:${d.msgs.length}:${JSON.stringify(d.queued || [])}:${d.state}:${d.ended}:${d.live.length}:${JSON.stringify(d.msgs.map(m => m.tasks.map(t => t.state)))}:${d.spec_view ? hash(JSON.stringify(d.spec_view)) : ""}:${(d.files || []).map(f => f.name + f.mtime).join()}` : "none";
+  const key = d ? `${d.id}:${tab === "today" ? d.title : ""}:${d.msgs.length}:${JSON.stringify(d.queued || [])}:${d.state}:${d.ended}:${d.live.length}:${JSON.stringify(d.msgs.map(m => m.tasks.map(t => t.state)))}:${d.spec_view ? hash(JSON.stringify(d.spec_view)) : ""}:${(d.files || []).map(f => f.name + f.mtime).join()}` : "none";
   $("#stopchat").classList.toggle("hidden", !thinking);
   // While Claude replies, a message waits in the chat's queue and goes when the reply ends
   $("#send").textContent = thinking ? "Queue" : "Send";
@@ -2485,18 +2497,16 @@ function renderChat() {
     : d && d.spec_view ? specGone(d)
     : d && d.spec_draft ? `<div class="spechead"><b>Drafting a new OpenSpec change</b>${d.spec_sub ? ` in <code>${esc(d.spec_sub)}/</code>` : ""}
       <div class="why">No change is attached yet. When a reply creates one folder in <code>openspec/changes/</code>, this chat becomes that change's chat and its files are saved to ${esc(P(d.project).dev_branch || "dev")}.</div></div>` : "";
-  if (d && tab === "today") $("#chathead").insertAdjacentHTML("afterbegin",
-    `<div>${d.kind === "project" ? "Chat" : "Design chat"}: <b>${esc(d.title)}</b>${pf ? "" : ` · ${esc(P(d.project).title)}`}</div>`);
   if (d && d.origin) {
     $("#chathead").insertAdjacentHTML("afterbegin", originLine(d.origin, "Started by"));
     $("#chathead").querySelector("a.origin").onclick = () => openOrigin(d.origin);
   }
   // Documents a design chat wrote (a design doc, a prototype): its own folder, outside the repo
   if (d && d.files && d.files.length) $("#chathead").insertAdjacentHTML("beforeend", `<div class="docs">Documents: ${d.files.map(f => `<a href="${esc(f.url)}" target="_blank" rel="noopener">${esc(f.name)}</a>`).join(" · ")}</div>`);
-  if (d && d.ended) $("#chathead").insertAdjacentHTML("afterbegin", `<div class="callout">You ended this chat. Send a message or click Reopen to put it back on your list.</div>`);
-  if (!d) { box.innerHTML = `<div class="muted" style="padding:20px 0">${TABTEXT[tab].intro}</div>`; return; }
+  if (d && d.ended && tab !== "today") $("#chathead").insertAdjacentHTML("afterbegin", `<div class="callout">You ended this chat. Send a message or click Reopen to put it back on your list.</div>`);
+  if (!d) { box.innerHTML = tab === "today" ? convIntro() : `<div class="muted" style="padding:20px 0">${TABTEXT[tab].intro}</div>`; return; }
   const links = chatCtx(d.project, d.id, (d.files || []).map(f => f.name));
-  box.innerHTML = d.msgs.map(m => m.role === "user"
+  box.innerHTML = (tab === "today" ? topicDivider() : "") + d.msgs.map(m => m.role === "user"
       ? `<div class="msg user">${userMd(m.text.replace(/^\[ops:[^\n]*\]\n\n/, ""), links)}</div>`
       : `<div class="msg ${m.role === "ops" ? "ops" : ""}">${md(m.text, undefined, links)}${m.tasks.length ? `<div class="chips">${m.tasks.map(t => `<button class="chip" data-task="${t.id}">#${t.id} ${esc(t.title || "")} · ${LABEL[t.state] || t.state}</button>`).join("")}</div>` : ""}</div>`).join("")
     + (thinking ? `<div class="live"><span class="pulse s-running">Claude is thinking</span>${d.live.map(l => `<div>  ${esc(l)}</div>`).join("")}</div>` : "")
@@ -2534,7 +2544,7 @@ async function sayChat(text) {  // a change's command button: sent as if typed, 
 async function sendChat() {
   const text = $("#say").value.trim();
   if (!text) return;
-  if (tab === "today" && (TD.mode || TD.conv?.task)) return tdSend(text);
+  if (tab === "today") return TD.mode ? tdSend(text) : convSay(text);
   try {
     if (chatSel) await api(`/api/designs/${chatSel}/say`, {text});
     else {
@@ -2545,6 +2555,25 @@ async function sendChat() {
   } catch (e) { $("#chatmsg").textContent = e.message; }
 }
 $("#send").onclick = sendChat;
+$("#cproj").onchange = () => { if (tab === "today") { TD.applied = ""; chatKey = ""; refreshDesign(); } };
+// Today: the message goes to the project's current topic, or starts one in the current mode (conv_say)
+async function convSay(text) {
+  const project = convProject();
+  if (!project) { $("#chatmsg").textContent = "pick a project"; return; }
+  try {
+    await api("/api/conversation/say", {project, text});
+    $("#say").value = ""; $("#chatmsg").textContent = ""; TD.starter = ""; chatKey = ""; renderSlash();
+    await refreshDesign(); toBottom($("#msgs"));
+  } catch (e) { $("#chatmsg").textContent = e.message; }
+}
+// Today: a link to a chat (where a task came from, say) makes it the current topic of its project.
+async function tdOpenChat(id) {
+  try {
+    const d = await api(`/api/designs/${id}`);
+    if (d.project !== convProject()) TD.over = {key: TD.convKey, project: d.project};
+    await convOpen({how: "chat", ref: id});
+  } catch (e) { $("#chatmsg").textContent = e.message; }
+}
 async function unqueue(id, index) {  // back in the message box, after anything you were typing
   try {
     const r = await api(`/api/designs/${id}/unqueue`, {index});
@@ -2586,7 +2615,7 @@ $("#say").onkeydown = e => {
   if (open && e.key === "Escape") { e.preventDefault(); e.stopPropagation(); slash.shut = true; renderSlash(); return; }
   if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) sendChat();
 };
-$("#stopchat").onclick = () => (tab === "today" && TD.conv?.task ? api(`/api/tasks/${TD.conv.task}/stopask`, {})
+$("#stopchat").onclick = () => (tab === "today" && TD.rs && TD.rs.running ? api(`/api/research/jobs/${encodeURIComponent(TD.rs.job)}/stop`, {})
   : api(`/api/designs/${chatSel}/stop`, {})).then(refreshDesign);
 async function endChat(id) {
   const c = chatList.find(x => x.id === id);
@@ -2609,8 +2638,8 @@ new ResizeObserver(() => document.documentElement.style.setProperty("--hdr-h", $
 // The left column is /api/state's todos; the centre is the selected one as a step, over the chat column (moved here
 // from the Design tab); the right column is read-only status, and a click opens a panel over it, the task page
 // among them (moved here from History). See README "Today view".
-const TD = {key: "", filter: "all", skip: {}, order: [], item: null, convKey: null, conv: null, task: null, pin: null,
-            mode: null, busy: "", msg: "", note: "", panel: null, designs: null, designsAt: 0};
+const TD = {key: "", filter: "all", skip: {}, order: [], item: null, convKey: null, task: null, mode: null, busy: "",
+            msg: "", note: "", panel: null, cv: null, rs: null, over: null, applied: "", starter: "", earlierOpen: false};
 try {
   TD.key = localStorage.getItem("ops-todo") || "";
   TD.filter = localStorage.getItem("ops-todo-filter") || "all";
@@ -2625,7 +2654,7 @@ const tdSave = () => { try { localStorage.setItem("ops-todo", TD.key); localStor
 const verbPill = x => `<span class="verb g-${esc(x.group)}">${esc(x.verb)}</span>`;
 const tdDoneToday = () => state.tasks.filter(t => t.state === "done" && t.finished >= midnight() && inView(t.project))
   .sort((a, b) => b.finished - a.finished);
-const convBusy = () => !!((chatData && chatData.state === "thinking") || (TD.task && TD.conv?.task && TD.task.chat_live));
+const convBusy = () => !!((chatData && chatData.state === "thinking") || (TD.rs && TD.rs.running));
 
 // The items in view, skipped ones last in the order you skipped them. A skip lasts until midnight.
 function tdAll() {
@@ -2657,7 +2686,7 @@ function renderToday() {
 function tdChanged(it) {
   TD.convKey = it ? it.key : "";
   TD.mode = it && it.verb === "Answer" ? tdAnswerMode(it) : null;
-  TD.task = null; TD.pin = null; TD.conv = null; TD.msg = ""; TD.note = ""; chatKey = "";
+  TD.task = null; TD.over = null; TD.msg = ""; TD.note = ""; chatKey = ""; tdClearStarter();
   refreshDesign();
 }
 const tdAnswerMode = it => ({a: "answer", id: it.source.id, words: `Your message answers #${it.source.id}'s question.`});
@@ -2720,7 +2749,7 @@ function tdFacts(it) {
 function tdStep(it, shown) {
   if (!it) {
     put($("#tdstep"), `<div class="stepcard"><div class="k">All clear</div><h2>Nothing needs you right now</h2>
-      <div class="why muted">Questions, reviews and replies show up on the left as they come. Below is the latest design chat${pf ? ` in ${esc(P(pf).title)}` : ""}.</div></div>`);
+      <div class="why muted">Questions, reviews and replies show up on the left as they come. Below is the conversation about ${esc(P(convProject()).title || "a project")}.</div></div>`);
     return;
   }
   const busy = TD.busy === it.key, acts = tdActions(it), facts = tdFacts(it);
@@ -2742,7 +2771,7 @@ function tdSkip() {
   TD.skip[it.key] = Date.now(); TD.key = next && next !== it.key ? next : it.key; tdSave(); renderToday();
 }
 // The message box answers a task, sends it back, or retries it with a note, instead of talking in the chat above it.
-function tdMode(m) { TD.mode = m; renderSayMode(); $("#say").focus(); }
+function tdMode(m) { tdClearStarter(); TD.mode = m; renderSayMode(); $("#say").focus(); }
 async function tdDo(a) {
   const it = TD.item; if (!it) return;
   const s = it.source || {};
@@ -2767,92 +2796,157 @@ async function tdDo(a) {
   if (a === "done") return run(() => api(`/api/todos/${it.todo}/done`, {}));
 }
 async function tdSend(text) {
-  const m = TD.mode, d = TD.task;
-  let path, body;
-  if (m) { path = `/api/tasks/${m.id}/${m.a}`; body = m.a === "answer" ? {answer: text} : m.a === "reject" ? {feedback: text} : {note: text}; }
-  else {
-    const a = d && (d.can_steer && !(d.state === "paused" && d.can_chat) ? "steer" : d.can_chat ? "ask" : "");
-    if (!a) { $("#chatmsg").textContent = "This task's worker can't take a message now."; return; }
-    path = `/api/tasks/${d.id}/${a}`; body = {text};
-  }
+  const m = TD.mode;
   try {
-    await api(path, body);
+    await api(`/api/tasks/${m.id}/${m.a}`, m.a === "answer" ? {answer: text} : m.a === "reject" ? {feedback: text} : {note: text});
     $("#say").value = ""; $("#chatmsg").textContent = ""; TD.mode = null; chatKey = "";
     renderSayMode(); refresh(); refreshDesign();
   } catch (e) { $("#chatmsg").textContent = e.message; }
 }
+const CONV_SAY = {design: TABTEXT.design.say, project: TABTEXT.chat.say,
+                  research: "Ask about this project's research, or ask for new research. (⌘↩ sends)"};
 function tdPlaceholder() {
-  const m = TD.mode, d = TD.conv?.task && TD.task;
+  const m = TD.mode;
   if (m) return {answer: `Your answer to #${m.id}'s question`, reject: `What should #${m.id} change?`, retry: `A note for #${m.id}'s worker on this retry`}[m.a]
     + ". Drop or paste screenshots to attach them. (⌘↩ sends)";
-  if (d) return d.can_steer ? "Steer the worker: change direction, add a requirement, or ask what it is doing. (⌘↩ sends)"
-    : d.can_chat ? "Ask the worker about this work. (⌘↩ sends)" : "This task's worker can't take a message now.";
-  if (chatData && chatData.kind === "project") return TABTEXT.chat.say;
-  return TABTEXT.design.say;
+  return CONV_SAY[TD.cv ? TD.cv.mode : "design"];
 }
-// The line over the message box that says where a message goes, when it isn't the chat above it.
+// The line over the message box that says where a message goes, when it isn't the conversation above it.
 function renderSayMode() {
   const today = tab === "today", m = today && TD.mode, el = $("#saymode");
   el.classList.toggle("hidden", !m);
   if (put(el, m ? `<span>${esc(m.words)}</span><button id="saycancel">Cancel</button>` : "") && m)
     $("#saycancel").onclick = () => { TD.mode = null; renderSayMode(); };
-  if (!today) { $("#say").placeholder = TABTEXT[chatTab() ? tab : "design"].say; return; }
+  $("#convmodes").classList.toggle("hidden", !today);
+  $("#convtop").classList.toggle("hidden", !today);
+  if (!today) { $("#say").placeholder = TABTEXT[chatTab() ? tab : "design"].say; $("#send").disabled = false; return; }
   $("#say").placeholder = tdPlaceholder();
+  const rs = !m && tdResearch();
   if (m) $("#send").textContent = SEND_WORDS[m.a];
-  else if (TD.conv?.task) $("#send").textContent = "Send";
-  $("#cprojwrap").classList.toggle("hidden", !!pf || !!chatSel || !!m || !!TD.conv?.task);
+  else if (rs) $("#send").textContent = TD.rs && TD.rs.running ? "Working…" : "Send";
+  $("#send").disabled = !!rs && !!(TD.rs && TD.rs.running);
+  $("#cprojwrap").classList.toggle("hidden", !!pf || !!TD.item || !!m);
 }
 
-// The conversation under the step: the item's chat; for a task the chat it came from, else its own chat with its
-// worker; otherwise the project's latest open design chat.
+// ---- the conversation under the step: one per project, made of topics (README TODAY-2). The daemon keeps the
+// current topic and the mode (GET/POST /api/conversation); a topic is a design or project chat, drawn by renderChat,
+// or a research thread ("r:<id>"), drawn by renderResearchConv.
+const tdResearch = () => !!(TD.cv && TD.cv.mode === "research" && (TD.cv.topic === null || typeof TD.cv.topic === "string"));
+// The project in view: the one Ask Claude about this moved to, else the item's, else the filter's, else the picker's.
+const convProject = () => (TD.over && TD.over.key === TD.convKey && TD.over.project) || (TD.item && TD.item.project) || pf || $("#cproj").value || "";
+// Text put in an empty message box for a task's item; taken out again if you leave it as it was.
+function tdStarter(text) {
+  const say = $("#say");
+  if (TD.mode || say.value.trim()) return;
+  say.value = TD.starter = text;
+}
+function tdClearStarter() { if (TD.starter && $("#say").value === TD.starter) $("#say").value = ""; TD.starter = ""; }
+const aboutTask = (id, t) => `About #${id}${t && t.title ? ` (${t.title})` : ""}: `;
+async function convOpen(body) {
+  const project = convProject(); if (!project) return;
+  try { TD.cv = await api("/api/conversation", {project, ...body}); $("#chatmsg").textContent = ""; }
+  catch (e) { $("#chatmsg").textContent = e.message; }
+  chatKey = ""; await refreshDesign();
+}
 async function loadConv() {
-  const it = TD.item, key = TD.convKey, s = (it && it.source) || {};
-  let chat = null, task = null;
+  const it = TD.item, key = TD.convKey, s = (it && it.source) || {}, project = convProject();
   if (s.kind === "task") {
     try { TD.task = await api(`/api/tasks/${s.id}`); } catch { TD.task = null; }
     if (TD.convKey !== key) return;
     renderToday();  // its facts
   }
-  if (TD.pin && TD.pin.key === key) chat = TD.pin.chat;
-  else if (s.kind === "chat") chat = s.id;
-  else if (s.kind === "task" && TD.task) {
-    const o = TD.task.origin;
-    if (o && !o.ref.startsWith("task:")) chat = o.id; else if (TD.task.chat_from) chat = TD.task.chat_from; else task = TD.task;
+  let cv = null;
+  try {
+    // A new item picks the topic once: its chat, or for a task the plan & design topic. After that you choose.
+    if (project && TD.applied !== `${key}|${project}`) {
+      const how = s.kind === "chat" ? {how: "chat", ref: s.id} : s.kind === "task" ? {how: "task"} : null;
+      if (how) cv = await api("/api/conversation", {project, ...how}).catch(() => null);
+      TD.applied = `${key}|${project}`;
+      if (s.kind === "task") tdStarter(aboutTask(s.id, TD.task));
+    }
+    if (!cv && project) cv = await api(`/api/conversation?project=${encodeURIComponent(project)}`);
+  } catch { cv = null; }
+  if (TD.convKey !== key || convProject() !== project) return;
+  TD.cv = cv;
+  const t = cv ? cv.topic : null;
+  if (typeof t === "number") {
+    TD.rs = null;
+    if (chatSel !== t) { chatSel = t; chatData = null; chatKey = ""; }
+    await loadChat();
+  } else {
+    chatSel = null; chatData = null;
+    if (typeof t === "string") await loadResearchConv(t); else { TD.rs = null; renderChat(); }
   }
-  if (!chat && !task && !(TD.pin && TD.pin.key === key)) chat = await tdLatestChat(it ? it.project : pf);
-  if (TD.convKey !== key) return;
-  TD.conv = task ? {task: task.id} : {chat};
-  if (task) { chatSel = null; chatData = null; renderTaskConv(task); renderSayMode(); return; }
-  if (chatSel !== chat) { chatSel = chat; chatData = null; chatKey = ""; }
-  const pinned = TD.pin && TD.pin.key === key ? TD.pin.project : "";
-  if (!chat && !pf && (pinned || it)) $("#cproj").value = pinned || it.project;  // a new design chat starts in the item's project
-  if (chat) await loadChat(); else renderChat();
-  renderSayMode();
+  renderConv(); renderSayMode();
 }
-async function tdLatestChat(project) {
-  if (!TD.designs || Date.now() - TD.designsAt > 30000) {
-    try { TD.designs = await api("/api/designs"); TD.designsAt = Date.now(); } catch { TD.designs = TD.designs || []; }
+const topicOf = id => TD.cv && TD.cv.topics.find(t => t.id === id);
+const modeWord = m => (TD.cv && TD.cv.modes[m]) || m;
+function topicDate(ts) {
+  const d = new Date(ts * 1000), today = new Date();
+  return d.toDateString() === today.toDateString() ? "Today" : d.toLocaleDateString(undefined, {month: "short", day: "numeric", ...(d.getFullYear() !== today.getFullYear() ? {year: "numeric"} : {})});
+}
+// The divider at the top of a topic: <date> · <title> · <mode>
+function topicDivider() {
+  const cv = TD.cv, t = cv && topicOf(cv.topic);
+  const words = t ? [topicDate(t.created || t.last), t.title, modeWord(t.mode)] : ["New topic", modeWord(cv ? cv.mode : "design")];
+  return `<div class="topicdiv"><span>${words.map(esc).join(" · ")}</span></div>`;
+}
+// What the timeline shows before the first message of a new topic.
+function convIntro() {
+  const cv = TD.cv;
+  if (!cv) return `<div class="muted" style="padding:20px 0">${convProject() ? "Loading…" : "Add a project to talk about it here."}</div>`;
+  const what = {design: "Describe an idea, a problem, or a feature you want. Claude reads the project's docs and dev code, asks questions, can draft OpenSpec changes and prototypes, and queues the work when you agree. It never edits code.",
+                project: "Talk to Claude in your checkout, as if you ran claude there. It can read, edit and run commands. Actions that would ask for permission are denied, since nobody can answer here.",
+                research: `Ask about the research project “${esc(cv.research.name || "")}”, or ask for new research. The agent reads its briefs and reports first.`}[cv.mode];
+  return topicDivider() + `<div class="muted" style="padding:12px 0">${what}</div>`;
+}
+// Earlier topics above the timeline, and the mode chips and New topic above the message box.
+function renderConv() {
+  const cv = TD.cv;
+  if (!cv) { put($("#convtop"), ""); put($("#convmodes"), ""); return; }
+  const now = Date.now() / 1000, older = cv.topics.filter(t => t.id !== cv.topic);
+  const top = older.length ? `<details id="earlier" ${TD.earlierOpen ? "open" : ""}><summary>Earlier topics (${older.length})${older.some(t => t.unread) ? ' <span class="s-review">●</span>' : ""}</summary>
+    ${older.map(t => `<div class="chatitem ${t.unread ? "unread" : ""}" data-topic="${esc(String(t.id))}"><div>${esc(t.title || "Untitled")}</div>
+      <div class="sub">${esc(modeWord(t.mode))}${t.spec ? " · OpenSpec" : ""} · ${t.state === "thinking" ? '<span class="pulse s-running">replying</span>' : t.unread ? '<span class="s-review">new reply</span>' : `${ago(t.last, now)} ago`}</div></div>`).join("")}</details>` : "";
+  if (put($("#convtop"), top)) {
+    $("#convtop").querySelectorAll("[data-topic]").forEach(el => el.onclick = () => {
+      TD.earlierOpen = false; const id = el.dataset.topic; convOpen({how: "topic", ref: /^\d+$/.test(id) ? +id : id}); });
+    if ($("#earlier")) $("#earlier").ontoggle = e => { TD.earlierOpen = e.target.open; };
   }
-  const c = TD.designs.filter(c => (c.kind || "design") === "design" && !c.ended && (project ? c.project === project : true))
-    .sort((a, b) => b.updated - a.updated)[0];
-  return c ? c.id : null;
+  const r = cv.research, from = cv.topic === null && cv.from;
+  const chips = [["design", "plan & design", "Reads dev and writes only its documents and OpenSpec changes: plans, designs, prototypes, never code"],
+                 ["project", "edit my checkout", "Plain Claude in your checkout: it can read, edit and run commands there"]]
+    .concat(r.on ? [["research", "research", r.name ? `A research chat about “${r.name}”` : `Link a research project to ${P(cv.project).title || cv.project} on the Research page first`]] : []);
+  const html = `<div class="row"><span class="tdchips convchips">${chips.map(([m, l, tip]) => `<button data-mode="${m}" class="${cv.mode === m ? "on" : ""}" title="${esc(tip)}" ${m === "research" && !r.name ? "disabled" : ""}>${l}</button>`).join("")}</span>
+    <span style="flex:1"></span><button id="newtopic" title="Your next message starts a new ${esc(modeWord(cv.mode))} topic" ${cv.topic === null && !from ? "disabled" : ""}>New topic</button></div>
+    ${from ? `<div class="convnote">Switched to ${esc(modeWord(cv.mode))}: your next message starts a new topic, with a short handoff of “${esc(from.title)}”.</div>`
+      : cv.topic === null && cv.topics.length ? `<div class="convnote">Your next message starts a new ${esc(modeWord(cv.mode))} topic.</div>` : ""}`;
+  if (put($("#convmodes"), html)) {
+    $("#convmodes").querySelectorAll("[data-mode]").forEach(b => b.onclick = () => b.classList.contains("on") || convOpen({how: "mode", mode: b.dataset.mode}));
+    $("#newtopic").onclick = () => { convOpen({how: "new"}); $("#say").focus(); };
+  }
 }
-// A task's own chat with its worker, drawn as the chat column draws a chat.
-function renderTaskConv(d) {
+// A research topic: its thread's turns, drawn as the Research page draws them.
+async function loadResearchConv(ref) {
+  let th = null;
+  try { th = await api(`/api/research/threads/${encodeURIComponent(ref.slice(2))}`); } catch {}
+  if (!TD.cv || TD.cv.topic !== ref) return;
+  const last = th && th.turns[th.turns.length - 1];
+  TD.rs = th ? {ref, running: !!(last && last.status === "running"), job: last && last.id} : null;
+  renderResearchConv(th);
+}
+function renderResearchConv(th) {
   $("#endchat").classList.add("hidden"); $("#reopenchat").classList.add("hidden");
-  $("#stopchat").classList.toggle("hidden", !d.chat_live);
-  const key = `task:${d.id}:${d.state}:${d.can_steer}:${d.can_chat}:${JSON.stringify(d.chat.map(m => [m.ts, m.delivered]))}:${JSON.stringify(d.chat_live || null)}`;
+  $("#stopchat").classList.toggle("hidden", !(TD.rs && TD.rs.running));
+  const key = `rs:${TD.cv.topic}:${th ? JSON.stringify(th.turns.map(t => [t.id, t.status, t.steps])) : "none"}`;
   if (key === chatKey) return;
-  const box = $("#msgs"), stick = atBottom(box) || !chatKey.startsWith(`task:${d.id}:`);
+  const box = $("#msgs"), stick = atBottom(box) || !chatKey.startsWith(`rs:${TD.cv.topic}:`);
   chatKey = key;
-  $("#chathead").innerHTML = `Your chat with the worker on ${taskLink(d.id)} · ${esc(d.title)}`;
-  const links = chatCtx(d.project);
-  box.innerHTML = (d.chat.map(m => m.role === "assistant" ? `<div class="msg">${md(m.text, undefined, links)}</div>`
-      : `<div class="msg user">${userMd(m.text, links)}${m.role === "steer" ? `<div class="note">${steerNote(d, m)}</div>` : ""}</div>`).join("")
-    || `<div class="muted" style="padding:20px 0">No messages with this task's worker yet.${d.can_steer || d.can_chat ? " Write below to ask it something." : ""}</div>`)
-    + (d.chat_live ? `<div class="live"><span class="pulse s-running">Claude is thinking</span>${d.chat_live.map(l => `<div>  ${esc(l)}</div>`).join("")}</div>` : "");
-  const bottom = () => { if (stick || d.chat_live) toBottom(box); };
-  bottom(); chatLinks(box, d.project).then(bottom);
+  $("#chathead").innerHTML = "";
+  box.innerHTML = topicDivider();
+  if (!th) { box.insertAdjacentHTML("beforeend", `<div class="err">Couldn't read this research conversation.</div>`); return; }
+  box.append(...th.turns.flatMap(t => rsTurn({...t, question: (t.question || "").split("\n\n## Handoff from the topic before this one")[0]})));
+  if (stick || (TD.rs && TD.rs.running)) toBottom(box);
 }
 
 // ---- the timeline: read-only, what runs, what waits, what got done today
@@ -2977,17 +3071,15 @@ async function tdAsk() {
   const p = TD.panel; if (!p) return;
   const t = p.kind === "task" && state.tasks.find(x => x.id === p.id);
   const sch = p.kind === "schedule" && (state.schedules || []).find(x => x.id === p.id);
-  const start = p.kind === "task" ? `About #${p.id}${t ? ` (${t.title})` : ""}: `
+  const start = p.kind === "task" ? aboutTask(p.id, t)
     : p.kind === "train" ? `About the ${P(p.project).title} promote train (${(P(p.project).train || {ids: []}).ids.map(i => "#" + i).join(", ")}): `
     : p.kind === "schedule" ? `About the schedule “${(sch || {}).title || "#" + p.id}” (${(sch || {}).every || ""}): `
     : "About the research runs: ";
-  TD.mode = null;
-  // Not to the worker of the task under the step: to a design chat in the project, or a new one
-  if (TD.conv?.task) {
-    const project = p.kind === "task" ? (t ? t.project : pf) : p.kind === "train" ? p.project : sch ? sch.project : (TD.item ? TD.item.project : pf);
-    TD.pin = {key: TD.convKey, chat: await tdLatestChat(project), project}; TD.conv = null; chatKey = "";
-    await refreshDesign();
-  }
+  TD.mode = null; tdClearStarter();
+  // To the plan & design topic of the project it is about: the current one, the latest, or a new one
+  const project = p.kind === "task" ? (t ? t.project : "") : p.kind === "train" ? p.project : sch ? sch.project : "";
+  if (project && project !== convProject()) TD.over = {key: TD.convKey, project};
+  await convOpen({how: "task"});
   renderSayMode();
   const say = $("#say"); say.value = start + say.value; say.focus(); say.setSelectionRange(start.length, start.length);
 }
@@ -3125,10 +3217,10 @@ function rsCloseDoc() { for (const id of ["#rsdoc", "#rsdocbg"]) { const el = rs
 document.addEventListener("keydown", e => { if (e.key === "Escape" && rsq("#rsdoc")) rsCloseDoc(); });
 document.addEventListener("click", async e => {
   const t = e.target.closest ? e.target : e.target.parentElement;
-  const doc = t.closest("#researchview [data-doc], #rsdoc [data-doc]");
+  const doc = t.closest("#researchview [data-doc], #rsdoc [data-doc], #msgs [data-doc]");
   if (doc) { e.preventDefault(); rsOpenDoc(doc.dataset.doc); return; }
-  const stop = t.closest("#researchview [data-stop]");
-  if (stop) { try { await rsWrite(stop, `/jobs/${stop.dataset.stop}/stop`); } catch { return; } rsReload(); }
+  const stop = t.closest("#researchview [data-stop], #msgs [data-stop]");
+  if (stop) { try { await rsWrite(stop, `/jobs/${stop.dataset.stop}/stop`); } catch { return; } rsReload(); if (tab === "today") refreshDesign(); }
 });
 
 // ---- read-only and writes

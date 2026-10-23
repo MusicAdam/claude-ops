@@ -4667,18 +4667,207 @@ def chat_stale(d):
 def chat_handoff(did, why):
     """The conversation so far, for a chat's fresh session: every message but the one being answered now, oldest
     first, each cut at 4000 characters, the oldest dropped to keep it under HANDOFF_CHARS. No Claude call."""
-    who = {"user": "The owner", "assistant": "You", "ops": "The dashboard"}
     msgs = q("SELECT role,text FROM design_msgs WHERE design_id=? ORDER BY id", (did,))
     if msgs and msgs[-1]["role"] == "user":
         msgs = msgs[:-1]  # this turn's message: it follows the note as "Now"
+    return handoff_of(msgs, f"## Handoff from your earlier session\n\nYour earlier session of this chat ended (reason: {why}). "
+                            "This is a fresh session. Files you changed or read are as they were; re-read what you need. "
+                            "The conversation so far, oldest first:\n\n", HANDOFF_CHARS)
+
+
+def handoff_of(msgs, head, room):
+    """head, then msgs ({role, text}) oldest first, each cut at 4000 characters, the oldest cut to stay under room."""
+    who = {"user": "The owner", "assistant": "You", "ops": "The dashboard"}
     said = "\n\n".join(f"{who.get(m['role'], m['role'])}: {(m['text'] or '')[:4000]}" for m in msgs) or "(none)"
-    head = (f"## Handoff from your earlier session\n\nYour earlier session of this chat ended (reason: {why}). "
-            "This is a fresh session. Files you changed or read are as they were; re-read what you need. "
-            "The conversation so far, oldest first:\n\n")
-    room = HANDOFF_CHARS - len(head)
+    room -= len(head)
     if len(said) > room:
         said = "… (earlier messages cut)\n\n" + said[len(said) - room + 40:]
     return head + said
+
+
+# ---------------------------------------------------------------- the project conversation (README: TODAY-2)
+# The Today view shows one conversation per project, made of topics. A topic is an ordinary chat row (a design chat,
+# a project chat or an OpenSpec change's chat) or a research thread, stored as before. The daemon keeps which one is
+# current, and the mode of the next new one, in the setting conv:<project>: {"topic": id or "r:<thread>" or null,
+# "mode", "from": the topic a mode switch left, whose handoff the new topic's first message carries}.
+MODES = {"design": "plan & design", "project": "edit my checkout", "research": "research"}
+SWITCH_CHARS = 8_000  # about 2k tokens: a mode switch's handoff of the topic before
+TOPIC_BLOCK = re.compile(r"```topic[ \t]*\n(.*?)```", re.S)
+SWITCH_HEAD = "## Handoff from the topic before this one"
+
+
+def research_links(project):
+    """The research projects linked to project, [{id, name}], or [] while research is off."""
+    try:
+        return (research.links().get(project) or []) if research.current() else []
+    except Exception as e:
+        print(f"research links of {project}: {e}", flush=True)
+        return []
+
+
+def research_topics(project):
+    """The research threads about the research projects linked to project, as topics. Last activity: the latest
+    turn's start."""
+    targets = {f"project:{r['id']}" for r in research_links(project)}
+    if not targets:
+        return []
+    when = lambda iso: datetime.datetime.fromisoformat(iso).timestamp() if iso else 0  # noqa: E731
+    with research.lock:
+        threads = [t for t in research.load_threads().values() if t.get("target") in targets]
+        jobs = {j["id"]: j for j in research.load_jobs()} if threads else {}
+    return [{"id": f"r:{t['id']}", "title": (t.get("title") or "").strip().split("\n")[0] or "Research", "mode": "research",
+             "kind": "research",
+             "target": t["target"], "created": when(t.get("created")), "unread": False, "state": "idle",
+             "last": max([when(jobs[j].get("started")) for j in t["turns"] if j in jobs] + [when(t.get("created"))])}
+            for t in threads]
+
+
+def topics(project):
+    """Every topic of project, newest activity first: its chats, ended ones too, and its research threads."""
+    out = [{"id": d["id"], "title": d["title"], "mode": "project" if d["kind"] == "project" else "design",
+            "kind": d["kind"] or "design", "spec": d["spec"], "spec_draft": d["spec_draft"], "created": d["created"],
+            "last": d["updated"] or 0, "state": d["state"],
+            "unread": d["state"] != "thinking" and (d["replied"] or 0) > (d["seen"] or 0)}
+           for d in q(f"SELECT {CHAT_COLS},created FROM designs WHERE project=?", (project,))]
+    return sorted(out + research_topics(project), key=lambda t: -(t["last"] or 0))
+
+
+def conv_state(project, tops):
+    """The kept conv:<project>, checked against tops: a topic that is gone falls back to the latest one, and a
+    topic's mode is its own (a topic never changes kind)."""
+    try:
+        c = json.loads(setting(f"conv:{project}") or "{}")
+    except ValueError:
+        c = {}
+    ids = {t["id"]: t for t in tops}
+    if not isinstance(c, dict) or "topic" not in c or (c["topic"] is not None and c["topic"] not in ids):
+        c = {"topic": tops[0]["id"], "mode": tops[0]["mode"]} if tops else {"topic": None, "mode": "design"}
+    if c["topic"] is not None:
+        c = {"topic": c["topic"], "mode": ids[c["topic"]]["mode"]}
+    if c.get("mode") not in MODES or (c["mode"] == "research" and not research_links(project)):
+        c["mode"] = "design"
+    if c.get("from") not in ids:
+        c.pop("from", None)
+    return c
+
+
+def conv_view(project):
+    """GET /api/conversation: the project's topics, the current one and the mode of the message box."""
+    proj(project)
+    tops = topics(project)
+    c = conv_state(project, tops)
+    links = research_links(project)
+    return {"project": project, "topic": c["topic"], "mode": c["mode"], "modes": MODES, "topics": tops,
+            "from": next((t for t in tops if t["id"] == c.get("from")), None),
+            "research": {"on": bool(research.current()), "name": links[0]["name"] if links else None}}
+
+
+def conv_open(project, how, ref=None, mode=None):
+    """Which topic the next message goes to (README: TODAY-2), kept in conv:<project>:
+    chat/topic: that one (a to-do whose source is a chat, or a click in Earlier topics);
+    task: the current plan & design topic, else the latest one, else a new one (a to-do whose source is a task,
+    or Ask Claude about this); new: a new topic in the current mode, or mode; mode: switch mode, which starts a new
+    topic of that kind carrying a handoff of the one that was open (switching back before you send returns to it)."""
+    proj(project)
+    tops = topics(project)
+    ids = {t["id"]: t for t in tops}
+    c = conv_state(project, tops)
+    cur = ids.get(c["topic"])
+    if how in ("chat", "topic"):
+        ref = int(ref) if str(ref).isdigit() else ref
+        if ref not in ids:
+            raise ValueError(f"no topic {ref} in {project}")
+        c = {"topic": ref, "mode": ids[ref]["mode"]}
+    elif how == "task":
+        if (cur["mode"] if cur else c["mode"]) != "design":
+            latest = next((t for t in tops if t["mode"] == "design"), None)
+            c = {"topic": latest["id"] if latest else None, "mode": "design"}
+    elif how == "new":
+        c = {"topic": None, "mode": mode if mode in MODES else c["mode"]}
+    elif how == "mode":
+        if mode not in MODES:
+            raise ValueError(f"no mode {mode!r}")
+        if mode == "research" and not research_links(project):
+            raise ValueError(f"research is off, or no research project is linked to {project}")
+        left = cur or ids.get(c.get("from"))
+        if left and not cur and left["mode"] == mode:
+            c = {"topic": left["id"], "mode": mode}
+        elif mode != c["mode"]:
+            c = {"topic": None, "mode": mode, **({"from": left["id"]} if left else {})}
+    else:
+        raise ValueError(f"unknown how {how!r}")
+    set_setting(f"conv:{project}", json.dumps(c))
+    return conv_view(project)
+
+
+def topic_handoff(t, mode):
+    """A mode switch's short handoff of topic t, for the first message of the new topic: what was said there,
+    oldest first, at most SWITCH_CHARS."""
+    if t["mode"] == "research":
+        th = research.thread_view(t["id"][2:]) or {"turns": []}
+        msgs = [m for j in th["turns"] for m in ({"role": "user", "text": (j.get("question") or "").split(
+            "\n\n" + SWITCH_HEAD)[0]}, {"role": "assistant", "text": j.get("result") or ""})]
+    else:
+        msgs = q("SELECT role,text FROM design_msgs WHERE design_id=? ORDER BY id", (t["id"],))
+    return handoff_of(msgs, f"{SWITCH_HEAD}\n\nThe owner switched this project's conversation from "
+                            f"{MODES[t['mode']]} to {MODES[mode]}, so this is a new topic with a session of its own. The "
+                            f"topic before it, “{t['title']}”, so far, oldest first. Re-read what you need:\n\n",
+                      SWITCH_CHARS)
+
+
+def conv_say(project, text):
+    """POST /api/conversation/say: send text into the current topic, or start one in the current mode. A topic a
+    mode switch started carries the handoff of the one before it to Claude, and a line saying so in the chat."""
+    text = (text or "").strip()
+    if not text:
+        raise ValueError("say something first")
+    proj(project)
+    tops = topics(project)
+    ids = {t["id"]: t for t in tops}
+    c = conv_state(project, tops)
+    cur, left = ids.get(c["topic"]), ids.get(c.get("from"))
+    if cur and cur["mode"] != "research":
+        return {"topic": cur["id"], "queued": design_say(cur["id"], text)}
+    handoff = topic_handoff(left, c["mode"]) if left and not cur else ""
+    if c["mode"] == "research":
+        links = research_links(project)
+        if not links:
+            raise ValueError(f"research is off, or no research project is linked to {project}")
+        body = {"message": text + (f"\n\n{handoff}" if handoff else "")}
+        body.update({"thread": cur["id"][2:], "target": cur["target"]} if cur else {"target": f"project:{links[0]['id']}"})
+        code, r = research.post("/chat", body)
+        if code != 200:
+            raise ValueError(r.get("error") or f"research said {code}")
+        new = f"r:{r['thread']}"
+    else:
+        now = time.time()
+        new = q("INSERT INTO designs (project, title, created, updated, kind) VALUES (?,?,?,?,?)",
+                (project, title_of(text)[:80], now, now, c["mode"]))
+        if handoff:  # the note goes to Claude with the first message (news); the line is what you see
+            q("INSERT INTO design_msgs (design_id, role, text, ts, note) VALUES (?,?,?,?,?)",
+              (new, "ops", f"Switched from {MODES[left['mode']]} to {MODES[c['mode']]}: this topic starts with a "
+                           f"short handoff of “{left['title']}”.", now, handoff))
+        design_say(new, text)
+    set_setting(f"conv:{project}", json.dumps({"topic": new, "mode": c["mode"]}))
+    return {"topic": new, "queued": False}
+
+
+def topic_from_reply(reply, did):
+    """Retitle the chat from the reply's ```topic block, {"title": "..."}. Returns (reply without it, note)."""
+    note = ""
+    for block in TOPIC_BLOCK.findall(reply):
+        try:
+            it = json.loads(block)
+        except ValueError as e:
+            note = f"your last topic block was not valid JSON ({e}); the title is unchanged"
+            continue
+        title = " ".join(str(it.get("title") or "").split())[:80] if isinstance(it, dict) else ""
+        if not title:
+            note = 'your last topic block had no title; write {"title": "..."}'
+            continue
+        q("UPDATE designs SET title=? WHERE id=?", (title, did))
+        note = f"this topic is now titled “{title}”"
+    return TOPIC_BLOCK.sub("", reply).strip(), note
 
 
 def mcp_servers(p):
@@ -4807,7 +4996,8 @@ def design_turn(did, text, fresh_why=None):
         reply, ids, note = (reply, [], "") if chat else queue_from_reply(p, reply, did)
         reply, todo_note = todos_from_reply(p, reply, did)
         reply, snote = schedules_from_reply(p, reply, did)  # design and project chats alike
-        note = "; ".join(x for x in (note, todo_note, snote) if x)
+        reply, tnote = topic_from_reply(reply, did)
+        note = "; ".join(x for x in (note, todo_note, snote, tnote) if x)
         first = not q("SELECT id FROM design_msgs WHERE design_id=? AND role='assistant' LIMIT 1", (did,))
         q("INSERT INTO design_msgs (design_id, role, text, ts, task_ids, note) VALUES (?,?,?,?,?,?)",
           (did, "assistant", reply, time.time(), json.dumps(ids), note))
@@ -5453,7 +5643,10 @@ PROJECT_CHAT_PROMPT = ("You are talking with the owner through the claude-ops da
                        "fenced block with the language `schedule` holding a JSON list of {project, title, body, every, "
                        "hold?, model?, effort?}; every is local time: 'day HH:MM', 'weekday HH:MM', 'mon HH:MM' (any of "
                        "mon..sun, or 'mon,thu HH:MM') or 'hour'. Each slot queues a task with that body for an "
-                       "unattended worker, so the body must stand alone.")
+                       "unattended worker, so the body must stand alone. "
+                       "This chat is one topic of the project's conversation on the dashboard, titled from its first "
+                       "message. When the subject clearly changes (not every reply), retitle it with a fenced block in "
+                       'the language `topic` holding {"title": "a few words"}; it is taken out of the reply.')
 CHAT_STATES = ("review", "needs_input", "failed", "done", "cancelled", "paused")  # the worker is not running
 CHAT_NEXT = {"review": "Approve merges the branch with your commits (the gate runs again first); Send back with "
                        "feedback sends the worker back to work",
@@ -6551,6 +6744,11 @@ class H(BaseHTTPRequestHandler):
         if path == "/api/analyze":  # the Analyze tab: ?period=1|7|30|all&project=<name>
             qs = parse_qs(urlparse(self.path).query)
             return self.send(200, analysis(qs.get("period", ["7"])[0], qs.get("project", [""])[0]))
+        if path == "/api/conversation":  # the Today view's conversation: ?project=<name>
+            try:
+                return self.send(200, conv_view(parse_qs(urlparse(self.path).query).get("project", [""])[0]))
+            except ValueError as e:
+                return self.send(400, {"error": str(e)})
         if path == "/api/designs":
             chats = q(f"SELECT {CHAT_COLS},origin FROM designs ORDER BY updated DESC")
             for c in chats:
@@ -6716,6 +6914,10 @@ class H(BaseHTTPRequestHandler):
             else:
                 set_setting(f"paused:{p.name}", "1" if act == "pause" else "0")
             return
+        if path == "/api/conversation":  # pick the topic: {project, how: chat|topic|task|new|mode, ref?, mode?}
+            return conv_open(b.get("project") or "", b.get("how"), b.get("ref"), b.get("mode"))
+        if path == "/api/conversation/say":
+            return conv_say(b.get("project") or "", b.get("text"))
         if path == "/api/designs":
             text = (b.get("text") or "").strip()
             if b.get("spec"):  # open the chat about an OpenSpec change; a message is optional
