@@ -4,6 +4,7 @@
   opsd.py serve                        run the dashboard + scheduler (http://127.0.0.1:8788)
   opsd.py add-project PATH [NAME]      detect PATH and write ~/.claude-ops/projects/NAME.toml
   opsd.py adopt-workspace-root -p NAME make workspace NAME's own folder a git repo its tasks commit to ("." in repos)
+  opsd.py export-config -p NAME        write NAME's gates, deploys, app and the rest into claude-ops.toml in its repo
   opsd.py add -p NAME [--model M] [--effort E] "text..."   queue a task through the running daemon; --model opus,
                                        sonnet, haiku or a full model id (else the setting model:task, then model);
                                        --effort low, medium, high, xhigh or max (else the setting effort);
@@ -165,8 +166,9 @@ class Part:
 
 
 class Project:
-    def __init__(self, path):
-        c = tomllib.loads(path.read_text())
+    def __init__(self, path, c=None):
+        """c: the config to use, the home toml merged with the repo file (see load_project); else the home toml."""
+        c = tomllib.loads(path.read_text()) if c is None else c
         self.name = path.stem
         self.title = c.get("title", self.name)
         self.repo = Path(c["repo"]).expanduser()
@@ -208,6 +210,10 @@ class Project:
             print(f"project {path.name}: direct_main is off: a project with [[deploy]] targets keeps {self.dev} "
                   "and Promote", flush=True)
             self.direct_main = False
+        self.config_blob = ""  # claude-ops.toml's blob on main, "" with none (see load_project)
+        self.config_error = None  # why the repo file on main is not the config in use
+        self.config_warnings = []  # keys the repo file sets that only the home toml may
+        self.missing = []  # repos folders the repo file lists that your checkout lacks: the queue holds new tasks
         self.lock = threading.Lock()  # merges into dev and promotes
         self.main_lock = threading.Lock()  # building main and moving it: a release and direct merges take turns
         self.checkout_lock = threading.Lock()  # moving main in your checkout, and clearing what Send to dev landed
@@ -327,6 +333,196 @@ def deploy_targets(p, items):
     return out
 
 
+# ---------------------------------------------------------------- config in the repo (README: ## Config in the repo)
+# A project's repo (a workspace's root repo, "." in repos) may hold claude-ops.toml at its root, read on main: a
+# change a task makes takes effect only once it reaches main, so a task can't loosen the gate it is judged by. Its
+# keys replace the home toml's whole; the home toml keeps identity and machine settings (HOME_ONLY).
+
+REPO_CONFIG = "claude-ops.toml"
+HOME_ONLY = ("title", "repo", "main_branch", "dev_branch", "worktrees", "max_parallel", "direct_main", "chat_mcp")
+MOVABLE = ("repos", "worktree", "gate", "app", "deploy")  # and notes in [worker] and [design]
+NOTES_TABLES = ("worker", "design")  # only notes moves: [worker] env and port_base are machine settings
+LAST_GOOD = {}  # project name -> the repo file's keys last loaded: a malformed one keeps these
+
+
+def repo_config_home(repo):
+    """The repo that may hold the repo file: repo itself if it is the top of a git repo (a plain project, or a
+    workspace with a root repo), else None (a workspace whose folder is not a repo)."""
+    if not repo.is_dir():
+        return None
+    top = sh("git", "rev-parse", "--show-toplevel", cwd=repo, check=False)
+    return repo if top and Path(top).resolve() == repo.resolve() else None
+
+
+def repo_config_blob(repo, main):
+    """The blob of claude-ops.toml on main in repo, or "" when there is none."""
+    return sh("git", "rev-parse", "--verify", "-q", f"refs/heads/{main}:{REPO_CONFIG}", cwd=repo, check=False)
+
+
+def split_repo_config(text):
+    """(the repo file's keys the queue reads from it, warnings about the rest, which it ignores)."""
+    d = tomllib.loads(text)
+    keep, warns = {}, []
+    for k, v in d.items():
+        if k in MOVABLE:
+            keep[k] = v
+        elif k in NOTES_TABLES and isinstance(v, dict):
+            if "notes" in v:
+                keep[k] = {"notes": v["notes"]}
+            warns += [f"[{k}] {x} is set in the home toml only: ignored" for x in v if x != "notes"]
+        elif k in HOME_ONLY or k in NOTES_TABLES:
+            warns.append(f"{k} is set in the home toml only: ignored")
+        else:
+            warns.append(f"{k} is not a config key: ignored")
+    for k, v in keep.items():
+        bad = {"repos": not isinstance(v, list) or not all(isinstance(x, str) for x in v),
+               "gate": not isinstance(v, list) or not all(isinstance(g, dict) and isinstance(g.get("run"), str)
+                                                          for g in v),
+               "deploy": not isinstance(v, list) or not all(isinstance(t, dict) for t in v)}.get(k, not isinstance(v, dict))
+        if bad or (k in NOTES_TABLES and not isinstance(v["notes"], str)):
+            raise ValueError(f"{k} is not " + {"repos": "a list of folder names", "gate": "a list of [[gate]] tables "
+                             "each with a run command", "deploy": "a list of [[deploy]] tables"}.get(
+                                 k, f"a [{k}] table" if k not in NOTES_TABLES else "a [{k}] table whose notes is text"))
+    if "repos" in keep and "." not in [str(r).strip("/") or "." for r in keep["repos"]]:
+        raise ValueError(f'repos must list "." (the repo {REPO_CONFIG} is in)')
+    return keep, warns
+
+
+def merged_config(c, r):
+    """The home toml c with the repo file's keys r in place of its own: each replaces the home key whole."""
+    out = dict(c)
+    for k, v in r.items():
+        out[k] = {**(c.get(k) or {}), **v} if k in NOTES_TABLES else v
+    return out
+
+
+def toml_key(k):
+    return k if re.fullmatch(r"[A-Za-z0-9_-]+", k) else json.dumps(k)
+
+
+def toml_value(v, multiline=False):
+    """v as TOML: strings, numbers, booleans, lists and inline tables, what a project toml holds."""
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    if isinstance(v, (int, float)):
+        return repr(v)
+    if isinstance(v, str):
+        if multiline and "\n" in v and not re.search(r"[\x00-\x08\x0b-\x1f\x7f]", v):
+            return '"""\n' + v.replace("\\", "\\\\").replace('"""', '""\\"') + '"""'
+        return json.dumps(v, ensure_ascii=False)
+    if isinstance(v, list):
+        return "[" + ", ".join(toml_value(x) for x in v) + "]"
+    if isinstance(v, dict):
+        return "{ " + ", ".join(f"{toml_key(k)} = {toml_value(x)}" for k, x in v.items()) + " }"
+    raise ValueError(f"can't write {v!r} as TOML")
+
+
+def config_toml(r):
+    """The repo file's text for keys r (split_repo_config's shape), tables in the README's order."""
+    out = ["# claude-ops config for this project, read from the main branch (README: Config in the repo).",
+           f"# The owner's home toml keeps {', '.join(HOME_ONLY[:4])},", f"# {', '.join(HOME_ONLY[4:])} and [worker] env.", ""]
+    if "repos" in r:
+        out += [f"repos = {toml_value(r['repos'])}", ""]
+    for k in ("worktree", "gate", "app", "deploy", "worker", "design"):
+        v = r.get(k)
+        for table in (v if isinstance(v, list) else [v] if isinstance(v, dict) else []):
+            out.append(f"[[{k}]]" if isinstance(v, list) else f"[{k}]")
+            out += [f"{toml_key(x)} = {toml_value(y, multiline=True)}" for x, y in table.items()]
+            out.append("")
+    return "\n".join(out)
+
+
+def export_config(name):
+    """opsd.py export-config -p NAME: write the keys of NAME's home toml that may live in the repo into
+    claude-ops.toml in your checkout, uncommitted. The home toml stays as it is: until you commit the file and it
+    reaches main, the queue goes on reading those keys there. Returns what moved."""
+    path = PROJECTS_DIR / f"{name}.toml"
+    if not re.fullmatch(r"[\w-]+", name or "") or not path.is_file():
+        raise ValueError(f"no project {name!r} ({path})")
+    c = tomllib.loads(path.read_text())
+    repo = Path(c["repo"]).expanduser()
+    home = repo_config_home(repo)
+    if not home:
+        raise ValueError(f"{repo} is not a git repo: a workspace keeps {REPO_CONFIG} in its root repo, so run "
+                         f"opsd.py adopt-workspace-root -p {name} first")
+    out = home / REPO_CONFIG
+    if out.exists():
+        raise ValueError(f"{out} exists already: edit it, or delete it and run this again")
+    r = {k: c[k] for k in MOVABLE if k in c}
+    for k in NOTES_TABLES:
+        if str((c.get(k) or {}).get("notes", "")).strip():
+            r[k] = {"notes": c[k]["notes"]}
+    if "repos" in r and "." not in [str(x).strip("/") or "." for x in r["repos"]]:
+        raise ValueError(f'{name}\'s repos has no ".": the queue reads {REPO_CONFIG} only from a root repo, so run '
+                         f"opsd.py adopt-workspace-root -p {name} first")
+    if not r:
+        raise ValueError(f"{path} has no keys that may live in the repo ({', '.join(MOVABLE)}, [worker] notes, "
+                         "[design] notes)")
+    text = config_toml(r)
+    if tomllib.loads(text) != r:  # what it wrote must read back as the same config
+        raise ValueError(f"writing {path}'s keys as TOML went wrong; nothing was written")
+    out.write_text(text)
+    moved = [f"[{k}] notes" if k in NOTES_TABLES else f"[[{k}]] x{len(r[k])}" if isinstance(r[k], list) and
+             k in ("gate", "deploy") else f"[{k}]" if isinstance(r[k], dict) else k for k in r]
+    return [f"wrote {out} (uncommitted): " + ", ".join(moved),
+            f"{path} is unchanged: it keeps {', '.join(k for k in HOME_ONLY if k in c)}"
+            + (" and [worker] env" if (c.get("worker") or {}).get("env") else "")
+            + f", and the queue keeps reading the moved keys there until {REPO_CONFIG} reaches "
+              f"{c.get('main_branch', 'main')}. Then you may delete them from it: the repo file's keys win."]
+
+
+class NotCloned(Exception):
+    pass
+
+
+def load_project(f):
+    """Project for home toml f, with the repo file on main merged in. A repo file that won't load (bad TOML, a bad
+    value, a repo folder you haven't cloned) leaves the last good one in use, or the home toml alone, with the error
+    on p.config_error; for missing folders also on p.missing, which holds the project's new tasks."""
+    c = tomllib.loads(f.read_text())
+    name, main = f.stem, c.get("main_branch", "main")
+    home = repo_config_home(Path(c["repo"]).expanduser()) if c.get("repo") else None
+    blob = repo_config_blob(home, main) if home else ""
+    if not blob:
+        LAST_GOOD.pop(name, None)
+        return Project(f, c)
+    warns, missing = [], []
+    try:
+        r, warns = split_repo_config(sh("git", "cat-file", "blob", blob, cwd=home))
+        p = Project(f, merged_config(c, r))
+        missing = [x.sub for x in p.parts if not x.root and not x.src.is_dir()]
+        if missing:
+            raise NotCloned(" and ".join(f"{m}/" for m in missing) + f" {'is' if len(missing) == 1 else 'are'} "
+                            f"not cloned: {REPO_CONFIG} on {main} lists {'it' if len(missing) == 1 else 'them'} in "
+                            f"repos. Clone {'it' if len(missing) == 1 else 'them'} into {home}; the queue holds "
+                            "new tasks until then")
+        LAST_GOOD[name] = r
+        err = None
+    except Exception as e:
+        err = str(e) if isinstance(e, NotCloned) else f"{REPO_CONFIG} on {main} did not load: {e}"
+        last = LAST_GOOD.get(name)
+        p = Project(f, merged_config(c, last) if last else c)
+        print(f"project {f.name}: {err}" + ("; the last good one stays in use" if last else
+                                             "; the home toml alone is in use"), flush=True)
+    for w in warns:
+        print(f"project {f.name}: {REPO_CONFIG}: {w}", flush=True)
+    p.config_blob, p.config_error, p.config_warnings, p.missing = blob, err, warns, missing
+    return p
+
+
+def repo_configs_moved():
+    """Whether a project's repo file on main changed, or a repo folder it waits for is now cloned."""
+    for p in list(PROJECTS.values()):
+        if not hasattr(p, "config_blob"):
+            continue
+        home = repo_config_home(p.repo)
+        if (repo_config_blob(home, p.main) if home else "") != p.config_blob:
+            return True
+        if p.missing and any((p.repo / m).is_dir() for m in p.missing):
+            return True
+    return False
+
+
 PROJECTS = {}
 BROKEN = {}  # name -> (title, why) of a project whose config can't load: its card shows why
 
@@ -337,7 +533,7 @@ def load_projects():
     found, broken = {}, {}
     for f in sorted(PROJECTS_DIR.glob("*.toml")):
         try:
-            p = Project(f)
+            p = load_project(f)
             for t in p.deploys:
                 if t.error:
                     print(f"project {f.name}: deploy target {t.name}: {t.error}", flush=True)
@@ -1554,10 +1750,25 @@ def worker_prompt(p, t):
     tpl = (CODE / "worker_prompt.md").read_text()
     checks = ", ".join(f"`{g['run']}`" for g in p.gate) or "(none configured: run whatever tests the repo has)"
     notes = workspace_note(p, t["branch"]) + (f"## Notes for {p.title}\n\n{p.worker_notes}\n" if p.worker_notes else "")
-    notes += peer_brief(p, "task")
+    notes += repo_config_note(p) + peer_brief(p, "task")
     return tpl.format(id=t["id"], title=t["title"], body=t["body"], project=p.title, worktree=t["worktree"],
                       branch=t["branch"], repo=p.repo, dev=p.dev, main=p.main, port=p.port_for(t["id"]),
                       result=result_path(t), checks=checks, notes=notes)
+
+
+def repo_config_note(p):
+    """For the briefs of a project that keeps its config in its repo. Empty for one that doesn't."""
+    if not getattr(p, "config_blob", ""):
+        return ""
+    where = f"the root of the `{p.repo.name}` root repo (the worktree root)" if p.repos else "the repo root"
+    return (f"## This project's queue config is `{REPO_CONFIG}` in the repo\n\n"
+            f"It is at {where}: repos, [worktree] clone/setup/setup_timeout, [[gate]], [app], [[deploy]], [worker] "
+            f"notes and [design] notes. Change it like any file you commit. The queue reads it from `{p.main}`, so "
+            f"your change takes effect only once it reaches `{p.main}`: this task is still checked by the gates in "
+            f"use now. {', '.join(HOME_ONLY)} and [worker] env stay in the owner's "
+            f"~/.claude-ops/projects/{p.name}.toml and can't be changed there (the queue ignores them in "
+            f"{REPO_CONFIG}). A repo you add to repos must be cloned by the owner before the project's next task "
+            "starts: the queue holds them until then.\n\n")
 
 
 def workspace_note(p, branch=None):
@@ -2912,6 +3123,8 @@ def scheduler():
             if n % 3 == 0:  # every 6 s: a scan for a running build takes up to 0.4 s
                 unblock_releases()
                 restart_if_idle()
+            if n % 5 == 0 and repo_configs_moved():  # every 10 s: main moved a claude-ops.toml, or a clone arrived
+                load_projects()
             if n % 30 == 0 and not STOPPING.is_set():  # every minute: promote trains whose time is up
                 release_trains()
         except Exception as e:
@@ -2934,6 +3147,8 @@ def schedule_once():
             break
         p = PROJECTS.get(t["project"])
         if not p or setting(f"paused:{p.name}") == "1":
+            continue
+        if getattr(p, "missing", None):  # its repo file lists a repo folder you haven't cloned
             continue
         if restart_holds(t):  # a Promote's restart waits for running deploys: a new one would hold it longer
             continue
@@ -3622,7 +3837,9 @@ def main_info(p, s=None):
             "senddev_open": senddev_open(p), "senddev_pending": f.get("senddev") or [],
             "dev_log": titled(p, f.get("dev_log") or []), "main_log": titled(p, f.get("main_log") or []),
             "main_since": p.show(f["main_since"]) if f.get("main_since") else None,
-            "main_since_kind": f.get("main_since_kind")}
+            "main_since_kind": f.get("main_since_kind"),
+            "config_error": p.config_error, "config_warnings": p.config_warnings, "missing": p.missing,
+            "repo_config": bool(p.config_blob)}
 
 
 def titled(p, log):
@@ -6925,6 +7142,9 @@ def wait_reasons(tasks, s=None):
             why = "its project is not loaded"
         elif s.get(f"paused:{p.name}") == "1":
             why = f"{p.title} is paused"
+        elif getattr(p, "missing", None):
+            why = " and ".join(f"{m}/" for m in p.missing) + " " + ("is" if len(p.missing) == 1 else "are") + \
+                  f" not cloned: clone {'it' if len(p.missing) == 1 else 'them'} into {p.repo}"
         elif restart_holds(t):
             why = "waiting for claude-ops to restart"
         elif braked and starts_claude(t):
@@ -8362,6 +8582,11 @@ if __name__ == "__main__":
             post("/api/projects/reload", {})
         except (HTTPError, URLError) as e:
             print(f"the claude-ops daemon did not reload ({e}): reload projects on the dashboard", file=sys.stderr)
+    elif cmd == "export-config" and len(args) == 2 and args[0] == "-p":
+        try:
+            print("\n".join(export_config(args[1])))
+        except (ValueError, RuntimeError) as e:
+            sys.exit(f"not exported: {e}")
     elif cmd == "send" and args and not args[0].startswith("-"):
         send_cli(args)
     elif cmd == "add" and len(args) >= 2 and args[0] == "-p":

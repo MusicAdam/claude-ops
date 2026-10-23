@@ -1070,6 +1070,7 @@ function projStats(g) {
   const need = n(NEEDS), qd = n(["queued"]);
   return [
     g.error ? `<span class="err">config error</span>` : "",
+    (g.missing || []).length ? `<span class="err">${esc(g.missing.map(m => m + "/").join(", "))} not cloned</span>` : g.config_error ? `<span class="err">claude-ops.toml error</span>` : "",
     g.paused ? `<span class="s-review">paused</span>` : "",
     need ? `<span class="s-review">${need} need${need === 1 ? "s" : ""} you</span>` : "",
     n(["running"]) ? `<span class="s-running pulse">${n(["running"])} working</span>` : "",
@@ -1099,7 +1100,7 @@ function projBody(g) {
   const promotable = g.ahead.length || (g.has_app && (!g.has_build || g.stale));
   const where = (b, sha, run) => `<span class="nw">${esc(b)} <span class="mono">${esc(sha)}</span>${run ? ' · <span class="s-running">running</span>' : ""}</span>`;
   // Release: main and dev, what Promote would bring, and the buttons that act on them.
-  return dirtyHtml(g) + sentHtml(g) + `<div class="sect"><h3>Release</h3>` +
+  return configHtml(g) + dirtyHtml(g) + sentHtml(g) + `<div class="sect"><h3>Release</h3>` +
     `<div>${where(g.main_branch + " (golden)", g.main, g.running)} · ${where(g.dev_branch, g.dev, g.dev_running)} · ${g.ahead.length ? `<span class="s-review nw">${nCommits(g.ahead.length)} to promote</span>` : `<span class="nw">nothing to promote</span>`}</div>` +
     (g.has_app && g.stale && g.built ? `<div class="s-review">The build is of ${esc(g.built)}, older than ${esc(g.main_branch)}. Promote to rebuild.</div>` : "") +
     (g.has_app && !g.has_build ? `<div class="s-review">Not built yet. Promote to build it.</div>` : "") +
@@ -1171,6 +1172,9 @@ function archivedHtml() {
 
 // Uncommitted files in your checkout (each repo of a workspace): no worker sees them and no release ships them.
 const files = n => `${n} file${n === 1 ? "" : "s"}`;
+// The project's claude-ops.toml on main (README: Config in the repo): why it is not in use, and keys it ignores.
+const configHtml = g => (g.config_error ? `<div class="err">${esc(g.config_error)}</div>` : "") +
+  ((g.config_warnings || []).length ? `<div class="s-review">claude-ops.toml: ${esc(g.config_warnings.join("; "))}</div>` : "");
 const dirtyCount = g => (g.uncommitted || []).reduce((a, u) => a + u.count, 0);
 function dirtyHtml(g) {
   const us = g.uncommitted || [], dev = esc(g.dev_branch), open = g.senddev_open;
