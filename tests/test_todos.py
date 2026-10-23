@@ -147,6 +147,18 @@ class Todos(unittest.TestCase):
         r = opsd.q("SELECT * FROM todos", one=True)
         self.assertEqual((r["source_kind"], r["source_id"], r["title"]), ("task", tid, "Run sudo make install"))
 
+    def test_chat_from(self):
+        """The Today view's conversation for a task: the design chat that queued it, or its parent."""
+        did = opsd.q("INSERT INTO designs (project, title, created, updated, kind) VALUES (?,?,?,?,?)",
+                     ("web", "Plan", time.time(), time.time(), "design"))
+        queued, child, alone = self.task("web", "review"), self.task("web", "review"), self.task("web", "review")
+        opsd.upd(child, parent=queued)
+        opsd.q("INSERT INTO design_msgs (design_id, role, text, ts, task_ids) VALUES (?,?,?,?,?)",
+               (did, "assistant", "Queued", time.time(), json.dumps([queued])))
+        self.assertEqual(opsd.chat_from(opsd.task(queued)), did)
+        self.assertEqual(opsd.chat_from(opsd.task(child)), did)
+        self.assertIsNone(opsd.chat_from(opsd.task(alone)))
+
 
 if __name__ == "__main__":
     unittest.main()

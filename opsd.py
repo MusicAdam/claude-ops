@@ -6305,6 +6305,16 @@ def todos_from_reply(p, reply, did):
     return TODO_BLOCK.sub("", reply).strip(), "; ".join(n for n in notes if n)
 
 
+def chat_from(t):
+    """The design chat that queued a task, or its parent (a split), for the Today view's conversation. None for a
+    task queued from the dashboard or the command line."""
+    for tid in (t["id"], t["parent"]):
+        if tid and (r := q("SELECT m.design_id FROM design_msgs m, json_each(m.task_ids) j "
+                           "WHERE m.task_ids IS NOT NULL AND j.value=? ORDER BY m.id LIMIT 1", (tid,), one=True)):
+            return r["design_id"]
+    return None
+
+
 def todos_list(tasks, projects, last):
     """The to-do list for /api/state, from what state_payload already read: its tasks (with last, their latest
     events), its projects (main_info, so no git call here), and two small queries for chats and stored items."""
@@ -6505,6 +6515,7 @@ class H(BaseHTTPRequestHandler):
                 t["merged_show"] = p.label(t["merged"])
                 t["base_show"] = p.label(t["base"])
             t["can_play"] = bool(p and p.launch and t["state"] == "review")
+            t["chat_from"] = chat_from(t)
             t["chat"] = q("SELECT role,text,ts,delivered FROM task_msgs WHERE task_id=? ORDER BY id", (tid,))
             t["chat_live"] = TASK_CHAT_LIVE.get(tid)
             t["can_chat"] = bool(t["session_id"]) and t["state"] in CHAT_STATES

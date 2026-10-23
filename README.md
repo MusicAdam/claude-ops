@@ -9,7 +9,7 @@ the golden version: it changes only when you promote.
 
 ```bash
 ./opsctl start                       # install + start the launchd service (runs at login, restarts if it dies)
-./opsctl open                        # dashboard: http://127.0.0.1:8788  (…/#tasks, …/#projects, …/#design, …/#chat open those tabs)
+./opsctl open                        # dashboard: http://127.0.0.1:8788  (…/#today, …/#tasks, …/#projects, …/#design, …/#chat open those pages)
 ./opsctl status | log | stop | restart   # stop and restart pause running tasks; the next start resumes them
 ./opsctl pause | resume              # pause every running task now / resume every paused one
 ./opsd.py add-project ~/dev/myrepo   # or "+ Project" on the dashboard
@@ -465,7 +465,7 @@ link. A reference whose target is missing is never a link that fails on click. T
   `openspec/changes/<name>/…` path opens that change in the OpenSpec reader, and a design-folder file opens
   from `/api/designs/<id>/files/<name>`. `GET /api/files?project=<name>&path=<rel>` serves the file: only one
   inside that project's dev worktree (symlinks resolved), not git-ignored, and 1 MB or smaller.
-- **LINK-4 Places in the app.** Names of places, such as Projects tab, Settings, Research tab, Analyze or Design
+- **LINK-4 Places in the app.** Names of places, such as Today view, Projects tab, Settings, Research tab, Analyze or Design
   tab, link to that place's hash route. One table in `dashboard.html`, `APP_PLACES`, maps each phrase to its
   route; a new place (the Today view's Scheduled, More → …) is one more row.
 - **LINK-5 URLs.** An http(s) URL opens in a new tab with `rel=noopener`. A trailing `.` `,` `)` `:` or `;` is
@@ -483,6 +483,69 @@ link. A reference whose target is missing is never a link that fails on click. T
 
 Text in fenced code and inside a longer code span is never linked. A code span that is only a file path (as
 Claude usually writes one) links as that file.
+
+## Today view
+
+The dashboard opens on **Today** (`#today`): one page for the day, in three columns. The header holds the name,
+the project switcher and **More ▾**. The switcher (All projects, or one) filters all three columns. More holds
+the older pages: History (the old Tasks tab), Projects, Design, Chat, Research, Analyze, Settings and Schedules.
+Their routes (`#tasks`, `#projects`, `#schedules`, …) still open them. The queue readouts and pause buttons stay on the right of the header.
+
+- **TODAY-1 Left: To-do.** The `todos` list from `/api/state`, nothing else.
+  - The top says **N things need you · ~M min** (the sum of `est_min`), over a progress bar: tasks done today ÷
+    (tasks done today + open items). "Done today" counts tasks that finished as done since local midnight; it is
+    the same list as the timeline's **Done today**.
+  - Filter chips, each with its count: **All**, **Review** (Try, Review, Agree, Read), **Unblock** (Answer, Fix),
+    **Ship** (Promote, Ship, Commit), **Only me** (Do).
+  - Each item shows its verb, title, project (with All projects) and age.
+  - The selection is the item's `key`, so it survives polls and reloads. When the selected item leaves the list
+    (you acted on it, or its state changed), the item after it is selected.
+  - **Skip for now** moves an item to the end of the list. It is kept in this browser only (localStorage), and
+    forgotten at midnight.
+- **TODAY-2 Centre: the step.** The selected item as one step: **Step k of n** (k within the filter) · project,
+  the title, the why, and key facts. For a task: its number, the gate result, how many files it changed, and how
+  long ago it was built. One primary button, a few secondary ones, and **Skip for now →**. Every button calls an
+  endpoint the older pages already use:
+
+  | Verb | Primary | Others |
+  |---|---|---|
+  | Try | ▶ Play this build (the task's play) | Approve & merge, Send back… |
+  | Review | Approve & merge | Open diff (the task's details, files changed), Send back… |
+  | Answer | Answer (focuses the message box; sending answers the task) | Details |
+  | Fix | Retry | Retry with a note… |
+  | Promote | Promote dev → main; for a release waiting on you, Stop main when the app is running, else Reply… | Details |
+  | Ship | Deploy (the Deploy dialog), one per target | |
+  | Commit | Send to dev | |
+  | Read | Mark read | |
+  | Agree | Reply (focuses the message box) | Done |
+  | Do | Done (`POST /api/todos/<id>/done`) | |
+
+  **Send back…**, **Retry with a note…** and **Answer** use the message box below: a line above it says where the
+  message goes, with **Cancel**.
+- **Centre, below: the conversation.** The existing chat view and message box. It shows the item's source chat.
+  For a task: the chat it came from (a peer's chat that sent it, or the design chat that queued it, or its parent's),
+  else the task's own chat with its worker. For a project item, or with nothing selected: the project's most recent
+  open design chat; with none, the message box starts a new design chat. Today never marks a chat read by itself:
+  **Mark read** does, so an item does not vanish while you read it.
+- **TODAY-3 Right: timeline.** Read-only status in three groups. Anything that needs a decision is in To-do, not
+  here.
+  - **Working now**: running, checking and merging tasks, and research runs.
+  - **Scheduled**: queued and paused tasks, with why each waits, each project's promote train, and each recurring
+    job (`schedules` in `/api/state`) with its next run, or paused.
+  - **Done today**: tasks that finished as done since local midnight.
+
+  Click an item for its details, in a panel over the column. A task shows a stage bar (Queued → Working → Gate →
+  Review → Merged → Promoted, the current stage lit), then the task page from History (model, effort, brief, live
+  output, log). The train shows the tasks it carries and **Promote now**. A schedule shows its last runs (its tasks in
+  `/api/state`), with **Run now**, **Pause** or **Resume**, and **Edit**, which opens it on the Schedules page.
+  Research runs link to the Research page.
+  Every panel has **Ask Claude about this**, which puts `About #231: ` in the message box.
+- **TODAY-4 One poll.** The page reads `/api/state` every 3 seconds, as before. Other reads are for what you
+  opened: the selected task (`GET /api/tasks/<id>`, as History does), the conversation shown, and the list of
+  chats once when an item has no chat of its own. `GET /api/tasks/<id>` gains `chat_from`, the design chat that
+  queued the task or its parent, for the conversation.
+- **Layout.** Desktop, 1100px and wider, has the three columns. Narrower windows stack them; the phone layout is
+  a later task.
 
 ## Chat mode
 
@@ -786,9 +849,10 @@ notes = """Project-specific guidance for design chats."""
 
 ## Other details
 
-- **Tabs.** The header has five: Projects, Tasks, Design, Chat and Settings. `#projects`, `#tasks`, `#design`,
-  `#chat` and `#settings` open one; the old `#queue` opens Tasks. The dashboard remembers the last tab you
-  used, and opens on Projects the first time.
+- **Tabs.** The header has **Today** and **More ▾** (see [Today view](#today-view)). More holds History (the
+  Tasks page), Projects, Design, Chat, Research, Analyze, Settings and Schedules. `#today`, `#tasks`, `#projects`,
+  `#design`, `#chat`, `#analyze`, `#settings` and `#schedules` open one; the old `#queue` opens Tasks. The address bar follows the page you
+  are on, so a reload stays there. With no page in the address, the dashboard opens on Today.
 - **Header.** Only what you watch or act on: the tabs, the queue readouts (working, queued, needs you,
   paused), the usage meters, and the pause buttons. Hover a readout or meter for what it counts; the
   dashboard draws that tooltip itself, so it shows at once and survives the 3-second redraw.
