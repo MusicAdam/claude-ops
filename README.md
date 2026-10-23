@@ -1133,12 +1133,37 @@ gitignored `.env` files each repo has, to clone into new worktrees.
   checkouts stay where they are (`<repo>/ballup-dunk`, …).
 - **Worktrees.** A task's worktree is a folder holding a copy of the workspace's own files (`CLAUDE.md`,
   `docs/`, `.claude/`) and one git worktree per repo. Edits to those copied files are not kept: change the
-  workspace's own files in its folder yourself.
+  workspace's own files in its folder yourself, or make the folder a repo (below).
 - **Merging.** The queue rebases every repo's task branch onto that repo's `dev` and runs the gate from the
   worktree root. It merges each repo the task committed to; a repo with no commits is left alone.
 - **Promote.** A release snapshots `dev` in every repo and checks them together. Each checkout is handled
   as in a plain project, uncommitted changes included. `main` moves in all repos or in none.
 - Commits show as one id per repo, such as `ballup-dunk 1a2b3c4d, ballup-swish 5e6f7a8b`.
+
+### The workspace folder as a repo (`"."`)
+
+Without it, a task can never change the workspace's own files (`CLAUDE.md`, `docs/`, `.claude/`, `bin/`,
+`.gitignore`, `openspec/`): they are copies. To let tasks change them, make the workspace folder a git repo of
+its own and list it as `"."`: `repos = ["ballup-dunk", "ballup-swish", "."]`.
+
+- **Set it up** with `./opsd.py adopt-workspace-root -p NAME`. In your checkout it runs `git init` in the folder
+  if needed (on `main_branch`), adds `/<repo>/` to `.gitignore` for each repo folder not yet ignored, commits the
+  folder's files as `chore: track workspace root`, makes `dev` from `main`, adds `"."` to the end of `repos` in
+  the toml (the rest of the file, comments included, stays as it was) and reloads projects. Running it again does
+  only what is still missing. It refuses while the folder is a repo with uncommitted changes.
+- **The rule.** The root repo must gitignore every other repo folder. If it doesn't, or `"."` is listed but the
+  folder is not a git repo, the project doesn't load: the daemon log and the project's card say why.
+- **What changes.** Each worktree root is a git worktree of the root repo (on the task branch, `dev`, or
+  detached), with the other repos' worktrees in the folders it ignores. Nothing is copied any more. The root is
+  one more repo everywhere else: it is rebased, gated, merged into its `dev` only when the task committed to it,
+  promoted (or sent straight to main) with the others, checked out for deploys, and included in Send to dev and
+  in carrying your uncommitted changes over. Its commit shows under the workspace's folder name, such as
+  `ballup-monorepo 1a2b3c4d, ballup-dunk 5e6f7a8b`. The worker brief says the root is a repo and edits to its
+  files must be committed there.
+- **Old records.** Commits are recorded in `repos` order, which is why `"."` goes last: releases and deploys
+  recorded before it still match their repos. A deploy target with `from` asks you to deploy its source
+  target once more first, as after any change to `repos`.
+- **Without `"."`** nothing changes.
 
 ## Archiving a project
 
@@ -1168,6 +1193,7 @@ main_branch = "main"
 dev_branch = "dev"                 # created from main if missing; add-project picks ops-dev if dev exists
 worktrees = "/Users/you/dev/mygame-wt"   # default: <repo>-wt
 # repos = ["backend", "app"]       # a workspace: repo is a folder and these folders in it are the git repos
+# repos = ["backend", "app", "."]  # "." too: the folder is a repo of its own that ignores the others (see Workspaces)
 max_parallel = 0                   # per-project cap; 0 = only the global "Parallel" limit
 # direct_main = false              # default true: a merge moves main at once, no release (see Straight to main)
 chat_mcp = []                      # MCP servers a project chat loads, by name (see Chat mode); default none
