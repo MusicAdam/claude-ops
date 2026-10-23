@@ -170,6 +170,8 @@ ul.clog { max-height: 220px; }
 #slash .sl.on { background: var(--chip); }
 #slash .sl code { font: 12px var(--mono); color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 #slash .muted { padding: 4px 8px; font-size: 12px; }
+.mdimg { display: block; max-width: 100%; max-height: 480px; margin: 6px 0; border-radius: 6px; border: 1px solid var(--line); }
+.imgmiss { display: block; margin: 6px 0; padding: 6px 10px; border: 1px dashed var(--line); border-radius: 6px; color: var(--muted); font-size: 12px; }
 .att { display: block; max-width: 260px; max-height: 200px; margin: 6px 0; border-radius: 6px; border: 1px solid var(--line); }
 textarea.dropping { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent); }
 .chathead { color: var(--muted); font-size: 12px; margin: 0 0 12px; }
@@ -1609,15 +1611,30 @@ const mdEmph = s => s
   .replace(/(^|[^\w*])\*(?=[^\s*])([^*]*?[^\s*])\*(?![\w*])/g, "$1<i>$2</i>")
   .replace(/(^|[^\w])_(?=[^\s_])([^_]*?[^\s_])_(?!\w)/g, "$1<i>$2</i>")
   .replace(/~~(?=\S)([\s\S]*?\S)~~/g, "<del>$1</del>");
+// A reply often names a picture or document by its path on disk. Those the dashboard serves (the images folder, a
+// design chat's own folder) become their URL; any other disk path stays as written, and fails to load (mdMissing).
+function mdLocal(u) {
+  const roots = ["(?:~|/Users/[^/]+)/\\.claude-ops"];
+  if (state && state.data_dir) roots.push(state.data_dir.replace(/[.*+?^$()|[\]{}\\]/g, "\\$&"));
+  const data = `(?:${roots.join("|")})`;
+  let m = u.match(new RegExp(`^${data}/images/([\\w-]+\\.\\w+)$`));
+  if (m) return `/api/images/${m[1]}`;
+  m = u.match(new RegExp(`^${data}/designs/(\\d+)/([\\w.-]+)$`));
+  return m ? `/api/designs/${m[1]}/files/${m[2]}` : u;
+}
 function inline(s, ctx = {}) {
-  // Code spans, escapes and links are set aside first, so no formatting reaches inside them.
+  // Code spans, escapes, images and links are set aside first, so no formatting reaches inside them.
   const keep = [], put = h => `\u0000${keep.push(h) - 1}\u0000`;
+  const img = (alt, url) => { url = mdLocal(url);
+    return put(`<a href="${url}" target="_blank" rel="noopener"><img class="mdimg" src="${url}" alt="${alt}" title="${alt}"></a>`); };
   const link = (text, url) => {
+    url = mdLocal(url);
     const local = url.startsWith("#"), href = local && ctx.idPrefix ? "#" + esc(ctx.idPrefix) + url.slice(1) : url;
     return put(`<a href="${href}"${local ? "" : ' target="_blank" rel="noopener"'}>${text}</a>`);
   };
   s = s.replace(/(`+)([^`]|[^`][\s\S]*?[^`])\1(?!`)/g, (m, f, c) => put(`<code>${c.replace(/^ ([\s\S]*) $/, "$1")}</code>`))
        .replace(/\\([\\`*_~[\]()#+\-.!|{}])/g, (m, c) => put(c))
+       .replace(/!\[([^\]]*)\]\(((?:[^\s()]|\([^\s()]*\))+)\)/g, (m, t, u) => mdSafeUrl(u) ? img(t, u) : t)
        .replace(/\[([^\]]*)\]\(((?:[^\s()]|\([^\s()]*\))+)\)/g, (m, t, u) => mdSafeUrl(u) ? link(mdEmph(t), u) : t)
        .replace(/\bhttps?:\/\/[^\s\u0000]+/gi, u => {
          let rest = ""; const cut = u.search(/&(lt|gt|quot);/);
@@ -1728,6 +1745,18 @@ function mdBlocks(lines, ctx) {
   }
   return out.join("");
 }
+// A picture in a reply that doesn't load says so, with the path it named, instead of a broken-image icon.
+// Error events don't bubble, so this listens in the capture phase, for every md() on the page.
+function mdMissing(e) {
+  const i = e.target;
+  if (!(i instanceof HTMLImageElement) || !i.classList.contains("mdimg")) return;
+  const note = document.createElement("span"), src = i.getAttribute("src");
+  note.className = "imgmiss";
+  note.textContent = `Picture not found: ${i.alt || "image"} (${src}). The dashboard shows only pictures saved in `
+    + `${state && state.data_dir ? state.data_dir : "~/.claude-ops"}/images or a design chat's own folder.`;
+  (i.parentElement.tagName === "A" ? i.parentElement : i).replaceWith(note);
+}
+document.addEventListener("error", mdMissing, true);
 function md(src, idPrefix) {
   const lines = esc(String(src ?? "").replace(/\u0000/g, "")).split(/\r?\n/)
     .map(l => l.replace(/^[ \t]+/, w => w.replace(/\t/g, "    ")));

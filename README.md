@@ -816,6 +816,9 @@ notes = """Project-specific guidance for design chats."""
   feedback, or a new task. It is saved in `~/.claude-ops/images/` and an `[image: <path>]` line goes in the
   text. The message shows it, and Claude (started with `--add-dir` on that folder) is told to read it.
   PNG, JPEG, GIF or WebP, up to 20 MB.
+- **Pictures in replies.** A reply's `![alt](path)` shows the picture. A path into `~/.claude-ops/images/`
+  or a design chat's own folder is served by the dashboard; a picture anywhere else on disk can't be, so it
+  shows a "Picture not found" note with its path. Chats are told to copy a picture into one of those first.
 - **Notifications.** macOS notifications when a task needs you, fails, or finishes.
 - **Speed.** The dashboard polls every 3 seconds, so the daemon answers a poll without waiting on git or the
   process table. Each project's branches, "to promote" list and whether its build is running are read in the

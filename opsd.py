@@ -5133,7 +5133,11 @@ PROJECT_CHAT_PROMPT = ("You are talking with the owner through the claude-ops da
                        "(Read with offset and limit, or `sed -n 'a,bp'`), 150 lines or fewer at a time. Never Read a "
                        "file over about 500 lines without a range, and never `cat` one. Don't reread what is already "
                        "in your context. Keep command output short: pipe it through `tail` or `grep`, and use quiet "
-                       "flags for tests and builds.")
+                       "flags for tests and builds. "
+                       f"To show the owner a picture, such as a screenshot, copy it into {IMAGES} under a name of "
+                       "letters, digits, - and _ with a .png, .jpg, .gif or .webp ending, then embed it with "
+                       "`![what it shows](/api/images/<name>)`. The dashboard can't show a picture from anywhere else "
+                       "on disk, such as /tmp or the repo.")
 CHAT_STATES = ("review", "needs_input", "failed", "done", "cancelled", "paused")  # the worker is not running
 CHAT_NEXT = {"review": "Approve merges the branch with your commits (the gate runs again first); Send back with "
                        "feedback sends the worker back to work",
