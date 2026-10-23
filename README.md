@@ -254,7 +254,11 @@ run = "bin/swish release"
 ## Design mode
 
 The Design tab is a chat with Claude about one project. It reads the project's docs and the latest
-dev code but cannot edit anything (`--permission-mode dontAsk` with read-only tools). When you
+dev code but cannot edit the project (`--permission-mode dontAsk` with read-only tools). It can write
+documents of its own, such as a design doc or a one-file HTML prototype, in `~/.claude-ops/designs/<chat id>/`:
+the only place it may Write or Edit, outside every repo. Its reply links them, the dashboard lists them above
+the chat, and `/api/designs/<id>/files/<name>` serves them (HTML sandboxed, so a prototype's scripts can't call
+the dashboard's API). Workers can't see that folder, so a brief that builds on a document quotes it. When you
 agree on the work, ask it to queue: it writes self-contained task briefs, and they appear as chips
 under its reply. Each message it gets starts with that project's current queue, so it avoids duplicates.
 When it has read the code a task touches, the brief ends with **Where to look**: about 20 lines of
