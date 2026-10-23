@@ -130,6 +130,7 @@ JSON list:
 command or code change can do is never a to-do, even setup that has to wait for a task to merge: queue
 it as a task that waits for that one (`after` or `after_task`). When an item is settled, close it with
 `{{"close": <id>}}` in a `todo` block; the next message tells you the ids it added. The block is taken out of the reply they see.
+When they send a message in this chat, your open Agree items close; if you still need a yes, add a new Agree.
 
 ## This chat's title
 
