@@ -7,7 +7,8 @@
                                        sonnet, haiku or a full model id (else the setting model:task, then model);
                                        --effort low, medium, high, xhigh or max (else the setting effort)
   opsd.py schedule add -p NAME --every 'mon 09:00' [--body TEXT] [--hold] [--model M] [--effort E] "title..."
-                                       a recurring job: queue that task on that timetable (README: Recurring jobs)
+                                       a recurring job: queue that task on that timetable (README: Recurring jobs);
+                                       --research T0|T1|T2 makes it a research job whose question is the text
   opsd.py deploy -p NAME TARGET [--version same|patch|minor|major|X.Y.Z] [--note TEXT]   deploy a [[deploy]] target
   opsd.py send NAME [--design|--chat] [--title T] [--hold] [--model M] [--effort E] "text..."
                                        from a session the queue started: a task (or chat) in another project
@@ -681,7 +682,8 @@ def init_db():
                       ("model", "TEXT"),  # and before models per task: null takes model:<kind> (see model_for)
                       ("session_model", "TEXT"),  # the model its session started on; every resume keeps it
                       ("effort", "TEXT"),  # and before effort per task: null takes the setting effort (see effort_for)
-                      ("last_call", "REAL"), ("ctx_tokens", "INTEGER")):  # its session's last call (see stale_session)
+                      ("last_call", "REAL"), ("ctx_tokens", "INTEGER"),  # its session's last call (see stale_session)
+                      ("research", "TEXT")):  # a research run: {question, tier, slug, path, read} as JSON (RES-1)
         if col not in cols:
             q(f"ALTER TABLE tasks ADD COLUMN {col} {decl}")
     q("CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY, task_id INTEGER, ts REAL, text TEXT)")
@@ -713,6 +715,8 @@ def init_db():
     q("""CREATE TABLE IF NOT EXISTS schedules (id INTEGER PRIMARY KEY, project TEXT, title TEXT, body TEXT,
         every TEXT, next_at REAL, paused INTEGER DEFAULT 0, last_task INTEGER, created REAL, model TEXT, effort TEXT,
         hold INTEGER DEFAULT 0, priority INTEGER DEFAULT 0)""")  # recurring jobs: see ## Recurring jobs
+    if "research" not in {r["name"] for r in q("PRAGMA table_info(schedules)")}:  # a recurring research job's tier
+        q("ALTER TABLE schedules ADD COLUMN research TEXT")
     q("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)")
     q("CREATE TABLE IF NOT EXISTS session_costs (session_id TEXT PRIMARY KEY, total REAL)")  # see cost_added
     for k, v in {"max_parallel": "3", "paused": "0", "model": "", "usage_brake": "85", "model:release": "sonnet",
@@ -852,13 +856,14 @@ def ev(tid, text):
 
 
 def add_task(project, body, title="", priority=0, hold=0, depends_on=None, parent=None, kind="task", auto_release=None,
-             deploy=None, origin=None, senddev=None, model=None, effort=None):
+             deploy=None, origin=None, senddev=None, model=None, effort=None, research=None):
     """auto_release None takes the project's default ("Promote after merge" on the project).
     A deploy (kind "deploy") is made only by queue_deploy: you clicked Deploy, or ran `opsd.py deploy`.
     origin: the session in another project that sent it (see send_peer).
     senddev: the snapshot a Send to dev task (kind "senddev", made by queue_senddev) lands on dev.
     model: the model its worker starts on; None takes model:<kind> when it starts (see model_for).
-    effort: its --effort; None takes the setting effort on each turn (see effort_for)."""
+    effort: its --effort; None takes the setting effort on each turn (see effort_for).
+    research: a research run's {question, tier, slug, path} (see queue_research)."""
     p = proj(project)
     model, effort = model_name(model), effort_name(effort)
     if auto_release is None:
@@ -868,10 +873,11 @@ def add_task(project, body, title="", priority=0, hold=0, depends_on=None, paren
     if (kind == "deploy") != bool(deploy):
         raise ValueError("a deploy needs its target, and only a deploy has one")
     tid = q("INSERT INTO tasks (project, title, body, priority, hold, depends_on, parent, created, kind, auto_release, "
-            "deploy, origin, senddev, model, effort) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "deploy, origin, senddev, model, effort, research) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (project, title, body, int(priority), int(bool(hold)), depends_on or None, parent, time.time(), kind,
              int(bool(auto_release) and kind in MERGES), json.dumps(deploy) if deploy else None,
-             json.dumps(origin) if origin else None, json.dumps(senddev) if senddev else None, model, effort))
+             json.dumps(origin) if origin else None, json.dumps(senddev) if senddev else None, model, effort,
+             json.dumps(research) if research else None))
     ev(tid, "queued" + (f" after #{depends_on}" if depends_on else "") + (f" on {model}" if model else "")
        + (f" at {effort} effort" if effort else ""))
     return tid
@@ -1550,6 +1556,9 @@ def run_claude(p, tid, prompt):
         model = session_model(t, t["kind"]) if kept is None else kept
         upd(tid, session_model=model, last_call=None, ctx_tokens=None)
     cmd += model_args(model) + effort_args(effort_for(t))
+    rs = research_of(t)
+    if rs:  # a research run's size follows its tier (RES-4)
+        cmd += ["--max-budget-usd", str(RESEARCH_TIERS[research_tier(rs.get("tier"))][1])]
     port = p.port_for(tid)
     env = dict(os.environ, OPS_RESULT=str(rp), OPS_TASK_ID=str(tid), OPS_PORT=str(port), OPS_FROM=f"task:{tid}",
                OPS_DAEMON=DAEMON_URL, **{k: str(v).format(port=port) for k, v in p.env.items()})
@@ -1563,6 +1572,12 @@ def run_claude(p, tid, prompt):
         track(tid, proc)
         seen, stuck, last_tool = [time.time()], [], "its first step"  # see watch_stuck
         threading.Thread(target=watch_stuck, args=(proc, seen, stuck), daemon=True).start()
+        timed = []  # a research run that reached its tier's time limit (RES-4)
+        if rs:
+            limit_min = RESEARCH_TIERS[research_tier(rs.get("tier"))][0]
+            timer = threading.Timer(limit_min * 60, lambda: (timed.append(limit_min), killgroup(proc.pid)))
+            timer.daemon = True
+            timer.start()
         try:
             send_user(proc.stdin, prompt)
             with STEER_LOCK:
@@ -1627,10 +1642,15 @@ def run_claude(p, tid, prompt):
                 close_steer(tid)  # messages already written still get their turn before claude exits
         close_steer(tid)
         proc.wait()
+        if rs:
+            timer.cancel()
         untrack(tid)
         with STEER_LOCK:
             INFLIGHT.pop(tid, None)  # written but never read: still pending, so the next turn gets them
     kill_app(p, t["worktree"])
+    if timed and not stopped(tid) and not rp.exists():  # a result written just in time still counts
+        ev(tid, f"stopped at the {rs.get('tier')} time limit ({timed[0]} min)")
+        return {"status": "failed", "summary": f"stopped at the {rs.get('tier')} time limit ({timed[0]} min)"}
     if stuck and not stopped(tid):
         return {"status": "needs_input", "summary": f"stuck on {last_tool}",
                 "question": f"The worker was stuck for {stuck[0] // 60:.0f} min on {last_tool}, with no command "
@@ -2708,7 +2728,7 @@ def schedule(sid):
 def schedule_fields(b, old=None):
     """The schedules row a create or edit body makes, checked: a known project, a title or body, a valid every."""
     s = dict(old or {})
-    for k in ("project", "title", "body", "every", "model", "effort", "hold", "priority"):
+    for k in ("project", "title", "body", "every", "model", "effort", "hold", "priority", "research"):
         if k in b:
             s[k] = b[k]
     proj(s.get("project") or "")
@@ -2719,15 +2739,16 @@ def schedule_fields(b, old=None):
     s["every"] = every_text(s.get("every"))
     s["model"], s["effort"] = model_name(s.get("model")), effort_name(s.get("effort"))
     s["hold"], s["priority"] = int(bool(s.get("hold"))), int(s.get("priority") or 0)
+    s["research"] = research_tier(s["research"]) if s.get("research") else None  # its body is the question (RES-6)
     return s
 
 
 def add_schedule(b, now=None):
     s = schedule_fields(b)
     return q("INSERT INTO schedules (project, title, body, every, next_at, paused, created, model, effort, hold, "
-             "priority) VALUES (?,?,?,?,?,0,?,?,?,?,?)",
+             "priority, research) VALUES (?,?,?,?,?,0,?,?,?,?,?,?)",
              (s["project"], s["title"], s["body"], s["every"], next_slot(s["every"], now or time.time()),
-              time.time(), s["model"], s["effort"], s["hold"], s["priority"]))
+              time.time(), s["model"], s["effort"], s["hold"], s["priority"], s["research"]))
 
 
 def edit_schedule(sid, b, now=None):
@@ -2736,16 +2757,22 @@ def edit_schedule(sid, b, now=None):
         raise ValueError(f"no schedule #{sid}")
     s = schedule_fields(b, old)
     nxt = next_slot(s["every"], now or time.time()) if s["every"] != old["every"] else old["next_at"]
-    q("UPDATE schedules SET project=?, title=?, body=?, every=?, next_at=?, model=?, effort=?, hold=?, priority=? "
-      "WHERE id=?", (s["project"], s["title"], s["body"], s["every"], nxt, s["model"], s["effort"], s["hold"],
-                     s["priority"], sid))
+    q("UPDATE schedules SET project=?, title=?, body=?, every=?, next_at=?, model=?, effort=?, hold=?, priority=?, "
+      "research=? WHERE id=?", (s["project"], s["title"], s["body"], s["every"], nxt, s["model"], s["effort"],
+                                s["hold"], s["priority"], s["research"], sid))
 
 
 def queue_scheduled(s, why):
-    """Queue schedule s's task, as /api/tasks would, and make it the schedule's last task."""
-    tid = add_task(s["project"], s["body"] or s["title"], s["title"], s["priority"], s["hold"], model=s["model"],
-                   effort=s["effort"], origin={"ref": f"schedule:{s['id']}", "kind": "schedule", "id": s["id"],
-                                               "project": s["project"], "title": s["title"]})
+    """Queue schedule s's task, as /api/tasks would, and make it the schedule's last task. A recurring research job
+    builds a fresh research brief each time, with a dated slug (RES-6)."""
+    origin = {"ref": f"schedule:{s['id']}", "kind": "schedule", "id": s["id"], "project": s["project"],
+              "title": s["title"]}
+    if s.get("research"):
+        tid = queue_research(s["project"], s["body"] or s["title"], s["research"], s["hold"], priority=s["priority"],
+                             model=s["model"], effort=s["effort"], origin=origin, dated=True)["id"]
+    else:
+        tid = add_task(s["project"], s["body"] or s["title"], s["title"], s["priority"], s["hold"], model=s["model"],
+                       effort=s["effort"], origin=origin)
     ev(tid, f"queued by schedule #{s['id']} ({s['every']}): {why}")
     q("UPDATE schedules SET last_task=? WHERE id=?", (tid, s["id"]))
     return tid
@@ -2812,6 +2839,268 @@ def schedules_from_reply(p, reply, did):
         print(f"chat #{did} made schedules {', '.join(made)}", flush=True)
         notes.insert(0, "your last reply made schedule " + "; ".join(made))
     return SCHEDULE_BLOCK.sub("", reply).strip(), "; ".join(notes)
+
+
+# ---------------------------------------------------------------- research tasks (README: ## Research)
+# A research run is a normal task flagged research (RES-1): its brief has the worker write one report to
+# docs/research/<slug>.md in its worktree, and it gates and merges like code. A merged report you haven't opened is a
+# Read to-do (RES-5); the open to-dos in the research repo's todos.json are Do items in their project (RES-8).
+
+RESEARCH_DIR = "docs/research"
+# tier -> (minutes per worker turn, --max-budget-usd, what the tier means): research.py's TIME_LIMIT_MIN and RUN_SIZES
+RESEARCH_TIERS = {"T0": (5, 1, "a quick answer: a handful of searches, no subagents"),
+                  "T1": (15, 3, "a normal run: enough sources to be confident, no parallel workers unless needed"),
+                  "T2": (40, 10, "a deep run: broad sources, parallel workers allowed")}
+SLUG_STOP = {"a", "an", "the", "is", "are", "of", "for", "to", "in", "on", "and", "or", "what", "whats", "how", "does",
+             "do", "anyone", "there", "any", "can", "i", "we", "it", "its", "be", "with", "by", "should", "my", "me",
+             "this", "that", "who", "which", "into"}  # research.make_slug's
+REPORT_DATES = {}  # repo folder -> (its HEAD, {report name: time of the last commit that touched it})
+
+
+def research_tier(tier):
+    tier = str(tier or "T1").strip().upper()
+    if tier not in RESEARCH_TIERS:
+        raise ValueError(f"tier must be one of {', '.join(RESEARCH_TIERS)}, not {tier!r}")
+    return tier
+
+
+def research_of(t):
+    """A task's research flag as a dict, or None for an ordinary task."""
+    try:
+        r = json.loads(t["research"]) if t and t.get("research") else None
+    except ValueError:
+        return None
+    return r if isinstance(r, dict) else None
+
+
+def report_rel(p, slug):
+    """Where a report goes, relative to a task worktree: docs/research/<slug>.md, in the first repo of a workspace."""
+    sub = p.parts[0].sub
+    return f"{sub + '/' if sub else ''}{RESEARCH_DIR}/{slug}.md"
+
+
+def research_slug(p, question, dated=False):
+    """A slug from the question's words, unique among the reports on dev and the project's open research tasks."""
+    words = [w for w in re.findall(r"[a-z0-9]+", question.lower()) if w not in SLUG_STOP]
+    base = "-".join(words[:6]) or "research"
+    if dated:
+        base += "-" + time.strftime("%Y-%m-%d")
+    taken = {Path(r["path"]).stem for r in research_reports(p)}
+    taken |= {r["slug"] for t in q(f"SELECT research FROM tasks WHERE project=? AND research IS NOT NULL AND state NOT "
+                                   f"IN ({','.join('?' * len(ENDED))})", (p.name, *ENDED))
+              if (r := research_of(t))}
+    slug, n = base, 2
+    while slug in taken:
+        slug, n = f"{base}-{n}", n + 1
+    return slug
+
+
+def research_brief(question, tier, path):
+    """The body of a research task: what the worker answers, where the report goes and what else it may touch."""
+    minutes, budget, means = RESEARCH_TIERS[tier]
+    return f"""Research run at tier {tier} ({means}).
+
+## Question
+
+{question}
+
+## What to do
+
+1. Answer the question at tier {tier} with the research skill in project mode: this repo is the target, and this
+   task's worktree is where the report goes.
+2. Write the report to `{path}` in this worktree, and nowhere else. This overrides the research skill's own paths:
+   do not write to ~/dev/research, and do not write briefs/, reports/, topics/, sources/registry.md or watchlist.md
+   anywhere.
+3. Start the report with a `# ` heading that names the subject, then one paragraph that answers the question in plain
+   words (the dashboard shows the heading as the title and that paragraph as the summary). Then the findings, with a
+   source for every claim you quote or count, and a `## Sources` list of links at the end. Say what you could not
+   reach.
+4. Commit only that file, with the message `Research: <the heading>`. Touch nothing else in the repo: no code, no
+   docs, no README.
+5. Report done with a summary that is the answer in two or three sentences.
+
+Limits: this worker is stopped after {minutes} minutes and at about ${budget} of API-equivalent usage, so finish and
+commit the report well before that. Don't run the project's build or app; the gate runs on its own."""
+
+
+def queue_research(project, question, tier="T1", hold=False, priority=0, model=None, effort=None, origin=None,
+                   dated=False):
+    """Queue a research task in project (RES-2). Returns {id, slug, path}."""
+    p = proj(project)
+    question = (question or "").strip()
+    if not question:
+        raise ValueError("Write a question first.")
+    tier = research_tier(tier)
+    slug = research_slug(p, question, dated)
+    path = report_rel(p, slug)
+    tid = add_task(project, research_brief(question, tier, path), f"Research: {title_of(question)}"[:120], priority,
+                   hold, model=model, effort=effort, origin=origin,
+                   research={"question": question, "tier": tier, "slug": slug, "path": path})
+    ev(tid, f"research at {tier}: writes {path}")
+    return {"id": tid, "slug": slug, "path": path}
+
+
+def new_research(project, b):
+    """POST /api/projects/<name>/research: queue a run, and with every a recurring job whose first run it is."""
+    tier, every = research_tier(b.get("tier")), (b.get("every") or "").strip()
+    if every:
+        every_text(every)  # refused before anything is queued
+    question = (b.get("question") or "").strip()
+    out = queue_research(project, question, tier, bool(b.get("hold")))
+    out["schedule"] = None
+    if every:
+        out["schedule"] = add_schedule({"project": project, "title": f"Research: {title_of(question)}"[:120],
+                                        "body": question, "every": every, "hold": bool(b.get("hold")),
+                                        "research": tier})
+        q("UPDATE schedules SET last_task=? WHERE id=?", (out["id"], out["schedule"]))  # no second run while it runs
+    return out
+
+
+def report_head(text):
+    """(title, summary) of a report: its first heading, and its first paragraph of prose, in one line."""
+    title, para, body = "", [], text.split("\n")
+    if body and body[0].strip() == "---":  # front matter
+        end = next((i for i, ln in enumerate(body[1:], 1) if ln.strip() == "---"), 0)
+        body = body[end + 1:]
+    fence = False
+    for ln in body:
+        s = ln.strip()
+        if s.startswith("```"):
+            fence = not fence
+            continue
+        if fence:
+            continue
+        if not title and s.startswith("# "):
+            title = s[2:].strip()
+            continue
+        if not s:
+            if para:
+                break
+            continue
+        if s.startswith(("#", "|", "---", "<!--", "![")) or re.match(r"^([-*]\s+)?\*\*[^*]{1,40}:\*\*", s):
+            if para:
+                break
+            continue  # headings, tables, rules and **Field:** lines are not the summary
+        para.append(re.sub(r"^([-*>]|\d+\.)\s+", "", s))
+    summary = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", " ".join(para))
+    return title, clip(re.sub(r"[*_`]", "", summary), 240)
+
+
+def report_dates(folder):
+    """{report name: unix time of the last commit that touched it} on the dev worktree folder, one git call per HEAD."""
+    try:
+        head = sh("git", "rev-parse", "HEAD", cwd=folder)
+        if REPORT_DATES.get(str(folder), (None,))[0] != head:
+            out, seen, ts = sh("git", "log", "--format=%x00%ct", "--name-only", "HEAD", "--", RESEARCH_DIR,
+                               cwd=folder), {}, 0
+            for ln in out.split("\n"):
+                if ln.startswith("\0"):
+                    ts = int(ln[1:])
+                elif ln.strip():
+                    seen.setdefault(Path(ln.strip()).name, ts)
+            REPORT_DATES[str(folder)] = (head, seen)
+        return REPORT_DATES[str(folder)][1]
+    except (RuntimeError, ValueError):
+        return {}
+
+
+def research_reports(p):
+    """The reports in docs/research/*.md on p's dev worktree (each repo's, in a workspace), newest first:
+    {path, title, date, summary, task, unread}. task is the latest research task that wrote it, unread whether
+    that task merged and you haven't opened its report."""
+    tasks = {}
+    for t in q("SELECT id,state,merged,research FROM tasks WHERE project=? AND research IS NOT NULL ORDER BY id",
+               (p.name,)):
+        if r := research_of(t):
+            tasks[r.get("path")] = (t, r)
+    out = []
+    for part in p.parts:
+        root = part.at(p.dev_wt)
+        folder = root / RESEARCH_DIR
+        if not folder.is_dir():
+            continue
+        dates = report_dates(root)
+        for f in folder.glob("*.md"):
+            if not f.is_file():
+                continue
+            rel = f"{part.sub + '/' if part.sub else ''}{RESEARCH_DIR}/{f.name}"
+            try:
+                with open(f, errors="replace") as fh:
+                    title, summary = report_head(fh.read(16384))
+            except OSError:
+                continue
+            t, r = tasks.get(rel, (None, None))
+            out.append({"path": rel, "title": title or f.stem, "summary": summary,
+                        "date": dates.get(f.name) or f.stat().st_mtime, "task": t["id"] if t else None,
+                        "unread": bool(t and t["state"] == "done" and t["merged"] and not r.get("read"))})
+    return sorted(out, key=lambda x: (-(x["date"] or 0), x["path"]))
+
+
+def report_read(project, path):
+    """Mark the report at path read: every research task of project that wrote it. Returns their ids (RES-5)."""
+    proj(project)
+    return [r["id"] for r in q("UPDATE tasks SET research=json_set(research, '$.read', ?) WHERE project=? AND "
+                               "research IS NOT NULL AND json_extract(research, '$.path')=? AND "
+                               "json_extract(research, '$.read') IS NULL RETURNING id", (time.time(), project, path))]
+
+
+def project_research(project):
+    """GET /api/projects/<name>/research: the Research section of TODAY-4."""
+    p = proj(project)
+    running = []
+    for t in q(f"SELECT id,title,state,research FROM tasks WHERE project=? AND research IS NOT NULL AND state NOT IN "
+               f"({','.join('?' * len(ENDED))}) ORDER BY id DESC", (project, *ENDED)):
+        t["research"] = research_of(t)
+        running.append(t)
+    return {"dev": p.dev, "reports": research_reports(p), "running": running,
+            "schedules": [s for s in schedules_view() if s["project"] == project and s["research"]]}
+
+
+def project_documents(project):
+    """GET /api/projects/<name>/documents: the files the project's plan & design topics wrote, newest first."""
+    proj(project)
+    out = []
+    for d in q("SELECT id,title FROM designs WHERE project=? AND COALESCE(kind,'design')!='project'", (project,)):
+        out += [{"design": d["id"], "title": d["title"], **f} for f in chat_files(d["id"])]
+    return sorted(out, key=lambda x: -x["mtime"])
+
+
+def research_home():
+    """The claude-ops project whose checkout is the research repo (RES-7), or None."""
+    repo = research.REPO
+    return next((p.name for p in PROJECTS.values() if repo and Path(p.repo).expanduser().resolve() == repo), None)
+
+
+def research_todo_items():
+    """The open to-dos of the research repo's todos.json, as Do items in the project their research project links
+    to, else in the research repo's own project (RES-8). Skipped: done ones, ones whose queued task is still live,
+    and any with no project to show in. [] while research is off."""
+    try:
+        if not research.current():
+            return []
+        todos, links = research.todos.list_todos(), research.load_projects()["projects"]
+    except Exception as e:
+        print(f"research to-dos: {e}", flush=True)
+        return []
+    home, out = research_home(), []
+    live = research.task_rows(t.get("task") for t in todos if not t.get("done"))
+    for t in todos:
+        r = live.get(t.get("task")) if isinstance(t.get("task"), int) else None
+        if t.get("done") or (r and r["state"] not in research.DEAD):
+            continue
+        rid = (links.get(t.get("effectiveProject") or "") or {}).get("repo")
+        project = rid if isinstance(rid, str) and rid in PROJECTS else home
+        if not project:
+            continue
+        try:
+            since = datetime.datetime.strptime(t.get("created") or "", "%Y-%m-%d").timestamp()
+        except ValueError:
+            since = 0
+        why = (t.get("notes") or "").strip() or f"Research to-do #{t['id']}" + (
+            f" ({t['effectiveProject']})" if t.get("effectiveProject") else "")
+        out.append(todo_item(f"rtodo:{t['id']}", "Do", project, t.get("text") or f"To-do #{t['id']}", why, since,
+                             "research_todo", t["id"], rtodo=t["id"]))
+    return out
 
 
 RESTART_NOTE = ("The task queue restarted while you were working. Any command you were running was stopped. "
@@ -6533,6 +6822,9 @@ def todos_list(tasks, projects, last):
                 out.append(item(f"task:{t['id']}:answer", "Answer", why=t["question"]))
         elif st == "failed":
             out.append(item(f"task:{t['id']}:fix", "Fix", why=t["error"]))
+        elif st == "done" and t["merged"] and (rs := t.get("research")) and not rs.get("read"):  # RES-5
+            out.append({**item(f"task:{t['id']}:report", "Read", why=f"Research report {rs.get('path')} merged into "
+                               f"{getattr(PROJECTS.get(t['project']), 'dev', 'dev')}"), "report": {"path": rs.get("path")}})
         elif st == "review":
             p = PROJECTS.get(t["project"])
             if p and p.launch:  # can_play in GET /api/tasks/<id>
@@ -6569,6 +6861,7 @@ def todos_list(tasks, projects, last):
         out.append(todo_item(f"todo:{r['id']}", r["verb"], r["project"], r["title"], r["why"], r["created"],
                              "chat" if r["source_kind"] == "design" else r["source_kind"], r["source_id"],
                              todo=r["id"]))
+    out += research_todo_items()
     return sorted(out, key=lambda x: (TODO_ORDER.index(x["group"]), x["since"], x["key"]))
 
 
@@ -6577,7 +6870,7 @@ def todos_list(tasks, projects, last):
 def state_payload():
     tasks = q("SELECT id,project,title,state,phase,priority,hold,depends_on,parent,created,started,"
               "finished,cost,rounds,summary,question,error,merged,branch,kind,auto_release,origin,paused_by,start_at,"
-              "model,session_model,effort FROM tasks "
+              "model,session_model,effort,research FROM tasks "
               "ORDER BY id DESC LIMIT 500")
     # What each task is doing right now, for the status line under it in the list.
     # Per listed task, one index lookup (events_task): a GROUP BY over every event scanned the whole table.
@@ -6597,6 +6890,7 @@ def state_payload():
         t["step"] = last_step(t["id"]) if t["state"] == "running" and t["phase"] == "claude working" else None
         t["wait"] = waits.get(t["id"])
         t["origin"] = origin_view(t["origin"])
+        t["research"] = research_of(t)
     projects = []
     for p in PROJECTS.values():
         try:
@@ -6750,6 +7044,12 @@ class H(BaseHTTPRequestHandler):
         if path == "/api/analyze":  # the Analyze tab: ?period=1|7|30|all&project=<name>
             qs = parse_qs(urlparse(self.path).query)
             return self.send(200, analysis(qs.get("period", ["7"])[0], qs.get("project", [""])[0]))
+        m = re.fullmatch(r"/api/projects/([\w-]+)/(research|documents)", path)  # a project's sections (TODAY-4)
+        if m:
+            try:
+                return self.send(200, (project_research if m.group(2) == "research" else project_documents)(m.group(1)))
+            except ValueError as e:
+                return self.send(404, {"error": str(e)})
         if path == "/api/conversation":  # the Today view's conversation: ?project=<name>
             try:
                 return self.send(200, conv_view(parse_qs(urlparse(self.path).query).get("project", [""])[0]))
@@ -6840,6 +7140,10 @@ class H(BaseHTTPRequestHandler):
             return {"id": tid, **({"warning": w} if p and (w := uncommitted_warning(p)) else {})}
         if path == "/api/schedules":
             return {"id": add_schedule(b)}
+        if m := re.fullmatch(r"/api/projects/([\w-]+)/research", path):  # New research (RES-2)
+            return new_research(m.group(1), b)
+        if m := re.fullmatch(r"/api/projects/([\w-]+)/research/read", path):  # you opened a report (RES-5)
+            return {"ok": True, "marked": report_read(m.group(1), (b.get("path") or "").strip())}
         m = re.fullmatch(r"/api/schedules/(\d+)(?:/(run|pause|resume|delete))?", path)
         if m:
             sid, act = int(m.group(1)), m.group(2)
@@ -7161,7 +7465,7 @@ if __name__ == "__main__":
         words, opts, rest = [], {"project": args[2]}, args[3:]
         while rest:
             a = rest.pop(0)
-            if a in ("--every", "--body", "--model", "--effort", "--priority") and rest:
+            if a in ("--every", "--body", "--model", "--effort", "--priority", "--research") and rest:
                 opts[a[2:]] = rest.pop(0)
             elif a == "--hold":
                 opts["hold"] = True
