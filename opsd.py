@@ -4939,6 +4939,9 @@ def design_turn(did, text, fresh_why=None):
               (did, "ops", f"chat_mcp in {p.name}.toml names MCP servers Claude has no definition for, so this "
                            f"chat runs without them: {', '.join(missing)}.", time.time()))
         system = PROJECT_CHAT_PROMPT + "\n\n" + peer_brief(p, "chat")
+        system += (f"\n\nTo queue a task in {p.name} itself, for an unattended worker in its own worktree, run "
+                   f"`{SEND_CMD} {p.name} --title \"...\" \"<a brief that stands alone>\"`. Do it when the owner "
+                   "asks or agrees.")
         if handoff and slash:
             system += "\n\n" + handoff
         cmd = [CLAUDE, "-p", ("[ops: " + " | ".join(said) + "]\n\n" if said else "") + with_images(text),
