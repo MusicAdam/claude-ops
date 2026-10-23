@@ -701,6 +701,8 @@ def init_db():
     q("CREATE INDEX IF NOT EXISTS design_msgs_design ON design_msgs (design_id, id)")
     q("""CREATE TABLE IF NOT EXISTS todos (id INTEGER PRIMARY KEY, project TEXT, verb TEXT, title TEXT, why TEXT,
         source_kind TEXT, source_id INTEGER, created REAL, closed REAL)""")  # what Claude asks of you (see To-dos)
+    q("""CREATE TABLE IF NOT EXISTS todo_notes (key TEXT PRIMARY KEY, note TEXT, parked REAL, skipped REAL,
+        wake_task INTEGER, updated REAL)""")  # your note on a to-do, and its skip or park (TODO-6)
     dcols = {r["name"] for r in q("PRAGMA table_info(designs)")}
     for col, decl in (("kind", "TEXT DEFAULT 'design'"),  # databases from before project chats
                       ("spec", "TEXT"), ("spec_sub", "TEXT DEFAULT ''"),  # and before OpenSpec chats
@@ -7093,9 +7095,95 @@ def chat_from(t):
     return None
 
 
-def todos_list(tasks, projects, last):
+TODO_WAKE = re.compile(r"#(\d+)|\btask (\d+)", re.I)
+TODO_WAITING = ("queued", "running", "gating", "merging")  # a parked item waiting on such a task stays parked
+TODO_WAKE_WORD = {"done": "merged", "failed": "failed", "needs_input": "needs you", "review": "in review",
+                  "paused": "paused"}
+
+
+def todo_wake_task(note):
+    """The task a note waits on: its first #N or "task N" (TODO-6), else None."""
+    m = TODO_WAKE.search(note or "")
+    return int(m.group(1) or m.group(2)) if m else None
+
+
+def todo_note(key, note):
+    """Save your note on a to-do (POST /api/todos/note). A parked item stays parked, even with no note."""
+    if not str(key or "").strip():
+        raise ValueError("no to-do key")
+    note = str(note or "").strip()
+    q("INSERT INTO todo_notes (key, note, wake_task, updated) VALUES (?,?,?,?) ON CONFLICT(key) DO UPDATE SET "
+      "note=excluded.note, wake_task=excluded.wake_task, updated=excluded.updated",
+      (key, note, todo_wake_task(note), time.time()))
+    q("DELETE FROM todo_notes WHERE key=? AND note='' AND parked IS NULL AND skipped IS NULL", (key,))
+
+
+def todo_skip(key, now=None):
+    """Skip for now (POST /api/todos/skip): park the item when it has a note, else move it last until midnight."""
+    if not str(key or "").strip():
+        raise ValueError("no to-do key")
+    now = now or time.time()
+    r = q("SELECT note FROM todo_notes WHERE key=?", (key,), one=True)
+    if r and (r["note"] or "").strip():
+        q("UPDATE todo_notes SET parked=?, skipped=NULL, updated=? WHERE key=?", (now, now, key))
+        return {"parked": True}
+    q("INSERT INTO todo_notes (key, note, skipped, updated) VALUES (?,'',?,?) ON CONFLICT(key) DO UPDATE SET "
+      "skipped=excluded.skipped, updated=excluded.updated", (key, now, now))
+    return {"skipped": True}
+
+
+def todo_unpark(key):
+    """Unpark (POST /api/todos/unpark): back into the list at its normal place, not skipped."""
+    q("UPDATE todo_notes SET parked=NULL, skipped=NULL, updated=? WHERE key=?", (time.time(), key))
+    q("DELETE FROM todo_notes WHERE key=? AND note=''", (key,))
+
+
+def todo_notes_apply(out, tasks, projects, now):
+    """Put your notes, skips and parks on the to-do list (TODO-6), wake parked items whose task has ended, drop
+    rows whose item is gone, and order it: unparked, then skipped in skip order, then parked."""
+    rows = {r["key"]: r for r in q("SELECT * FROM todo_notes")}
+    if not rows:
+        return [{**x, "note": ""} for x in out]
+    keys = {x["key"] for x in out}
+    unknown = {f["name"] for f in projects if f.get("error")}  # its items are missing only because it failed to load
+    midnight = datetime.datetime.fromtimestamp(now).replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+    states = {t["id"]: t["state"] for t in tasks}
+    want = [r["wake_task"] for r in rows.values() if r["parked"] and r["wake_task"] and r["wake_task"] not in states]
+    if want:  # older than the tasks state_payload read: one query for them all
+        states.update((r["id"], r["state"]) for r in q(
+            f"SELECT id, state FROM tasks WHERE id IN ({','.join('?' * len(want))})", want))
+    for k, r in list(rows.items()):
+        if k not in keys:
+            if not (k.startswith("project:") and k.split(":")[1] in unknown):
+                q("DELETE FROM todo_notes WHERE key=?", (k,))
+            rows.pop(k)
+            continue
+        if r["parked"] and (n := r["wake_task"]) and (st := states.get(n)) not in TODO_WAITING:
+            note = f"{r['note'] or ''} · #{n} {TODO_WAKE_WORD.get(st, 'gone' if st is None else st)}".strip(" ·")
+            q("UPDATE todo_notes SET note=?, parked=NULL, skipped=NULL, updated=? WHERE key=?", (note, now, k))
+            r = rows[k] = {**r, "note": note, "parked": None, "skipped": None}
+        if r["skipped"] and r["skipped"] < midnight:
+            r = rows[k] = {**r, "skipped": None}
+        if not (r["note"] or r["parked"] or r["skipped"]):
+            q("DELETE FROM todo_notes WHERE key=?", (k,))
+    main, skipped, parked = [], [], []
+    for x in out:
+        r = rows.get(x["key"]) or {}
+        x = {**x, "note": r.get("note") or ""}
+        if r.get("parked"):
+            parked.append({**x, "parked": {"since": r["parked"], "wake_task": r["wake_task"]}})
+        elif r.get("skipped"):
+            skipped.append({**x, "skipped": r["skipped"]})
+        else:
+            main.append(x)
+    return (main + sorted(skipped, key=lambda x: x["skipped"])
+            + sorted(parked, key=lambda x: x["parked"]["since"]))
+
+
+def todos_list(tasks, projects, last, now=None):
     """The to-do list for /api/state, from what state_payload already read: its tasks (with last, their latest
-    events), its projects (main_info, so no git call here), and two small queries for chats and stored items."""
+    events), its projects (main_info, so no git call here), and two small queries for chats and stored items.
+    Your notes, skips and parks go on last (TODO-6); now is the clock, for tests."""
     out = []
     for t in tasks:
         k, st = t["kind"], t["state"]
@@ -7153,7 +7241,8 @@ def todos_list(tasks, projects, last):
         out.append(todo_item(f"todo:{r['id']}", r["verb"], r["project"], r["title"], r["why"], r["created"],
                              "chat" if r["source_kind"] == "design" else r["source_kind"], r["source_id"],
                              todo=r["id"]))
-    return sorted(out, key=lambda x: (TODO_ORDER.index(x["group"]), x["since"], x["key"]))
+    out.sort(key=lambda x: (TODO_ORDER.index(x["group"]), x["since"], x["key"]))
+    return todo_notes_apply(out, tasks, projects, now or time.time())
 
 
 # ---------------------------------------------------------------- http
@@ -7418,6 +7507,12 @@ class H(BaseHTTPRequestHandler):
             if not todo_done(int(m.group(1))):
                 raise ValueError("no open to-do with that id")
             return {"ok": True}
+        if path == "/api/todos/note":  # TODO-6
+            return todo_note(b["key"], b.get("note"))
+        if path == "/api/todos/skip":
+            return todo_skip(b["key"])
+        if path == "/api/todos/unpark":
+            return todo_unpark(b["key"])
         if path == "/api/links/check":  # which of a chat message's link targets exist (README: Links in chats)
             heads = {}
             return {"refs": link_check(b.get("project"), b.get("refs"), heads), "heads": heads}

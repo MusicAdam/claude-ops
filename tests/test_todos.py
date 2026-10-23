@@ -32,7 +32,7 @@ def project_facts(name, **kw):
 class Todos(unittest.TestCase):
     def setUp(self):
         opsd.init_db()
-        for t in ("tasks", "events", "designs", "design_msgs", "todos"):
+        for t in ("tasks", "events", "designs", "design_msgs", "todos", "todo_notes"):
             opsd.q(f"DELETE FROM {t}")
         self.saved = dict(opsd.PROJECTS)
         opsd.PROJECTS.clear()
@@ -187,6 +187,95 @@ class Todos(unittest.TestCase):
         self.assertEqual(opsd.chat_from(opsd.task(queued)), did)
         self.assertEqual(opsd.chat_from(opsd.task(child)), did)
         self.assertIsNone(opsd.chat_from(opsd.task(alone)))
+
+
+    # TODO-6 notes and parking
+    def keyed(self, **kw):
+        return {x["key"]: x for x in self.todos_at(**kw)}
+
+    def todos_at(self, now=None):
+        tasks = opsd.q("SELECT * FROM tasks ORDER BY id DESC")
+        return opsd.todos_list(tasks, [], {}, now=now)
+
+    def test_note_shows_on_item(self):
+        a = self.task("web", "failed", error="x")
+        key = f"task:{a}:fix"
+        self.assertEqual(self.keyed()[key]["note"], "")
+        opsd.todo_note(key, "look at the log")
+        got = self.keyed()[key]
+        self.assertEqual(got["note"], "look at the log")
+        self.assertNotIn("parked", got)
+        self.assertNotIn("skipped", got)
+        opsd.todo_note(key, "")  # an empty note on an item neither parked nor skipped leaves no row
+        self.assertIsNone(opsd.q("SELECT * FROM todo_notes WHERE key=?", (key,), one=True))
+
+    def test_skip_without_note_goes_last_until_midnight(self):
+        a, b, c = (self.task("web", "failed", error="x") for _ in range(3))
+        now = time.mktime((2026, 10, 23, 15, 0, 0, 0, 0, -1))
+        opsd.todo_skip(f"task:{b}:fix", now=now)
+        opsd.todo_skip(f"task:{a}:fix", now=now + 1)
+        order = [x["key"] for x in self.todos_at(now=now + 60)]
+        self.assertEqual(order, [f"task:{c}:fix", f"task:{b}:fix", f"task:{a}:fix"])  # skipped last, in skip order
+        self.assertEqual(self.keyed(now=now + 60)[f"task:{b}:fix"]["skipped"], now)
+        tomorrow = time.mktime((2026, 10, 24, 0, 1, 0, 0, 0, -1))
+        got = self.todos_at(now=tomorrow)
+        self.assertTrue(all("skipped" not in x for x in got))
+        self.assertEqual(opsd.q("SELECT COUNT(*) AS n FROM todo_notes", one=True)["n"], 0)
+
+    def test_skip_with_note_parks_and_unpark(self):
+        a, b = self.task("web", "failed", error="x"), self.task("web", "failed", error="y")
+        key = f"task:{a}:fix"
+        opsd.todo_note(key, "blocked on Apple review")
+        self.assertEqual(opsd.todo_skip(key), {"parked": True})
+        got = self.todos_at()
+        self.assertEqual([x["key"] for x in got], [f"task:{b}:fix", key])  # last, flagged for the Parked section
+        self.assertEqual(got[1]["parked"]["wake_task"], None)
+        self.assertGreater(got[1]["parked"]["since"], 0)
+        self.assertNotIn("parked", got[0])
+        opsd.todo_note(key, "")  # clearing the note does not unpark it
+        self.assertIn("parked", self.keyed()[key])
+        opsd.todo_unpark(key)
+        got = self.keyed()[key]
+        self.assertNotIn("parked", got)
+        self.assertNotIn("skipped", got)
+
+    def test_wake_on_task(self):
+        item = self.task("web", "failed", error="x")
+        wait = self.task("web", "running")
+        key = f"task:{item}:fix"
+        opsd.todo_note(key, f"wait for #{wait}")
+        opsd.todo_skip(key)
+        self.assertEqual(self.keyed()[key]["parked"]["wake_task"], wait)  # still running: still parked
+        opsd.upd(wait, state="done")
+        got = self.todos_at()
+        self.assertEqual(got[0]["key"], key)  # back at its normal place, not skipped
+        self.assertNotIn("parked", got[0])
+        self.assertNotIn("skipped", got[0])
+        self.assertEqual(got[0]["note"], f"wait for #{wait} · #{wait} merged")
+        self.assertNotIn("parked", self.keyed()[key])  # stays woken
+
+    def test_wake_parse_and_no_number(self):
+        self.assertEqual(opsd.todo_wake_task("waiting on Task 12 first"), 12)
+        self.assertEqual(opsd.todo_wake_task("see #7 and #8"), 7)
+        self.assertIsNone(opsd.todo_wake_task("blocked on Apple review"))
+        item = self.task("web", "failed", error="x")
+        key = f"task:{item}:fix"
+        opsd.todo_note(key, "blocked on Apple review")
+        opsd.todo_skip(key)
+        self.assertIn("parked", self.keyed()[key])  # never wakes by itself
+        opsd.todo_note(key, f"task {item + 99}")  # editing re-parses; a task that isn't there is gone
+        got = self.keyed()[key]
+        self.assertNotIn("parked", got)
+        self.assertEqual(got["note"], f"task {item + 99} · #{item + 99} gone")
+
+    def test_row_dropped_when_item_leaves(self):
+        item = self.task("web", "failed", error="x")
+        key = f"task:{item}:fix"
+        opsd.todo_note(key, "later")
+        opsd.todo_skip(key)
+        opsd.upd(item, state="done")
+        self.assertNotIn(key, self.keyed())
+        self.assertIsNone(opsd.q("SELECT * FROM todo_notes WHERE key=?", (key,), one=True))
 
 
 class AgreeClosesOnReply(unittest.TestCase):
