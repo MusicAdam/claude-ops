@@ -6,8 +6,10 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
+import urllib.request
 from pathlib import Path
 
 DATA = tempfile.mkdtemp()
@@ -40,6 +42,19 @@ class Conversation(unittest.TestCase):
         fake.write_text(FAKE)
         fake.chmod(0o755)
         opsd.CLAUDE = str(fake)
+        opsd.READY.set()  # projects are loaded: the API answers
+        cls.srv = opsd.ThreadingHTTPServer(("127.0.0.1", 0), opsd.H)
+        threading.Thread(target=cls.srv.serve_forever, daemon=True).start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.srv.shutdown()
+
+    def post(self, path, body):
+        req = urllib.request.Request(f"http://127.0.0.1:{self.srv.server_port}{path}", json.dumps(body).encode(),
+                                     {"Content-Type": "application/json", "X-Ops": "1"})
+        with urllib.request.urlopen(req) as r:
+            return json.loads(r.read())
 
     def setUp(self):
         opsd.q("DELETE FROM designs")
@@ -318,6 +333,42 @@ class Conversation(unittest.TestCase):
             self.assertEqual(json.loads(opsd.setting("research_ended")), {})
         finally:
             opsd.research_topics = real
+
+    # ---- the quick chat (README: TODAY-6): a new topic that never takes over Today's shown one
+    def test_quick_chat_keeps_fallback_topic(self):
+        shown = self.chat("what Today shows", ago=100)
+        self.assertEqual(self.view()["topic"], shown)  # nothing kept: the latest open topic
+        did = self.post("/api/designs", {"project": "demo", "text": "a quick question", "quick": True})["id"]
+        self.assertEqual(self.said, [(did, "a quick question")])
+        v = self.view()
+        self.assertEqual((v["topic"], v["mode"]), (shown, "design"))
+        t = next(t for t in v["topics"] if t["id"] == did)  # an open plan & design topic in Earlier topics
+        self.assertEqual((t["kind"], t["ended"]), ("design", None))
+
+    def test_quick_chat_with_no_topics_keeps_new_topic(self):
+        self.post("/api/designs", {"project": "demo", "text": "hello", "quick": True})
+        self.assertEqual(self.view()["topic"], None)
+
+    def test_quick_chat_leaves_kept_topic(self):
+        kept = self.chat("kept", ago=100)
+        self.chat("newer", ago=10)
+        opsd.conv_open("demo", "topic", kept)
+        self.post("/api/designs", {"project": "demo", "text": "hi", "quick": True})
+        self.assertEqual(self.view()["topic"], kept)
+        opsd.conv_open("demo", "new", mode="project")  # a kept "new topic" stays one
+        self.post("/api/designs", {"project": "demo", "text": "again", "quick": True})
+        self.assertEqual((self.view()["topic"], self.view()["mode"]), (None, "project"))
+
+    def test_quick_chat_replaces_gone_topic(self):
+        shown = self.chat("shown", ago=100)
+        opsd.set_setting("conv:demo", json.dumps({"topic": 999, "mode": "design"}))
+        self.post("/api/designs", {"project": "demo", "text": "hi", "quick": True})
+        self.assertEqual(self.view()["topic"], shown)
+
+    def test_plain_new_chat_pins_nothing(self):
+        self.chat("old", ago=100)
+        self.post("/api/designs", {"project": "demo", "text": "hi"})
+        self.assertEqual(opsd.setting("conv:demo"), "")
 
 
 class TopicBlock(unittest.TestCase):

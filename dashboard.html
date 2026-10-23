@@ -574,6 +574,32 @@ a[data-task] { color: var(--accent); cursor: pointer; }
   #tdcentre .composer #stopchat { order: 4; }
   #tdcentre .composer :is(#clip, #stopchat) { height: 40px; }
 }
+/* The quick chat (README: TODAY-6): floats over the page with no backdrop, under dialogs (#dlg is 10) */
+#qc { position: fixed; z-index: 9; display: flex; flex-direction: column; background: var(--panel); border: 1px solid var(--line);
+      border-radius: 10px; box-shadow: 0 8px 30px rgba(0, 0, 0, .25); overflow: hidden; min-width: 320px; min-height: 300px; }
+#qcbar { display: flex; align-items: center; gap: 6px; padding: 6px 8px; border-bottom: 1px solid var(--line); cursor: move;
+         user-select: none; touch-action: none; }
+#qcbar select { max-width: 45%; }
+#qctitle { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+#qcbar button { padding: 0 8px; line-height: 22px; }
+#qcmsgs { flex: 1; overflow: auto; padding: 10px; }
+#qcmsgs .msg { max-width: none; } #qcmsgs .msg.user { margin-left: 24px; }
+#qcmsgs .muted { padding: 8px 2px; }
+#qccomp { padding: 8px; border-top: 1px solid var(--line); }
+#qccomp textarea { width: 100%; box-sizing: border-box; min-height: 56px; max-height: 40%; resize: none; }
+#qccomp .row { display: flex; align-items: center; gap: 6px; margin-top: 6px; }
+.qcgrip { position: absolute; bottom: 0; width: 14px; height: 14px; touch-action: none; }
+.qcgrip.l { left: 0; cursor: nesw-resize; } .qcgrip.r { right: 0; cursor: nwse-resize; }
+#qcpill { position: fixed; z-index: 9; right: 16px; bottom: 16px; border-radius: 99px; padding: 6px 14px;
+          box-shadow: 0 4px 16px rgba(0, 0, 0, .25); }
+#qcpill .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--warn); margin-left: 6px; }
+/* Phones: full screen, no drag or resize; the pill clears the bottom bar */
+@media (max-width: 699px) {
+  #qc { inset: 0 !important; width: auto !important; height: auto !important; border-radius: 0; min-width: 0; min-height: 0;
+        padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); }
+  #qcbar { cursor: default; } .qcgrip { display: none; }
+  #qcpill { bottom: calc(64px + env(safe-area-inset-bottom)); }
+}
 </style>
 </head>
 <body>
@@ -581,7 +607,7 @@ a[data-task] { color: var(--accent); cursor: pointer; }
   <h1>Claude Ops</h1>
   <select id="proj" title="Project"></select>
   <nav class="tabs" id="nav"><button id="tab-today" title="What needs you, the step to take, and what is going on">Today</button><div class="more" id="more"><button id="morebtn" aria-haspopup="true" aria-expanded="false" title="The other pages">More ▾</button>
-    <div class="menu hidden" id="moremenu" role="menu"><button id="tab-tasks" title="Every task, the New task form, and each task's page">History</button><button id="tab-projects" title="Every project: branches, Promote, Play, Deploys, Archive, and its tasks">Projects</button><button id="tab-research" class="hidden" title="The research repo: proposals, reports, projects, to-dos, sources and runs">Research</button><button id="tab-analyze" title="Where time and money went: run times and costs of tasks, and how to make them cheaper and faster">Analyze</button><button id="tab-settings" title="Parallel, promote wait, usage brake, models, effort, and what Claude has cost">Settings</button><button id="tab-schedules" title="Recurring jobs: schedules that queue a task on a timetable">Schedules</button><hr><button id="addproj" title="Add a git repository, or a folder of git repos, as a project">+ Project</button></div></div></nav>
+    <div class="menu hidden" id="moremenu" role="menu"><button id="tab-tasks" title="Every task, the New task form, and each task's page">History</button><button id="tab-projects" title="Every project: branches, Promote, Play, Deploys, Archive, and its tasks">Projects</button><button id="tab-research" class="hidden" title="The research repo: proposals, reports, projects, to-dos, sources and runs">Research</button><button id="tab-analyze" title="Where time and money went: run times and costs of tasks, and how to make them cheaper and faster">Analyze</button><button id="tab-settings" title="Parallel, promote wait, usage brake, models, effort, and what Claude has cost">Settings</button><button id="tab-schedules" title="Recurring jobs: schedules that queue a task on a timetable">Schedules</button><hr><button id="addproj" title="Add a git repository, or a folder of git repos, as a project">+ Project</button></div></div><button id="askbtn" title="Quick chat: ask any project without leaving your place (⌘K)">Ask</button></nav>
   <span class="grow" style="flex:1"></span>
   <span class="stats" id="hdr"></span>
   <span class="stats hidden" id="usage"></span>
@@ -773,6 +799,16 @@ a[data-task] { color: var(--accent); cursor: pointer; }
 </main>
 <!-- An OpenSpec change's reader waits here, hidden, until Read the change moves it into the side drawer -->
 <div id="rpark" class="hidden"><section id="reader"><div id="rhead"><div id="rinfo"></div><div id="rnav"></div></div><div id="rbody"></div></section></div>
+<!-- The quick chat (README: TODAY-6): a floating window over the page, and the pill it shrinks to -->
+<div id="qc" class="hidden" role="dialog" aria-label="Quick chat">
+  <div id="qcbar" title="Drag to move"><select id="qcproj" title="The project this chat talks to. Locked after the first message: close and open a new one to talk to another."></select>
+    <span id="qctitle"></span><button id="qcmin" title="Minimise (Esc)">–</button><button id="qcx" title="Close. The next one starts fresh; this topic stays in the project's Earlier topics.">×</button></div>
+  <div id="qcmsgs"></div>
+  <div id="qccomp"><textarea id="qcsay" placeholder="Ask anything. Drop or paste screenshots to attach them. (Enter sends, Shift+Enter adds a line)"></textarea>
+    <div class="row"><button class="primary" id="qcsend">Send</button><button id="qcclip" title="Attach pictures (or paste or drop them on the message box)">📎</button><input type="file" id="qcfile" accept="image/*" multiple class="hidden"><span id="qcmsg" class="err"></span></div></div>
+  <i class="qcgrip l" data-grip="l" title="Resize"></i><i class="qcgrip r" data-grip="r" title="Resize"></i>
+</div>
+<button id="qcpill" class="hidden" title="Open the quick chat again"></button>
 <div id="dlg" class="hidden"></div>
 <script>
 const $ = s => document.querySelector(s);
@@ -851,6 +887,7 @@ function render() {
   const st = sel && state.tasks.find(t => t.id === sel);
   if (st && !inView(st.project)) clearSelection();
   renderProjects(); renderHeader(); renderMains(); renderList(); renderSchedules(); renderToday();
+  qcRender();
   $("#tab-research").classList.toggle("hidden", !state.research);
   if (tab === "research") { if (state.research) { rsLock(); refreshResearch.poll(); } else rsRender(); }
   if (tab === "analyze" && (anaKey !== `${anaPeriod}|${pf}` || Date.now() - anaAt > 60000)) refreshAnalyze();
@@ -2364,11 +2401,7 @@ function renderChat() {
   if (d && d.files && d.files.length) $("#chathead").insertAdjacentHTML("beforeend", `<div class="docs">Documents: ${d.files.map(f => `<a href="${esc(f.url)}" target="_blank" rel="noopener">${esc(f.name)}</a>`).join(" · ")}</div>`);
   if (!d) { box.innerHTML = convIntro(); return; }
   const links = chatCtx(d.project, d.id, (d.files || []).map(f => f.name));
-  box.innerHTML = topicDivider() + d.msgs.map(m => m.role === "user"
-      ? `<div class="msg user">${userMd(m.text.replace(/^\[ops:[^\n]*\]\n\n/, ""), links)}</div>`
-      : `<div class="msg ${m.role === "ops" ? "ops" : ""}">${md(m.text, undefined, links)}${m.tasks.length ? `<div class="chips">${m.tasks.map(t => `<button class="chip" data-task="${t.id}">#${t.id} ${esc(t.title || "")} · ${LABEL[t.state] || t.state}</button>`).join("")}</div>` : ""}</div>`).join("")
-    + (thinking ? `<div class="live"><span class="pulse s-running">Claude is thinking</span>${d.live.map(l => `<div>  ${esc(l)}</div>`).join("")}</div>` : "")
-    + (d.queued || []).map((t, k) => `<div class="msg user queued">${userMd(t, links)}<div class="qbar">Queued: sent ${thinking ? "when this reply ends" : "next"} · <button data-unq="${k}" title="Take it off the queue and put it back in the message box">Edit</button></div></div>`).join("");
+  box.innerHTML = topicDivider() + msgsHtml(d, links);
   box.querySelectorAll("[data-unq]").forEach(b => b.onclick = () => unqueue(d.id, +b.dataset.unq));
   box.querySelectorAll("[data-task]").forEach(b => b.onclick = () => openTask(+b.dataset.task));
   const bottom = () => {
@@ -2378,6 +2411,16 @@ function renderChat() {
     box.querySelectorAll("img").forEach(i => i.complete || i.addEventListener("load", () => toBottom(box), {once: true}));
   };
   bottom(); chatLinks(box, d.project).then(bottom);
+}
+// A chat's messages, Claude's reply as it streams in, and the queued messages: the Today conversation and the quick
+// chat draw them alike.
+function msgsHtml(d, links) {
+  const thinking = d.state === "thinking";
+  return d.msgs.map(m => m.role === "user"
+      ? `<div class="msg user">${userMd(m.text.replace(/^\[ops:[^\n]*\]\n\n/, ""), links)}</div>`
+      : `<div class="msg ${m.role === "ops" ? "ops" : ""}">${md(m.text, undefined, links)}${m.tasks.length ? `<div class="chips">${m.tasks.map(t => `<button class="chip" data-task="${t.id}">#${t.id} ${esc(t.title || "")} · ${LABEL[t.state] || t.state}</button>`).join("")}</div>` : ""}</div>`).join("")
+    + (thinking ? `<div class="live"><span class="pulse s-running">Claude is thinking</span>${d.live.map(l => `<div>  ${esc(l)}</div>`).join("")}</div>` : "")
+    + (d.queued || []).map((t, k) => `<div class="msg user queued">${userMd(t, links)}<div class="qbar">Queued: sent ${thinking ? "when this reply ends" : "next"} · <button data-unq="${k}" title="Take it off the queue and put it back in the message box">Edit</button></div></div>`).join("");
 }
 // What lnRef needs to know about a chat: its project, where that project is on disk, and a design chat's documents.
 const chatCtx = (project, did, files) => ({project, roots: P(project).roots || [], did, files: files || []});
@@ -3252,14 +3295,14 @@ const imageFiles = dt => [...((dt && dt.files) || [])].filter(f => f.type.starts
 function dropBox(el) {  // the textarea a drop on el goes to: el itself, or the message box of the panel it is in
   if (!el || !el.closest) return null;
   const ta = el.closest("textarea"); if (ta) return ta;
-  for (const zone of [el.closest("details"), el.closest("#chat, #detail, #taskcol .card")])
+  for (const zone of [el.closest("details"), el.closest("#chat, #detail, #taskcol .card, #qc")])
     if (zone && zone.querySelector("textarea")) return zone.querySelector("textarea");
   return null;
 }
 let dropping = null;
 function markDrop(ta) { if (dropping !== ta) { dropping?.classList.remove("dropping"); ta?.classList.add("dropping"); dropping = ta; } }
 async function attachImages(ta, files) {
-  const id = ta.id, msg = $({say: "#chatmsg", body: "#formmsg"}[id] || "#actmsg");
+  const id = ta.id, msg = $({say: "#chatmsg", body: "#formmsg", qcsay: "#qcmsg"}[id] || "#actmsg");
   typing = true;  // keep the task page from redrawing the box mid-upload
   for (const f of files) {
     try {
@@ -3293,6 +3336,169 @@ document.addEventListener("paste", e => {
   const ta = e.target.closest && e.target.closest("textarea"), files = imageFiles(e.clipboardData);
   if (ta && files.length) { e.preventDefault(); attachImages(ta, files); }
 });
+
+// ---------------------------------------------------------------- quick chat (README: TODAY-6)
+// A floating window that talks to any project and leaves the page under it alone: it never touches the header
+// filter, TD or chatSel/chatKey, and its first message asks the daemon (quick: true) to keep the topic Today shows.
+// localStorage keeps ops-qc {project, did, min, seen} while a chat is open or minimised, and ops-qc-geo {x, y, w, h}.
+const QC = {on: false, min: false, project: "", did: null, d: null, key: "", seen: 0, geo: null};
+const QC_MIN = {w: 320, h: 300}, QC_PHONE = matchMedia("(max-width: 699px)");
+// The window's place and size, kept inside a vw×vh viewport with at least QC_MIN; null (nothing kept) is the
+// default 420×520 at the bottom right, 16px in.
+function qcFit(g, vw, vh) {
+  g = g || {w: 420, h: 520, x: vw - 420 - 16, y: vh - 520 - 16};
+  const w = Math.round(Math.max(QC_MIN.w, Math.min(g.w, vw))), h = Math.round(Math.max(QC_MIN.h, Math.min(g.h, vh)));
+  return {w, h, x: Math.round(Math.max(0, Math.min(g.x, vw - w))), y: Math.round(Math.max(0, Math.min(g.y, vh - h)))};
+}
+function qcSave() {
+  try {
+    if (QC.on) localStorage.setItem("ops-qc", JSON.stringify({project: QC.project, did: QC.did, min: QC.min, seen: QC.seen}));
+    else localStorage.removeItem("ops-qc");
+    if (QC.geo) localStorage.setItem("ops-qc-geo", JSON.stringify(QC.geo));
+  } catch {}
+}
+function qcPlace() {
+  QC.geo = qcFit(QC.geo, innerWidth, innerHeight);
+  const el = $("#qc");
+  Object.assign(el.style, {left: QC.geo.x + "px", top: QC.geo.y + "px", width: QC.geo.w + "px", height: QC.geo.h + "px"});
+}
+function qcOpen() {
+  if (!QC.on) { QC.on = true; QC.did = null; QC.d = null; QC.key = ""; QC.project = ""; $("#qcsay").value = ""; $("#qcmsg").textContent = ""; }
+  QC.min = false; qcSave(); qcRender();
+  $("#qcsay").focus();
+  if (QC.did) qcLoad();
+}
+function qcMinimise() {
+  QC.min = true; QC.seen = QC.d ? QC.d.msgs.length : 0; qcSave(); qcRender();
+  if (document.activeElement && $("#qc").contains(document.activeElement)) document.activeElement.blur();
+}
+function qcClose() {  // the topic stays open in its project; only the window forgets it
+  QC.on = false; QC.min = false; QC.did = null; QC.d = null; QC.key = ""; QC.project = "";
+  $("#qcsay").value = ""; $("#qcmsg").textContent = ""; $("#qcmsgs").innerHTML = "";
+  qcSave(); qcRender();
+}
+// A reply since you minimised it: more messages than when you did, the last one not yours, and Claude done.
+const qcReplied = () => !!QC.d && QC.d.state !== "thinking" && QC.d.msgs.length > QC.seen
+  && QC.d.msgs[QC.d.msgs.length - 1].role !== "user";
+function qcRender() {
+  $("#qc").classList.toggle("hidden", !QC.on || QC.min);
+  $("#qcpill").classList.toggle("hidden", !QC.on || !QC.min);
+  if (!QC.on || !state) return;
+  const ps = state.projects;
+  if (!QC.project || (!QC.did && !ps.some(p => p.name === QC.project)))
+    QC.project = (ps.find(p => p.name === (pf || focus)) || ps[0] || {}).name || "";
+  const pick = $("#qcproj"), html = (QC.did && !ps.some(p => p.name === QC.project) ? [P(QC.project)] : []).concat(ps)
+    .map(p => `<option value="${esc(p.name)}">${esc(p.title)}</option>`).join("");
+  if (pick.dataset.html !== html) pick.innerHTML = pick.dataset.html = html;
+  pick.value = QC.project; pick.disabled = !!QC.did;
+  const d = QC.d && QC.d.id === QC.did ? QC.d : null, thinking = !!d && d.state === "thinking";
+  $("#qctitle").textContent = d ? d.title || "" : "";
+  $("#qctitle").title = $("#qctitle").textContent;
+  $("#qcsend").textContent = thinking ? "Queue" : "Send";
+  $("#qcsend").title = thinking ? "Claude is replying: this message goes as soon as the reply ends" : "";
+  $("#qcpill").innerHTML = `Ask · ${esc(P(QC.project).title)}${QC.min && qcReplied() ? '<span class="dot" title="Claude replied"></span>' : ""}`;
+  if (QC.min) return;
+  if (!QC_PHONE.matches) qcPlace();
+  const box = $("#qcmsgs");
+  const key = d ? `${d.id}:${d.title}:${d.msgs.length}:${JSON.stringify(d.queued || [])}:${d.state}:${d.live.length}:${JSON.stringify(d.msgs.map(m => m.tasks.map(t => t.state)))}:${(d.files || []).map(f => f.name + f.mtime).join()}`
+    : QC.did ? "loading" : "new";
+  if (key === QC.key) return;
+  const stick = box.scrollTop + box.clientHeight >= box.scrollHeight - 40 || !QC.key.startsWith(`${d && d.id}:`);
+  QC.key = key;
+  if (!d) {
+    box.innerHTML = QC.did ? `<div class="muted">Loading…</div>`
+      : `<div class="muted">A quick chat with ${esc(P(QC.project).title)}. Your first message starts a new plan &amp; design topic there; the page behind this window stays as it is.</div>`;
+    return;
+  }
+  const links = chatCtx(d.project, d.id, (d.files || []).map(f => f.name));
+  box.innerHTML = msgsHtml(d, links);
+  box.querySelectorAll("[data-unq]").forEach(b => b.onclick = () => qcUnqueue(+b.dataset.unq));
+  box.querySelectorAll("[data-task]").forEach(b => b.onclick = () => openTask(+b.dataset.task));
+  const bottom = () => {
+    if (!(stick || thinking)) return;
+    box.scrollTop = box.scrollHeight;
+    box.querySelectorAll("img").forEach(i => i.complete || i.addEventListener("load", () => box.scrollTop = box.scrollHeight, {once: true}));
+  };
+  bottom(); chatLinks(box, d.project).then(bottom);
+}
+const qcLoad = single(async () => {
+  const did = QC.did; if (!did) return;
+  try {
+    const d = await api(`/api/designs/${did}`);
+    if (QC.did === did) QC.d = d;
+  } catch (e) {
+    if (/no such|not found/i.test(e.message) && QC.did === did) return qcClose();  // the chat is gone
+    $("#qcmsg").textContent = e.message;
+  }
+  qcRender();
+});
+async function qcSend() {
+  const text = $("#qcsay").value.trim();
+  if (!text) return;
+  if (!QC.project) { $("#qcmsg").textContent = "pick a project"; return; }
+  $("#qcsend").disabled = true;
+  try {
+    if (QC.did) await api(`/api/designs/${QC.did}/say`, {text});
+    else { QC.did = (await api("/api/designs", {project: QC.project, text, quick: true})).id; qcSave(); }
+    $("#qcsay").value = ""; $("#qcmsg").textContent = ""; QC.key = "";
+    await qcLoad();
+    $("#qcmsgs").scrollTop = $("#qcmsgs").scrollHeight;
+  } catch (e) { $("#qcmsg").textContent = e.message; }
+  $("#qcsend").disabled = false;
+}
+async function qcUnqueue(index) {  // back in the window's message box, after anything you were typing
+  try {
+    const r = await api(`/api/designs/${QC.did}/unqueue`, {index});
+    $("#qcsay").value = [$("#qcsay").value.trim(), r.text].filter(Boolean).join("\n\n"); $("#qcsay").focus();
+  } catch (e) { $("#qcmsg").textContent = e.message; }
+  QC.key = ""; qcLoad();
+}
+// Drag by the title bar; resize from a bottom corner (the left one keeps the right edge where it is).
+function qcDrag(e, how) {
+  if (QC_PHONE.matches || e.button !== 0) return;
+  e.preventDefault();
+  const g0 = {...QC.geo}, x0 = e.clientX, y0 = e.clientY, el = e.currentTarget;
+  el.setPointerCapture(e.pointerId);
+  el.onpointermove = m => {
+    const dx = m.clientX - x0, dy = m.clientY - y0;
+    QC.geo = how === "move" ? {...g0, x: g0.x + dx, y: g0.y + dy}
+      : how === "r" ? {...g0, w: g0.w + dx, h: g0.h + dy}
+      : {...g0, x: g0.x + Math.min(dx, g0.w - QC_MIN.w), w: g0.w - dx, h: g0.h + dy};
+    qcPlace();
+  };
+  el.onpointerup = el.onpointercancel = () => { el.onpointermove = el.onpointerup = el.onpointercancel = null; qcSave(); };
+}
+$("#qcbar").onpointerdown = e => { if (!e.target.closest("select, button")) qcDrag(e, "move"); };
+document.querySelectorAll("#qc .qcgrip").forEach(g => g.onpointerdown = e => qcDrag(e, g.dataset.grip));
+addEventListener("resize", () => { if (QC.on && !QC.min && !QC_PHONE.matches) { qcPlace(); qcSave(); } });
+$("#askbtn").onclick = qcOpen;
+$("#qcpill").onclick = qcOpen;
+$("#qcmin").onclick = qcMinimise;
+$("#qcx").onclick = qcClose;
+$("#qcsend").onclick = qcSend;
+$("#qcproj").onchange = () => { if (!QC.did) { QC.project = $("#qcproj").value; QC.key = ""; qcSave(); qcRender(); } };
+$("#qcsay").onkeydown = e => { if (sendKey(e)) { e.preventDefault(); qcSend(); } };
+$("#qcclip").onclick = () => $("#qcfile").click();
+$("#qcfile").onchange = e => { const files = imageFiles(e.target); e.target.value = ""; if (files.length) attachImages($("#qcsay"), files); };
+// Esc in the window minimises it, and goes no further (Today's Esc would close its panel).
+$("#qc").addEventListener("keydown", e => { if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); qcMinimise(); } });
+// ⌘K (Ctrl+K off macOS) opens it from anywhere, even mid-typing in another box: caught before any other handler.
+const QC_MAC = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
+document.addEventListener("keydown", e => {
+  if ((e.key || "").toLowerCase() !== "k" || e.altKey || e.shiftKey || !(QC_MAC ? e.metaKey && !e.ctrlKey : e.ctrlKey && !e.metaKey)) return;
+  e.preventDefault(); e.stopPropagation(); qcOpen();
+}, true);
+try {
+  QC.geo = JSON.parse(localStorage.getItem("ops-qc-geo") || "null");
+  const k = JSON.parse(localStorage.getItem("ops-qc") || "null");
+  if (k) Object.assign(QC, {on: true, project: k.project || "", did: k.did || null, min: !!k.min, seen: k.seen || 0});
+} catch {}
+setInterval(() => {  // the window's topic: every 1.5s while Claude replies, else every 3s
+  if (document.hidden || !QC.on || !QC.did) return;
+  QC.tick = !QC.tick;
+  if (QC.tick || !QC.d || QC.d.state === "thinking") qcLoad.poll();
+}, 1500);
+if (QC.did) qcLoad();
 
 // ---------------------------------------------------------------- research tab
 // The research repo's proposals, projects, reports, to-dos, sources and runs, from /api/research/ (README: ## Research).

@@ -5235,6 +5235,20 @@ def conv_view(project):
             "research": {"on": bool(research.current()), "name": links[0]["name"] if links else None}}
 
 
+def conv_pin(project):
+    """Keep the topic Today shows for project in conv:<project> when nothing, or a topic that is gone, is kept there,
+    so a new chat (the quick chat, README: TODAY-6) doesn't become the shown topic through the latest-activity
+    fallback."""
+    try:
+        c = json.loads(setting(f"conv:{project}") or "{}")
+    except ValueError:
+        c = {}
+    tops = topics(project)
+    ids = {t["id"] for t in tops}
+    if not isinstance(c, dict) or "topic" not in c or (c["topic"] is not None and c["topic"] not in ids):
+        set_setting(f"conv:{project}", json.dumps(conv_state(project, tops)))
+
+
 def conv_open(project, how, ref=None, mode=None):
     """Which topic the next message goes to (README: TODAY-2), kept in conv:<project>:
     chat/topic: that one (a to-do whose source is a chat, or a click in Earlier topics);
@@ -7522,6 +7536,8 @@ class H(BaseHTTPRequestHandler):
             if not text:
                 raise ValueError("say something to start the chat")
             proj(b["project"])
+            if b.get("quick"):  # the quick chat: leave the topic Today shows alone (README: TODAY-6)
+                conv_pin(b["project"])
             kind = "project" if b.get("kind") == "project" else "design"
             did = q("INSERT INTO designs (project, title, created, updated, kind) VALUES (?,?,?,?,?)",
                     (b["project"], title_of(text)[:80], time.time(), time.time(), kind))

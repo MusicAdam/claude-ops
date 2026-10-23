@@ -698,6 +698,36 @@ stay on the right of the header.
 - **Layout.** Desktop, 1100px and wider, has the three columns. Narrower windows stack them. Below 700px the
   phone layout below takes over.
 
+
+### Quick chat
+
+- **TODAY-6 Quick chat.** A floating window for a quick talk with any project that leaves the page under it as it
+  was. **Ask** in the header (next to **More ▾**), or **⌘K** (**Ctrl+K** off macOS) on any page, even while you
+  type in another box, opens it.
+  - **Window.** It floats over the page, under dialogs, about 420×520px at the bottom right. There is no backdrop:
+    the page stays clickable. Drag it by its title bar; resize it from its bottom-left or bottom-right corner (at
+    least 320×300). It stays inside the window, also after the browser window shrinks. Its place and size are kept
+    in this browser (localStorage).
+  - **Title bar.** The project picker (every project that isn't archived, without All projects), the topic's title
+    once it has one, **–** (minimise) and **×** (close).
+  - **Body.** The topic's messages, drawn as in the Today conversation (markdown, links, pictures, the reply as it
+    streams in), and a message box. Enter sends and Shift+Enter adds a line, as in every chat box; while Claude
+    replies, **Send** reads **Queue**. Drop or paste screenshots to attach them.
+  - **Fresh each time.** The first message starts a new plan & design topic in the picked project
+    (`POST /api/designs` with `quick: true`); later ones go to that topic (`/api/designs/<id>/say`). There is no
+    "continue the current topic". Until the first message, the picker only changes where it will start; after
+    it, the picker is locked. To talk to another project, close the window and open a new one.
+  - **Minimise.** **–**, or Esc while focus is in the window, shrinks it to a pill at the bottom right with the
+    project's name, and a dot once Claude has replied since. Click the pill to get the same chat back. Open or
+    minimised, the chat stays across pages and reloads (its topic id and state are kept in localStorage).
+  - **Close.** **×** clears the window: the next open starts fresh. The topic is not ended: it stays an open
+    topic in the project's Earlier topics, and its unread replies go on the to-do list like any design chat's.
+  - **Today never changes.** Opening, using or closing the quick chat leaves the header filter, the selected
+    to-do and its step, and every project's shown topic alone. A project whose `conv:<project>` keeps no topic
+    shows its latest open topic, which a new quick chat would become. So before it creates the topic, the daemon
+    pins the topic Today shows now (or "a new topic" when there is none) in `conv:<project>` when nothing is kept
+    there yet. (Pinning was simpler than leaving quick-chat topics out of that fallback: it needs no new column.)
+
 ### Today on a phone
 
 Below 700px Today is phone-first. The rules:
@@ -726,6 +756,8 @@ Below 700px Today is phone-first. The rules:
   the bottom bar is never under the browser's toolbar, and it keeps clear of the notch and home indicator
   (safe-area insets). Nothing scrolls sideways except the step's action row; tab rows that could overflow hide
   their scrollbar and still scroll sideways.
+- **PHONE-4 Quick chat.** The quick chat (TODAY-6) opens full screen, with no drag or resize. Minimise and
+  close work as on a desktop.
 
 ## Chat mode
 
