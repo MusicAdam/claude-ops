@@ -37,7 +37,7 @@ OFF = {"error": "research is off"}
 READONLY = "The old research dashboard is running. Stop it to make changes here."
 WRITE_TOOLS = {"Write", "Edit", "MultiEdit", "NotebookEdit"}
 # Bump when the chat context changes, so resumed conversations get told once.
-CONTEXT_VERSION = 4
+CONTEXT_VERSION = 5
 # Read-only Claude in Chrome tools (runs pass --chrome). Unattended runs drive Adam's
 # signed-in browser, so no click/type (computer, form_input), no javascript_tool and
 # no uploads: a hostile page can't steer the run into acting in his accounts.
@@ -711,6 +711,7 @@ def job_view(job: dict, full: bool = False) -> dict:
             "steps": sum(f["kind"] == "tool" for f in feed),
             "archived": job["slug"] in load_archived()}
     view.pop("briefsBefore", None)
+    view.pop("todoNote", None)
     view["changed"] = list(dict.fromkeys(f["path"] for f in feed if f.get("path")))
     if view["kind"] == "chat":
         # Briefs this turn wrote that didn't exist before it: research run from chat.
@@ -724,6 +725,10 @@ def job_view(job: dict, full: bool = False) -> dict:
     if full:
         view["feed"] = feed
         view["result"] = (result or {}).get("result")
+        if view["kind"] == "chat" and view["result"]:
+            # The ```todo blocks went to claude-ops to-dos (take_todos): show what happened to them instead.
+            view["result"] = "\n\n".join(x for x in (ops.TODO_BLOCK.sub("", view["result"]).strip(),
+                                                     job.get("todoNote") and f"_To-dos: {job['todoNote']}._") if x)
     else:
         view["last"] = next((f for f in reversed(feed) if f["kind"] in ("tool", "stderr")), None)
     return view
@@ -924,6 +929,7 @@ def watchdog_pass(now=None) -> None:
     survives restarts. Nothing at all while the old server runs: its own watchdog covers it."""
     if not current() or old_running():
         return
+    finalize_chat_jobs()  # a chat turn's to-dos reach Today even if nobody opens the chat
     now = now or datetime.now()
     with lock:
         jobs = load_jobs()
@@ -1060,10 +1066,33 @@ def notes_rule(kind: str, tid: str) -> str:
             f"  research deltas, which you still add when you run new research.")
 
 
+def todo_project(kind: str, tid: str) -> str | None:
+    """The claude-ops project a chat's to-dos go to: the one its research project links to (`repo`), else the
+    one whose checkout is the research repo, else None."""
+    pid = project_of(kind, tid)
+    rid = (load_projects()["projects"].get(pid) or {}).get("repo") if pid else None
+    if isinstance(rid, str) and rid in code_projects():
+        return rid
+    return next((name for name, p in code_projects().items() if Path(p.repo).expanduser().resolve() == REPO), None)
+
+
 def todo_rule(kind: str, tid: str) -> str:
-    return ("To-dos: this chat can't add to-dos, and the research repo's own list (bin/todo, the todo skill)\n"
-            "  is retired. When Adam asks you to track or remember an action, write it as one line he can\n"
-            "  add to claude-ops. Don't suggest to-dos he didn't ask for unless they matter.")
+    where = todo_project(kind, tid)
+    if not where:
+        return ("To-dos: this chat has no claude-ops project to add to-dos to (link the research project to\n"
+                "  one), and the research repo's own list (bin/todo, the todo skill) is retired. When Adam asks\n"
+                "  you to track an action, write it as one line he can add to claude-ops.")
+    return ("To-dos: a to-do is only for something that truly needs Adam: a password or sudo, a macOS\n"
+            "  permission grant, an API key or account he must create, or a decision (a proposal awaiting\n"
+            f"  his yes). Add it to his claude-ops to-do list (project `{where}`) with a fenced block in the\n"
+            "  language `todo`, holding a JSON list:\n"
+            "  ```todo\n"
+            '  [{"verb": "Do", "title": "Short imperative title", "why": "one line on why it is needed"}]\n'
+            "  ```\n"
+            '  `verb` is "Do" for what only he can do, "Agree" for a proposal awaiting a yes. When an item is\n'
+            '  settled, close it with {"close": <id>} in a `todo` block; the next message tells you the ids it\n'
+            "  added. The block is taken out of the reply he sees. The research repo's own list (bin/todo,\n"
+            "  the todo skill) is retired: don't use it. Don't add to-dos he didn't ask for unless they matter.")
 
 
 def chat_context(kind: str, tid: str) -> str:
@@ -1133,19 +1162,22 @@ def chat(body: dict) -> dict:
         if turns and job_view(turns[-1])["status"] == "running":
             raise ValueError("Wait for the current reply, or stop it.")
         resume = next((s for s in (read_events(t)[2] for t in reversed(turns)) if s), None)
+        # What the last turn's todo blocks did (the ids it added), as a design chat's next turn is told.
+        note = turns[-1].get("todoNote") if resume else None
+        said = f"(Dashboard: {note}.)\n\n{message}" if note else message
         if not resume:
             prompt = f"{chat_context(kind, tid)}\n\nAdam's first message:\n{message}"
         elif thread.get("ctx", 1) < CONTEXT_VERSION:
             # Older conversation: tell it once about rules added since it started.
             prompt = (f"(Dashboard update, applies from now on:\n- {notes_rule(kind, tid)}\n- {todo_rule(kind, tid)})"
-                      f"\n\n{message}")
+                      f"\n\n{said}")
         else:
-            prompt = message
+            prompt = said
         thread["ctx"] = CONTEXT_VERSION
         job = {"kind": "chat", "target": target, "thread": thread["id"], "slug": f"chat:{target}",
                "question": message, "tier": "chat", "model": (body.get("model") or "").strip() or "default",
                **run_size(body, CHAT_SIZE), "notes": "",
-               "briefsBefore": sorted(brief_slugs())}
+               "briefsBefore": sorted(brief_slugs()), "todosTaken": False}
         code = code_project(project_of(kind, tid))
         view = spawn(job, prompt, resume, add_dir=code.repo if code else None)
         thread["turns"].append(view["id"])
@@ -1153,13 +1185,46 @@ def chat(body: dict) -> dict:
     return {"thread": thread["id"], "turn": view}
 
 
+def take_todos(job: dict) -> None:
+    """Store an ended chat turn's ```todo blocks as claude-ops to-dos (source kind 'research', id r:<thread>), once:
+    todosTaken in jobs.json. Only turns this daemon started carry todosTaken (False), so older turns are never
+    read. What happened goes in todoNote: shown under the reply and told to the chat's next turn."""
+    blocks = ops.TODO_BLOCK.findall((read_events(job)[1] or {}).get("result") or "")
+    kind, _, tid = job["target"].partition(":")
+    where = todo_project(kind, tid) if blocks else None
+    notes = []
+    for block in blocks if where else []:
+        try:
+            items = json.loads(block)
+        except ValueError as e:
+            notes.append(f"your last todo block was not valid JSON ({e}); nothing from it was added")
+            continue
+        notes.append(ops.todo_add(where, items, "research", f"r:{job['thread']}"))  # its topic id in Today
+    if blocks and not where:
+        notes.append("nothing was added: this research project links to no claude-ops project")
+    job["todosTaken"] = True
+    if any(notes):
+        job["todoNote"] = "; ".join(n for n in notes if n)
+
+
 def finalize_chat_jobs() -> None:
-    """When a chat turn ends, note the briefs it created and file them into the project. It runs on reads, so it
-    writes only when it may (otherwise the old server, which may, does it)."""
+    """When a chat turn ends, note the briefs it created and file them into the project, and take its to-dos
+    (take_todos). It runs on reads and each watchdog pass, so it writes only when it may (otherwise the old server
+    does the briefs, and the to-dos wait)."""
     with lock:
         jobs = load_jobs()
         data = load_projects()
         changed = False
+        ended = [j for j in jobs if j.get("kind") == "chat" and j.get("todosTaken") is False
+                 and job_view(j)["status"] != "running"]
+        if ended:
+            try:
+                writable()  # todosTaken must save, or a later pass adds them again
+            except Refused:
+                ended = []
+            for j in ended:
+                take_todos(j)
+            changed = changed or bool(ended)
         for j in jobs:
             if j.get("kind") != "chat" or j.get("finalized") or job_view(j)["status"] == "running":
                 continue

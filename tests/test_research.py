@@ -35,6 +35,7 @@ printf '%s\\n' "$@" > "$FAKE_ARGS"
 pwd > "$FAKE_CWD"
 echo '{"type":"system","subtype":"init","session_id":"fake-sid"}'
 if [ -n "$FAKE_SLEEP" ]; then exec sleep "$FAKE_SLEEP"; fi
+if [ -n "$FAKE_RESULT" ]; then exec cat "$FAKE_RESULT"; fi
 echo '{"type":"result","subtype":"success","is_error":false,"result":"ok","total_cost_usd":0}'
 """
 
@@ -96,6 +97,7 @@ class Research(unittest.TestCase):
         self.notes.clear()
         self.mine = []  # pids this test started, stopped by pid in tearDown
         os.environ.pop("FAKE_SLEEP", None)
+        os.environ.pop("FAKE_RESULT", None)
 
     def tearDown(self):
         for pid in self.mine:
@@ -429,7 +431,7 @@ class Research(unittest.TestCase):
         self.wait_done(out["turn"]["id"])
         args = (SCRATCH / "args").read_text().split("\n")
         self.assertEqual(args[args.index("--resume") + 1], "chat-sid")
-        # The fixture's thread predates CONTEXT_VERSION 4, so it is told once that bin/todo is retired.
+        # The fixture's thread predates CONTEXT_VERSION, so it is told the to-do rule once (bin/todo is retired).
         self.assertEqual(args[args.index("-p") + 1], "(Dashboard update, applies from now on:")  # one line per arg
         sent = (SCRATCH / "args").read_text()
         self.assertIn("is retired", sent)
@@ -648,6 +650,72 @@ class Research(unittest.TestCase):
         _, job = self.post("/api/research/dispatch", {"question": "Standalone now?", "project": "ai-search"})
         self.wait_done(job["id"])
         self.assertNotIn("--add-dir", (SCRATCH / "args").read_text().split("\n"))
+
+    def reply_with(self, text):
+        """The fake claude's next turns end with this result text."""
+        f = SCRATCH / f"result-{self.id().rsplit('.', 1)[1]}"
+        f.write_text(json.dumps({"type": "result", "subtype": "success", "is_error": False, "result": text,
+                                 "total_cost_usd": 0}) + "\n")
+        os.environ["FAKE_RESULT"] = str(f)
+
+    def chat_turn(self, message, thread=None):
+        code, out = self.post("/api/research/chat", {"target": "project:ai-search", "message": message,
+                                                     **({"thread": thread} if thread else {})})
+        self.assertEqual(code, 200, out)
+        self.wait_done(out["turn"]["id"])
+        return out["thread"], self.get(f"/api/research/threads/{out['thread']}")[1]["turns"][-1]
+
+    def test_a_chat_todo_block_becomes_a_claude_ops_todo_once(self):
+        self.fake_projects()
+        self.link("plugins")
+        research.current()
+        opsd.q("DELETE FROM todos")
+        self.assertIn("language `todo`", research.chat_context("project", "ai-search"))
+        self.assertIn("project `plugins`", research.chat_context("project", "ai-search"))
+        self.reply_with('Sure.\n\n```todo\n[{"verb": "Do", "title": "Grant the plugin a key", "why": "API"}]\n```\n')
+        thread, turn = self.chat_turn("Remind me to grant the key")
+        rows = opsd.q("SELECT * FROM todos")
+        self.assertEqual([(r["project"], r["verb"], r["title"], r["source_kind"], r["source_id"]) for r in rows],
+                         [("plugins", "Do", "Grant the plugin a key", "research", f"r:{thread}")])
+        self.assertNotIn("```todo", turn["result"])
+        self.assertIn(f"added to-do #{rows[0]['id']}", turn["result"])
+        saved = next(j for j in self.file("logs/dashboard/jobs.json") if j["id"] == turn["id"])
+        self.assertIs(saved["todosTaken"], True)
+        # Today shows it as a Do item of the linked project, pointing at the research topic.
+        item = next(x for x in self.state()["todos"] if x.get("todo") == rows[0]["id"])
+        self.assertEqual((item["verb"], item["project"], item["source"]), ("Do", "plugins",
+                                                                          {"kind": "chat", "id": f"r:{thread}"}))
+        # Only once: done, then a restart and more reads and watchdog passes add nothing.
+        opsd.todo_done(rows[0]["id"])
+        self.restart()
+        self.get(f"/api/research/threads/{thread}")
+        research.watchdog_pass()
+        self.assertEqual(len(opsd.q("SELECT * FROM todos")), 1)
+        # The next turn is told what its blocks did.
+        self.reply_with("ok")
+        self.chat_turn("Thanks", thread)
+        self.assertIn(f"(Dashboard: added to-do #{rows[0]['id']}.)", (SCRATCH / "args").read_text())
+
+    def test_a_chat_todo_with_no_claude_ops_project_is_not_stored(self):
+        self.fake_projects()  # neither links nor has the research repo as its checkout
+        research.current()
+        opsd.q("DELETE FROM todos")
+        self.assertIn("no claude-ops project", research.chat_context("project", "ai-search"))
+        self.reply_with('```todo\n[{"verb": "Do", "title": "Nowhere to go"}]\n```')
+        _, turn = self.chat_turn("Track this")
+        self.assertEqual(opsd.q("SELECT * FROM todos"), [])
+        self.assertIn("links to no claude-ops project", turn["result"])
+        self.assertNotIn("```todo", turn["result"])
+
+    def test_a_chat_todo_falls_back_to_the_research_repos_project(self):
+        from types import SimpleNamespace
+        self.fake_projects()
+        opsd.PROJECTS = {**opsd.PROJECTS, "research": SimpleNamespace(name="research", title="Research",
+                                                                      repo=self.repo)}
+        opsd.q("DELETE FROM todos")
+        self.reply_with('```todo\n[{"verb": "Agree", "title": "Pick a scout area"}]\n```')
+        self.chat_turn("Ask me later")
+        self.assertEqual([r["project"] for r in opsd.q("SELECT * FROM todos")], ["research"])
 
     def test_state_lists_linked_research_projects(self):
         self.fake_projects()
