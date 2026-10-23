@@ -31,7 +31,7 @@ class PromoteOverBuildChanges(unittest.TestCase):
         opsd.PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
         name = f"promo{self.repo.parent.name[-6:].lower()}"
         (opsd.PROJECTS_DIR / f"{name}.toml").write_text(
-            f'repo = "{self.repo}"\nworktrees = "{self.repo.parent / "wt"}"\n'
+            f'repo = "{self.repo}"\nworktrees = "{self.repo.parent / "wt"}"\ndirect_main = false\n'
             f'[app]\nbuild = "touch built.txt"\nartifact = "built.txt"\n')
         self.toml = opsd.PROJECTS_DIR / f"{name}.toml"
         opsd.load_projects()

@@ -69,7 +69,9 @@ the language `queue` at the end of your reply, holding a JSON list:
   button): elsewhere there is nothing to try, so the queue ignores it and merges after the gate.
 - `release`: "Promote after merge". True when the owner asks for it to be promoted on its own once it
   merges: the queue then promotes dev to main, as the Promote button does. False when they ask it not to. Otherwise null, which takes
-  the project's default (the `[ops: ...]` line says whether it is on).
+  the project's default (the `[ops: ...]` line says whether it is on). It only matters for a project that
+  opted out of going straight to main (`direct_main = false`) or has deploy targets: everywhere else a merge
+  moves main at once, so leave it null there (the `[ops: ...]` line says so).
 - `model`: the Claude model its worker runs on: "opus", "sonnet", "haiku", or null for the queue's
   task model setting. Use sonnet for mechanical plumbing tasks: a rename, a config field passed
   through, a doc update. Leave it null for design-heavy or tricky work, or when unsure.
