@@ -428,6 +428,9 @@ the uncommitted-files banner, Deploy. `/api/state` gathers them into one list, `
     empty. A project with no recorded deploy of `main` yet shows no Ship item.
   - **Commit**: your checkout has uncommitted files. It reuses the banner's list; no extra git call.
   - **Read**: a design or project chat with a reply you haven't opened, as the tab badges count them.
+  - **Read** (a report): a research task merged into `dev` whose report you haven't opened (see
+    [Research](#research), RES-5).
+  - **Do** (research): an open to-do in the research repo's `todos.json`, in its linked project (RES-8).
 - **TODO-2 Two kinds Claude adds.** **Do**: something only you can do (grant Full Disk Access, add an API key,
   run a command that needs your password). **Agree**: Claude proposed something and waits for your yes. These
   are stored in the `todos` table. Two ways in:
@@ -446,10 +449,11 @@ the uncommitted-files banner, Deploy. `/api/state` gathers them into one list, `
   within a group.
 
 Each item is `{key, verb, group, project, title, why, since, est_min, source: {kind, id}}`. `key` stays the same
-across polls (`task:231:review`, `chat:42:read`, `project:diskgame:commit`, `todo:7`). `since` is when the state
+across polls (`task:231:review`, `chat:42:read`, `project:diskgame:commit`, `todo:7`, `task:240:report`,
+`rtodo:12`). `since` is when the state
 began, as near as the queue knows: a task's last event, a chat's last reply, the oldest uncommitted file, the
 oldest commit not yet promoted or deployed. `est_min` is a guess at minutes: Answer 2, Fix 5, Try 5, Review 3,
-Agree 2, Read 3, Promote 1, Ship 2, Commit 2, Do 5. `source.kind` is `task`, `chat` or `project`: a stored item
+Agree 2, Read 3, Promote 1, Ship 2, Commit 2, Do 5. `source.kind` is `task`, `chat`, `project` or `research_todo`: a stored item
 points at the chat or task that added it, and has `todo`, its id for the Done button.
 
 There is no `done_today` count yet: derived items leave no record when they close, so only stored items could be
@@ -523,9 +527,9 @@ Their routes (`#tasks`, `#projects`, `#schedules`, …) still open them. The que
   | Promote | Promote dev → main; for a release waiting on you, Stop main when the app is running, else Reply… | Details |
   | Ship | Deploy (the Deploy dialog), one per target | |
   | Commit | Send to dev | |
-  | Read | Mark read | |
+  | Read | Mark read; for a report, Open report (RES-5) | Details (a report) |
   | Agree | Reply (focuses the message box) | Done |
-  | Do | Done (`POST /api/todos/<id>/done`) | |
+  | Do | Done (`POST /api/todos/<id>/done`; a research to-do: `POST /api/research/todos/<id>`) | |
 
   **Send back…**, **Retry with a note…** and **Answer** use the message box below: a line above it says where the
   message goes, with **Cancel**.
@@ -591,9 +595,26 @@ Their routes (`#tasks`, `#projects`, `#schedules`, …) still open them. The que
   Review → Merged → Promoted, the current stage lit), then the task page from History (model, effort, brief, live
   output, log). The train shows the tasks it carries and **Promote now**. A schedule shows its last runs (its tasks in
   `/api/state`), with **Run now**, **Pause** or **Resume**, and **Edit**, which opens it on the Schedules page.
-  Research runs link to the Research page.
+  Research runs in the research repo (legacy) link to the Research page; research tasks are tasks.
   Every panel has **Ask Claude about this**, which puts `About #231: ` in the message box.
-- **TODAY-4 One poll.** The page reads `/api/state` every 3 seconds, as before. Other reads are for what you
+- **TODAY-4 Centre: a project's sections.** Over the conversation, the project in view has four tabs:
+  **Conversation · Specs & designs · Research · Tasks**. Conversation is TODAY-2. The tab you pick is kept in this
+  browser.
+  - **Specs & designs.** The project's open OpenSpec changes, with done/total, and its drafts, as the Design tab
+    lists them (see [OpenSpec changes](#openspec-changes)); a repo without `openspec/` shows its **Set up** line.
+    Click a change to open its chat as the current topic. Below them, the documents its plan & design topics wrote:
+    the files in `~/.claude-ops/designs/<topic id>/` of the project's design rows, newest first, each opening from
+    `/api/designs/<id>/files/<name>` in a new tab (`GET /api/projects/<name>/documents`). Two buttons:
+    **New change** (the Design tab's + New change, for this project) and **New prototype**, which starts a plan &
+    design topic with `Make a one-file HTML prototype of: ` in the message box.
+  - **Research.** The reports in `docs/research/*.md` on the project's `dev` (each repo's, in a workspace), newest
+    first: the title from the first heading, the date of the last commit that touched it, and a one-line summary from
+    the first paragraph, with ● while it is unread. Click one to read it in the side drawer; that marks it read.
+    Under them, the research runs under way and the project's recurring research jobs (schedules whose task is
+    research). **New research** asks for a question, a tier (T0, T1, T2) and an optional repeat, and queues a
+    research task (see [Research](#research)). `GET /api/projects/<name>/research` has all of it.
+  - **Tasks.** The project's tasks, the History list filtered to it, newest first. Click one for its page.
+- **TODAY-5 One poll.** The page reads `/api/state` every 3 seconds, as before. Other reads are for what you
   opened: the selected task (`GET /api/tasks/<id>`, as History does), the conversation shown, and the list of
   chats once when an item has no chat of its own. `GET /api/tasks/<id>` gains `chat_from`, the design chat that
   queued the task or its parent. The conversation reads `GET /api/conversation?project=<name>` with each poll,
@@ -661,6 +682,59 @@ settings and `CLAUDE.md`. Each chat keeps one Claude session across messages, un
 
 ## Research
 
+Research is ordinary queue work in the project it is about. A report lives in that project's repo at
+`docs/research/<slug>.md`, and gets there the way code does: a worktree, the gate and a merge into `dev`.
+
+- **RES-1 A research run is a task.** It is a normal task (kind `task`) flagged research: the `research` column
+  holds `{question, tier, slug, path}` as JSON. So it queues, runs, gates, merges, holds, retries and promotes like
+  any task, and every list shows it. A flag, not a kind of its own, because every rule that tests `kind` (merges,
+  the promote train, Try and Review, steering) should treat it as a task. `/api/state` shows `research` on each task
+  (null on others).
+- **RES-2 Asking for one.** **New research** in the project's Research section (TODAY-4), or
+  `POST /api/projects/<name>/research` with `{question, tier, every?, hold?}`. `tier` is `T0`, `T1` (the default) or
+  `T2`. The slug is made from the question's words, unique among the reports on `dev` and the project's open research
+  tasks. The task is titled `Research: <question>`. With `every` (any [schedule](#recurring-jobs) form) it also makes
+  a recurring research job and queues the first run now, as the schedule's last task. It answers
+  `{id, slug, path, schedule}`.
+- **RES-3 The brief.** The task's body tells the worker to answer the question at its tier with the research skill
+  in project mode, and to write the report to `docs/research/<slug>.md` in its worktree (the first repo's, in a
+  workspace). It says so in so many words, because the owner's `/research` skill writes to `~/dev/research` by
+  default: not there, and not `briefs/`, `reports/`, `topics/` or `watchlist.md`. The report starts with a `# `
+  heading and a one-paragraph answer (the Research section's title and summary), then the findings with a source for
+  each claim and a `## Sources` list. The worker commits that one file and touches nothing else.
+- **RES-4 Time and size follow the tier.** T0 5, T1 15, T2 40 minutes per worker turn: a research task's worker is
+  stopped at its tier's limit and the task fails with `stopped at the T1 time limit (15 min)`, so Retry is one click.
+  Its size cap is `--max-budget-usd` 1, 3 or 10 (API-equivalent dollars, as the old runs used).
+- **RES-5 Read when it merges.** A research task that is done and merged, and whose report you haven't opened, is a
+  **Read** to-do (`task:<id>:report`, with `report: {path}`). Opening the report, from that step's **Open report** or
+  from the Research section, marks it read (`POST /api/projects/<name>/research/read` with `{path}`; it stores
+  `read` in the task's `research`). Research tasks from before this have no flag, so nothing old shows up.
+- **RES-6 Recurring research.** A schedule whose `research` column holds a tier is a recurring research job. Each run
+  builds a fresh brief from its body (the question) with a dated slug, `<slug>-<YYYY-MM-DD>`, so runs don't overwrite
+  each other. `opsd.py schedule add -p NAME --every 'day 07:00' --research T1 "question"` makes one; `POST
+  /api/schedules` takes `research` too. The Schedules page lists them with the rest.
+- **RES-7 Research with no code home.** Stocks, business ideas and the daily scout belong to the research repo
+  itself. Make it an ordinary claude-ops project once, by hand (claude-ops never adds it for you):
+
+  ```bash
+  ./opsd.py add-project ~/dev/research research    # then review ~/.claude-ops/projects/research.toml and reload
+  ```
+
+  Its reports then go to its own `docs/research/` the same way. The daily scout becomes a schedule there:
+  `./opsd.py schedule add -p research --every 'day 07:00' --research T1 "Daily scout: new leads in my interest areas"`.
+- **RES-8 Research to-dos in their project.** While research is on, each open to-do in the research repo's
+  `dashboard/todos.json` is a **Do** item in Today (`rtodo:<id>`, with `rtodo: <id>`). Its project is the claude-ops
+  project its research project links to (`repo`), or, when unlinked or stale, the claude-ops project whose `repo` is
+  the research repo (RES-7). With neither it is not shown. A to-do whose queued task (see **To-do → task** below) is
+  still live is left out: it closes when that task merges. It is read through the repo's own `todos.py`, and
+  **Done** closes it in `todos.json` through `POST /api/research/todos/<id>` (`{done: true}`), so the old lock and
+  read-only rule hold.
+- **RES-9 The Research tab is legacy.** It stays under More, read-only in spirit: for the history of the research
+  repo's proposals, reports and runs. Old reports are not moved. New research goes through the queue.
+
+### Legacy: research runs in the research repo
+
+Before RES-1, research ran outside the queue, in the research repo, and that path still works for the Research tab.
 claude-ops also serves the research dashboard's data and runs, which used to need their own server
 (`~/dev/research/dashboard/server.py`, port 8787). The code is `research.py`; `opsd.py` only routes to it.
 The API is `/api/research/...`, with the old server's endpoints and response shapes: `proposals`, `projects`
@@ -735,7 +809,7 @@ and `chat`. `file` serves only `.md` files inside the research repo.
   `done` is null and its notes lack that line, so one you reopen by hand stays open. The pass is skipped while
   read-only, like the rest of the watchdog.
 
-### The Research tab
+### The Research tab (legacy)
 
 The dashboard's **Research** tab replaces the old page. It shows only while `research_repo` is set (Settings,
 under Research). It has the old page's views in claude-ops' look: proposals grouped by research project, each
@@ -840,7 +914,7 @@ API: `/api/state` has `schedules` (each with `next_at`, `paused`, `last_task` an
 `POST /api/schedules` creates one; `POST /api/schedules/<id>` edits it (any of project, title, body, every,
 hold, priority, model, effort); `POST /api/schedules/<id>/run`, `/pause`, `/resume` and `/delete` do the rest.
 
-The research daily job is not a schedule yet.
+A recurring research job is a schedule with `research` set: see RES-6. The research repo's old daily job becomes one once the research repo is a project (RES-7).
 
 ## Workspaces
 
