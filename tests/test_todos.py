@@ -108,8 +108,21 @@ class Todos(unittest.TestCase):
         did = opsd.q("INSERT INTO designs (project, title, state, created, updated, seen) VALUES "
                      "('web','Plan it','idle',?,?,?)", (old, old, old))
         opsd.q("INSERT INTO design_msgs (design_id, role, text, ts) VALUES (?,?,?,?)", (did, "assistant", "hi", old + 50))
-        self.assertEqual([x["key"] for x in self.todos()], [f"chat:{did}:read"])
-        opsd.q("UPDATE designs SET seen=? WHERE id=?", (time.time(), did))  # you opened it
+        got = self.todos()
+        self.assertEqual([(x["key"], x["unread"], x["why"]) for x in got], [(f"chat:{did}:read", True, "Claude replied")])
+        opsd.q("UPDATE designs SET seen=? WHERE id=?", (time.time(), did))  # you opened it: still open, so still yours
+        self.assertEqual([(x["key"], x["unread"]) for x in self.todos()], [(f"chat:{did}:read", False)])
+        opsd.q("UPDATE designs SET state='thinking' WHERE id=?", (did,))  # Claude is replying: not waiting on you
+        self.assertEqual(self.todos(), [])
+        opsd.q("UPDATE designs SET state='idle', ended=? WHERE id=?", (time.time(), did))  # you ended it
+        self.assertEqual(self.todos(), [])
+
+    def test_reply_after_end_stays_off(self):
+        """An ended chat is done: a reply landing later (a task's result note) doesn't bring it back."""
+        old = time.time() - 100
+        did = opsd.q("INSERT INTO designs (project, title, state, created, updated, seen, ended) VALUES "
+                     "('web','Plan it','idle',?,?,?,?)", (old, old, old, old))
+        opsd.q("INSERT INTO design_msgs (design_id, role, text, ts) VALUES (?,?,?,?)", (did, "ops", "#9 merged", old + 50))
         self.assertEqual(self.todos(), [])
 
     def test_order(self):
