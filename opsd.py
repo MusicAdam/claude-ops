@@ -2935,6 +2935,8 @@ def main_info(p, s=None):
     deploys = [dict(x, open=next((o["id"] for o in opens if json.loads(o["deploy"] or "{}").get("target") == x["name"]),
                                  None), log=x.get("log") and titled(p, x["log"])) for x in f.get("deploys") or []]
     return {"name": p.name, "title": p.title, "main_branch": p.main, "dev_branch": p.dev, "direct_main": p.direct_main,
+            # where its files live on disk, so a chat's absolute path to one links as a repo file (Links in chats)
+            "roots": [str(x).replace(str(HOME), "~", 1) if v else str(x) for x in (p.repo, p.wt) for v in (0, 1)],
             "main": p.show(f["main"]), "built": p.show(built), "dev": p.show(f["dev"]), "ahead": f["ahead"],
             "has_app": bool(p.build), "can_launch": bool(p.launch),
             "stale": bool(p.build) and built != f["main"], "running": f["running"],
@@ -4423,6 +4425,86 @@ def chat_files(did):
             out.append({"name": f.name, "size": st.st_size, "mtime": st.st_mtime,
                         "url": f"/api/designs/{did}/files/{f.name}"})
     return sorted(out, key=lambda x: -x["mtime"])
+
+
+# ---------------------------------------------------------------- links in chats (README: Links in chats)
+# A chat message names tasks, repo files, pictures and design documents. The dashboard asks link_check about all of
+# a message's targets in one request, and links only those that exist; /api/files serves a repo file from dev.
+FILE_MAX = 1 << 20
+
+
+def repo_file(p, rel):
+    """(path, None) for rel, a file of p as on its dev worktree, or (None, why not). Only a file inside the dev
+    worktree once symlinks and '..' are resolved, outside .git, not git-ignored and at most FILE_MAX bytes."""
+    rel = (rel or "").strip()
+    if not rel or rel.startswith(("/", "~")) or "\0" in rel:
+        return None, f"Not a repo path: {rel}"
+    root = p.dev_wt
+    path = root / rel
+    if not within(path, root) or ".git" in Path(os.path.relpath(os.path.realpath(path), os.path.realpath(root))).parts:
+        return None, f"Outside the project: {rel}"
+    if not path.is_file():
+        return None, f"Not on dev: {rel}"
+    part = max((r for r in p.parts if within(path, r.at(root))), key=lambda r: len(r.sub), default=None)
+    if not part or subprocess.run(["git", "check-ignore", "-q", "--", os.path.realpath(path)], cwd=part.at(root),
+                                  capture_output=True).returncode == 0:
+        return None, f"Ignored by git: {rel}"
+    if path.stat().st_size > FILE_MAX:
+        return None, f"Over 1 MB: {rel}"
+    return Path(os.path.realpath(path)), None
+
+
+def head_words(t):
+    return " ".join(re.sub(r"[`*_]", "", t).lower().split())
+
+
+def file_section(text, sec):
+    """The markdown heading of text that sec names: the longest one sec starts with, as a sentence may run on
+    after it ("README.md § Design mode for details"). None if there is none."""
+    sec = head_words(sec)
+    heads = [head_words(h) for h in re.findall(r"(?m)^ {0,3}#{1,6}[ \t]+(.*?)[ \t#]*$", text)]
+    return max((h for h in heads if h and (sec == h or sec.startswith(h + " "))), key=len, default=None)
+
+
+def link_check(project, refs, heads=None):
+    """{ref: None if its target exists, else why not} for refs of the forms task:<id>, file:<repo path>[:<line>]
+    [§<heading>], spec:[<sub>/]<change>, image:<name> and design:<chat id>/<name>. heads gets, for each file ref
+    with a § that exists, the heading it found, so the page can end the link there."""
+    p = PROJECTS.get(project or "")
+    out, heads = {}, {} if heads is None else heads
+    for ref in list(dict.fromkeys(refs or []))[:500]:
+        kind, _, val = str(ref).partition(":")
+        if kind == "task":
+            out[ref] = None if val.isdigit() and task(int(val)) else f"No task #{val}"
+        elif kind == "image":
+            ok = re.fullmatch(r"[\w-]+\.\w+", val) and (IMAGES / val).is_file()
+            out[ref] = None if ok else f"Picture not found: {val}"
+        elif kind == "design":
+            m = re.fullmatch(r"(\d+)/([\w-][\w.-]*)", val)
+            out[ref] = None if m and (CHAT_FILES / m[1] / m[2]).is_file() else f"No such design document: {val}"
+        elif not p:
+            out[ref] = f"Unknown project: {project}"
+        elif kind == "file":  # <path>[:<line>][§<heading>]
+            path, _, sec = val.partition("§")
+            m = re.fullmatch(r"(.+?)(?::(\d+)(?:-\d+)?)?", path.strip())
+            f, why = repo_file(p, m[1]) if m else (None, f"Not a repo path: {val}")
+            if not why and (m[2] or sec.strip()):
+                text = f.read_bytes().decode(errors="replace")
+                if m[2] and int(m[2]) > text.count("\n") + 1:
+                    why = f"{m[1]} has only {text.count(chr(10)) + 1} lines"
+                elif sec.strip() and not (head := file_section(text, sec)):
+                    why = f"No section “{sec.strip()}” in {m[1]}"
+                elif sec.strip():
+                    heads[ref] = head
+            out[ref] = why
+        elif kind == "spec":
+            sub, _, name = val.rpartition("/")
+            ok = sub in [r.sub for r in p.parts] and re.fullmatch(r"[\w.-]+", name) and name != "archive" and \
+                (spec_part(p, sub).at(p.dev_wt) / "openspec" / "changes" / name).is_dir()
+            out[ref] = None if ok else f"No OpenSpec change on dev: {name}"
+        else:
+            out[ref] = f"Unknown link: {ref}"
+    return out
 
 
 # A chat is "ready for you" when Claude isn't replying, and has a new reply when its last answer (Claude's, or a
@@ -6441,6 +6523,14 @@ class H(BaseHTTPRequestHandler):
             # sandboxed: a prototype's scripts run, but in an origin of their own, so they can't drive the dashboard
             return self.send(200, f.read_bytes(), FILE_TYPES.get(f.suffix.lower(), FILE_TEXT),
                              {"Content-Security-Policy": "sandbox allow-scripts allow-forms allow-popups"})
+        if path == "/api/files":  # a repo file as on the project's dev worktree, for a link in a chat
+            qs = parse_qs(urlparse(self.path).query)
+            p = PROJECTS.get(qs.get("project", [""])[0])
+            f, why = repo_file(p, qs.get("path", [""])[0]) if p else (None, "unknown project")
+            if not f:
+                return self.send(404, {"error": why})
+            return self.send(200, f.read_bytes(), FILE_TYPES.get(f.suffix.lower(), FILE_TEXT),
+                             {"Content-Security-Policy": "sandbox allow-scripts allow-forms allow-popups"})
         m = re.fullmatch(r"/api/images/([\w-]+(\.\w+))", path)
         if m and m.group(2) in IMAGE_TYPES.values() and (IMAGES / m.group(1)).is_file():
             ctype = next(k for k, v in IMAGE_TYPES.items() if v == m.group(2))
@@ -6519,6 +6609,9 @@ class H(BaseHTTPRequestHandler):
             if not todo_done(int(m.group(1))):
                 raise ValueError("no open to-do with that id")
             return {"ok": True}
+        if path == "/api/links/check":  # which of a chat message's link targets exist (README: Links in chats)
+            heads = {}
+            return {"refs": link_check(b.get("project"), b.get("refs"), heads), "heads": heads}
         if path == "/api/tasks":
             if not (b.get("body") or "").strip():
                 raise ValueError("describe the task")

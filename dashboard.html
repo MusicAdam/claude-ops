@@ -174,6 +174,11 @@ ul.clog { max-height: 220px; }
 #slash .sl code { font: 12px var(--mono); color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 #slash .muted { padding: 4px 8px; font-size: 12px; }
 .mdimg { display: block; max-width: 100%; max-height: 480px; margin: 6px 0; border-radius: 6px; border: 1px solid var(--line); }
+.ref.bad { color: var(--muted); cursor: help; }
+.fdhead { position: sticky; top: -16px; margin: -16px -16px 12px; padding: 12px 16px; background: var(--panel); border-bottom: 1px solid var(--line); z-index: 1; }
+.flines { font-size: 12px; white-space: pre; overflow-x: auto; }
+.flines b { display: inline-block; min-width: 4.5em; padding-right: 1em; text-align: right; color: var(--muted); font-weight: normal; user-select: none; }
+.flines .hit, .rsdoc .hit { background: color-mix(in srgb, var(--accent) 20%, transparent); scroll-margin-top: 64px; }
 .imgmiss { display: block; margin: 6px 0; padding: 6px 10px; border: 1px dashed var(--line); border-radius: 6px; color: var(--muted); font-size: 12px; }
 .att { display: block; max-width: 260px; max-height: 200px; margin: 6px 0; border-radius: 6px; border: 1px solid var(--line); }
 textarea.dropping { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent); }
@@ -655,6 +660,7 @@ a[data-task] { color: var(--accent); cursor: pointer; }
       <div id="slash" class="hidden"></div>
       <textarea id="say"></textarea>
       <div class="row"><label id="cprojwrap">Project <select id="cproj"></select></label><button class="primary" id="send">Send</button><span class="muted">⌘↩</span>
+        <button id="clip" title="Attach pictures (or paste or drop them on the message box)">📎</button><input type="file" id="clipfile" accept="image/*" multiple class="hidden">
         <button id="stopchat" class="danger hidden">Stop</button><span id="chatmsg" class="err"></span><span style="flex:1"></span>
         <button id="endchat" class="hidden" title="Take this chat off your list. It stays under Ended, where you can reopen it">End chat</button>
         <button id="reopenchat" class="hidden" title="Put this chat back on your list">Reopen</button></div>
@@ -1303,7 +1309,7 @@ async function loadDetail(id, fresh) {
     setFilter(detail.project); refresh();
   }
   if (fresh && detail.project !== focus) setFocus(detail.project);
-  const t = detail, live = ["running", "gating", "merging"].includes(t.state);
+  const t = detail, live = ["running", "gating", "merging"].includes(t.state), links = chatCtx(t.project);
   const btn = (act, label, cls = "") => `<button class="${cls}" data-act="${act}">${label}</button>`;
   let actions = "";
   if (t.state === "review") actions = (t.can_play ? btn("play", "▶ Try this build", "primary") : "") + btn("approve", "Approve & merge");
@@ -1329,8 +1335,8 @@ async function loadDetail(id, fresh) {
     ${t.error ? `<div class="callout bad"><pre class="mono">${esc(t.error)}</pre></div>` : ""}
     <div class="row">${actions}</div>
     ${t.can_steer || t.can_chat || t.chat.length ? `<details data-k="chat" open><summary>${t.can_steer || t.chat_full ? "Talk to the worker" : "Ask the worker"}</summary>
-      <div class="tchat">${t.chat.map(m => m.role === "assistant" ? `<div class="msg">${md(m.text)}</div>`
-          : `<div class="msg user">${pics(esc(m.text))}${m.role === "steer" ? `<div class="note">${steerNote(t, m)}</div>` : ""}</div>`).join("")}
+      <div class="tchat">${t.chat.map(m => m.role === "assistant" ? `<div class="msg">${md(m.text, undefined, links)}</div>`
+          : `<div class="msg user">${userMd(m.text, links)}${m.role === "steer" ? `<div class="note">${steerNote(t, m)}</div>` : ""}</div>`).join("")}
         ${t.chat_live ? `<div class="live"><span class="pulse s-running">Claude is thinking</span>${t.chat_live.map(l => `<div>  ${esc(l)}</div>`).join("")}</div>` : ""}</div>
       ${t.state === "paused" && t.can_chat ? `<textarea id="ask" placeholder="${t.chat_full ? "Chat with the worker now: ask, or have it change things in its worktree (it commits on the task's branch)" : "Ask about this work now (read-only)"}, or send a message the worker gets when you resume the task. Drop or paste screenshots to attach them. (⌘↩ chats now)" style="min-height:60px"></textarea>
         <div class="row">${t.chat_live ? btn("stopask", "Stop") : btn("ask", t.chat_full ? "Chat now" : "Ask", "primary")}${btn("steer", "Send when it resumes")}</div>`
@@ -1357,6 +1363,8 @@ async function loadDetail(id, fresh) {
     el.scrollTop + el.clientHeight >= el.scrollHeight - 30]);
   const opens = Object.fromEntries([...box.querySelectorAll("details[data-k]")].map(d => [d.dataset.k, d.open]));
   box.innerHTML = detailHtml = html; box.dataset.id = t.id;
+  const tchat = box.querySelector(".tchat");
+  if (tchat) chatLinks(tchat, t.project);
   if (same) box.querySelectorAll("details[data-k]").forEach(d => { if (d.dataset.k in opens) d.open = opens[d.dataset.k]; });
   for (const el of box.querySelectorAll("#feed, .tchat")) {
     const was = same && scrolls.find(s => s[0] === (el.id || el.className));
@@ -1714,6 +1722,8 @@ function mdLocal(u) {
 function inline(s, ctx = {}) {
   // Code spans, escapes, images and links are set aside first, so no formatting reaches inside them.
   const keep = [], put = h => `\u0000${keep.push(h) - 1}\u0000`;
+  // In a chat message (ctx.links) every reference is a checked link: see lnRef and chatLinks
+  const L = ctx.links, ref = (r, h) => put(lnSpan(r, h));
   const img = (alt, url) => { url = mdLocal(url);
     return put(`<a href="${url}" target="_blank" rel="noopener"><img class="mdimg" src="${url}" alt="${alt}" title="${alt}"></a>`); };
   const link = (text, url) => {
@@ -1721,10 +1731,18 @@ function inline(s, ctx = {}) {
     const local = url.startsWith("#"), href = local && ctx.idPrefix ? "#" + esc(ctx.idPrefix) + url.slice(1) : url;
     return put(`<a href="${href}"${local ? "" : ' target="_blank" rel="noopener"'}>${text}</a>`);
   };
-  s = s.replace(/(`+)([^`]|[^`][\s\S]*?[^`])\1(?!`)/g, (m, f, c) => put(`<code>${c.replace(/^ ([\s\S]*) $/, "$1")}</code>`))
+  let r;
+  // In a chat, a link to a disk path the dashboard can't serve is greyed, not a link that fails
+  const lnOut = (u, t) => L && !/^(https?:|#)/i.test(u) && put(`<span class="ref bad" title="The dashboard can't open ${u}">⚠ ${t || u}</span>`);
+  // Nothing inside a code span links, but a code span that is only a path is a link to that file
+  s = s.replace(/(`+)([^`]|[^`][\s\S]*?[^`])\1(?!`)/g, (m, f, c) => { const code = `<code>${c.replace(/^ ([\s\S]*) $/, "$1")}</code>`;
+         return L && (r = lnRef(c.trim(), L, "code")) ? ref({...r, img: ""}, code) : put(code); })
        .replace(/\\([\\`*_~[\]()#+\-.!|{}])/g, (m, c) => put(c))
-       .replace(/!\[([^\]]*)\]\(((?:[^\s()]|\([^\s()]*\))+)\)/g, (m, t, u) => mdSafeUrl(u) ? img(t, u) : t)
-       .replace(/\[([^\]]*)\]\(((?:[^\s()]|\([^\s()]*\))+)\)/g, (m, t, u) => mdSafeUrl(u) ? link(mdEmph(t), u) : t)
+       .replace(/\[image: ([^\]\n]+)\]/g, (m, p) => L && (r = lnRef(p.trim(), L)) && r.img ? ref({...r, img: "att"}, p.replace(/^.*\//, "")) : m)
+       .replace(/!\[([^\]]*)\]\(((?:[^\s()]|\([^\s()]*\))+)\)/g, (m, t, u) => !mdSafeUrl(u) ? t
+         : L && (r = lnRef(u, L)) ? ref(r, t || u.replace(/^.*\//, "")) : lnOut(u, t) || img(t, u))
+       .replace(/\[([^\]]*)\]\(((?:[^\s()]|\([^\s()]*\))+)\)/g, (m, t, u) => !mdSafeUrl(u) ? t
+         : L && (r = lnRef(u, L)) ? ref({...r, img: ""}, mdEmph(t)) : lnOut(u, mdEmph(t)) || link(mdEmph(t), u))
        .replace(/\bhttps?:\/\/[^\s\u0000]+/gi, u => {
          let rest = ""; const cut = u.search(/&(lt|gt|quot);/);
          if (cut >= 0) { rest = u.slice(cut); u = u.slice(0, cut); }
@@ -1735,10 +1753,54 @@ function inline(s, ctx = {}) {
          }
          return (/^https?:\/\/./i.test(u) ? link(u, u) : u) + rest;
        });
+  if (L) s = s.replace(lnPathRe(), (m, pre, p) => (r = lnRef(p, L, "text")) ? pre + ref(r, p) : m)
+    .replace(/(^|[^\w&#/])#(\d+)(?![\w-])/g, (m, pre, n) => pre + ref({ref: `task:${n}`, href: "#tasks"}, `#${n}`))
+    .replace(lnPlaceRe(), (m, pre, k) => pre + put(`<a href="${APP_PLACES[k]}" data-place>${k}</a>`));
   s = mdEmph(s);
   while (s.includes("\u0000")) s = s.replace(/\u0000(\d+)\u0000/g, (m, n) => keep[n]);
   return s;
 }
+// ---- Links in chats (README: Links in chats, LINK-1..7). A chat message's references become links once the daemon
+// says their target exists: inline() wraps each in <span class="ref" data-ref>, and chatLinks checks them all in one
+// request and turns each into a link, or greys it with ⚠ and the reason. A reference is never a link that fails.
+// Places in the app a message may name, and the route each opens. Longer names win over shorter ones.
+const APP_PLACES = {"Projects tab": "#projects", "Tasks tab": "#tasks", "Design tab": "#design", "Chat tab": "#chat",
+  "Analyze tab": "#analyze", "Research tab": "#research", "Settings tab": "#settings", "Settings": "#settings",
+  "Analyze": "#analyze"};
+const reEsc = t => t.replace(/[.*+?^$()|[\]{}\\]/g, "\\$&");
+const lnPlaceRe = () => new RegExp(`(^|[^\\w])(${Object.keys(APP_PLACES).sort((a, b) => b.length - a.length).map(reEsc).join("|")})(?!\\w)`, "g");
+// File types a bare word in the text must end with to count as a path (so "e.g." or "v1.2" stays text)
+const LN_EXT = "md|markdown|py|pyi|html?|js|mjs|cjs|ts|tsx|jsx|json|jsonc|toml|ya?ml|txt|sh|zsh|bash|c|h|cc|cpp|hpp|m|mm|"
+  + "swift|go|rs|java|kt|rb|php|cs|css|scss|sql|cfg|ini|conf|xml|csv|svg|png|jpe?g|gif|webp|lock|gd|tscn|tres|ipynb|plist";
+const LN_IMG = /\.(png|jpe?g|gif|webp|svg)$/i;
+// A path in running text: optional ~/ or /, folders, a name with one of LN_EXT, then :line or " § heading" (to the
+// next punctuation). It starts after a space or opening bracket, and isn't part of a longer word or path.
+const lnPathRe = () => new RegExp(`(^|[\\s(\\[{,;*>'“‘]|&quot;)((?:~\\/|\\/)?(?:[\\w.@+-]+\\/)*[\\w@+-][\\w.@+-]*\\.(?:${LN_EXT})`
+  + `(?::\\d+(?:-\\d+)?)?(?:\\s*§\\s*[^\\n.,;:()\\[\\]\\u0000]*[^\\s.,;:()\\[\\]\\u0000])?)(?![\\w/-]|\\.\\w)`, "gi");
+// What a path names: {ref: what chatLinks asks the daemon about, href, img: shown as a picture}, or null to leave it as
+// written. L is the chat: {project, roots (its checkout and worktrees on disk), did and files (a design chat's own)}.
+// mode "text" (a word in running text) or "code" (a whole code span): a name with no folder must have one of LN_EXT
+// (so state.tasks stays code), and when there is no such file it stays as written (Node.js) rather than ⚠.
+function lnRef(p, L, mode) {
+  let m, u = mdLocal(p);
+  if ((m = u.match(/^\/api\/images\/([\w-]+\.\w+)$/))) return {ref: `image:${m[1]}`, href: u, img: LN_IMG.test(u) ? "mdimg" : ""};
+  if ((m = u.match(/^\/api\/designs\/(\d+)\/files\/([\w.-]+)$/) || p.match(/^(?:\S*\/)?designs\/(\d+)\/([\w.-]+)$/)
+      || (L.files && L.files.includes(p) && [p, L.did, p])))
+    return {ref: `design:${m[1]}/${m[2]}`, href: `/api/designs/${m[1]}/files/${m[2]}`, img: LN_IMG.test(m[2]) ? "mdimg" : ""};
+  (L.roots || []).some((r, k) => p.startsWith(r + "/") && (p = p.slice(r.length + 1), k >= 2 && (p = p.replace(/^[^/]+\//, "")), true));
+  if (!(m = p.replace(/^\.\//, "").match(/^([\w.@+-]+(?:\/[\w.@+-]+)*)\/?(?::(\d+)(?:-\d+)?)?(?:\s*§\s*(.+))?$/))) return null;
+  const [, path, line, sec] = m;
+  if (/(^|\/)\.\.?(\/|$)/.test(path) || /^\d+$/.test(path)) return null;
+  if ((m = path.match(/^(?:([\w.-]+)\/)?openspec\/changes\/([\w.-]+)/)) && m[2] !== "archive")
+    return {ref: `spec:${m[1] || ""}/${m[2]}`, href: "#design"};
+  const word = !path.includes("/");
+  if (mode && word && !new RegExp(`\\.(${LN_EXT})$`, "i").test(path)) return null;
+  return {ref: `file:${path}${line ? ":" + line : ""}${sec ? "§" + sec.trim() : ""}`, quiet: !!mode && word && !line && !sec,
+          href: `/api/files?project=${encodeURIComponent(L.project)}&path=${encodeURIComponent(path)}`,
+          img: LN_IMG.test(path) && !line && !sec ? "mdimg" : ""};
+}
+// r.ref and the text come from the escaped source, so they are safe in an attribute and as HTML as they are.
+const lnSpan = (r, html) => `<span class="ref" data-ref="${r.ref}" data-href="${r.href}"${r.img ? ` data-img="${r.img}"` : ""}${r.quiet ? " data-quiet" : ""}>${html}</span>`;
 function mdCells(r) {
   r = r.trim(); if (r.startsWith("|")) r = r.slice(1); if (r.endsWith("|") && !r.endsWith("\\|")) r = r.slice(0, -1);
   // Split on | outside code spans (a stray backtick falls back to a plain split); \| is a literal pipe.
@@ -1846,10 +1908,109 @@ function mdMissing(e) {
   (i.parentElement.tagName === "A" ? i.parentElement : i).replaceWith(note);
 }
 document.addEventListener("error", mdMissing, true);
-function md(src, idPrefix) {
+// links: a chat message's chat (see lnRef), so its references become links; chatLinks then checks them.
+function md(src, idPrefix, links) {
   const lines = esc(String(src ?? "").replace(/\u0000/g, "")).split(/\r?\n/)
     .map(l => l.replace(/^[ \t]+/, w => w.replace(/\t/g, "    ")));
-  return mdBlocks(lines, { idPrefix, ids: new Set() });
+  return mdBlocks(lines, { idPrefix, ids: new Set(), links });
+}
+// What you wrote in a chat: your text as typed, with its pictures and references linked as in a reply.
+const userMd = (text, links) => esc(String(text ?? "").replace(/\u0000/g, "").replace(/(\[image: [^\]\n]+\])\n/g, "$1"))
+  .split("\n").map(l => inline(l, {links})).join("\n");
+
+// A chat's references (inline's span.ref) as links: one request asks the daemon which targets exist, for every
+// reference in el not seen before. The answers are kept, so a redraw asks nothing; a missing one is asked again
+// after two minutes, in case it has landed on dev since.
+const LN_SEEN = new Map();  // "<project>\n<ref>" → {why: null | reason, at} or the request under way
+function chatLinks(el, project) {
+  const els = [...el.querySelectorAll("span.ref[data-ref]")], key = r => `${project}\n${r}`;
+  const known = v => v instanceof Promise || (v && (v.why === null || Date.now() - v.at < 120000));
+  const need = [...new Set(els.map(e => e.dataset.ref))].filter(r => !known(LN_SEEN.get(key(r))));
+  if (need.length) {
+    const ask = api("/api/links/check", {project, refs: need}).then(j => {
+      for (const r of need) LN_SEEN.set(key(r), {why: r in j.refs ? j.refs[r] : "Not checked", head: (j.heads || {})[r], at: Date.now()}); })
+      .catch(() => { for (const r of need) LN_SEEN.delete(key(r)); });  // daemon away: they stay plain text
+    for (const r of need) LN_SEEN.set(key(r), ask);
+  }
+  return Promise.all([...new Set(els.map(e => LN_SEEN.get(key(e.dataset.ref))))].filter(v => v instanceof Promise)).then(() => {
+    for (const e of els) { const v = LN_SEEN.get(key(e.dataset.ref)); if (v && !(v instanceof Promise) && e.isConnected) lnApply(e, v, project); }
+  });
+}
+function lnApply(e, {why, head}, project) {
+  const d = e.dataset;
+  // "README.md § Design mode for details": the link ends with the heading the daemon found, the rest is the sentence's
+  const run = head && e.childNodes.length === 1 && e.firstChild.nodeType === 3 && e.textContent.match(/^([^§]*§\s*)(.*)$/);
+  if (run) { const n = head.split(" ").length, w = run[2].split(/(\s+)/);
+             e.textContent = run[1] + w.slice(0, 2 * n - 1).join(""); e.after(w.slice(2 * n - 1).join("")); }
+  if (why && "quiet" in d) return e.replaceWith(...e.childNodes);
+  if (why) { e.className = "ref bad"; e.title = why; delete d.ref; e.prepend("⚠ "); return; }
+  const a = Object.assign(document.createElement("a"), {href: d.href, className: "ref"});
+  a.dataset.ref = d.ref; a.dataset.project = project;
+  if (!/^(task|spec):/.test(d.ref)) { a.target = "_blank"; a.rel = "noopener"; }
+  if (d.img) a.append(Object.assign(document.createElement("img"), {className: d.img, src: d.href, alt: e.textContent, title: e.textContent}));
+  else a.append(...e.childNodes);
+  e.replaceWith(a);
+}
+// A click on a checked reference: a task opens its details, a repo file the file drawer, an OpenSpec path its change,
+// and a place its tab. Pictures and design documents open in a new tab, as does any link with ⌘ or Ctrl held.
+document.addEventListener("click", e => {
+  const a = e.target.closest && e.target.closest("a[data-ref], a[data-place]");
+  if (!a || e.metaKey || e.ctrlKey || e.shiftKey || e.button) return;
+  const r = a.dataset.ref || "", val = r.slice(r.indexOf(":") + 1);
+  if ("place" in a.dataset) { e.preventDefault(); rsCloseDoc(); goPlace(a.getAttribute("href")); }
+  else if (r.startsWith("task:")) { e.preventDefault(); rsCloseDoc(); if (tab !== "tasks") showTab("tasks"); selectTask(+val); refresh(); }
+  else if (r.startsWith("spec:")) { e.preventDefault(); rsCloseDoc(); openSpecLink(a.dataset.project, val); }
+  else if (r.startsWith("file:") && !a.querySelector("img")) { e.preventDefault(); openRepoFile(a.dataset.project, val); }
+});
+function goPlace(route) {
+  const t = route.slice(1).split("/")[0];
+  if (!TABS.includes(t)) return;
+  history.pushState(null, "", route);
+  if (t === "research") rsApply(route);
+  if (tab !== t) showTab(t); else if (t === "research") rsRender();
+}
+async function openSpecLink(project, val) {
+  const k = val.lastIndexOf("/");
+  try {
+    const r = await api("/api/designs", {project, sub: val.slice(0, k), spec: val.slice(k + 1)});
+    if (tab !== "design") showTab("design");
+    specsAt = 0; selectChat(r.id);
+  } catch (err) { $("#chatmsg").textContent = err.message; }
+}
+// A repo file as on dev, in the research tab's side drawer: markdown rendered and scrolled to its § heading, any
+// other file (or one opened at a :line) as numbered lines, scrolled to that line.
+async function openRepoFile(project, val) {
+  const [, path, line, sec] = val.match(/^(.+?)(?::(\d+)(?:-\d+)?)?(?:§(.*))?$/);
+  const url = `/api/files?project=${encodeURIComponent(project)}&path=${encodeURIComponent(path)}`;
+  rsCloseDoc();
+  const bg = document.createElement("div"), dr = document.createElement("aside");
+  bg.className = "rsdrawerbg"; bg.id = "rsdocbg"; dr.className = "rsdrawer"; dr.id = "rsdoc";
+  dr.innerHTML = `<div class="row fdhead"><code class="mono">${esc(path)}${line ? ":" + line : ""}${sec ? " § " + esc(sec) : ""}</code>
+    <span class="muted">on ${esc(P(project).dev_branch || "dev")}</span><span style="flex:1"></span><a href="${url}" target="_blank" rel="noopener">Raw</a><button id="rsdocx">Close</button></div><div class="muted">Loading…</div>`;
+  document.body.append(bg, dr);
+  bg.onclick = rsCloseDoc; $("#rsdocx").onclick = rsCloseDoc;
+  const body = dr.lastChild;
+  let text;
+  try {
+    const r = await fetch(url);
+    text = await r.text();
+    if (!r.ok) throw new Error((() => { try { return JSON.parse(text).error; } catch { return `HTTP ${r.status}`; } })());
+  } catch (err) { body.innerHTML = `<span class="err">Couldn't open ${esc(path)}: ${esc(err.message)}</span>`; return; }
+  if (!dr.isConnected) return;
+  const doc = document.createElement("div");
+  if (!line && /\.(md|markdown)$/i.test(path)) {
+    doc.className = "msg rsdoc"; doc.innerHTML = md(text, "fd-");
+    body.replaceWith(doc);
+    const words = t => t.toLowerCase().replace(/[`*_]/g, "").split(/\s+/).filter(Boolean).join(" "), want = sec && words(sec);
+    const h = want && [...doc.querySelectorAll("h1, h2, h3, h4")].map(h => [h, words(h.textContent)])
+      .filter(([, t]) => t && (want === t || want.startsWith(t + " "))).sort((a, b) => b[1].length - a[1].length)[0];
+    if (h) { h[0].classList.add("hit"); h[0].scrollIntoView({block: "start"}); dr.querySelector(".fdhead code").textContent = `${path} § ${h[0].textContent}`; }
+  } else {
+    doc.className = "flines mono";
+    doc.innerHTML = text.split("\n").map((l, i) => `<div class="${i + 1 === +line ? "hit" : ""}"><b>${i + 1}</b>${esc(l) || " "}</div>`).join("");
+    body.replaceWith(doc);
+    const hit = doc.querySelector(".hit"); if (hit) hit.scrollIntoView({block: "center"});
+  }
 }
 
 // The list has three parts: chats ready for you (Claude has answered; a new reply is marked ●), chats where
@@ -2237,46 +2398,24 @@ function renderChat() {
   if (d && d.files && d.files.length) $("#chathead").insertAdjacentHTML("beforeend", `<div class="docs">Documents: ${d.files.map(f => `<a href="${esc(f.url)}" target="_blank" rel="noopener">${esc(f.name)}</a>`).join(" · ")}</div>`);
   if (d && d.ended) $("#chathead").insertAdjacentHTML("afterbegin", `<div class="callout">You ended this chat. Send a message or click Reopen to put it back on your list.</div>`);
   if (!d) { box.innerHTML = `<div class="muted" style="padding:20px 0">${TABTEXT[tab].intro}</div>`; return; }
+  const links = chatCtx(d.project, d.id, (d.files || []).map(f => f.name));
   box.innerHTML = d.msgs.map(m => m.role === "user"
-      ? `<div class="msg user">${pics(esc(m.text.replace(/^\[ops:[^\n]*\]\n\n/, "")))}</div>`
-      : `<div class="msg ${m.role === "ops" ? "ops" : ""}">${md(m.text)}${m.tasks.length ? `<div class="chips">${m.tasks.map(t => `<button class="chip" data-task="${t.id}">#${t.id} ${esc(t.title || "")} · ${LABEL[t.state] || t.state}</button>`).join("")}</div>` : ""}</div>`).join("")
+      ? `<div class="msg user">${userMd(m.text.replace(/^\[ops:[^\n]*\]\n\n/, ""), links)}</div>`
+      : `<div class="msg ${m.role === "ops" ? "ops" : ""}">${md(m.text, undefined, links)}${m.tasks.length ? `<div class="chips">${m.tasks.map(t => `<button class="chip" data-task="${t.id}">#${t.id} ${esc(t.title || "")} · ${LABEL[t.state] || t.state}</button>`).join("")}</div>` : ""}</div>`).join("")
     + (thinking ? `<div class="live"><span class="pulse s-running">Claude is thinking</span>${d.live.map(l => `<div>  ${esc(l)}</div>`).join("")}</div>` : "")
-    + (d.queued || []).map((t, k) => `<div class="msg user queued">${pics(esc(t))}<div class="qbar">Queued: sent ${thinking ? "when this reply ends" : "next"} · <button data-unq="${k}" title="Take it off the queue and put it back in the message box">Edit</button></div></div>`).join("");
+    + (d.queued || []).map((t, k) => `<div class="msg user queued">${userMd(t, links)}<div class="qbar">Queued: sent ${thinking ? "when this reply ends" : "next"} · <button data-unq="${k}" title="Take it off the queue and put it back in the message box">Edit</button></div></div>`).join("");
   box.querySelectorAll("[data-unq]").forEach(b => b.onclick = () => unqueue(d.id, +b.dataset.unq));
   box.querySelectorAll("[data-task]").forEach(b => b.onclick = () => { showTab("tasks"); selectTask(+b.dataset.task); refresh(); });
-  chatFileLinks(box, d);
-  if (stick || thinking) {
+  const bottom = () => {
+    if (!(stick || thinking)) return;
     toBottom(box);
     // Pictures load after this: their height would leave you short of the bottom, so go down again as each arrives.
     box.querySelectorAll("img").forEach(i => i.complete || i.addEventListener("load", () => toBottom(box), {once: true}));
-  }
+  };
+  bottom(); chatLinks(box, d.project).then(bottom);
 }
-// A reply names the documents it wrote by their path on disk (`/Users/…/.claude-ops/designs/42/proto.html`) or just
-// their name. Each one this chat wrote opens from the dashboard instead, in a new tab: a code span, a markdown
-// link or a bare path in the text. A path to another chat's folder, or to a file that isn't there, stays text.
-function chatFileLinks(box, d) {
-  const files = new Map((d.files || []).map(f => [f.name, f.url]));
-  if (!files.size) return;
-  const url = p => { const m = p.trim().match(/^(?:(?:\S*\/)?designs\/(\d+)\/)?([\w.-]+)$/);
-    return m && (!m[1] || +m[1] === d.id) ? files.get(m[2]) : null; };
-  const anchor = u => Object.assign(document.createElement("a"), {href: u, target: "_blank", rel: "noopener"});
-  box.querySelectorAll(".msg:not(.user) a[href]").forEach(a => { const u = url(a.getAttribute("href")); if (u) a.href = u; });
-  box.querySelectorAll(".msg:not(.user) code").forEach(c => {
-    const u = !c.closest("pre, a") && url(c.textContent);
-    if (u) { const a = anchor(u); c.replaceWith(a); a.appendChild(c); }
-  });
-  const walk = document.createTreeWalker(box, NodeFilter.SHOW_TEXT), texts = [];
-  while (walk.nextNode()) if (/designs\/\d+\//.test(walk.currentNode.nodeValue) && !walk.currentNode.parentElement.closest("pre, code, a, .user, .live")) texts.push(walk.currentNode);
-  for (const t of texts) {
-    const frag = document.createDocumentFragment(); let last = 0;
-    for (const m of t.nodeValue.matchAll(/(?:~|\/)[^\s]*?\/designs\/\d+\/[\w.-]*[\w]/g)) {
-      const u = url(m[0]); if (!u) continue;
-      frag.append(t.nodeValue.slice(last, m.index), Object.assign(anchor(u), {textContent: m[0]}));
-      last = m.index + m[0].length;
-    }
-    if (last) { frag.append(t.nodeValue.slice(last)); t.replaceWith(frag); }
-  }
-}
+// What lnRef needs to know about a chat: its project, where that project is on disk, and a design chat's documents.
+const chatCtx = (project, did, files) => ({project, roots: P(project).roots || [], did, files: files || []});
 // The message list scrolls on its own beside an OpenSpec change. Elsewhere it grows with its messages and the page
 // scrolls instead (the message box stays stuck to the bottom of the window), so both are moved and checked.
 // The page is as tall as its tallest column, often the chat list, so its own bottom can sit far below the chat's:
@@ -2408,6 +2547,8 @@ document.addEventListener("drop", e => {
   const ta = dropBox(e.target), files = imageFiles(e.dataTransfer);
   if (ta && files.length) attachImages(ta, files);
 });
+$("#clip").onclick = () => $("#clipfile").click();
+$("#clipfile").onchange = e => { const files = imageFiles(e.target); e.target.value = ""; if (files.length) attachImages($("#say"), files); };
 document.addEventListener("paste", e => {
   const ta = e.target.closest && e.target.closest("textarea"), files = imageFiles(e.clipboardData);
   if (ta && files.length) { e.preventDefault(); attachImages(ta, files); }
