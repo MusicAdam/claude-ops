@@ -4912,7 +4912,9 @@ def design_turn(did, text, fresh_why=None):
             send_queued(did)
             return
         tools += spec_tools(cwd)
-    tools += f",Bash({SEND_CMD}:*)"  # read-only still: it only asks another project to do something
+    # any shell command the owner could run at the CLI (git, gh, opsd.py send, …), past the guard (the owner's
+    # choice, task #254); the prompt keeps it off the project's files, which change only through tasks
+    tools += ",Bash"
     if not chat:  # its own documents folder: the only place outside openspec/ it may write
         files = CHAT_FILES / str(did)
         files.mkdir(parents=True, exist_ok=True)
@@ -4939,6 +4941,9 @@ def design_turn(did, text, fresh_why=None):
               (did, "ops", f"chat_mcp in {p.name}.toml names MCP servers Claude has no definition for, so this "
                            f"chat runs without them: {', '.join(missing)}.", time.time()))
         system = PROJECT_CHAT_PROMPT + "\n\n" + peer_brief(p, "chat")
+        system += (f"\n\nTo queue a task in {p.name} itself, for an unattended worker in its own worktree, run "
+                   f"`{SEND_CMD} {p.name} --title \"...\" \"<a brief that stands alone>\"`. Do it when the owner "
+                   "asks or agrees.")
         if handoff and slash:
             system += "\n\n" + handoff
         cmd = [CLAUDE, "-p", ("[ops: " + " | ".join(said) + "]\n\n" if said else "") + with_images(text),
@@ -4956,6 +4961,7 @@ def design_turn(did, text, fresh_why=None):
         cmd = [CLAUDE, "-p", note + with_images(text), "--output-format", "stream-json",
                "--verbose", "--permission-mode", "dontAsk", "--permission-prompts", "none", "--allowedTools", tools,
                "--strict-mcp-config", "--no-chrome", "--name", f"{p.name} design #{did}",
+               "--settings", guard_settings(None),
                "--append-system-prompt", system]
         cmd += ["--add-dir", str(CHAT_FILES / str(did))]
         if spec_chat(d):  # deny rules win over the allowed-tools a command's own frontmatter grants
