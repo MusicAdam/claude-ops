@@ -885,7 +885,7 @@ function projBody(g) {
   const where = (b, sha, run) => `<span class="nw">${esc(b)} <span class="mono">${esc(sha)}</span>${run ? ' · <span class="s-running">running</span>' : ""}</span>`;
   // Release: main and dev, what Promote would bring, and the buttons that act on them.
   return dirtyHtml(g) + sentHtml(g) + `<div class="sect"><h3>Release</h3>` +
-    `<div>${where(g.main_branch + " (golden)", g.main, g.running)} · ${where(g.dev_branch, g.dev, g.dev_running)} · ${g.ahead.length ? `<span class="s-review nw">${g.ahead.length} merge${g.ahead.length === 1 ? "" : "s"} to promote</span>` : `<span class="nw">nothing to promote</span>`}</div>` +
+    `<div>${where(g.main_branch + " (golden)", g.main, g.running)} · ${where(g.dev_branch, g.dev, g.dev_running)} · ${g.ahead.length ? `<span class="s-review nw">${nCommits(g.ahead.length)} to promote</span>` : `<span class="nw">nothing to promote</span>`}</div>` +
     (g.has_app && g.stale && g.built ? `<div class="s-review">The build is of ${esc(g.built)}, older than ${esc(g.main_branch)}. Promote to rebuild.</div>` : "") +
     (g.has_app && !g.has_build ? `<div class="s-review">Not built yet. Promote to build it.</div>` : "") +
     (g.can_launch && g.dev_stale ? `<div class="s-review">${esc(g.dev_branch)} needs build: it moved since its last build. Play ${esc(g.dev_branch)} builds it first.</div>` : "") +
