@@ -9,7 +9,6 @@ research_repo), the same runs and chats, the same response shapes, under /api/re
 - the usage meter, notifications and the usage brake.
 Research runs live outside the tasks table and PROCS/STEPS, so a daemon restart or Promote never stops one.
 opsd binds itself as `ops` (bind) before any of this runs."""
-import importlib.util
 import json
 import os
 import re
@@ -17,7 +16,6 @@ import shutil
 import signal
 import socket
 import subprocess
-import sys
 import tempfile
 import threading
 import time
@@ -39,7 +37,7 @@ OFF = {"error": "research is off"}
 READONLY = "The old research dashboard is running. Stop it to make changes here."
 WRITE_TOOLS = {"Write", "Edit", "MultiEdit", "NotebookEdit"}
 # Bump when the chat context changes, so resumed conversations get told once.
-CONTEXT_VERSION = 3
+CONTEXT_VERSION = 4
 # Read-only Claude in Chrome tools (runs pass --chrome). Unattended runs drive Adam's
 # signed-in browser, so no click/type (computer, form_input), no javascript_tool and
 # no uploads: a hostile page can't steer the run into acting in his accounts.
@@ -77,7 +75,6 @@ LSTART = {}  # pid -> (when read, ps lstart)
 
 # The research repo's paths, set by current() from the setting research_repo.
 REPO = HERE = JOBS_DIR = JOBS_FILE = THREADS_FILE = ARCHIVE_FILE = PROJECTS_FILE = NOTES_DIR = None
-todos = None  # the repo's own dashboard/todos.py, so its .todos.lock is shared with bin/todo and the skill
 
 
 class Refused(Exception):
@@ -90,7 +87,7 @@ class Refused(Exception):
 
 def current():
     """The research repo from the setting research_repo, or None while research is off. Points the paths at it."""
-    global REPO, HERE, JOBS_DIR, JOBS_FILE, THREADS_FILE, ARCHIVE_FILE, PROJECTS_FILE, NOTES_DIR, todos
+    global REPO, HERE, JOBS_DIR, JOBS_FILE, THREADS_FILE, ARCHIVE_FILE, PROJECTS_FILE, NOTES_DIR
     raw = (ops.setting("research_repo") or "").strip()
     if not raw:
         return None
@@ -102,21 +99,8 @@ def current():
             JOBS_FILE, THREADS_FILE = JOBS_DIR / "jobs.json", JOBS_DIR / "threads.json"
             ARCHIVE_FILE, PROJECTS_FILE = HERE / "archived.json", HERE / "projects.json"
             NOTES_DIR = repo / "projects"
-            todos = load_todos(HERE / "todos.py")
             REPO = repo
     return REPO
-
-
-def load_todos(path):
-    """Load the repo's todos.py by path. No bytecode is written: nothing in the research repo changes."""
-    spec = importlib.util.spec_from_file_location("research_todos", path)
-    mod = importlib.util.module_from_spec(spec)
-    was, sys.dont_write_bytecode = sys.dont_write_bytecode, True
-    try:
-        spec.loader.exec_module(mod)
-    finally:
-        sys.dont_write_bytecode = was
-    return mod
 
 
 def check_repo(raw):
@@ -125,8 +109,8 @@ def check_repo(raw):
     if not raw:
         return ""
     repo = Path(raw).expanduser().resolve()
-    if not (repo / "dashboard" / "todos.py").is_file():
-        raise ValueError(f"{repo} isn't the research repo: it has no dashboard/todos.py")
+    if not (repo / "dashboard" / "projects.json").is_file() or not (repo / "briefs").is_dir():
+        raise ValueError(f"{repo} isn't the research repo: it has no dashboard/projects.json and briefs/")
     return str(repo)
 
 
@@ -180,7 +164,7 @@ def backup():
     part = root / f".{dest.name}.partial"  # a backup cut short is never counted as one
     shutil.rmtree(part, ignore_errors=True)
     part.mkdir()
-    for f in (PROJECTS_FILE, ARCHIVE_FILE, HERE / "todos.json", JOBS_FILE, THREADS_FILE):
+    for f in (PROJECTS_FILE, ARCHIVE_FILE, JOBS_FILE, THREADS_FILE):
         if f.is_file():
             shutil.copy2(f, part / f.name)
     notes = sorted(NOTES_DIR.glob("*.md")) if NOTES_DIR.is_dir() else []
@@ -782,7 +766,6 @@ def allowed_tools() -> list[str]:
         "Skill", "Read", "Write", "Edit", "Glob", "Grep", "WebSearch", "WebFetch", "Agent",
         "Bash(ls:*)", "Bash(date:*)", "Bash(cat:*)", "Bash(grep:*)", "Bash(mkdir:*)",
         "Bash(jq:*)", "Bash(bin/fetch:*)", "Bash(./bin/fetch:*)", f"Bash({REPO}/bin/fetch:*)",
-        "Bash(bin/todo:*)", "Bash(./bin/todo:*)", f"Bash({REPO}/bin/todo:*)",
         *CHROME_READ_TOOLS,
     ]
 
@@ -925,91 +908,6 @@ def stop_job(job_id: str) -> dict:
     return job_view(job)
 
 
-# ---------- to-dos that become queue tasks ----------
-# A to-do's `task` is a claude-ops task id. todos.update() writes only its FIELDS, so `task` (and closing a to-do)
-# is written here, under the repo's own todos._locked(): the lock stays shared with bin/todo.
-
-PRIORITY = {"high": 1, "normal": 0, "low": -1}
-DEAD = ("failed", "cancelled")  # a linked task in any other state is live: no second one
-
-
-def task_rows(ids) -> dict:
-    ids = sorted({i for i in ids if isinstance(i, int)})
-    if not ids:
-        return {}
-    rows = ops.q(f"SELECT id, state, merged, finished FROM tasks WHERE id IN ({','.join('?' * len(ids))})", ids)
-    return {r["id"]: r for r in rows}
-
-
-def todo_list() -> list[dict]:
-    """todos.list_todos() plus `taskState` on each to-do with a `task`: {state, merged}, or None if the row is gone."""
-    out = todos.list_todos()
-    rows = task_rows(t.get("task") for t in out)
-    for t in out:
-        if isinstance(t.get("task"), int):
-            r = rows.get(t["task"])
-            t["taskState"] = {"state": r["state"], "merged": bool(r["merged"])} if r else None
-    return out
-
-
-def todo_task(tid: int, body: dict) -> dict:
-    """Queue a claude-ops task from to-do tid, as /api/tasks would, and store its id as the to-do's `task`."""
-    project = (body.get("project") or "").strip() if isinstance(body.get("project"), str) else ""
-    if not project:
-        raise ValueError("Pick a code project.")
-    if project not in code_projects():
-        raise ValueError(f"{project} is not a claude-ops project")
-    text = (body.get("body") or "").strip()
-    if not text:
-        raise ValueError("describe the task")
-    prio = body.get("priority", 0)
-    prio = PRIORITY[prio] if prio in PRIORITY else int(prio or 0)
-    if prio not in (1, 0, -1):
-        raise ValueError("priority must be high, normal or low")
-    release = body.get("release")
-    with todos._locked() as data:
-        todo = next((t for t in data["todos"] if t["id"] == tid), None)
-        if not todo:
-            raise ValueError(f"No to-do #{tid}")
-        if todo.get("done"):
-            raise ValueError(f"To-do #{tid} is done.")
-        old = todo.get("task")
-        if isinstance(old, int) and (r := task_rows([old]).get(old)) and r["state"] not in DEAD:
-            raise ValueError(f"To-do #{tid} already has task #{old} ({r['state']}).")
-        new = ops.add_task(project, text, body.get("title") or "", prio, bool(body.get("hold")),
-                           auto_release=None if release is None or release == "" else bool(release))
-        todo["task"] = new
-    return {"id": new}
-
-
-def close_line(task_id: int, date: str) -> str:
-    return f"Closed by task #{task_id}, merged {date}."
-
-
-def close_merged() -> None:
-    """Close each open to-do whose task is done and merged: done is the day it finished, plus a line in notes.
-    A to-do already carrying that task's line stays as it is, so one reopened by hand stays open."""
-    def due(data):
-        rows = task_rows(t.get("task") for t in data["todos"] if not t.get("done"))
-        for t in data["todos"]:
-            r = rows.get(t.get("task")) if isinstance(t.get("task"), int) else None
-            if (not t.get("done") and r and r["state"] == "done" and r["merged"]
-                    and f"Closed by task #{r['id']}," not in (t.get("notes") or "")):
-                yield t, r
-    if not any(due(todos._load())):
-        return
-    try:
-        writable()
-    except Refused as e:
-        print("research watchdog:", e, flush=True)
-        return
-    with todos._locked() as data:
-        for t, r in list(due(data)):
-            date = datetime.fromtimestamp(r["finished"]).strftime("%Y-%m-%d") if r["finished"] else today()
-            t["done"] = date
-            t["notes"] = (t["notes"].rstrip() + "\n" if t.get("notes") else "") + close_line(r["id"], date)
-
-
 # ---------- watchdog: time limits, the usage meter, notifications ----------
 
 def watchdog() -> None:
@@ -1026,10 +924,6 @@ def watchdog_pass(now=None) -> None:
     survives restarts. Nothing at all while the old server runs: its own watchdog covers it."""
     if not current() or old_running():
         return
-    try:
-        close_merged()
-    except Exception as e:
-        print("research watchdog: closing to-dos:", e, flush=True)
     now = now or datetime.now()
     with lock:
         jobs = load_jobs()
@@ -1167,19 +1061,9 @@ def notes_rule(kind: str, tid: str) -> str:
 
 
 def todo_rule(kind: str, tid: str) -> str:
-    link = f"--proposal {tid}" if kind == "proposal" else f"--project {tid}"
-    return (f"To-dos: when Adam asks you to add, track or remember an action, use the todo skill\n"
-            f"  (`bin/todo add \"<action>\" {link}`); it shows in the dashboard's To-dos tab.\n"
-            f"  Don't add to-dos he didn't ask for; suggest them in your reply instead.")
-
-
-def open_todos_lines(kind: str, tid: str) -> list[str]:
-    key = "proposal" if kind == "proposal" else "effectiveProject"
-    items = [t for t in todos.list_todos() if not t["done"] and t.get(key) == tid]
-    if not items:
-        return []
-    return ["", "Open to-dos here:"] + [f"- #{t['id']} {t['text']}" + (f" (due {t['due']})" if t.get("due") else "")
-                                        for t in items]
+    return ("To-dos: this chat can't add to-dos, and the research repo's own list (bin/todo, the todo skill)\n"
+            "  is retired. When Adam asks you to track or remember an action, write it as one line he can\n"
+            "  add to claude-ops. Don't suggest to-dos he didn't ask for unless they matter.")
 
 
 def chat_context(kind: str, tid: str) -> str:
@@ -1211,7 +1095,6 @@ def chat_context(kind: str, tid: str) -> str:
     code = code_project(project_of(kind, tid))
     if code is not None:
         lines += ["", repo_block(code)]
-    lines += open_todos_lines(kind, tid)
     return "\n".join(lines) + "\n\n" + CHAT_RULES.format(today=today(), parent=parent,
                                                          notes_rule=notes_rule(kind, tid),
                                                          todo_rule=todo_rule(kind, tid))
@@ -1351,8 +1234,6 @@ def get(path: str, query: str):
             return 200, project_activity(m.group(1))
         if path == "/references":
             return 200, list_references()
-        if path == "/todos":
-            return 200, todo_list()
         if path == "/jobs":
             return 200, list(reversed(research_jobs()))
         if path.startswith("/jobs/"):
@@ -1416,15 +1297,6 @@ def route(path: str, body: dict):
         if action == "/notes":
             return lambda: save_notes(pid, body)
         return lambda: update_project(pid, body)
-    if path == "/todos":
-        return lambda: todos.add(body)
-    m = re.fullmatch(r"/todos/(\d+)/task", path)
-    if m:
-        return lambda: todo_task(int(m.group(1)), body)
-    m = re.fullmatch(r"/todos/(\d+)(/delete)?", path)
-    if m:
-        tid = int(m.group(1))
-        return lambda: todos.delete(tid) if m.group(2) else todos.update(tid, body)
     m = re.fullmatch(r"/jobs/([\w-]+)/stop", path)
     if m:
         return lambda: stop_job(m.group(1))

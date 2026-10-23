@@ -242,72 +242,44 @@ def free_port():
         return s.getsockname()[1]
 
 
-class ResearchTodoBridge(unittest.TestCase):
-    """RES-8: open to-dos in the research repo's todos.json are Do items in their claude-ops project."""
+class ResearchTodoListRetired(unittest.TestCase):
+    """RES-8 (retired): the research repo's own to-do list is gone. Research turns on without dashboard/todos.py or
+    todos.json, and the Today list has no items from them."""
 
     def setUp(self):
         opsd.init_db()
-        opsd.q("DELETE FROM tasks")
         os.environ["OPS_RESEARCH_OLD_PORT"] = str(free_port())  # nothing answers: research is writable
         self.repo = Path(tempfile.mkdtemp()) / "research"
         shutil.copytree(FIXTURE, self.repo)
-        opsd.set_setting("research_repo", str(self.repo.resolve()))
-        self.saved = dict(opsd.PROJECTS)
-        opsd.PROJECTS.clear()
-        opsd.PROJECTS["web"] = FakeProject("web", Path(tempfile.mkdtemp()))
 
     def tearDown(self):
         opsd.set_setting("research_repo", "")
         research.current()
-        opsd.PROJECTS.clear()
-        opsd.PROJECTS.update(self.saved)
         shutil.rmtree(self.repo.parent, ignore_errors=True)
 
-    def link(self, repo):
-        f = self.repo / "dashboard" / "projects.json"
-        data = json.loads(f.read_text())
-        data["projects"]["ai-search"]["repo"] = repo
-        f.write_text(json.dumps(data))
+    def test_a_repo_without_todos_py_turns_research_on(self):
+        for f in ("todos.py", "todos.json"):
+            (self.repo / "dashboard" / f).unlink(missing_ok=True)
+        self.assertEqual(research.check_repo(str(self.repo)), str(self.repo.resolve()))
+        opsd.set_setting("research_repo", str(self.repo.resolve()))
+        self.assertEqual(research.current(), self.repo.resolve())
+        self.assertEqual(research.get("/api/research/proposals", "")[0], 200)
+        self.assertFalse(hasattr(research, "todos"))
+        self.assertFalse([x for x in opsd.todos_list([], [], {}) if x["source"]["kind"] == "research_todo"])
 
-    def test_unlinked_and_no_home_is_hidden(self):
-        self.assertEqual(opsd.research_todo_items(), [])
+    def test_its_routes_are_gone(self):
+        opsd.set_setting("research_repo", str(self.repo.resolve()))
+        self.assertEqual(research.get("/api/research/todos", "")[0], 404)
+        self.assertEqual(research.post("/api/research/todos", {"text": "t"})[0], 404)
 
-    def test_linked_project(self):
-        self.link("web")
-        got = opsd.research_todo_items()
-        self.assertEqual(len(got), 1)
-        it = got[0]
-        self.assertEqual((it["key"], it["verb"], it["group"], it["project"]), ("rtodo:1", "Do", "only_me", "web"))
-        self.assertEqual((it["title"], it["rtodo"], it["source"]), ("Email the vendor", 1,
-                                                                     {"kind": "research_todo", "id": 1}))
-        self.assertIn("ai-search", it["why"])
-        self.assertGreater(it["since"], 0)
-        self.assertIn("rtodo:1", [x["key"] for x in opsd.todos_list([], [], {})])
-
-    def test_unlinked_goes_to_the_research_project(self):
-        opsd.PROJECTS["research"] = FakeProject("research", self.repo)
-        self.assertEqual([x["project"] for x in opsd.research_todo_items()], ["research"])
-        self.link("gone")  # a stale link falls back too
-        self.assertEqual([x["project"] for x in opsd.research_todo_items()], ["research"])
-
-    def test_live_task_and_done_are_left_out(self):
-        self.link("web")
-        tid = opsd.add_task("web", "body", "t")
-        f = self.repo / "dashboard" / "todos.json"
-        data = json.loads(f.read_text())
-        data["todos"][0]["task"] = tid
-        f.write_text(json.dumps(data))
-        self.assertEqual(opsd.research_todo_items(), [])
-        opsd.upd(tid, state="cancelled")
-        self.assertEqual(len(opsd.research_todo_items()), 1)
-        code, _ = research.post("/api/research/todos/1", {"done": True})  # the Done button
-        self.assertEqual(code, 200)
-        self.assertTrue(json.loads(f.read_text())["todos"][0]["done"])
-        self.assertEqual(opsd.research_todo_items(), [])
-
-    def test_research_off(self):
-        opsd.set_setting("research_repo", "")
-        self.assertEqual(opsd.research_todo_items(), [])
+    def test_a_repo_without_projects_json_or_briefs_is_refused(self):
+        (self.repo / "dashboard" / "projects.json").unlink()
+        with self.assertRaises(ValueError):
+            research.check_repo(str(self.repo))
+        shutil.copy(FIXTURE / "dashboard" / "projects.json", self.repo / "dashboard" / "projects.json")
+        shutil.rmtree(self.repo / "briefs")
+        with self.assertRaises(ValueError):
+            research.check_repo(str(self.repo))
 
 
 class AddCli(unittest.TestCase):
