@@ -28,7 +28,8 @@ as a new git repo with one empty commit.
 
 `add-project` detects Unity (`scripts/unity.sh` + `Assets/`), Node (`package.json`) and Python
 projects and writes a starter config. It also takes a workspace: a folder that is not a git repo but holds
-several (see [Workspaces](#workspaces)). Read it, adjust it, then click **Reload projects** (or
+several (see [Workspaces](#workspaces)). The project goes [Straight to main](#main-is-the-golden-version);
+the config has a comment on how to opt out. Read it, adjust it, then click **Reload projects** (or
 `./opsctl restart`).
 
 ## Flow (per project)
@@ -48,13 +49,19 @@ several (see [Workspaces](#workspaces)). Read it, adjust it, then click **Reload
                                   ▼
                             merge --no-ff into dev   (<worktrees>/dev)
                                   │
-                 you click Promote ▼
+                                  ├─ Straight to main (the default): main moves to dev at once, no release
+                                  │
+     direct_main = false or [[deploy]]: you click Promote ▼
    release task: snapshot dev ─▶ gate ─▶ Claude builds and plays it (blocks, or passes)
                                   ▼ pass
         build the snapshot in <worktrees>/main ─▶ fast-forward main in your checkout
 ```
 
 ## main is the golden version
+
+By default a project goes **Straight to main** (below): each merge moves main at once, and dev stays equal to it.
+The release, Promote and Promote after merge described here are for a project that opted out with
+`direct_main = false`, or one with `[[deploy]]` targets.
 
 - **dev** gets every task that passes the gate. It is the newest version.
 - **main** moves only when a **release** passes, and its build (`<worktrees>/main`) always matches it. The one
@@ -105,7 +112,8 @@ several (see [Workspaces](#workspaces)). Read it, adjust it, then click **Reload
      cleared 3 from your checkout` or `...; left 1 you edited after sending`. Below it, per repo, it lists the
      files that landed on dev, the files cleared, any left and why, and the ref.
 
-  Pausing, stopping or cancelling the task before the merge clears nothing; Retry after a merge clears then. Until
+  Pausing, stopping or cancelling the task before the merge clears nothing; Retry after a merge clears then. Under
+  Straight to main, main moves right after the clearing, so the work comes back at once. Otherwise, until
   the next Promote the work is in dev but not in your checkout: the card says `On dev, not released yet. Promote to
   get it back here.` with a link to the task, until main contains it.
 - With nothing new on dev, Promote only rebuilds main (no gate).
@@ -113,7 +121,8 @@ several (see [Workspaces](#workspaces)). Read it, adjust it, then click **Reload
   carry conflict still uses a worker). A gate failure blocks it. Its summary starts `Gate-only release: the merge
   check passed (<checks>)`, then gives each released task's summary, and **Not part of this release** as usual.
   A gate-only release starts while the usage brake is on, as it starts no Claude session.
-- **Promote after merge** (a checkbox on a new task, and on its page until it finishes) promotes for you, as a
+- **Promote after merge** (only for a project that opted out of Straight to main, or has `[[deploy]]` targets; a
+  checkbox on a new task, and on its page until it finishes) promotes for you, as a
   **promote train**: once the task merges into dev, the queue queues a release, the same one Promote makes, but
   only when either
   - the project is **quiet**: none of its tasks (or Send to devs) is queued, running, checking or merging. Tasks
@@ -130,12 +139,14 @@ several (see [Workspaces](#workspaces)). Read it, adjust it, then click **Reload
 
   The internal names keep the old word: the task field and API key `release`, the column `auto_release`, the
   per-project setting `auto_release:<project>` and the global setting `release_wait`.
-- **Promote after merge by default** (a checkbox on the project's card) ticks that box for every task the
+- **Promote after merge by default** (a checkbox on the project's card, for the same projects) ticks that box for every task the
   project gets from then on: from the form, `opsd.py add`, a design chat, and the follow-ups a worker
   queues. You can still untick it on a task. Tasks already queued keep what they have. It is off until you
   turn it on.
-- **Straight to main** (`direct_main = true` in the project's toml; the daemon reads it when it reloads
-  projects or restarts). A task that passes its gate merges into dev as before, under the same lock, then moves
+- **Straight to main** is the default. To opt out, put `direct_main = false` in the project's toml; the daemon
+  reads it when it reloads projects or restarts. Why it is the default: a held task is tried before it merges,
+  so once a task merges into dev there is nothing left on dev for you to check, and a Promote click would add
+  nothing. Opt out only when you do want to check dev before main moves. A task that passes its gate merges into dev as before, under the same lock, then moves
   main to dev at once: the steps of a release after its gate (build main if there is an `[app] build`,
   fast-forward, carry your uncommitted changes over), without running the gate again. So no release is queued:
   Promote after merge, the promote train and the Promote button go away for the project. dev stays, equal to
@@ -143,12 +154,17 @@ several (see [Workspaces](#workspaces)). Read it, adjust it, then click **Reload
   - Something in the way of main (the main build is running, main is checked out in another worktree, or your
     uncommitted changes can't be carried over) makes the task wait on you, `needs input`, as a release does. It
     goes on by itself once the way is clear. Answering or Retry only moves main; the merge is done.
-  - Turned on while dev is ahead of main, the next merge brings all of dev into main with it (its gate ran on
+  - Turned on while dev is ahead of main (as for a project from before it was the default), the next merge brings all of dev into main with it (its gate ran on
     all of it). Until then the card shows Promote, to release it at once.
   - Commits made straight to main come into dev before each task's gate (a fast-forward when they can). If they
     conflict with dev, the task fails and says to Promote once: the release has a worker merge them.
   - Tasks move main one at a time, and never alongside a release.
-  - For claude-ops itself, every merge restarts the daemon, as a Promote does.
+  - Send to dev lands on main too: it clears your checkout after the merge into dev, then main moves and brings
+    the work back into your checkout, committed.
+  - For claude-ops itself, every merge restarts the daemon to load the new code. As a restart pauses every
+    running task in every project and starts their gates over, it waits until no task is running, checking or
+    merging, for at most 15 minutes, and no new task starts meanwhile (they say `waiting for claude-ops to
+    restart`). A Promote still restarts at once.
   - Not for a project with `[[deploy]]` targets: a deploy moves main too, and builds from the main a release
     checked. There the option is ignored, with a line in the daemon log.
 - Promoting claude-ops itself restarts the daemon to load the new code (`opsctl restart`: running
@@ -425,7 +441,8 @@ the uncommitted-files banner, Deploy. `/api/state` gathers them into one list, `
   - **Try**: a task in review whose project has a launch step (the same test as `can_play`). **Review**: the
     same without one; you read its diff and summary.
   - **Promote**: a release or deploy in needs_input (**waiting on you**), or `dev` ahead of `main` in a project
-    with **Promote after merge** off and no release under way.
+    with **Promote after merge** off and no release under way. Under Straight to main dev is ahead only until
+    the next merge (a project from before it was the default), or while a merge waits on you to move main.
   - **Ship**: `main` has moved since the last deploy of a project with deploy targets, and no deploy is under
     way. This reads what the Deploy panel already knows: `main_since_kind` is `deploy` and `main_log` is not
     empty. A project with no recorded deploy of `main` yet shows no Ship item.
@@ -985,7 +1002,7 @@ dev_branch = "dev"                 # created from main if missing; add-project p
 worktrees = "/Users/you/dev/mygame-wt"   # default: <repo>-wt
 # repos = ["backend", "app"]       # a workspace: repo is a folder and these folders in it are the git repos
 max_parallel = 0                   # per-project cap; 0 = only the global "Parallel" limit
-direct_main = false                # true: a merge moves main at once, no release (see Straight to main)
+# direct_main = false              # default true: a merge moves main at once, no release (see Straight to main)
 chat_mcp = []                      # MCP servers a project chat loads, by name (see Chat mode); default none
 
 [worktree]

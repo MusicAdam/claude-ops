@@ -167,9 +167,10 @@ class Project:
         self.main_wt = self.wt / "main"
         self.deploy_wt = self.wt / "deploy"  # persistent: build output survives from one deploy to the next
         self.deploys = deploy_targets(self, c.get("deploy", []))
-        # direct_main: a task's merge goes on to move main at once (see land), with no release. Not with [[deploy]]:
-        # a deploy moves main too, and its targets build from the main a release checked.
-        self.direct_main = bool(c.get("direct_main", False))
+        # direct_main (the default; `direct_main = false` opts out): a task's merge goes on to move main at once (see
+        # land), with no release. Not with [[deploy]]: a deploy moves main too, and its targets build from the main a
+        # release checked.
+        self.direct_main = bool(c.get("direct_main", True))
         if self.direct_main and self.deploys:
             print(f"project {path.name}: direct_main is off: a project with [[deploy]] targets keeps {self.dev} "
                   "and Promote", flush=True)
@@ -520,6 +521,10 @@ def create_repo(repo):
     sh("git", "commit", "-q", "--allow-empty", "-m", "Initial commit", cwd=repo)
 
 
+DIRECT_MAIN_NOTE = ("# merges go straight to main (see Straight to main in the README). To merge into dev and "
+                    "Promote by hand, add:\n# direct_main = false")
+
+
 def detect_project(path, name=None, create=False):
     """Write a starter config for the repo at path. Returns the config path."""
     repo = resolve_repo(path)
@@ -541,7 +546,7 @@ def detect_project(path, name=None, create=False):
     dev = "dev"
     if sh("git", "rev-parse", "--verify", "-q", "refs/heads/dev", cwd=repo, check=False):
         dev = "ops-dev"  # don't take over a dev branch the repo already uses
-    lines = [f'title = "{repo.name}"', f'repo = "{repo}"', f'main_branch = "{main}"', f'dev_branch = "{dev}"', ""]
+    lines = [f'title = "{repo.name}"', f'repo = "{repo}"', f'main_branch = "{main}"', f'dev_branch = "{dev}"', DIRECT_MAIN_NOTE, ""]
     unity = repo / "scripts" / "unity.sh"
     if unity.exists() and (repo / "Assets").is_dir():
         app = re.search(r"Builds/macOS/([\w .-]+\.app)", unity.read_text())
@@ -599,7 +604,7 @@ def workspace_toml(repo, subs):
             gates.append(gate_toml(f"{s} test", f"cd {s} && python3 -m pytest -q"))
     lines = [f'title = "{repo.name}"', f'repo = "{repo}"',
              "repos = [" + ", ".join(f'"{s}"' for s in subs) + "]   # a workspace: each folder is its own git repo",
-             f'main_branch = "{main}"', f'dev_branch = "{dev}"', "", "[worktree]",
+             f'main_branch = "{main}"', f'dev_branch = "{dev}"', DIRECT_MAIN_NOTE, "", "[worktree]",
              "clone = [" + ", ".join(f'"{c}"' for c in clone) + "]",
              "setup = [" + ", ".join(f'"{c}"' for c in setup) + "]",
              "# setup_timeout = 15   # minutes each setup command may run before it is stopped and the task fails", ""]
@@ -2075,7 +2080,7 @@ def land_on_main(p, tid):
     stale_facts(p.name)
     finish(p, tid, merged=t["merged"], note=f"{p.main} is now {p.show(commit)}")
     if Path(p.repo).resolve() == CODE and p.revs(p.main) != before:
-        restart_self(tid)
+        restart_when_idle(tid)
 
 
 def ask_owner(p, tid, question):
@@ -2404,6 +2409,35 @@ def is_service():
     return bool(m) and int(m.group(1)) in (os.getpid(), os.getppid())
 
 
+RESTART_IDLE_MAX = 15 * 60  # seconds a direct_main merge of claude-ops waits for the queue to go idle before restarting
+RESTART_AFTER = {}  # {"tid", "since"}: a restart waiting for idle. Not a setting: the next daemon has the new code
+
+
+def restart_when_idle(tid):
+    """A direct_main merge moved main of claude-ops itself. A restart pauses every running task in every project and
+    starts their gates over, so it waits until none is running, checking or merging (at most RESTART_IDLE_MAX), and
+    starts no new task meanwhile. restart_if_idle, from the scheduler, does it. A Promote, which you click, restarts at
+    once."""
+    if not RESTART_AFTER:
+        RESTART_AFTER.update(tid=tid, since=time.time())
+    ev(tid, f"claude-ops restarts to load the new code once no task is running (at most "
+            f"{RESTART_IDLE_MAX // 60} min); new tasks wait for it")
+
+
+def restart_if_idle():
+    if not RESTART_AFTER or STOPPING.is_set():
+        return
+    busy = q(f"SELECT id FROM tasks WHERE state IN ({','.join('?' * len(ACTIVE))})", ACTIVE)
+    if busy and time.time() - RESTART_AFTER["since"] < RESTART_IDLE_MAX:
+        return
+    tid = RESTART_AFTER["tid"]
+    RESTART_AFTER.clear()
+    if busy:
+        ev(tid, f"restarting after {RESTART_IDLE_MAX // 60} min although tasks still run: "
+                + ", ".join(f"#{t['id']}" for t in busy))
+    restart_self(tid)
+
+
 def restart_self(tid):
     """main of claude-ops itself just moved: run `opsctl restart` to load the new code. Running tasks pause and
     the new daemon resumes them. It runs in a session of its own, so stopping this daemon's launchd job spares it."""
@@ -2631,6 +2665,7 @@ def scheduler():
             schedule_once()
             if n % 3 == 0:  # every 6 s: a scan for a running build takes up to 0.4 s
                 unblock_releases()
+                restart_if_idle()
             if n % 30 == 0 and not STOPPING.is_set():  # every minute: promote trains whose time is up
                 release_trains()
         except Exception as e:
@@ -2641,7 +2676,7 @@ def scheduler():
 
 def schedule_once():
     waiting = limited()  # first, so the limit clears and its tasks requeue even while the queue is paused
-    if setting("paused") == "1" or STOPPING.is_set() or waiting:
+    if setting("paused") == "1" or STOPPING.is_set() or waiting or RESTART_AFTER:
         return
     braked = usage_braked()  # running work carries on; no new Claude session starts until the window resets
     slots = int(setting("max_parallel") or 1) - len(THREADS)
@@ -4885,6 +4920,7 @@ def ops_note(p, did, extra=""):
     live = q("SELECT id,state,title FROM tasks WHERE project=? AND state NOT IN ('done','cancelled') ORDER BY id",
              (p.name,))
     parts = ["queue: " + ("; ".join(f"#{t['id']} {t['state']} {t['title']}" for t in live[:25]) or "empty"),
+             f"merges go straight to {p.main} (direct_main), so release does nothing here" if p.direct_main else
              "promote after merge: " + ("on" if release_default(p) else "off") + " by default for this project"]
     dirty = facts(p).get("uncommitted") or []
     if dirty:
@@ -6352,7 +6388,7 @@ STATE_WORDS = {"running": "working", "gating": "checking", "needs_input": "needs
 def wait_reasons(tasks, s=None):
     """Why each queued task has not started yet, in the scheduler's own order of checks."""
     s = settings_now() if s is None else s
-    if STOPPING.is_set():
+    if STOPPING.is_set() or RESTART_AFTER:
         return {t["id"]: "waiting for claude-ops to restart" for t in tasks if t["state"] == "queued"}
     if s.get("paused") == "1":
         return {t["id"]: "the queue is paused" for t in tasks if t["state"] == "queued"}
