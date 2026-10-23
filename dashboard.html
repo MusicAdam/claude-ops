@@ -2122,10 +2122,37 @@ function renderChat() {
       : `<div class="msg ${m.role === "ops" ? "ops" : ""}">${md(m.text)}${m.tasks.length ? `<div class="chips">${m.tasks.map(t => `<button class="chip" data-task="${t.id}">#${t.id} ${esc(t.title || "")} · ${LABEL[t.state] || t.state}</button>`).join("")}</div>` : ""}</div>`).join("")
     + (thinking ? `<div class="live"><span class="pulse s-running">Claude is thinking</span>${d.live.map(l => `<div>  ${esc(l)}</div>`).join("")}</div>` : "");
   box.querySelectorAll("[data-task]").forEach(b => b.onclick = () => { showTab("tasks"); selectTask(+b.dataset.task); refresh(); });
+  chatFileLinks(box, d);
   if (stick || thinking) {
     toBottom(box);
     // Pictures load after this: their height would leave you short of the bottom, so go down again as each arrives.
     box.querySelectorAll("img").forEach(i => i.complete || i.addEventListener("load", () => toBottom(box), {once: true}));
+  }
+}
+// A reply names the documents it wrote by their path on disk (`/Users/…/.claude-ops/designs/42/proto.html`) or just
+// their name. Each one this chat wrote opens from the dashboard instead, in a new tab: a code span, a markdown
+// link or a bare path in the text. A path to another chat's folder, or to a file that isn't there, stays text.
+function chatFileLinks(box, d) {
+  const files = new Map((d.files || []).map(f => [f.name, f.url]));
+  if (!files.size) return;
+  const url = p => { const m = p.trim().match(/^(?:(?:\S*\/)?designs\/(\d+)\/)?([\w.-]+)$/);
+    return m && (!m[1] || +m[1] === d.id) ? files.get(m[2]) : null; };
+  const anchor = u => Object.assign(document.createElement("a"), {href: u, target: "_blank", rel: "noopener"});
+  box.querySelectorAll(".msg:not(.user) a[href]").forEach(a => { const u = url(a.getAttribute("href")); if (u) a.href = u; });
+  box.querySelectorAll(".msg:not(.user) code").forEach(c => {
+    const u = !c.closest("pre, a") && url(c.textContent);
+    if (u) { const a = anchor(u); c.replaceWith(a); a.appendChild(c); }
+  });
+  const walk = document.createTreeWalker(box, NodeFilter.SHOW_TEXT), texts = [];
+  while (walk.nextNode()) if (/designs\/\d+\//.test(walk.currentNode.nodeValue) && !walk.currentNode.parentElement.closest("pre, code, a, .user, .live")) texts.push(walk.currentNode);
+  for (const t of texts) {
+    const frag = document.createDocumentFragment(); let last = 0;
+    for (const m of t.nodeValue.matchAll(/(?:~|\/)[^\s]*?\/designs\/\d+\/[\w.-]*[\w]/g)) {
+      const u = url(m[0]); if (!u) continue;
+      frag.append(t.nodeValue.slice(last, m.index), Object.assign(anchor(u), {textContent: m[0]}));
+      last = m.index + m[0].length;
+    }
+    if (last) { frag.append(t.nodeValue.slice(last)); t.replaceWith(frag); }
   }
 }
 // The message list scrolls on its own beside an OpenSpec change. Elsewhere it grows with its messages and the page
