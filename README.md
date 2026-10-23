@@ -502,7 +502,27 @@ across polls (`task:231:review`, `chat:42:read`, `project:diskgame:commit`, `tod
 `since` is when the state began, as near as the queue knows: a task's last event, a chat's last reply, the oldest uncommitted file, the
 oldest commit not yet promoted or deployed. `est_min` is a guess at minutes: Answer 2, Fix 5, Try 5, Review 3,
 Agree 2, Read 3, Promote 1, Ship 2, Commit 2, Do 5. `source.kind` is `task`, `chat` or `project`: a stored item
-points at the chat or task that added it, and has `todo`, its id for the Done button.
+points at the chat or task that added it, and has `todo`, its id for the Done button. Every item also has
+`note` (your note to self, `""` when none); a parked item has `parked: {since, wake_task}` and a skipped one
+`skipped: <ts>` (TODO-6).
+
+- **TODO-6 Notes and parking.** Notes live in the table `todo_notes (key, note, parked, skipped, wake_task,
+  updated)`, keyed by the item's `key`.
+  - `POST /api/todos/note {key, note}` saves the note and re-reads `wake_task`: the first `#(\d+)` or
+    `task (\d+)` in it (any case), else none. Editing a parked item's note keeps it parked; clearing it does
+    not unpark it.
+  - `POST /api/todos/skip {key}`: with a non-empty note it parks the item (`parked` = now); otherwise it skips
+    it (`skipped` = now). A skip lasts until local midnight.
+  - `POST /api/todos/unpark {key}` clears `parked` and `skipped`.
+  - Order: unparked items as TODO-4, then skipped ones in the order you skipped them, then parked ones, which
+    carry `parked` for the dashboard to group.
+  - **Auto-wake.** On each state build, a parked item whose `wake_task` is no longer queued, running or
+    merging (any other state, or deleted) is unparked and not skipped, and ` · #249 <word>` is added to its
+    note, with the word for the task's state: merged (done), failed, needs you, in review, paused, gone. A note
+    with no task number never wakes; it stays parked until you unpark it.
+  - A row is deleted when its key is no longer in `todos` (the item went by itself), or when its note is empty
+    and it is neither parked nor skipped since today's midnight. Items of a project whose facts failed to load
+    keep their rows.
 
 There is no `done_today` count yet: derived items leave no record when they close, so only stored items could be
 counted, and a number that skips most of what you did would mislead.
@@ -563,12 +583,20 @@ stay on the right of the header.
   - Each item shows its verb, title, project (with All projects) and age.
   - The selection is the item's `key`, so it survives polls and reloads. When the selected item leaves the list
     (you acted on it, or its state changed), the item after it is selected.
-  - **Skip for now** moves an item to the end of the list. It is kept in this browser only (localStorage), and
-    forgotten at midnight.
+  - **Skip for now** is one click. With an empty note it moves the item to the end of the list until local
+    midnight. With a note it parks the item: it leaves the list, the chip counts and the **N things need you**
+    total, and goes to a folded **Parked (N)** section at the bottom. Both are kept on the server (TODO-6), so
+    every device agrees. A parked row shows its verb, title, project, the note and `parked 4d` (its age since
+    parking). An item with a note shows the note on its row, muted and cut with an ellipsis.
+  - The next item selected when one leaves the list is never a parked one.
 - **TODAY-2 Centre: the step.** The selected item as one step: **Step k of n** (k within the filter) · project,
   the title, the why, and key facts. For a task: its number, the gate result, how many files it changed, and how
   long ago it was built. One primary button, a few secondary ones, and **Skip for now →**. Every button calls an
-  endpoint the older pages already use:
+  endpoint the older pages already use. Beside **Skip for now →**, on the desktop and phone layouts alike, is a
+  one-line note field, always shown, with the placeholder `Note to self, e.g. wait for #249`. It saves as you
+  type (after about 500 ms, and on blur) through `POST /api/todos/note`. Skip's tooltip says what it will do:
+  "Move to the end of the list until midnight" with an empty note, "Park it with this note" with one. A parked
+  item's step has **Unpark** beside Skip. See TODO-6.
 
   | Verb | Primary | Others |
   |---|---|---|
@@ -739,8 +767,8 @@ Below 700px Today is phone-first. The rules:
   readouts and the pause buttons are left out on Today; the other pages still show them. The usage-limit bar
   still shows when the limit is hit.
 - **HDR-2 Step card.** Compact by default, about 100px: one top row with **‹ To-do**, **Step k of n · project**,
-  **Details ▾** and **Skip →**; then the title; then one row of action buttons that scrolls sideways. The why and
-  the facts open under **Details ▾**.
+  **Details ▾** and **Skip →** (and **Unpark** for a parked item); then the title; then one row of action buttons
+  that scrolls sideways, ending in the note field (TODO-6). The why and the facts open under **Details ▾**.
 - **Sending a message.** In the Today composer, the Design and Chat tabs' message box, and a task page's ask or
   steer box, **Enter** sends, **Shift+Enter** or **Alt/Option+Enter** adds a line, and **⌘/Ctrl+Enter** also sends.
   Enter never sends while an input method (IME) is composing. On a touch screen **Enter** adds a line and you send
