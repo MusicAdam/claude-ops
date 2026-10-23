@@ -2921,7 +2921,7 @@ def schedules_view():
              "LEFT JOIN tasks t ON t.id = s.last_task ORDER BY s.project, s.next_at")
 
 
-SCHEDULE_BLOCK = re.compile(r"```schedule[ \t]*\n(.*?)```", re.S)
+SCHEDULE_BLOCK = re.compile(r"```schedule[ \t]*\n(.*?)^[ \t]*```[ \t]*$", re.S | re.M)
 
 
 def schedules_from_reply(p, reply, did):
@@ -4858,7 +4858,7 @@ def deploy_done(p, tid, note):
 DESIGN_TOOLS = "Read,Grep,Glob,WebSearch,WebFetch,Bash(git log:*),Bash(git show:*),Bash(git diff:*),Bash(ls:*)"
 DESIGN_PROCS = {}  # design id -> Popen
 DESIGN_LIVE = {}  # design id -> tool lines of the turn in progress
-QUEUE_BLOCK = re.compile(r"```queue[ \t]*\n(.*?)```", re.S)
+QUEUE_BLOCK = re.compile(r"```queue[ \t]*\n(.*?)^[ \t]*```[ \t]*$", re.S | re.M)
 
 
 def design(did):
@@ -5151,7 +5151,7 @@ def handoff_of(msgs, head, room):
 # "mode", "from": the topic a mode switch left, whose handoff the new topic's first message carries}.
 MODES = {"design": "plan & design", "project": "edit my checkout", "research": "research"}
 SWITCH_CHARS = 8_000  # about 2k tokens: a mode switch's handoff of the topic before
-TOPIC_BLOCK = re.compile(r"```topic[ \t]*\n(.*?)```", re.S)
+TOPIC_BLOCK = re.compile(r"```topic[ \t]*\n(.*?)^[ \t]*```[ \t]*$", re.S | re.M)
 SWITCH_HEAD = "## Handoff from the topic before this one"
 
 
@@ -7019,7 +7019,7 @@ TODO_GROUP = {"Answer": "unblock", "Fix": "unblock", "Promote": "ship", "Ship": 
 TODO_ORDER = ("unblock", "ship", "review", "only_me")
 TODO_MIN = {"Answer": 2, "Fix": 5, "Try": 5, "Review": 3, "Agree": 2, "Read": 3, "Promote": 1, "Ship": 2,
             "Commit": 2, "Do": 5}  # a guess at the minutes each takes you
-TODO_BLOCK = re.compile(r"```todo[ \t]*\n(.*?)```", re.S)
+TODO_BLOCK = re.compile(r"```todo[ \t]*\n(.*?)^[ \t]*```[ \t]*$", re.S | re.M)
 
 
 def todo_item(key, verb, project, title, why, since, kind, sid, **extra):

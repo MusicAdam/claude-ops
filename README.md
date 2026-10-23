@@ -472,7 +472,8 @@ the uncommitted-files banner, Deploy. `/api/state` gathers them into one list, `
   decision; Claude proposed something and waits for your yes. A step that a command or code change can do is
   never a to-do, even setup that has to wait for a task to merge: a chat queues it as a task, a worker as a
   follow-up (TODO-5). The worker, design and follow-up chat prompts all give this same list. These
-  are stored in the `todos` table. Two ways in:
+  are stored in the `todos` table. In every chat block (`queue`, `todo`, `schedule`, `topic`) a fence closes
+  the block only on a line of its own, so three backticks inside a JSON string are content. Two ways in:
   - A design or project chat reply with a fenced block in the language `todo`, holding a JSON list of
     `{"verb": "Do" | "Agree", "title", "why"}`. The block is taken out of the reply you see, as a `queue` block
     is. The item's source is that chat.
