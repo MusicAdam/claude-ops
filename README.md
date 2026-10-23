@@ -431,8 +431,11 @@ the uncommitted-files banner, Deploy. `/api/state` gathers them into one list, `
   - **Read** (a report): a research task merged into `dev` whose report you haven't opened (see
     [Research](#research), RES-5).
   - **Do** (research): an open to-do in the research repo's `todos.json`, in its linked project (RES-8).
-- **TODO-2 Two kinds Claude adds.** **Do**: something only you can do (grant Full Disk Access, add an API key,
-  run a command that needs your password). **Agree**: Claude proposed something and waits for your yes. These
+- **TODO-2 Two kinds Claude adds.** **Do**: something that truly needs you: a password or sudo, a macOS
+  permission grant (Full Disk Access and the like), an API key or account you must create. **Agree**: a
+  decision; Claude proposed something and waits for your yes. A step that a command or code change can do is
+  never a to-do, even setup that has to wait for a task to merge: a chat queues it as a task, a worker as a
+  follow-up (TODO-5). The worker, design and follow-up chat prompts all give this same list. These
   are stored in the `todos` table. Two ways in:
   - A design or project chat reply with a fenced block in the language `todo`, holding a JSON list of
     `{"verb": "Do" | "Agree", "title", "why"}`. The block is taken out of the reply you see, as a `queue` block
@@ -447,6 +450,15 @@ the uncommitted-files banner, Deploy. `/api/state` gathers them into one list, `
 - **TODO-4 Order and groups.** Each item has a group: `unblock` (Answer, Fix), `ship` (Promote, Ship, Commit),
   `review` (Try, Review, Agree, Read), `only_me` (Do). The list runs unblock, ship, review, only_me, oldest first
   within a group.
+- **TODO-5 Follow-up tasks.** A worker's result is `{"status": "done" | "needs_input" | "failed" | "split",
+  "summary", "question"?, "tasks"?, "todos"?, "followups"?}`. `followups` is a list of `{title, body}`, the
+  shape of split tasks, for steps a task can do once this one has merged (running a command this task adds,
+  say). It is read only with status `done`; on any other status it is ignored. Each item is queued as a task in
+  the same project with `parent` and `depends_on` set to this task, so it starts only after this task merges.
+  Priority, model and effort take the queue defaults and release the project default, not the parent's. The
+  parent logs `follow-ups: #N, #M`. If the parent then fails at the gate or merge, the follow-ups wait behind it
+  as any dependent does. A worker resumed after a gate failure may list them again: a title already queued
+  behind the task is skipped. Each body stands alone, like a split task: goal, exact steps, acceptance.
 
 Each item is `{key, verb, group, project, title, why, since, est_min, source: {kind, id}}`. `key` stays the same
 across polls (`task:231:review`, `chat:42:read`, `project:diskgame:commit`, `todo:7`, `task:240:report`,

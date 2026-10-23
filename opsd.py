@@ -1913,6 +1913,9 @@ def _pipeline(p, tid):
             if pending_steers(tid):  # sent as the worker finished
                 prompt = steered_prompt("as you finished")
                 continue
+            if res.get("followups"):  # steps for after this merges, queued behind it; only a done result has them
+                if ids := add_followups(p, tid, res["followups"]):
+                    ev(tid, "follow-ups: " + ", ".join(f"#{i}" for i in ids))
             if applying:
                 why = senddev_commit(p, tid)
                 if why:
@@ -2135,6 +2138,25 @@ def add_subtasks(p, tid, items, priority=0, hold=0, auto_release=None, model=Non
         ids.append(add_task(p.name, sub.get("body") or sub.get("title", ""), sub.get("title", ""),
                             priority=priority, hold=hold, depends_on=dep, parent=tid, auto_release=auto_release,
                             model=model, effort=effort))
+    return ids
+
+
+def add_followups(p, tid, items):
+    """Queue a done worker's follow-ups ({title, body}) as tasks that depend on tid, so each runs only once tid has
+    merged; if tid fails they wait behind it like any dependent. Queue defaults for priority, model, effort and
+    release, not the parent's. A worker resumed after a gate failure may list them again: a title already queued
+    behind tid is skipped. Returns the new ids."""
+    have = {r["title"] for r in q("SELECT title FROM tasks WHERE parent=? AND depends_on=?", (tid, tid))}
+    ids = []
+    for f in items if isinstance(items, list) else []:
+        if not isinstance(f, dict) or not (f.get("body") or f.get("title")):
+            continue
+        body = f.get("body") or f.get("title")
+        title = (f.get("title") or title_of(body)).strip()[:120]
+        if title in have:
+            continue
+        have.add(title)
+        ids.append(add_task(p.name, body, title, depends_on=tid, parent=tid))
     return ids
 
 
@@ -5929,10 +5951,13 @@ PROJECT_CHAT_PROMPT = ("You are talking with the owner through the claude-ops da
                        "letters, digits, - and _ with a .png, .jpg, .gif or .webp ending, then embed it with "
                        "`![what it shows](/api/images/<name>)`. The dashboard can't show a picture from anywhere else "
                        "on disk, such as /tmp or the repo. "
-                       "When the owner alone must do something (grant Full Disk Access, add an API key, run a command "
-                       "that needs their password), or you proposed something and wait for their yes, add it to their "
-                       "to-do list: a fenced block in the language `todo` holding a JSON list of "
-                       '{"verb": "Do" or "Agree", "title", "why"}. Never add work a task or you could do. Close an '
+                       "A to-do is only for something that truly needs the owner: a password or sudo, a macOS "
+                       "permission grant (Full Disk Access and the like), an API key or account they must create, or "
+                       "a decision (you proposed something and wait for their yes). Add one to their to-do list with "
+                       "a fenced block in the language `todo` holding a JSON list of "
+                       '{"verb": "Do" or "Agree", "title", "why"}. A step that a command or code change can do is '
+                       "never a to-do, even setup that must wait for a task to merge: do it, or queue it as a task. "
+                       'Close an '
                        'item that is settled with {"close": <id>} in a `todo` block; the dashboard tells you the ids. '
                        "When the owner asks for work that repeats (\"every Monday, check the dependencies\"), add a "
                        "fenced block with the language `schedule` holding a JSON list of {project, title, body, every, "
