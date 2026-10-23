@@ -448,6 +448,42 @@ points at the chat or task that added it, and has `todo`, its id for the Done bu
 There is no `done_today` count yet: derived items leave no record when they close, so only stored items could be
 counted, and a number that skips most of what you did would mislead.
 
+### Links in chats
+
+Every reference in a design chat, project chat or task chat message, from Claude or from you, is a working
+link. A reference whose target is missing is never a link that fails on click. The Today view will reuse this.
+
+- **LINK-1 Images.** `[image: <path>]`, `![alt](path)` and a bare image path show a thumbnail; click it to open
+  the picture full size. Paths into `~/.claude-ops/images/` and a design chat's folder `designs/<id>/` map to
+  `/api/images/…` and `/api/designs/<id>/files/…`. Attach a picture with the 📎 button, by pasting, or by dropping
+  it on the message box.
+- **LINK-2 Tasks.** `#231` (a `#` and digits, as a word of its own, not in code or a URL) opens that task's
+  details, for any task id: one older than the 500 in `/api/state` comes from `/api/tasks/<id>`.
+- **LINK-3 Repo files.** A relative repo path such as `docs/design.md`, `opsd.py:5914` or `README.md § Design mode`
+  opens that file as it is on the project's dev worktree, in a side drawer. Markdown renders as on the page and
+  scrolls to the `§` heading; other files show as numbered lines, scrolled to `:line`. An
+  `openspec/changes/<name>/…` path opens that change in the OpenSpec reader, and a design-folder file opens
+  from `/api/designs/<id>/files/<name>`. `GET /api/files?project=<name>&path=<rel>` serves the file: only one
+  inside that project's dev worktree (symlinks resolved), not git-ignored, and 1 MB or smaller.
+- **LINK-4 Places in the app.** Names of places, such as Projects tab, Settings, Research tab, Analyze or Design
+  tab, link to that place's hash route. One table in `dashboard.html`, `APP_PLACES`, maps each phrase to its
+  route; a new place (the Today view's Scheduled, More → …) is one more row.
+- **LINK-5 URLs.** An http(s) URL opens in a new tab with `rel=noopener`. A trailing `.` `,` `)` `:` or `;` is
+  the sentence's, not the link's.
+- **LINK-6 No broken links.** Before a message renders, the daemon checks every target in one batched request,
+  `POST /api/links/check {project, refs: [...]}` → `{refs: {ref: null | reason}}`. The page keeps each answer,
+  so redrawing a long chat asks nothing new; a missing target is asked again after two minutes. The project is the
+  chat's project. A missing target shows greyed with ⚠ and a tooltip giving the reason, such as
+  `Not on dev: docs/x.md` or `No task #9999`, and is not clickable. A plain word that only looks like a file
+  name (Node.js) stays plain text when there is no such file. For `README.md § Design mode for details` the
+  daemon also returns the heading it found, so the link ends at "Design mode".
+- **LINK-7 Tests.** `tests/test_chat_links.py` has one test per kind (image, task, repo file, file with `§`,
+  OpenSpec path, design file, app place, URL with trailing punctuation), one for a missing target, and one for
+  `/api/files` refusing a path outside the worktree.
+
+Text in fenced code and inside a longer code span is never linked. A code span that is only a file path (as
+Claude usually writes one) links as that file.
+
 ## Chat mode
 
 The Chat tab is plain Claude in the project folder, as if you ran `claude` there. It works in your
