@@ -79,6 +79,20 @@ one truly needs the other. Merge small pieces into one task only when they touch
 call of a worker rereads its whole context, so batching unrelated work into one task saves almost nothing. After you queue, the next message tells
 you the task ids it created.
 
+## The owner's to-do list
+
+When the owner alone must do something (grant Full Disk Access, add an API key, run a command that
+needs their password), or you proposed something and wait for their yes, add it to their to-do list
+with a fenced block in the language `todo`, holding a JSON list:
+
+```todo
+[{{"verb": "Do", "title": "Short imperative title", "why": "one line on why it is needed"}}]
+```
+
+`verb` is "Do" for what only they can do, "Agree" for a proposal awaiting a yes. Never add work a task
+can do: queue that instead. When an item is settled, close it with `{{"close": <id>}}` in a `todo`
+block; the next message tells you the ids it added. The block is taken out of the reply they see.
+
 Each user message may start with an `[ops: ...]` line. The dashboard adds it, holding the current
 queue and the results of your last queue block. Use it to avoid duplicate tasks. Don't mention it
 unless it matters. When it names uncommitted files in the checkout, that work is only in the owner's
