@@ -690,7 +690,7 @@ a[data-task] { color: var(--accent); cursor: pointer; }
         <label>After # <input id="after" style="width:60px" placeholder="—"></label>
         <label title="The model its worker starts on. Default: the Tasks model setting (per kind, on the Settings tab)">Model <select id="tmodel"><option value="">Default</option><option value="opus">Opus</option><option value="sonnet">Sonnet</option><option value="haiku">Haiku</option></select></label>
         <label title="How hard its worker thinks (--effort). Default: the Effort setting on the Settings tab">Effort <select id="teffort"><option value="">Default</option><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option><option value="xhigh">Extra high</option><option value="max">Max</option></select></label>
-        <label title="Build it and wait for you to play and approve before merging"><input type="checkbox" id="hold"> Hold for my review</label>
+        <label title="Build it and wait for you to play and approve before merging. Only for projects with an app to launch; elsewhere it merges after the gate"><input type="checkbox" id="hold"> Hold for my review</label>
         <label title="Once it merges into dev, promote dev to main, as the Promote button does. Tasks it splits into are promoted together, after the last one merges. Starts as the project's default, set on its card."><input type="checkbox" id="autorel"> Promote after merge</label>
       </div>
       <div class="callout hidden" id="dirtywarn"></div>

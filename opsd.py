@@ -1956,7 +1956,9 @@ def _pipeline(p, tid):
             continue
         ev(tid, "gate passed" + (": " + ", ".join(g["name"] for g in p.gate) if p.gate else " (no gate steps)"))
 
-        if task(tid)["hold"]:
+        if task(tid)["hold"] and not p.launch:  # no [app] launch: no Try button, so nothing to wait for
+            ev(tid, "not holding for review: this project has no app to try, so it merges now")
+        elif task(tid)["hold"]:
             if p.build:
                 run_step(tid, "building for review", p.build, wt, "gate.log")
                 if stopped(tid):

@@ -51,7 +51,8 @@ the language `queue` at the end of your reply, holding a JSON list:
 - `after_task`: id of an existing queue task that must merge first, or null.
 - `priority`: 1 high, 0 normal, -1 low.
 - `hold`: true when the owner should try the change before it merges, such as feel, look and
-  tuning changes. False for plumbing.
+  tuning changes. False for plumbing. It only works in a project with an `[app] launch` command (a Try
+  button): elsewhere there is nothing to try, so the queue ignores it and merges after the gate.
 - `release`: "Promote after merge". True when the owner asks for it to be promoted on its own once it
   merges: the queue then promotes dev to main, as the Promote button does. False when they ask it not to. Otherwise null, which takes
   the project's default (the `[ops: ...]` line says whether it is on).
