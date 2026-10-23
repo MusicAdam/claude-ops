@@ -1165,6 +1165,38 @@ its own and list it as `"."`: `repos = ["ballup-dunk", "ballup-swish", "."]`.
   target once more first, as after any change to `repos`.
 - **Without `"."`** nothing changes.
 
+## Config in the repo
+
+A project's gates, deploy targets and the rest can live in its own repo, so a task can change them, with review
+and history like any other change. Put `claude-ops.toml` at the root of the project's repo: the repo itself for a
+plain project, the root repo (`"."` in `repos`) for a workspace. A workspace without `"."` can't have one.
+
+- **What goes where.** The home toml (`~/.claude-ops/projects/<name>.toml`) keeps identity and machine
+  settings: `title`, `repo`, `main_branch`, `dev_branch`, `worktrees`, `max_parallel`, `direct_main`,
+  `chat_mcp` and `[worker] env` (and `port_base`). The repo file may hold `repos`, `[worktree]` (`clone`, `setup`,
+  `setup_timeout`), `[[gate]]`, `[app]`, `[[deploy]]`, `[worker] notes` and `[design] notes`. A home-only key in
+  the repo file is ignored with a warning, on the project's card and in the daemon log.
+- **Which wins.** A key in the repo file replaces the home toml's whole: two `[[gate]]` lists are not merged,
+  and a `[worktree]` table replaces the home one. A key the repo file leaves out comes from the home toml.
+  `repos` in the repo file must list `"."`.
+- **Read from main.** The queue reads the file as it is on `main_branch` (`git show main:claude-ops.toml`), never
+  dev. A task's change to its gates takes effect only once it reaches main, so a task can't loosen the gate it is
+  judged by. The daemon checks every 10 seconds and reloads when main's copy changes, and on Reload.
+- **A broken file.** If the file is not valid TOML, or a key has the wrong type, the last good config stays in
+  use (after a restart with no last good one, the home toml alone). The error shows on the project's card and in
+  the daemon log. Fix it on main and it loads by itself.
+- **A repo not cloned yet.** If `repos` in the file names a folder your checkout lacks (a task added
+  `ballup-web`), the card says "ballup-web/ is not cloned", the last good config stays in use, and the queue
+  holds that project's queued tasks. Clone it into the workspace folder yourself (nothing clones it for you);
+  the daemon sees it within 10 seconds and goes on.
+- **Workers know.** A project with the file gets a section in each worker brief saying where it is, that a
+  change takes effect on main, and which keys stay in the home toml.
+- **Move a project over** with `./opsd.py export-config -p NAME`. It writes the home toml's repo keys into
+  `claude-ops.toml` in your checkout, uncommitted, and prints what it wrote. It doesn't change the home toml:
+  the queue goes on reading those keys there until you commit the file and it reaches main. Then you may delete
+  them from the home toml. It refuses if the file is there already, or for a workspace without `"."`.
+- **Without the file** nothing changes.
+
 ## Archiving a project
 
 On the dashboard, open a project's card and click **Archive**, or run `./opsd.py archive-project NAME`. Either
@@ -1186,7 +1218,11 @@ Both commands go through the running daemon (`POST /api/projects/NAME/archive` a
 
 ## Project config: `~/.claude-ops/projects/<name>.toml`
 
+Each key is marked **home** (only here, in the home toml) or **repo** (here, or in `claude-ops.toml` in the
+project's repo, where it wins: see Config in the repo).
+
 ```toml
+# --- home: identity and machine settings
 title = "My Game"
 repo = "/Users/you/dev/mygame"
 main_branch = "main"
@@ -1198,6 +1234,7 @@ max_parallel = 0                   # per-project cap; 0 = only the global "Paral
 # direct_main = false              # default true: a merge moves main at once, no release (see Straight to main)
 chat_mcp = []                      # MCP servers a project chat loads, by name (see Chat mode); default none
 
+# --- repo: the rest may also live in claude-ops.toml (repos too; it must list "." there)
 [worktree]
 clone = ["Library"]                # APFS-cloned into each new worktree (warm caches)
 setup = ["npm ci --silent"]        # run in each new worktree; $OPS_REPO is your checkout
@@ -1219,8 +1256,8 @@ artifact = "Builds/macOS/MyGame.app"           # must exist after build; kept as
 # stop = "scripts/app-stop.sh"         # optional: stops the app if it runs from this worktree
 
 [worker]
-env = { GAME_PORT = "{port}" }     # extra env; {port} is the worker's own free port ($OPS_PORT)
-notes = """Project-specific guidance added to every worker brief."""
+env = { GAME_PORT = "{port}" }     # home: extra env; {port} is the worker's own free port ($OPS_PORT)
+notes = """Project-specific guidance added to every worker brief."""   # repo
 
 [[deploy]]                         # zero or more; see Deploys. Runs only when you click Deploy
 name = "store test"
