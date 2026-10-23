@@ -15,6 +15,7 @@ the golden version: it changes only when you promote.
 ./opsd.py add-project ~/dev/myrepo   # or "+ Project" on the dashboard
 ./opsd.py add -p myrepo "Fix the crash when the save file is empty"
 ./opsd.py add -p myrepo --model sonnet "Rename the config key"   # its worker runs on Sonnet (see Models)
+./opsd.py schedule add -p myrepo --every 'mon 09:00' "Check dependencies"   # a recurring job (see Recurring jobs)
 ./opsd.py deploy -p myrepo "store test" --version patch --note "Fixes the crash"   # see Deploys
 ./opsd.py send myrepo --design "How does the save format work?"   # what a worker or chat runs to ask a peer project
 ./opsd.py archive-project myrepo     # take it off the queue; unarchive-project brings it back (see Archiving)
@@ -620,6 +621,47 @@ opsd.py send <project> --chat "<message>"     # a project chat there, in its che
 - The daemon gives each session `OPS_FROM` (`task:12` or `chat:3`) and `OPS_DAEMON` (its own URL), which `send`
   reads. Run from a terminal without them, it still reaches the live daemon; the task then says it came from
   outside the queue.
+
+## Recurring jobs
+
+A schedule queues an ordinary task on a timetable: "every Monday at 09:00, check the dependencies". The task
+gets a worktree, the gate and a merge like one you queued by hand, and says **Sent by** its schedule.
+
+```bash
+./opsd.py schedule add -p myrepo --every 'mon 09:00' "Check dependencies"   # also --body, --hold, --model, --effort
+```
+
+- **`every`** takes one of these, in local time:
+  - `day HH:MM`: every day.
+  - `weekday HH:MM`: Monday to Friday.
+  - `mon HH:MM`: one day of the week (`mon` … `sun`), or a list such as `mon,thu HH:MM`.
+  - `hour`: every hour, on the hour.
+
+  Anything else is refused with a 400 that lists these forms. Times are local wall-clock times, so `09:00` stays
+  09:00 across a daylight-saving change.
+- **When it runs.** The scheduler checks schedules on every pass (every 2 s). When a schedule is due and not paused,
+  it queues a task with the schedule's title, body, model, effort, hold and priority, and moves `next_at` to the
+  next slot.
+- **No pile-up.** When the task it queued last is still open (queued, running, gating, merging, in review, waiting on
+  you, or paused), that slot is skipped: the open task's log says so, and `next_at` moves on.
+- **Missed slots.** If the daemon was down over one or more slots, the schedule runs once when it starts again,
+  never once per missed slot.
+- **Run now** queues a task at once and leaves `next_at` alone. It queues even when the last task is still open:
+  you asked for it.
+- **Pause** stops it queueing; **Resume** sets `next_at` to the next slot from now, so a long pause doesn't run at
+  once.
+- **Where to see it.** The **Schedules** page (`#schedules`, linked from Settings) lists each schedule with its next
+  run and its last task, with Run now, Pause/Resume, Edit (title, body, every) and Delete.
+- **From a chat.** A design or project chat can create one when you ask for something that repeats, with a fenced
+  `schedule` block holding a JSON list of `{project, title, body, every, hold?, model?, effort?}`. The daemon
+  creates them and strips the block from the reply, as it does a `queue` block; the next message tells Claude
+  what it made, or why one was refused.
+
+API: `/api/state` has `schedules` (each with `next_at`, `paused`, `last_task` and `last_state`).
+`POST /api/schedules` creates one; `POST /api/schedules/<id>` edits it (any of project, title, body, every,
+hold, priority, model, effort); `POST /api/schedules/<id>/run`, `/pause`, `/resume` and `/delete` do the rest.
+
+The research daily job is not a schedule yet.
 
 ## Workspaces
 

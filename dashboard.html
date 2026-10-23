@@ -340,6 +340,12 @@ a[data-task] { color: var(--accent); cursor: pointer; }
 .settings .why { grid-column: 2 / -1; color: var(--muted); font-size: 12px; }
 .settings h3 { font-size: 13px; color: var(--muted); margin: 14px 0 2px; font-weight: 600; }
 .settings .muted { font-size: 12px; margin-top: 6px; }
+.sched { padding: 10px 0; border-top: 1px solid var(--line); } .sched:first-child { border-top: 0; }
+.sched .sub { color: var(--muted); font-size: 12px; margin: 3px 0 6px; }
+.sched code { font-size: 12px; } .sched a { color: var(--accent); cursor: pointer; text-decoration: underline; }
+.sched input, .sched textarea { width: 100%; box-sizing: border-box; margin: 2px 0 6px; }
+.sched textarea { min-height: 80px; } #schednew { display: grid; grid-template-columns: auto 1fr 150px; gap: 6px; }
+#schednew textarea { grid-column: 1 / -1; min-height: 60px; }
 #spent .big { font-size: 22px; font-weight: 600; font-variant-numeric: tabular-nums; }
 #spent table { border-collapse: collapse; margin-top: 8px; font-variant-numeric: tabular-nums; }
 #spent td { padding: 2px 16px 2px 0; } #spent td:last-child { text-align: right; }
@@ -486,8 +492,28 @@ a[data-task] { color: var(--accent); cursor: pointer; }
       <div id="rsrepomsg" class="err"></div>
     </div>
     <div class="card settings">
+      <h2>Schedules</h2>
+      <div><a href="#schedules" id="schedlink" class="origin">Recurring jobs</a> <span class="muted" id="schedcount"></span></div>
+      <div class="muted">Tasks the queue adds on a timetable, such as every Monday at 09:00.</div>
+    </div>
+    <div class="card settings">
       <h2>Spent</h2>
       <div id="spent"></div>
+    </div>
+  </section>
+</main>
+<main id="schedulesview" class="hidden">
+  <section>
+    <div class="card">
+      <h2>Schedules</h2>
+      <div class="muted" style="margin-bottom:8px">Each one queues an ordinary task on its timetable, in local time. A slot is skipped while the last task it queued is still open. Every: <code>day HH:MM</code>, <code>weekday HH:MM</code>, <code>mon HH:MM</code> (or <code>mon,thu HH:MM</code>), <code>hour</code>.</div>
+      <div id="schedlist"></div>
+    </div>
+    <div class="card">
+      <h2>New schedule</h2>
+      <div id="schednew"><select id="schedproj"></select><input id="schedtitle" placeholder="Title, such as Check dependencies"><input id="schedevery" placeholder="mon 09:00">
+        <textarea id="schedbody" placeholder="The task's brief: what its worker does each time. Empty: the title."></textarea></div>
+      <div style="margin-top:6px"><button id="schedadd" class="primary">Add schedule</button> <span class="err" id="schedmsg"></span></div>
     </div>
   </section>
 </main>
@@ -712,7 +738,7 @@ function render() {
   // The header filter hides the selected task's project: drop the selection rather than show it as part of this one.
   const st = sel && state.tasks.find(t => t.id === sel);
   if (st && !inView(st.project)) clearSelection();
-  renderProjects(); renderHeader(); renderMains(); renderList();
+  renderProjects(); renderHeader(); renderMains(); renderList(); renderSchedules();
   $("#tab-research").classList.toggle("hidden", !state.research);
   if (tab === "research") { if (state.research) { rsLock(); refreshResearch.poll(); } else rsRender(); }
   if (tab === "analyze" && (anaKey !== `${anaPeriod}|${pf}` || Date.now() - anaAt > 60000)) refreshAnalyze();
@@ -1362,6 +1388,7 @@ function originLine(o, verb) {
   return o ? `<div class="muted" style="margin:4px 0">${verb} <a class="origin">${esc(o.words)}</a>${o.title ? ` · ${esc(o.title)}` : ""}</div>` : "";
 }
 function openOrigin(o) {
+  if (o.ref.startsWith("schedule:")) { showTab("schedules"); return; }
   if (o.ref.startsWith("task:")) { showTab("tasks"); selectTask(o.id); refresh(); return; }
   if (!inView(o.project)) { setFilter(o.project); renderProjects(); renderHeader(); renderMains(); }
   showTab(o.kind === "project" ? "chat" : "design"); selectChat(o.id);
@@ -1549,8 +1576,8 @@ const TABTEXT = {
          intro: "Talk to Claude in the project folder, as if you ran claude there. It can read, edit and run commands in your checkout. Actions that would ask for permission are denied, since nobody can answer here."}};
 let tab = "projects", chatSel = null, chatData = null, chatKey = "", chatSels = {};
 try { tab = localStorage.getItem("ops-tab") || "projects"; chatSels = JSON.parse(localStorage.getItem("ops-chats") || "{}"); } catch {}
-const TABS = ["tasks", "projects", "design", "chat", "analyze", "research", "settings"];
-if (["#tasks", "#projects", "#design", "#queue", "#chat", "#analyze", "#settings"].includes(location.hash)) tab = location.hash.slice(1);
+const TABS = ["tasks", "projects", "design", "chat", "analyze", "research", "settings", "schedules"];
+if (["#tasks", "#projects", "#design", "#queue", "#chat", "#analyze", "#settings", "#schedules"].includes(location.hash)) tab = location.hash.slice(1);
 if (/^#research(\/|$)/.test(location.hash)) tab = "research";
 if (!TABS.includes(tab)) tab = "tasks";  // "queue", the old name of Tasks
 const chatTab = () => tab === "design" || tab === "chat";
@@ -1558,7 +1585,7 @@ const chatTab = () => tab === "design" || tab === "chat";
 function showTab(t) {
   tab = t;
   try { localStorage.setItem("ops-tab", t); } catch {}
-  for (const k of TABS) $(`#tab-${k}`).classList.toggle("on", t === k);
+  for (const k of TABS) $(`#tab-${k}`)?.classList.toggle("on", t === k || (k === "settings" && t === "schedules"));
   // On a phone the tabs scroll sideways: bring the chosen one into view, without scrolling the page.
   const bar = $("header > .tabs"), on = $(`#tab-${t}`);
   if (on && bar.scrollWidth > bar.clientWidth) {
@@ -1569,6 +1596,12 @@ function showTab(t) {
   $("#tasksview").classList.toggle("hidden", t !== "tasks");
   $("#projectsview").classList.toggle("hidden", t !== "projects");
   $("#settingsview").classList.toggle("hidden", t !== "settings");
+  $("#schedulesview").classList.toggle("hidden", t !== "schedules");
+  if (t === "schedules") { if (location.hash !== "#schedules") history.replaceState(null, "", "#schedules"); if (state) renderSchedules(); }
+  else {  // leaving drops an edit in progress
+    if (schedEdit !== null) { schedEdit = null; $("#schedlist").dataset.html = ""; }
+    if (location.hash === "#schedules") history.replaceState(null, "", "#" + t);
+  }
   $("#analyzeview").classList.toggle("hidden", t !== "analyze");
   if (t === "analyze") refreshAnalyze();
   $("#researchview").classList.toggle("hidden", t !== "research");
@@ -1589,6 +1622,59 @@ $("#tab-chat").onclick = () => showTab("chat");
 $("#tab-settings").onclick = () => showTab("settings");
 $("#tab-analyze").onclick = () => showTab("analyze");
 $("#tab-research").onclick = () => showTab("research");
+
+// Schedules (#schedules): recurring jobs that queue a task on a timetable. A row being edited is left alone by the poll.
+let schedEdit = null;
+const when = t => new Date(t * 1000).toLocaleString([], {weekday: "short", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit"});
+function renderSchedules() {
+  const all = state.schedules || [], ss = all.filter(s => inView(s.project));
+  $("#schedcount").textContent = all.length ? `· ${all.length}` : "";
+  const sel = $("#schedproj"), opts = state.projects.map(p => `<option value="${esc(p.name)}">${esc(p.title)}</option>`).join("");
+  if (sel.dataset.html !== opts) { const v = sel.value; sel.innerHTML = sel.dataset.html = opts; if (v) sel.value = v; }
+  if (pf) sel.value = pf;
+  if (tab !== "schedules" || schedEdit !== null) return;
+  put($("#schedlist"), ss.length ? ss.map(s => `<div class="sched" data-id="${s.id}">
+    <div><b>${esc(s.title)}</b> ${pf ? "" : `<span class="ptag">${esc(P(s.project).title)}</span>`} <code>${esc(s.every)}</code>${s.paused ? ' <span class="badge s-paused">paused</span>' : ""}${s.hold ? ' <span class="ptag">hold</span>' : ""}</div>
+    <div class="sub">${s.paused ? "Paused" : `Next ${esc(when(s.next_at))}`} · ${s.last_task
+      ? `last task <a data-task="${s.last_task}">#${s.last_task}</a> <span class="s-${esc(s.last_state || "")}">${esc(LABEL[s.last_state] || s.last_state || "gone")}</span>`
+      : "no task yet"}</div>
+    <div><button data-act="run" title="Queue its task now. The next run stays as it is.">Run now</button>
+      <button data-act="${s.paused ? "resume" : "pause"}">${s.paused ? "Resume" : "Pause"}</button>
+      <button data-act="edit">Edit</button> <button data-act="delete">Delete</button></div></div>`).join("")
+    : `<div class="muted">No schedules${pf ? " in this project" : ""} yet. Add one below, ask a design chat for something that repeats, or run <code>opsd.py schedule add -p NAME --every 'mon 09:00' "title"</code>.</div>`);
+}
+$("#schedlist").onclick = async e => {
+  const a = e.target.closest("a[data-task]");
+  if (a) { showTab("tasks"); selectTask(+a.dataset.task); return; }
+  const b = e.target.closest("button[data-act]"), row = e.target.closest(".sched");
+  if (!b || !row) return;
+  const id = +row.dataset.id, s = (state.schedules || []).find(x => x.id === id), act = b.dataset.act;
+  if (act === "edit") {
+    schedEdit = id;
+    row.innerHTML = `<input class="et" value="${esc(s.title)}"><input class="ee" value="${esc(s.every)}" placeholder="mon 09:00">
+      <textarea class="eb">${esc(s.body)}</textarea><button data-act="save" class="primary">Save</button> <button data-act="cancel">Cancel</button> <span class="err"></span>`;
+    return;
+  }
+  if (act === "cancel") { schedEdit = null; $("#schedlist").dataset.html = ""; renderSchedules(); return; }
+  if (act === "delete" && !confirm(`Delete the schedule “${s.title}”? Tasks it queued stay.`)) return;
+  try {
+    if (act === "save") {
+      await api(`/api/schedules/${id}`, {title: row.querySelector(".et").value, every: row.querySelector(".ee").value, body: row.querySelector(".eb").value});
+      schedEdit = null; $("#schedlist").dataset.html = "";
+    } else await api(`/api/schedules/${id}/${act}`, {});
+    refresh();
+  } catch (err) {
+    if (act === "save") row.querySelector(".err").textContent = err.message; else alert(err.message);
+  }
+};
+$("#schedadd").onclick = async () => {
+  try {
+    await api("/api/schedules", {project: $("#schedproj").value, title: $("#schedtitle").value, every: $("#schedevery").value, body: $("#schedbody").value});
+    $("#schedtitle").value = $("#schedevery").value = $("#schedbody").value = ""; $("#schedmsg").textContent = "";
+    refresh();
+  } catch (err) { $("#schedmsg").textContent = err.message; }
+};
+$("#schedlink").onclick = e => { e.preventDefault(); showTab("schedules"); };
 
 // Markdown for chat replies and OpenSpec files, in house. The source is HTML-escaped first, so raw HTML never
 // renders and every pattern below matches escaped text (a quote's ">" is "&gt;"). With idPrefix each heading gets

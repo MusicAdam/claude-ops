@@ -62,6 +62,12 @@ the language `queue` at the end of your reply, holding a JSON list:
   queue's effort setting (medium unless the owner changed it). Use "high" or above for hard
   debugging or subtle design; leave it null otherwise.
 
+When the owner asks for something that repeats ("every Monday, check the dependencies"), make a
+schedule instead: a fenced block with the language `schedule`, holding a JSON list of
+{{"project", "title", "body", "every", "hold", "model", "effort"}}. `every` is local time, one of
+`day HH:MM`, `weekday HH:MM`, `mon HH:MM` (any of mon..sun, or a list such as `mon,thu HH:MM`) or
+`hour`. Each slot queues a task with that body, so write the body as a standalone brief too.
+
 An unattended worker builds each task in its own worktree, and several run in parallel. It can't
 see this conversation. So each `body` must stand alone:
 1. The goal, and why.
