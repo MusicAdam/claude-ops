@@ -663,12 +663,23 @@ stay on the right of the header.
     Today composer no longer offers a switch.
   - **Which topic a message goes to** (`conv_open()` in opsd.py):
     1. Opening a to-do whose source is a chat (Read, Agree, …) makes that chat the current topic.
-    2. Opening a to-do whose source is a task, or **Ask Claude about this**, continues the current plan & design
-       topic: the current topic if it is one, else the project's latest plan & design topic, else a new one starts
-       with your next message. The message box gets the starter text (`About #231: `) when it is empty.
+    2. Opening a to-do whose source is a task (Try, Review, Fix, Answer, Promote for a release, a report's Read) or
+       a project item (Promote, Ship, Commit) opens that thing's own plan & design topic. Its subject is
+       `task:<id>`, or `project:<name>:promote|ship|commit`. If an open topic has that subject, the latest one
+       becomes current. Otherwise nothing is made yet: your first message creates the topic, titled `#<id> <task
+       title>` or the item's title (`Promote <project>`), cut to 80 characters. Its first turn carries the item's
+       context to Claude as a note (for a task: state, gate result, question or error, files changed, brief; for a
+       project item: its why, and for Ship the changes on main), with a line `About task #231` in the chat. An
+       ended topic is not reused: the next message starts a new one. No starter text goes in the message box.
+       The **Answer** step still sends the message box to the waiting worker, as before.
     3. **New topic** starts a fresh plan & design topic (`how: "new"`, `mode: "design"`): your next message opens
        it. The line under the button says so.
     4. Otherwise a message continues the current topic.
+
+    Picking a topic in Earlier topics, **New topic**, or another item replaces a subject still waiting for its first
+    message. The subject is stored in `designs.subject` and kept in `conv:<project>` while pending. API:
+    `POST /api/conversation` with `{project, how, ref?, mode?}`, `how` one of `chat`, `topic`, `subject` (`ref` is
+    the subject key), `task` (the current plan & design topic, for the research runs panel), `new`, `mode`.
 
     To queue a task, ask Claude. The Tasks page's own **Queue task** form still queues one without Claude.
   - **What a topic may run.** Plan & design and edit my checkout both run any shell command you could at the CLI,
@@ -703,7 +714,9 @@ stay on the right of the header.
   output, log). The train shows the tasks it carries and **Promote now**. A schedule shows its last runs (its tasks in
   `/api/state`), with **Run now**, **Pause** or **Resume**, and **Edit**, which opens it on the Schedules page.
   Research runs in the research repo (legacy) link to the Research page; research tasks are tasks.
-  Every panel has **Ask Claude about this**, which puts `About #231: ` in the message box.
+  Every panel has **Ask Claude about this**. A task, the promote train and a schedule open their own topic, as their
+  to-dos do (TODAY-2 rule 2; subjects `task:<id>`, `project:<name>:promote`, `schedule:<id>`). The research runs
+  panel puts `About the research runs: ` in the message box of the current plan & design topic.
 - **TODAY-4 Centre: a project's sections.** Over the conversation, the project in view has four tabs:
   **Conversation · Specs & designs · Research · Tasks**. Conversation is TODAY-2. The tab you pick is kept in this
   browser.

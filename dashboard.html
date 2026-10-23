@@ -2867,14 +2867,8 @@ function renderSayMode() {
 const tdResearch = () => !!(TD.cv && TD.cv.mode === "research" && (TD.cv.topic === null || typeof TD.cv.topic === "string"));
 // The project in view: the one Ask Claude about this moved to, else the item's, else the filter's, else the picker's.
 const convProject = () => (TD.over && TD.over.key === TD.convKey && TD.over.project) || (TD.item && TD.item.project) || pf || $("#cproj").value || "";
-// Text put in an empty message box for a task's item; taken out again if you leave it as it was.
-function tdStarter(text) {
-  const say = $("#say");
-  if (TD.mode || say.value.trim()) return;
-  say.value = TD.starter = text;
-}
+// Text put in an empty message box (Ask Claude about the research runs); taken out again if you leave it as it was.
 function tdClearStarter() { if (TD.starter && $("#say").value === TD.starter) $("#say").value = ""; TD.starter = ""; }
-const aboutTask = (id, t) => `About #${id}${t && t.title ? ` (${t.title})` : ""}: `;
 async function convOpen(body) {
   const project = convProject(); if (!project) return;
   tdShowConv();
@@ -2891,12 +2885,12 @@ async function loadConv() {
   }
   let cv = null;
   try {
-    // A new item picks the topic once: its chat, or for a task the plan & design topic. After that you choose.
+    // A new item picks the topic once: its chat, or its own topic (task:<id>, project:<name>:ship, …), made when
+    // you send the first message. After that you choose.
     if (project && TD.applied !== `${key}|${project}`) {
-      const how = s.kind === "chat" ? {how: "chat", ref: s.id} : s.kind === "task" ? {how: "task"} : null;
+      const how = s.kind === "chat" ? {how: "chat", ref: s.id} : it && it.subject ? {how: "subject", ref: it.subject} : null;
       if (how) cv = await api("/api/conversation", {project, ...how}).catch(() => null);
       TD.applied = `${key}|${project}`;
-      if (s.kind === "task") tdStarter(aboutTask(s.id, TD.task));
     }
     if (!cv && project) cv = await api(`/api/conversation?project=${encodeURIComponent(project)}`);
   } catch { cv = null; }
@@ -2968,7 +2962,8 @@ function renderConv() {
   const cur = topicOf(cv.topic), busy = cur && cur.state === "thinking";
   const html = `<div class="row"><span style="flex:1"></span>${cur ? `<button id="endtopic" ${busy ? "disabled" : ""} title="${busy ? "Claude is replying. Stop the reply, or wait for it, to end this topic" : "Done with this topic: it moves under Ended and off your to-do list"}">End topic</button>` : ""}
     <button id="newtopic" title="Your next message starts a new topic" ${cv.topic === null ? "disabled" : ""}>New topic</button></div>
-    ${cv.topic === null && cv.topics.length ? `<div class="convnote">Your next message starts a new topic.</div>` : ""}`;
+    ${cv.topic === null && cv.subject ? `<div class="convnote">Your next message starts this item's own topic.</div>`
+      : cv.topic === null && cv.topics.length ? `<div class="convnote">Your next message starts a new topic.</div>` : ""}`;
   if (put($("#convmodes"), html)) {
     $("#newtopic").onclick = () => { convOpen({how: "new", mode: "design"}); $("#say").focus(); };
     if ($("#endtopic")) $("#endtopic").onclick = () => convAct("end", {ref: cv.topic});
@@ -3313,21 +3308,20 @@ function tdPanel() {
     });
   }
 }
-// Ask Claude about this: a first line in the message box, to finish and send to the conversation shown.
+// Ask Claude about this: a task, the promote train or a schedule opens its own topic (made on the first message);
+// the research runs put a first line in the message box, to finish and send to the plan & design topic shown.
 async function tdAsk() {
   const p = TD.panel; if (!p) return;
   const t = p.kind === "task" && state.tasks.find(x => x.id === p.id);
   const sch = p.kind === "schedule" && (state.schedules || []).find(x => x.id === p.id);
-  const start = p.kind === "task" ? aboutTask(p.id, t)
-    : p.kind === "train" ? `About the ${P(p.project).title} promote train (${(P(p.project).train || {ids: []}).ids.map(i => "#" + i).join(", ")}): `
-    : p.kind === "schedule" ? `About the schedule “${(sch || {}).title || "#" + p.id}” (${(sch || {}).every || ""}): `
-    : "About the research runs: ";
+  const subject = p.kind === "task" ? `task:${p.id}` : p.kind === "train" ? `project:${p.project}:promote`
+    : p.kind === "schedule" ? `schedule:${p.id}` : null;
+  const start = subject ? "" : "About the research runs: ";
   TD.mode = null; tdClearStarter();
   if (phone()) { tdClosePanel(); TD.pane = "now"; }  // the message box is under the step
-  // To the plan & design topic of the project it is about: the current one, the latest, or a new one
   const project = p.kind === "task" ? (t ? t.project : "") : p.kind === "train" ? p.project : sch ? sch.project : "";
   if (project && project !== convProject()) TD.over = {key: TD.convKey, project};
-  await convOpen({how: "task"});
+  await convOpen(subject ? {how: "subject", ref: subject} : {how: "task"});
   renderSayMode();
   const say = $("#say"); say.value = start + say.value; say.focus(); say.setSelectionRange(start.length, start.length); sayFit();
 }
