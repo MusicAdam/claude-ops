@@ -19,7 +19,17 @@ import opsd  # noqa: E402
 
 class FakeProject:
     def __init__(self, name, launch=""):
-        self.name, self.launch = name, launch
+        self.name, self.launch, self.direct_main = name, launch, False
+
+
+class GitProject(FakeProject):
+    """A project with one real git repo, for the released check."""
+    pairs = opsd.Project.pairs
+
+    def __init__(self, name, repo):
+        super().__init__(name)
+        self.repo, self.main = repo, "main"
+        self.parts = [opsd.Part(self, "")]
 
 
 def project_facts(name, **kw):
@@ -34,6 +44,7 @@ class Todos(unittest.TestCase):
         opsd.init_db()
         for t in ("tasks", "events", "designs", "design_msgs", "todos", "todo_notes"):
             opsd.q(f"DELETE FROM {t}")
+        opsd.TODO_MAIN.clear()
         self.saved = dict(opsd.PROJECTS)
         opsd.PROJECTS.clear()
         opsd.PROJECTS.update({"game": FakeProject("game", launch="open Game.app"), "web": FakeProject("web")})
@@ -246,7 +257,7 @@ class Todos(unittest.TestCase):
         opsd.todo_note(key, f"wait for #{wait}")
         opsd.todo_skip(key)
         self.assertEqual(self.keyed()[key]["parked"]["wake_task"], wait)  # still running: still parked
-        opsd.upd(wait, state="done")
+        opsd.upd(wait, state="done", merged="abc")
         got = self.todos_at()
         self.assertEqual(got[0]["key"], key)  # back at its normal place, not skipped
         self.assertNotIn("parked", got[0])
@@ -276,6 +287,163 @@ class Todos(unittest.TestCase):
         opsd.upd(item, state="done")
         self.assertNotIn(key, self.keyed())
         self.assertIsNone(opsd.q("SELECT * FROM todo_notes WHERE key=?", (key,), one=True))
+
+    # Wait sets: a parked item waits on tasks until they merge or release (TODO-6)
+    def route(self, path, body):
+        return opsd.H.__new__(opsd.H).route(path, body)
+
+    def parked_key(self):
+        item = self.task("web", "failed", error="x")
+        return f"task:{item}:fix"
+
+    def test_wait_set_until_merged(self):
+        key = self.parked_key()
+        a, b = self.task("web", "running"), self.task("web", "running")
+        self.assertEqual(opsd.todo_wait(key, [a, f"#{b}"], "merged"), {"parked": True, "wake_tasks": [a, b],
+                                                                       "wake_on": "merged"})
+        opsd.upd(a, state="done", merged="aaa")
+        got = self.keyed()[key]
+        self.assertEqual(got["parked"]["wake_tasks"], [a, b])  # a merged, b still running: still parked
+        self.assertEqual((got["parked"]["wake_on"], got["parked"]["wake_task"]), ("merged", a))
+        opsd.upd(b, state="done", merged="bbb")
+        got = self.keyed()[key]
+        self.assertNotIn("parked", got)
+        self.assertEqual(got["note"], f"#{a} merged, #{b} merged")
+
+    def test_wait_set_wakes_early_on_failure(self):
+        key = self.parked_key()
+        a, b = self.task("web", "running"), self.task("web", "running")
+        opsd.todo_wait(key, [a, b])
+        opsd.upd(b, state="failed")
+        got = self.keyed()[key]
+        self.assertNotIn("parked", got)
+        self.assertEqual(got["note"], f"#{a} running, #{b} failed")
+
+    def test_wait_until_released(self):
+        repo = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, repo, True)
+        git = lambda *a: subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", *a], cwd=repo,
+                                        check=True, capture_output=True, text=True).stdout.strip()
+        git("init", "-q", "-b", "main")
+        git("commit", "-q", "--allow-empty", "-m", "start")
+        git("checkout", "-q", "-b", "dev")
+        git("commit", "-q", "--allow-empty", "-m", "the task")
+        sha, main = git("rev-parse", "dev"), git("rev-parse", "main")
+        p = GitProject("web", repo)
+        opsd.PROJECTS["web"] = p
+        key = self.parked_key()
+        a = self.task("web", "done", merged=sha)
+        opsd.todo_wait(key, [a], "released")
+        facts = lambda m: [project_facts("web", direct_main=False, main_sha=m)]
+        self.assertEqual(self.todos(facts(main))[-1]["parked"]["wake_on"], "released")  # merged, not on main
+        self.assertEqual(self.todos(facts(main))[-1]["key"], key)  # the second build asks git nothing new
+        self.assertEqual(opsd.TODO_MAIN["web"], (main, {sha: False}))
+        git("checkout", "-q", "main")
+        git("merge", "-q", "--ff-only", "dev")
+        got = {x["key"]: x for x in self.todos(facts(sha))}[key]  # main moved to the merge
+        self.assertNotIn("parked", got)
+        self.assertEqual(got["note"], f"#{a} released")
+
+    def test_released_in_direct_main_is_merged(self):
+        opsd.PROJECTS["web"].direct_main = True
+        key = self.parked_key()
+        a = self.task("web", "running")
+        self.assertEqual(opsd.todo_wait(key, [a], "released")["wake_on"], "merged")  # stored as merged
+        opsd.upd(a, state="done", merged="abc")
+        got = {x["key"]: x for x in self.todos([project_facts("web", direct_main=True, main_sha="old")])}[key]
+        self.assertNotIn("parked", got)
+        self.assertEqual(got["note"], f"#{a} merged")
+        opsd.q("UPDATE todo_notes SET parked=1, wake_on='released' WHERE key=?", (key,))  # stored before: also wakes
+        got = {x["key"]: x for x in self.todos([project_facts("web", direct_main=True, main_sha="old")])}[key]
+        self.assertTrue(got["note"].endswith(f"#{a} released"))
+
+    def test_old_wake_task_rows_migrate(self):
+        key = self.parked_key()
+        a = self.task("web", "running")
+        opsd.q("DROP TABLE todo_notes")
+        opsd.q("CREATE TABLE todo_notes (key TEXT PRIMARY KEY, note TEXT, parked REAL, skipped REAL, wake_task INTEGER, "
+               "updated REAL)")
+        opsd.q("INSERT INTO todo_notes VALUES (?,?,?,NULL,?,?)", (key, f"wait for #{a}", 5, a, 5))
+        opsd.init_db()
+        r = opsd.q("SELECT * FROM todo_notes WHERE key=?", (key,), one=True)
+        self.assertEqual((json.loads(r["wake_tasks"]), r["wake_on"], r["wake_set"]), ([a], "merged", 0))
+        self.assertEqual(self.keyed()[key]["parked"]["wake_tasks"], [a])
+        opsd.upd(a, state="done", merged="abc")
+        self.assertEqual(self.keyed()[key]["note"], f"wait for #{a} · #{a} merged")
+
+    def test_note_never_overwrites_explicit_wait(self):
+        key = self.parked_key()
+        a, b = self.task("web", "running"), self.task("web", "running")
+        opsd.todo_wait(key, [a], "merged")
+        opsd.todo_note(key, f"or maybe #{b}")
+        got = self.keyed()[key]
+        self.assertEqual((got["note"], got["parked"]["wake_tasks"]), (f"or maybe #{b}", [a]))
+        opsd.todo_wait(key, [])  # cleared and unparked: the note's number counts again on its next edit
+        self.assertNotIn("parked", self.keyed()[key])
+        opsd.todo_note(key, f"now #{b}")
+        r = opsd.q("SELECT * FROM todo_notes WHERE key=?", (key,), one=True)
+        self.assertEqual((json.loads(r["wake_tasks"]), r["wake_set"]), ([b], 0))
+
+    def test_wait_endpoint(self):
+        key = self.parked_key()
+        a = self.task("web", "running")
+        with self.assertRaisesRegex(ValueError, f"no task #{a + 50}"):
+            self.route("/api/todos/wait", {"key": key, "tasks": [a, a + 50], "until": "merged"})
+        self.assertNotIn("parked", self.keyed()[key])
+        self.route("/api/todos/wait", {"key": key, "tasks": [a], "until": "released"})
+        self.assertEqual(self.keyed()[key]["parked"]["wake_on"], "released")
+        self.route("/api/todos/wait", {"key": key, "tasks": []})
+        self.assertNotIn("parked", self.keyed()[key])
+        self.assertIsNone(opsd.q("SELECT * FROM todo_notes WHERE key=?", (key,), one=True))
+
+    def test_todo_block_wait_after(self):
+        p = FakeProject("web")
+        a = self.task("web", "queued")
+        reply = ('Queued it.\n```todo\n[{"verb": "Do", "title": "Grant access", "wait": {"after": [0]}},\n'
+                 f' {{"verb": "Agree", "title": "Ship it", "wait": {{"tasks": [{a}], "after": [1], "until": "merged"}}}},\n'
+                 ' {"verb": "Do", "title": "Plain"}]\n```')
+        q1, q2 = self.task("web", "queued"), self.task("web", "queued")
+        text, note = opsd.todos_from_reply(p, reply, 7, [q1, q2])
+        self.assertEqual(text, "Queued it.")
+        self.assertNotIn("wait on", note)
+        rows = {r["title"]: r["id"] for r in opsd.q("SELECT id, title FROM todos")}
+        got = self.keyed()
+        self.assertEqual(got[f"todo:{rows['Grant access']}"]["parked"]["wake_tasks"], [q1])
+        self.assertEqual(got[f"todo:{rows['Ship it']}"]["parked"]["wake_tasks"], [a, q2])
+        self.assertNotIn("parked", got[f"todo:{rows['Plain']}"])
+        _, note = opsd.todos_from_reply(p, '```todo\n[{"verb": "Do", "title": "Bad", "wait": {"after": [5]}}]\n```',
+                                        7, [q1])
+        self.assertIn("the wait on 'Bad'", note)
+        bad = opsd.q("SELECT id FROM todos WHERE title='Bad'", one=True)["id"]
+        self.assertNotIn("parked", self.keyed()[f"todo:{bad}"])  # added all the same, unparked
+        _, note = opsd.todos_from_reply(p, '```todo\n[{"verb": "Do", "title": "Gone", "wait": {"tasks": [99999]}}]\n```',
+                                        7, [])
+        self.assertIn("no task #99999", note)
+
+    def test_worker_result_wait(self):
+        tid, w = self.task("web", "running"), self.task("web", "running")
+        opsd.todo_add("web", [{"verb": "Do", "title": "Enter the key", "wait": {"tasks": [w]}}], "task", tid)
+        r = opsd.q("SELECT id FROM todos", one=True)
+        self.assertEqual(self.keyed()[f"todo:{r['id']}"]["parked"]["wake_tasks"], [w])
+
+    def test_owner_todo(self):
+        a = self.task("web", "running")
+        got = self.route("/api/todos", {"project": "web", "title": " Call the bank ", "why": "card expires"})
+        item = self.keyed()[got["key"]]
+        self.assertEqual((item["verb"], item["title"], item["why"], item["source"]),
+                         ("Do", "Call the bank", "card expires", {"kind": "owner", "id": None}))
+        self.assertNotIn("parked", item)
+        with self.assertRaisesRegex(ValueError, "already has that title"):
+            self.route("/api/todos", {"project": "web", "title": "Call the bank"})
+        with self.assertRaisesRegex(ValueError, "no project"):
+            self.route("/api/todos", {"project": "nope", "title": "x"})
+        with self.assertRaisesRegex(ValueError, f"no task #{a + 9}"):
+            self.route("/api/todos", {"project": "web", "title": "Later", "wait": {"tasks": [a + 9]}})
+        self.assertIsNone(opsd.q("SELECT id FROM todos WHERE title='Later'", one=True))  # nothing added
+        got = self.route("/api/todos", {"project": "web", "title": "Later", "wait": {"tasks": [a], "until": "merged"}})
+        self.assertTrue(got["parked"])
+        self.assertEqual(self.keyed()[got["key"]]["parked"]["wake_tasks"], [a])
+        self.assertTrue(opsd.todo_done(got["id"]))  # Done closes it
 
 
 class AgreeClosesOnReply(unittest.TestCase):

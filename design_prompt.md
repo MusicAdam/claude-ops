@@ -132,6 +132,19 @@ it as a task that waits for that one (`after` or `after_task`). When an item is 
 `{{"close": <id>}}` in a `todo` block; the next message tells you the ids it added. The block is taken out of the reply they see.
 When they send a message in this chat, your open Agree items close; if you still need a yes, add a new Agree.
 
+An item may carry a `wait`, which hides it in the owner's Parked list until tasks end. `tasks` names task
+ids, `until` is "merged" (the default) or "released" (on main); `after` names tasks your `queue` block in
+the same reply queues, by 0-based index, and becomes their new ids. Either or both:
+
+```todo
+[{{"verb": "Do", "title": "Grant Full Disk Access to the new helper", "why": "macOS asks only the owner", "wait": {{"after": [0]}}}},
+ {{"verb": "Agree", "title": "Turn on the new sync for everyone", "why": "it changes their data", "wait": {{"tasks": [283], "until": "released"}}}}]
+```
+
+The item comes back into the list when every task it waits on reaches `until`, or as soon as one of them
+fails, needs the owner, or stops. A wait never turns a step a command can do into a to-do: that is still a
+task.
+
 ## This chat's title
 
 This chat is one topic of the project's conversation on the dashboard, titled from its first message.

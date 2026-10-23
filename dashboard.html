@@ -467,6 +467,25 @@ details.tdparked .tditem { opacity: .8; }
 .stepcard .row .tdnote { margin-left: auto; flex: 0 1 260px; min-width: 120px; }
 .stepcard input.tdnote { font-size: 13px; padding: 4px 8px; }
 .stepcard .row .tdunpark { margin-left: 0; }
+/* Wait for… and + Add (README TODO-6, TODAY-1) */
+.stepcard .row .tdwaitb { background: none; color: var(--muted); }
+.stepcard .tdwaiting { color: var(--muted); font-size: 13px; margin: 4px 0; display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+.stepcard .tdwaiting button { font-size: 12px; padding: 1px 8px; }
+.tdaddb { display: block; width: 100%; text-align: left; background: none; border: 1px dashed var(--line); color: var(--muted); margin-bottom: 6px; }
+.tdaddf, .tdwaitbox { display: flex; flex-direction: column; gap: 6px; border: 1px solid var(--line); border-radius: 8px;
+                      background: var(--panel); padding: 8px 10px; margin-bottom: 6px; }
+.stepcard .tdwaitbox { margin: 10px 0 0; }
+.tdaddf .tdwaitbox { margin: 0; padding: 6px 8px; background: var(--bg); }
+.tdaddf input, .tdwaitbox input[data-wother] { font-size: 13px; padding: 4px 8px; }
+.tdwaitbox .wlist { max-height: 11em; overflow: auto; display: flex; flex-direction: column; gap: 3px; font-size: 13px; }
+.tdwaitbox label { display: flex; gap: 6px; align-items: baseline; cursor: pointer; min-width: 0; }
+.tdwaitbox label .wt { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+.tdwaitbox .muted { font-size: 13px; }
+.wrow { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.wrow .seg { display: inline-flex; }
+.wrow .seg button { border-radius: 0; font-size: 12px; padding: 3px 10px; background: none; color: var(--muted); }
+.wrow .seg button:first-child { border-radius: 6px 0 0 6px; } .wrow .seg button:last-child { border-radius: 0 6px 6px 0; }
+.wrow .seg button.on { background: var(--chip); color: var(--ink); border-color: var(--accent); font-weight: 600; }
 /* Today's conversation: Earlier topics, the divider at the top of a topic, New topic */
 #convtop details { margin: 0 0 8px; }
 #convtop summary { font-size: 12px; color: var(--muted); cursor: pointer; }
@@ -560,6 +579,7 @@ details.tdparked .tditem { opacity: .8; }
   .stepcard .row > button { flex: none; white-space: nowrap; padding: 4px 12px; }
   .stepcard .row > .skip, .stepcard .row > .tdunpark { display: none; }
   .stepcard .row > .tdnote { flex: 1 0 150px; }
+  .stepcard .tdwaitbox { margin-top: 6px; } .tdwaitbox .wlist { max-height: 6.5em; }
   /* The conversation: messages may wrap anywhere, never widen the page */
   #tdcentre #chathead { margin: 0 0 6px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   #tdcentre #msgs { overflow-x: hidden; }
@@ -860,6 +880,15 @@ async function api(path, body) {
 function put(el, html) {
   if (el.dataset.html === html) return false;
   el.innerHTML = el.dataset.html = html;
+  return true;
+}
+// put, keeping focus and caret in the field you were typing in (fields carry data-fld), when keep allows
+function putKeep(el, html, keep = true) {
+  const a = document.activeElement, fld = keep && a && el.contains(a) && a.dataset.fld;
+  const sel = fld && "selectionStart" in a ? [a.selectionStart, a.selectionEnd] : null;
+  if (!put(el, html)) return false;
+  const b = fld && el.querySelector(`[data-fld="${fld}"]`);
+  if (b) { b.focus(); if (sel) try { b.setSelectionRange(...sel); } catch {} }
   return true;
 }
 
@@ -2528,7 +2557,8 @@ new ResizeObserver(() => document.documentElement.style.setProperty("--hdr-h", $
 // among them (moved here from History). See README "Today view".
 const TD = {key: "", filter: "all", drafts: {}, noteTimer: null, parkOpen: false, order: [], item: null, convKey: null, task: null, mode: null, busy: "",
             msg: "", note: "", panel: null, cv: null, rs: null, over: null, applied: "", starter: "", earlierOpen: false,
-            pane: "todo", dets: false, sec: "conv", sd: null, unc: null, udiff: false};
+            pane: "todo", dets: false, sec: "conv", sd: null, unc: null, udiff: false,
+            wait: null, add: null};  // the open Wait for… chooser {key, ids, other, until}, and the + Add form
 try {
   TD.key = localStorage.getItem("ops-todo") || "";
   TD.filter = localStorage.getItem("ops-todo-filter") || "all";
@@ -2602,7 +2632,7 @@ const tdAnswerMode = it => ({a: "answer", id: it.source.id, words: `Your message
 const tdRow = x => `<div class="tditem ${x.key === TD.key ? "sel" : ""} ${x.skipped ? "skipped" : ""}" data-key="${esc(x.key)}">
   ${verbPill(x)}<span class="t" title="${esc(x.title)}">${esc(x.title)}</span>
   <span class="sub">${[pf ? "" : esc(P(x.project).title), x.parked ? `parked ${ago(x.parked.since, state.now)}` : x.since ? `${ago(x.since, state.now)} ago` : "",
-    x.skipped ? "skipped" : ""].filter(Boolean).join(" · ")}</span>
+    x.skipped ? "skipped" : "", x.parked && tdWaiting(x.parked) ? esc(tdWaiting(x.parked)) : ""].filter(Boolean).join(" · ")}</span>
   ${x.note ? `<span class="tdn" title="${esc(x.note)}">${esc(x.note)}</span>` : ""}</div>`;
 function tdLeft(all, shown) {
   const parked = tdParked();
@@ -2613,11 +2643,13 @@ function tdLeft(all, shown) {
     <div class="tdbar" title="${done} done today, ${open} open"><i style="width:${pct}%"></i></div>
     <div class="muted" style="font-size:12px">${done} done today</div>
     <div class="tdchips">${TD_FILTERS.map(([k, l]) => `<button data-f="${k}" class="${TD.filter === k ? "on" : ""}">${l}<b>${n(k)}</b></button>`).join("")}</div>`
+    + tdAddForm()
     + (shown.map(tdRow).join("")
       || `<div class="muted">${all.length ? "Nothing under this filter." : "Nothing needs you right now."}</div>`)
     + (parked.length ? `<details class="tdparked" ${TD.parkOpen ? "open" : ""}><summary>Parked (${parked.length})</summary>${parked.map(tdRow).join("")}</details>` : "");
-  if (!put($("#tdleft"), html)) return;
+  if (!putKeep($("#tdleft"), html)) return;
   if ($("#tdleft .tdparked")) $("#tdleft .tdparked").ontoggle = e => { TD.parkOpen = e.target.open; };
+  tdAddWire($("#tdleft"));
   $("#tdleft").querySelectorAll("[data-f]").forEach(b => b.onclick = () => { TD.filter = b.dataset.f; tdSave(); renderToday(); });
   $("#tdleft").querySelectorAll("[data-key]").forEach(el => el.onclick = () => { TD.key = el.dataset.key; tdSave(); if (TD.pane === "todo") tdGo("now"); else renderToday(); });
 }
@@ -2697,31 +2729,37 @@ function tdStep(it, shown) {
   const dets = !!(it.why || facts), note = tdNoteVal(it);
   const skipTip = note.trim() ? "Park it with this note: it moves to Parked until you unpark it, or the task it names ends"
     : "Move it to the end of the list until midnight. With a note, it parks instead";
-  const noteIn = `<input class="tdnote" data-tdnote maxlength="300" placeholder="Note to self, e.g. wait for #249" value="${esc(note)}" title="Saves as you type">`;
+  const noteIn = `<input class="tdnote" data-tdnote data-fld="note" maxlength="300" placeholder="Note to self, e.g. wait for #249" value="${esc(note)}" title="Saves as you type">`;
   const unpark = cls => it.parked ? `<button class="${cls}" data-unpark title="Back into the list at its normal place">Unpark</button>` : "";
   const html = `<div class="stepcard${TD.dets ? " open" : ""}"><div class="top"><button class="ph back" data-back title="Back to the list">‹ To-do</button>
     <div class="k">${it.parked ? `Parked ${ago(it.parked.since, state.now)}` : `Step ${shown.indexOf(it) + 1} of ${shown.length}`} · ${esc(P(it.project).title)}</div>
     ${dets ? `<button class="ph" data-dets aria-expanded="${TD.dets}">Details ${TD.dets ? "▴" : "▾"}</button>` : ""}
     ${unpark("ph skip")}<button class="ph skip" data-skip title="${esc(skipTip)}">Skip →</button></div>
     <h2>${verbPill(it)}<span>${esc(it.title)}</span></h2>
+    ${it.parked && tdWaiting(it.parked) ? `<div class="tdwaiting">${esc(tdWaiting(it.parked))}<button data-wclear title="Forget the wait and put it back in the list">Clear</button></div>` : ""}
     <div class="dets">${it.why ? `<div class="why">${esc(it.why)}</div>` : ""}
     ${facts ? `<div class="facts">${facts}</div>` : ""}${it.verb === "Commit" ? tdUncommitted() : ""}</div>
     ${it.verb === "Ship" && P(it.project).deploys && P(it.project).deploys.length ? tdShipLog(P(it.project)) : ""}
     <div class="row">${acts.map(b => `<button data-ta="${esc(b.a)}" class="${b.primary ? "primary" : ""}" ${busy || b.disabled ? "disabled" : ""} title="${esc(b.title || "")}">${esc(b.label)}</button>`).join("")}
-      ${noteIn}${unpark("tdunpark")}<button class="skip" data-skip title="${esc(skipTip)}">Skip for now →</button></div>
+      ${noteIn}<button class="tdwaitb" data-waitfor title="Park it until tasks you pick merge or are released">Wait for…</button>${unpark("tdunpark")}<button class="skip" data-skip title="${esc(skipTip)}">Skip for now →</button></div>
+    ${TD.wait && TD.wait.key === it.key ? tdWaitBox(it.project, TD.wait, `<button class="primary" data-wgo>Wait</button><button data-wx>Cancel</button>`) : ""}
     ${TD.msg || playErr ? `<div class="err" style="margin-top:8px;white-space:pre-wrap">${esc(TD.msg || playErr)}</div>` : TD.note ? `<div class="muted" style="margin-top:8px">${esc(TD.note)}</div>` : ""}</div>`;
-  // A poll that rewrites the card while you type in the note keeps your caret where it was
-  const typing = document.activeElement && document.activeElement.matches("#tdstep [data-tdnote]") ? document.activeElement : null;
-  const caret = typing && $("#tdstep").dataset.key === it.key && [typing.selectionStart, typing.selectionEnd];
-  if (!put($("#tdstep"), html)) return;
+  // A poll that rewrites the card while you type in the note (or the chooser) keeps your caret where it was
+  if (!putKeep($("#tdstep"), html, $("#tdstep").dataset.key === it.key)) return;
   $("#tdstep").dataset.key = it.key;
-  if (caret) { const el = $("#tdstep [data-tdnote]"); el.focus(); el.setSelectionRange(...caret); }
   $("#tdstep").querySelectorAll("[data-tdnote]").forEach(el => {
     el.oninput = () => { TD.drafts[it.key] = el.value; clearTimeout(TD.noteTimer); TD.noteTimer = setTimeout(() => tdSaveNote(it.key), 500); };
     el.onblur = () => tdSaveNote(it.key);
     el.onkeydown = e => { if (e.key === "Enter") { e.preventDefault(); el.blur(); } };
   });
   $("#tdstep").querySelectorAll("[data-unpark]").forEach(b => b.onclick = tdUnpark);
+  $("#tdstep [data-waitfor]").onclick = () => {
+    TD.wait = TD.wait && TD.wait.key === it.key ? null : {key: it.key, ...tdWaitNew(it.project, it.parked)}; renderToday();
+    if (TD.wait) $("#tdstep .tdwaitbox").scrollIntoView({block: "nearest"}); };  // a phone's step card is short
+  if (TD.wait && TD.wait.key === it.key) tdWaitWire($("#tdstep .tdwaitbox"), TD.wait);
+  if ($("#tdstep [data-wgo]")) $("#tdstep [data-wgo]").onclick = tdWaitGo;
+  if ($("#tdstep [data-wx]")) $("#tdstep [data-wx]").onclick = () => { TD.wait = null; renderToday(); };
+  if ($("#tdstep [data-wclear]")) $("#tdstep [data-wclear]").onclick = tdWaitClear;
   $("#tdstep").querySelectorAll("[data-ta]").forEach(b => b.onclick = () => tdDo(b.dataset.ta));
   $("#tdstep").querySelectorAll("[data-files]").forEach(a => a.onclick = () => tdOpenTask(+a.dataset.files, true));
   $("#tdstep").querySelectorAll("[data-skip]").forEach(b => b.onclick = tdSkip);
@@ -2777,7 +2815,7 @@ async function tdSkip() {
   const i = TD.order.indexOf(it.key), next = it.parked ? null : TD.order[i + 1] || TD.order[0];
   try {
     const r = await api("/api/todos/skip", {key: it.key}), x = tdItem(it.key), now = Date.now() / 1000;
-    if (x && r.parked) { x.parked = {since: (x.parked && x.parked.since) || now, wake_task: null}; delete x.skipped; }
+    if (x && r.parked) { x.parked = {wake_tasks: [], wake_on: "merged", ...x.parked, since: (x.parked && x.parked.since) || now}; delete x.skipped; }
     else if (x) x.skipped = now;
     if (x && !x.parked) state.todos = state.todos.filter(y => y !== x).concat([x]);
   } catch (e) { TD.msg = e.message; renderToday(); return; }
@@ -2788,6 +2826,96 @@ async function tdUnpark() {
   const it = TD.item; if (!it) return;
   try { await api("/api/todos/unpark", {key: it.key}); } catch (e) { TD.msg = e.message; renderToday(); return; }
   const x = tdItem(it.key); if (x) { delete x.parked; delete x.skipped; }
+  renderToday(); refresh();
+}
+// Wait for… (README TODO-6): park an item until tasks merge or are released. One chooser serves a step and + Add.
+const TD_WAIT_STATES = ["queued", "running", "gating", "merging", "review"];
+const tdWaiting = w => (w.wake_tasks || []).length
+  ? `Waiting on ${w.wake_tasks.map(n => "#" + n).join(", ")} to ${w.wake_on === "released" ? "release" : "merge"}` : "";
+const tdWaitTasks = project => state.tasks.filter(t => t.project === project && TD_WAIT_STATES.includes(t.state)).sort((a, b) => a.id - b.id);
+const tdWaitIds = w => [...new Set([...w.ids, ...(w.other.match(/\d+/g) || []).map(Number)])];
+// A chooser's state, with the tasks of cur (an item's parked) ticked: the listed ones as boxes, the rest typed
+function tdWaitNew(project, cur) {
+  const listed = new Set(tdWaitTasks(project).map(t => t.id)), ids = (cur && cur.wake_tasks) || [];
+  return {ids: ids.filter(n => listed.has(n)), other: ids.filter(n => !listed.has(n)).join(", "), until: (cur && cur.wake_on) || "merged"};
+}
+function tdWaitBox(project, w, go) {
+  const ts = tdWaitTasks(project), g = P(project), rel = !g.direct_main;
+  if (!rel) w.until = "merged";  // straight to main: a merge is the release
+  return `<div class="tdwaitbox">
+    ${ts.length ? `<div class="wlist">${ts.map(t => `<label title="${esc(t.title)}"><input type="checkbox" data-wt="${t.id}" ${w.ids.includes(t.id) ? "checked" : ""}>
+      <span class="mono">#${t.id}</span><span class="wt">${esc(t.title)}</span><span class="muted">${esc(t.state)}</span></label>`).join("")}</div>`
+      : `<div class="muted">No task of ${esc(g.title)} is queued, running or in review.</div>`}
+    <input data-wother data-fld="wother" placeholder="Other task ids, e.g. 283, 290" value="${esc(w.other)}">
+    <div class="wrow"><span class="seg"><button data-wuntil="merged" class="${w.until === "merged" ? "on" : ""}" title="Once each is merged into ${esc(g.dev_branch || "dev")}">Merged</button>${rel
+      ? `<button data-wuntil="released" class="${w.until === "released" ? "on" : ""}" title="Once each is on ${esc(g.main_branch || "main")}">Released</button>` : ""}</span>${go}</div></div>`;
+}
+function tdWaitWire(box, w) {
+  if (!box) return;
+  box.querySelectorAll("[data-wt]").forEach(c => c.onchange = () => { const n = +c.dataset.wt; w.ids = c.checked ? [...w.ids, n] : w.ids.filter(x => x !== n); });
+  box.querySelectorAll("[data-wother]").forEach(i => i.oninput = () => { w.other = i.value; });
+  box.querySelectorAll("[data-wuntil]").forEach(b => b.onclick = () => { w.until = b.dataset.wuntil; renderToday(); });
+}
+async function tdWaitGo() {
+  const it = TD.item, w = TD.wait; if (!it || !w || w.key !== it.key) return;
+  const ids = tdWaitIds(w);
+  if (!ids.length) { TD.msg = "Tick a task, or type its id."; return renderToday(); }
+  const i = TD.order.indexOf(it.key), next = it.parked ? null : TD.order[i + 1] || TD.order[0];
+  try {
+    const r = await api("/api/todos/wait", {key: it.key, tasks: ids, until: w.until}), x = tdItem(it.key);
+    if (x) { x.parked = {since: (x.parked && x.parked.since) || Date.now() / 1000, wake_tasks: r.wake_tasks, wake_on: r.wake_on, wake_task: r.wake_tasks[0]}; delete x.skipped; }
+  } catch (e) { TD.msg = e.message; return renderToday(); }
+  TD.wait = null; TD.msg = "";
+  TD.key = next && next !== it.key ? next : it.parked ? it.key : "";
+  tdSave(); renderToday(); refresh();
+}
+async function tdWaitClear() {
+  const it = TD.item; if (!it) return;
+  try { await api("/api/todos/wait", {key: it.key, tasks: []}); } catch (e) { TD.msg = e.message; return renderToday(); }
+  const x = tdItem(it.key); if (x) { delete x.parked; delete x.skipped; }
+  TD.wait = null; renderToday(); refresh();
+}
+// + Add (README TODO-1): your own Do, in the project you filter on, or one you pick; it may start parked.
+function tdAddForm() {
+  const a = TD.add;
+  if (!a) return `<button class="tdaddb" data-add title="Add your own to-do">+ Add</button>`;
+  const projs = state.projects.filter(g => !g.error);
+  if (pf || !projs.some(g => g.name === a.project)) a.project = pf || (projs[0] || {}).name || "";
+  return `<div class="tdaddf">
+    <input data-fld="addtitle" data-addf="title" maxlength="200" placeholder="What you need to do" value="${esc(a.title)}">
+    <input data-fld="addwhy" data-addf="why" maxlength="400" placeholder="Why (optional)" value="${esc(a.why)}">
+    <div class="wrow">${pf ? "" : `<select data-addproj title="The project it belongs to">${projs.map(g => `<option value="${esc(g.name)}" ${g.name === a.project ? "selected" : ""}>${esc(g.title)}</option>`).join("")}</select>`}
+      <span class="seg"><button data-addwait class="${a.wait ? "on" : ""}" title="${a.wait ? "Add it to the list now instead" : "Park it until tasks you pick merge or are released"}">Wait for…</button></span></div>
+    ${a.wait ? tdWaitBox(a.project, a.wait, "") : ""}
+    <div class="wrow"><button class="primary" data-addgo ${a.busy ? "disabled" : ""}>Add</button><button data-addx>Cancel</button></div>
+    ${a.msg ? `<div class="err">${esc(a.msg)}</div>` : ""}</div>`;
+}
+function tdAddWire(root) {
+  const a = TD.add;
+  if (root.querySelector("[data-add]")) root.querySelector("[data-add]").onclick = () => {
+    TD.add = {title: "", why: "", project: pf, wait: null, msg: "", busy: false}; renderToday(); $("#tdleft [data-addf=title]").focus(); };
+  if (!a) return;
+  root.querySelectorAll("[data-addf]").forEach(i => {
+    i.oninput = () => { a[i.dataset.addf] = i.value; };
+    i.onkeydown = e => { if (e.key === "Enter" && !e.isComposing) { e.preventDefault(); tdAddGo(); } else if (e.key === "Escape") { TD.add = null; renderToday(); } };
+  });
+  if (root.querySelector("[data-addproj]")) root.querySelector("[data-addproj]").onchange = e => {
+    a.project = e.target.value; if (a.wait) a.wait = {...tdWaitNew(a.project), until: a.wait.until}; renderToday(); };
+  root.querySelector("[data-addwait]").onclick = () => { a.wait = a.wait ? null : tdWaitNew(a.project); renderToday(); };
+  tdWaitWire(root.querySelector(".tdaddf .tdwaitbox"), a.wait);
+  root.querySelector("[data-addgo]").onclick = tdAddGo;
+  root.querySelector("[data-addx]").onclick = () => { TD.add = null; renderToday(); };
+}
+async function tdAddGo() {
+  const a = TD.add; if (!a || a.busy) return;
+  const ids = a.wait ? tdWaitIds(a.wait) : [];
+  a.msg = !a.title.trim() ? "Give it a title." : a.wait && !ids.length ? "Tick a task to wait for, or turn Wait for off." : "";
+  if (a.msg) return renderToday();
+  a.busy = true; renderToday();
+  try {
+    await api("/api/todos", {project: a.project, title: a.title, why: a.why, ...(ids.length ? {wait: {tasks: ids, until: a.wait.until}} : {})});
+    TD.add = null;
+  } catch (e) { a.msg = e.message; a.busy = false; }
   renderToday(); refresh();
 }
 // The message box answers a task, sends it back, or retries it with a note, instead of talking in the chat above it.
