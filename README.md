@@ -576,12 +576,18 @@ Their routes (`#tasks`, `#projects`, `#schedules`, …) still open them. The que
   | Review | Approve & merge | Open diff (the task's details, files changed), Send back… |
   | Answer | Answer (focuses the message box; sending answers the task) | Details |
   | Fix | Retry | Retry with a note… |
-  | Promote | Promote dev → main; for a release waiting on you, Stop main when the app is running, else Reply… | Details |
-  | Ship | Deploy (the Deploy dialog), one per target | |
+  | Promote | Promote dev → main; for a release waiting on you, Stop main when the app is running, else Reply… | Details; for a project with a launch step, ▶ Play dev (■ Stop dev while it runs) |
+  | Ship | Deploy (the Deploy dialog), one per target, each with its own count: `Deploy <target> (N)`, `(up to date)`, `(first deploy)`, or `(?)` when its last deployed commit is gone | For a project with a launch step, ▶ Play main (■ Stop main while it runs; off until it is built or while a play is under way) |
   | Commit | Commit these: **Send to dev**, unchanged underneath. Its tooltip says it lands the files on `main` through the gate, then clears them from your checkout; `dev` in a project with Promote after merge off (and not straight to main). While one is open: Sending… #id | |
   | Read | A chat: Mark read when it is new, else End topic. A report: Open report (RES-5) | A chat: End topic, or Reply. A report: Details |
   | Agree | Reply (focuses the message box) | Done |
   | Do | Done (`POST /api/todos/<id>/done`; a research to-do: `POST /api/research/todos/<id>`) | |
+
+  The Ship step also lists its changelog, open, under the why: `main_log`, the rows the Projects card's
+  `main` changelog shows (task or short sha, repo, title, how long ago), at most 15, then **and N more**, which
+  opens the project on Projects. With no `main_log` it says "First deploy: no changelog yet." The Play and Stop
+  buttons call the Projects card's `POST /api/projects/<name>/play` and `/stop`; a failed play shows in the step's
+  message line.
 
   **Send back…**, **Retry with a note…** and **Answer** use the message box below: a line above it says where the
   message goes, with **Cancel**.

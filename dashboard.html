@@ -489,6 +489,9 @@ a[data-task] { color: var(--accent); cursor: pointer; }
 .stepcard .k { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
 .stepcard h2 { font-size: 18px; margin: 6px 0; display: flex; gap: 10px; align-items: baseline; }
 .stepcard .why { white-space: pre-wrap; margin: 6px 0; max-height: 9em; overflow: auto; }
+.stepcard .tdlog { margin: 6px 0; font-size: 13px; }
+.stepcard .tdlog ul.clog { margin: 0 0 4px; max-height: 8.5em; overflow: auto; }
+.stepcard .tdlog a[data-tdproj] { color: var(--accent); cursor: pointer; }
 .stepcard .facts { display: flex; flex-wrap: wrap; gap: 4px 6px; color: var(--muted); font-size: 13px; margin: 8px 0; }
 .stepcard .facts > * + *::before { content: "·"; margin-right: 6px; color: var(--muted); }
 .stepcard .facts a { cursor: pointer; color: var(--accent); }
@@ -2849,9 +2852,10 @@ function tdActions(it) {
     case "Promote":
       if (s.kind === "task") return [g.running ? A("stopmain", `■ Stop ${g.main_branch}`, {primary: 1, title: `Quit ${g.title} running from ${g.main_branch}, so the release can move it`})
         : A("answer", "Reply…", {primary: 1, title: "Answer the release in the message box below"}), A("details", "Details")];
-      return [A("promote", `Promote ${g.dev_branch} → ${g.main_branch}`, {primary: 1, title: `If the gate passes on ${g.dev_branch}, ${g.main_branch} moves to it`})];
-    case "Ship": return (g.deploys || []).map((d, i) => A("deploy:" + d.name, `Deploy ${d.name}`, {primary: !i, disabled: !!(d.error || d.blocked), title: d.error || d.blocked || ""}))
-      .concat(g.deploys && g.deploys.length ? [] : [A("projects", "Open in Projects", {primary: 1})]);
+      return [A("promote", `Promote ${g.dev_branch} → ${g.main_branch}`, {primary: 1, title: `If the gate passes on ${g.dev_branch}, ${g.main_branch} moves to it`})].concat(tdPlay(g, "dev"));
+    case "Ship": return (g.deploys || []).map((d, i) => A("deploy:" + d.name, `Deploy ${d.name}${tdBehind(d)}`, {primary: !i, disabled: !!(d.error || d.blocked),
+        title: d.error || d.blocked || (d.log_unknown ? "The commit it last deployed is gone from git (a rewritten history)" : "")}))
+      .concat(g.deploys && g.deploys.length ? tdPlay(g, "main") : [A("projects", "Open in Projects", {primary: 1})]);
     // Send to dev underneath. It reaches main by itself when its task promotes after merge (the project's default)
     case "Commit": return [g.senddev_open ? A("details:" + g.senddev_open, `Sending… #${g.senddev_open}`, {primary: 1, title: "Open the task sending these files"})
       : A("senddev", "Commit these", {primary: 1, title: `Lands these files on ${g.direct_main || g.auto_release ? g.main_branch : g.dev_branch} through the gate, then clears them from your checkout`})];
@@ -2862,6 +2866,25 @@ function tdActions(it) {
     case "Do": return [A(it.rtodo ? "rdone" : "done", "Done", {primary: 1, title: it.rtodo ? "Closes it in the research repo's to-dos" : ""})];
   }
   return [];
+}
+// What one Deploy button ships: its own count of commits, as the Projects card's Deploys section says it.
+const tdBehind = d => d.log_unknown ? " (?)" : !d.last && !d.from ? " (first deploy)" : d.behind == null ? "" : d.behind ? ` (${d.behind})` : " (up to date)";
+// Play or Stop the project's app from main or dev, as the Projects card's buttons do. None if it can't launch.
+function tdPlay(g, where) {
+  if (!g.can_launch) return [];
+  const b = where === "dev" ? g.dev_branch : g.main_branch, playing = !!(g.play && g.play.phase);
+  if (where === "dev" ? g.dev_running : g.running)
+    return [{a: "stop:" + where, label: `■ Stop ${b}`, disabled: playing, title: `Quit ${g.title} running from ${b}`}];
+  return [{a: "play:" + where, label: `▶ Play ${b}`, disabled: playing || (where === "main" && !g.has_build),
+    title: playing ? "A play is in progress" : where === "main" && !g.has_build ? "Not built yet" : `Run ${b}${where === "dev" ? " in its worktree, to try it before you promote" : ""}`}];
+}
+// The Ship step's changelog: what main gained since the last deploy, open, at most 15 rows.
+const TD_LOG_MAX = 15;
+function tdShipLog(g) {
+  const log = g.main_log || [];
+  if (!log.length) return `<div class="muted tdlog">First deploy: no changelog yet.</div>`;
+  const more = log.length - TD_LOG_MAX;
+  return `<div class="tdlog">${logRows(log.slice(0, TD_LOG_MAX))}${more > 0 ? `<a data-tdproj title="See the whole changelog on the Projects tab">and ${more} more</a>` : ""}</div>`;
 }
 // A task's facts: its number, the gate's result, the files it changed, when it was built. From its page, once read.
 function tdFacts(it) {
@@ -2885,7 +2908,10 @@ function tdStep(it, shown) {
       <div class="why muted">Questions, reviews and replies show up on the left as they come. Below is the conversation about ${esc(P(convProject()).title || "a project")}.</div></div>`);
     return;
   }
-  const busy = TD.busy === it.key, acts = tdActions(it), facts = tdFacts(it);
+  const busy = TD.busy === it.key, acts = tdActions(it), facts = tdFacts(it), g = P(it.project), pl = g.play;
+  // A Play or Stop from this step that failed says so in the step's message line, as on the Projects card
+  const playErr = acts.some(b => /^(play|stop):/.test(b.a)) && pl && pl.error && !pl.phase
+    ? `${pl.stop ? "Stop" : "Play"} ${pl.where === "dev" ? g.dev_branch : g.main_branch} failed: ${pl.error}` : "";
   // On a phone the top row also has ‹ To-do, Details ▾ (the why and the facts, closed at first) and Skip →
   const dets = !!(it.why || facts);
   const html = `<div class="stepcard${TD.dets ? " open" : ""}"><div class="top"><button class="ph back" data-back title="Back to the list">‹ To-do</button>
@@ -2895,13 +2921,15 @@ function tdStep(it, shown) {
     <h2>${verbPill(it)}<span>${esc(it.title)}</span></h2>
     <div class="dets">${it.why ? `<div class="why">${esc(it.why)}</div>` : ""}
     ${facts ? `<div class="facts">${facts}</div>` : ""}${it.verb === "Commit" ? tdUncommitted() : ""}</div>
+    ${it.verb === "Ship" && P(it.project).deploys && P(it.project).deploys.length ? tdShipLog(P(it.project)) : ""}
     <div class="row">${acts.map(b => `<button data-ta="${esc(b.a)}" class="${b.primary ? "primary" : ""}" ${busy || b.disabled ? "disabled" : ""} title="${esc(b.title || "")}">${esc(b.label)}</button>`).join("")}
       <button class="skip" data-skip title="Move it to the end of the list, in this browser, until midnight">Skip for now →</button></div>
-    ${TD.msg ? `<div class="err" style="margin-top:8px;white-space:pre-wrap">${esc(TD.msg)}</div>` : TD.note ? `<div class="muted" style="margin-top:8px">${esc(TD.note)}</div>` : ""}</div>`;
+    ${TD.msg || playErr ? `<div class="err" style="margin-top:8px;white-space:pre-wrap">${esc(TD.msg || playErr)}</div>` : TD.note ? `<div class="muted" style="margin-top:8px">${esc(TD.note)}</div>` : ""}</div>`;
   if (!put($("#tdstep"), html)) return;
   $("#tdstep").querySelectorAll("[data-ta]").forEach(b => b.onclick = () => tdDo(b.dataset.ta));
   $("#tdstep").querySelectorAll("[data-files]").forEach(a => a.onclick = () => tdOpenTask(+a.dataset.files, true));
   $("#tdstep").querySelectorAll("[data-skip]").forEach(b => b.onclick = tdSkip);
+  $("#tdstep").querySelectorAll("[data-tdproj]").forEach(a => a.onclick = () => tdDo("projects"));
   $("#tdstep [data-back]").onclick = () => tdGo("todo");
   if ($("#tdstep [data-dets]")) $("#tdstep [data-dets]").onclick = () => { TD.dets = !TD.dets; renderToday(); };
   if ($("#tdstep [data-udiff]")) $("#tdstep [data-udiff]").ontoggle = e => { TD.udiff = e.target.open; };
@@ -2957,6 +2985,8 @@ async function tdDo(a) {
   if (a === "projects") { setFocus(it.project); return showTab("projects"); }
   if (a === "play") return run(() => api(`/api/tasks/${s.id}/play`, {}), "Starting the build. Approve it, or send it back, when you have tried it.");
   if (a === "approve" || a === "retry") return run(() => api(`/api/tasks/${s.id}/${a}`, {}));
+  if (/^(play|stop):/.test(a)) { const [act, where] = a.split(":");
+    return run(() => api(`/api/projects/${encodeURIComponent(it.project)}/${act}`, where === "dev" ? {where} : {}), act === "play" ? `Starting ${where}.` : `Stopped ${where}.`); }
   if (a === "stopmain") return run(() => api(`/api/projects/${encodeURIComponent(it.project)}/stop`, {}), "Stopped. The release goes on by itself within a minute.");
   if (a === "promote" || a === "senddev") return run(() => api(`/api/projects/${encodeURIComponent(it.project)}/${a}`, {}));
   if (a === "read") return run(() => api(`/api/designs/${s.id}/seen`, {}));
