@@ -5410,6 +5410,7 @@ def conv_say(project, text):
     if cur and cur["ended"]:  # a message into an ended topic reopens it, as it does an ended chat
         topic_reopen(project, cur["id"])
     if cur and cur["mode"] != "research":
+        todos_agree_close(cur["id"])
         return {"topic": cur["id"], "queued": design_say(cur["id"], text)}
     handoff = topic_handoff(left, c["mode"]) if left and not cur else ""
     if c["mode"] == "research":
@@ -7086,6 +7087,13 @@ def todo_done(tid, project=None):
                   + " RETURNING id", (time.time(), tid, *([project] if project else []))))
 
 
+def todos_agree_close(did):
+    """The owner sent a message in chat did: close the open Agree to-dos that chat added. Do items stay open.
+    Called from the owner's own send paths only, not from system inserts (ops notes, task results, the brief)."""
+    q("UPDATE todos SET closed=? WHERE verb='Agree' AND source_kind='design' AND source_id=? AND closed IS NULL",
+      (time.time(), did))
+
+
 def todos_from_reply(p, reply, did):
     """Store the reply's ```todo blocks. Returns (reply without them, note for Claude)."""
     notes = []
@@ -7564,6 +7572,7 @@ class H(BaseHTTPRequestHandler):
             if not design(did):
                 raise ValueError("no such chat")
             if m.group(2) == "say":
+                todos_agree_close(did)
                 return {"queued": design_say(did, b["text"].strip())}
             elif m.group(2) == "unqueue":  # take back a queued message, by its place in the queue
                 with DESIGN_LOCK:

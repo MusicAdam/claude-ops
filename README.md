@@ -482,7 +482,8 @@ the uncommitted-files banner, Deploy. `/api/state` gathers them into one list, `
 
   Every item links to its source. An open item with the same project and title is not added twice.
 - **TODO-3 Closing.** Derived items close by themselves. A stored item closes with
-  `POST /api/todos/<id>/done` (your Done button), or when Claude writes `{"close": <id>}` in a `todo` block.
+  `POST /api/todos/<id>/done` (your Done button), or when Claude writes `{"close": <id>}` in a `todo` block. A stored Agree also closes when you send a message
+  in the chat that added it, even if the message waits in the chat's queue; a Do stays open.
   Closed items stay in the table.
 - **TODO-4 Order and groups.** Each item has a group: `unblock` (Answer, Fix), `ship` (Promote, Ship, Commit),
   `review` (Try, Review, Agree, Read), `only_me` (Do). The list runs unblock, ship, review, only_me, oldest first
@@ -581,7 +582,7 @@ stay on the right of the header.
   | Ship | Deploy (the Deploy dialog), one per target, each with its own count: `Deploy <target> (N)`, `(up to date)`, `(first deploy)`, or `(?)` when its last deployed commit is gone | For a project with a launch step, ▶ Play main (■ Stop main while it runs; off until it is built or while a play is under way) |
   | Commit | Commit these: **Send to dev**, unchanged underneath. Its tooltip says it lands the files on `main` through the gate, then clears them from your checkout; `dev` in a project with Promote after merge off (and not straight to main). While one is open: Sending… #id | |
   | Read | A chat: Mark read when it is new, else End topic. A report: Open report (RES-5) | A chat: End topic, or Reply. A report: Details |
-  | Agree | Reply (focuses the message box) | Done |
+  | Agree | Reply (focuses the message box; sending closes it) | Done |
   | Do | Done (`POST /api/todos/<id>/done`; a research to-do: `POST /api/research/todos/<id>`) | |
 
   The Ship step also lists its changelog, open, under the why: `main_log`, the rows the Projects card's

@@ -189,6 +189,59 @@ class Todos(unittest.TestCase):
         self.assertIsNone(opsd.chat_from(opsd.task(alone)))
 
 
+class AgreeClosesOnReply(unittest.TestCase):
+    def setUp(self):
+        opsd.init_db()
+        for t in ("designs", "design_msgs", "todos"):
+            opsd.q(f"DELETE FROM {t}")
+        self.turns = []
+        self.saved = opsd.design_turn
+        opsd.design_turn = lambda did, text: self.turns.append((did, text))  # no Claude: the chat stays thinking
+        self.a = opsd.q("INSERT INTO designs (project, title, created, updated, kind) VALUES ('web','a',1,1,'design')")
+        self.b = opsd.q("INSERT INTO designs (project, title, created, updated, kind) VALUES ('web','b',1,1,'design')")
+
+    def tearDown(self):
+        opsd.design_turn = self.saved
+
+    def add(self, verb, title, did):
+        opsd.todo_add("web", [{"verb": verb, "title": title, "why": ""}], "design", did)
+        return opsd.q("SELECT id FROM todos WHERE title=? ORDER BY id DESC", (title,), one=True)["id"]
+
+    def closed(self, tid):
+        return opsd.q("SELECT closed FROM todos WHERE id=?", (tid,), one=True)["closed"] is not None
+
+    def say(self, did, text="yes"):
+        return opsd.H.__new__(opsd.H).route(f"/api/designs/{did}/say", {"text": text})
+
+    def test_reply_closes_agree_when_idle_and_when_queued(self):
+        agree = self.add("Agree", "Use SQLite", self.a)
+        self.assertFalse(self.say(self.a)["queued"])
+        self.assertTrue(self.closed(agree))
+        again = self.add("Agree", "Use WAL", self.a)
+        self.assertTrue(self.say(self.a)["queued"])  # the chat is still replying
+        self.assertTrue(self.closed(again))
+
+    def test_do_and_other_chats_stay_open(self):
+        do = self.add("Do", "Grant access", self.a)
+        other = self.add("Agree", "Use Redis", self.b)
+        self.say(self.a)
+        self.assertFalse(self.closed(do))
+        self.assertFalse(self.closed(other))
+
+    def test_system_inserts_do_not_close(self):
+        agree = self.add("Agree", "Use SQLite", self.a)
+        opsd.q("INSERT INTO design_msgs (design_id, role, text, ts) VALUES (?,?,?,?)", (self.a, "ops", "note", 1))
+        opsd.send_queued(self.a)
+        self.assertFalse(self.closed(agree))
+
+    def test_readding_after_close_makes_a_new_item(self):
+        first = self.add("Agree", "Use SQLite", self.a)
+        self.say(self.a)
+        second = self.add("Agree", "Use SQLite", self.a)
+        self.assertNotEqual(first, second)
+        self.assertFalse(self.closed(second))
+
+
 class Uncommitted(unittest.TestCase):
     """GET /api/projects/<name>/uncommitted on a scratch repo: one changed, one new and one deleted file."""
 
