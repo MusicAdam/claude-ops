@@ -33,7 +33,7 @@ and every repo has its own main, dev and task branches. With "." in repos the wo
 path above is then a worktree of it, with the other repos' worktrees in folders it gitignores, and nothing is copied.
 """
 from contextlib import nullcontext
-import base64, ctypes, datetime, fnmatch, json, os, re, secrets, shlex, shutil, signal, sqlite3, subprocess, sys, threading, time, tomllib
+import base64, ctypes, datetime, fnmatch, json, math, os, re, secrets, shlex, shutil, signal, sqlite3, subprocess, sys, threading, time, tomllib
 import xml.etree.ElementTree as ET
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
@@ -879,7 +879,7 @@ def init_db():
         q("ALTER TABLE schedules ADD COLUMN research TEXT")
     q("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)")
     q("CREATE TABLE IF NOT EXISTS session_costs (session_id TEXT PRIMARY KEY, total REAL)")  # see cost_added
-    for k, v in {"max_parallel": "3", "paused": "0", "model": "", "usage_brake": "85", "model:release": "sonnet",
+    for k, v in {"max_parallel": "3", "paused": "0", "model": "", "usage_brake": "85", "usage_taper": "50", "model:release": "sonnet",
                  "release_wait": "180", "effort": "medium"}.items():
         q("INSERT OR IGNORE INTO settings VALUES (?,?)", (k, v))
     q("DELETE FROM settings WHERE key='draining'")  # the old restart's stored hold: a crash could leave it set
@@ -903,7 +903,7 @@ def set_setting(k, v):
 # goes to --model on every resume, whatever the settings say now.
 
 MODEL_KINDS = ("task", "release", "design", "chat")
-SETTING_KEYS = ("max_parallel", "paused", "model", "usage_brake", "release_wait", "effort",  # the dashboard's
+SETTING_KEYS = ("max_parallel", "paused", "model", "usage_brake", "usage_taper", "release_wait", "effort",  # the dashboard's
                 "research_repo", *(f"model:{k}" for k in MODEL_KINDS))
 MODEL_OF_KIND = {"senddev": "task", "deploy": "task", "project": "chat"}  # a project chat is the Chat tab
 
@@ -2777,7 +2777,8 @@ def limit_pause(tid, prompt=None):
 # usage is account-wide, so it counts your own Claude use too. The daemon keeps the latest reading per window in
 # settings usage:<window>, and at usage_brake percent (default 85, 0 = off) of either window the scheduler starts no
 # new task until that window resets, which leaves the rest of it for your design chats, chats and answers. Running
-# work carries on, and chats are never held.
+# work carries on, and chats are never held. Below the brake, the usage taper (usage_taper, default 50, 0 = off)
+# starts fewer Claude workers as the 5-hour window fills: see usage_taper_cap.
 
 USAGE_WINDOWS = {"five_hour": ("5-hour", "5h"), "seven_day": ("7-day", "7d")}
 USAGE_LOCK = threading.Lock()
@@ -2822,10 +2823,32 @@ def usage_brake_pct(s):
         return 0
 
 
+def usage_taper_pct(s):
+    try:
+        return max(0, int(float(s.get("usage_taper") or 0)))
+    except ValueError:
+        return 0
+
+
+def usage_taper_cap(pct, taper, most):
+    """How many Claude workers may run at pct percent of the 5-hour window: max(1, most - ceil((pct - taper) / 10))
+    above the taper, None (no cap) at or below it or with the taper off."""
+    if not taper or pct <= taper:
+        return None
+    return max(1, most - math.ceil((pct - taper) / 10))
+
+
+def claude_running(find=None):
+    """The running Claude workers, for the taper: running tasks that are not a deploy or release."""
+    find = find or task
+    return sum(1 for i in list(THREADS) if (t := find(i)) and t["kind"] not in ("deploy", "release"))
+
+
 def usage_info(s=None):
     """The usage windows and the brake, for the scheduler and the dashboard: {brake, windows: [{key, label, short,
-    pct, resetsAt, resets, ts}], braked}. A reading whose reset has passed is stale and counts as 0. braked is the
-    window that holds the queue (the one that resets last, when both do), or None."""
+    pct, resetsAt, resets, ts}], braked, taper}. A reading whose reset has passed is stale and counts as 0. braked is the
+    window that holds the queue (the one that resets last, when both do), or None. taper is {pct, cap, max, words}
+    while the 5-hour window's taper cap is below max_parallel, else None."""
     s = settings_now() if s is None else s
     brake, now, wins = usage_brake_pct(s), time.time(), []
     for k, (label, short) in USAGE_WINDOWS.items():
@@ -2841,7 +2864,17 @@ def usage_info(s=None):
     if braked:
         braked = {**braked, "words": f"Usage at {braked['pct']}% of the {braked['label']} window · starts again "
                                      f"after {braked['resets']}"}
-    return {"brake": brake, "windows": wins, "braked": braked}
+    try:
+        most = int(s.get("max_parallel") or 1)
+    except ValueError:
+        most = 1
+    five = next((w for w in wins if w["key"] == "five_hour"), None)
+    cap = usage_taper_cap(five["exact"], usage_taper_pct(s), most) if five else None
+    taper = None
+    if cap is not None and cap < most:
+        taper = {"pct": five["pct"], "cap": cap, "max": most,
+                 "words": f"Usage at {five['pct']}% of the 5-hour window · {cap} of {most} workers"}
+    return {"brake": brake, "windows": wins, "braked": braked, "taper": taper}
 
 
 def usage_braked():
@@ -2893,6 +2926,8 @@ def schedule_once():
     if setting("paused") == "1" or STOPPING.is_set() or waiting or held:
         return
     braked = usage_braked()  # running work carries on; no new Claude session starts until the window resets
+    taper = usage_info()["taper"]  # below the brake, fewer new Claude workers as the 5-hour window fills
+    claude = claude_running() if taper else 0
     slots = int(setting("max_parallel") or 1) - len(THREADS)
     for t in q("SELECT * FROM tasks WHERE state='queued' ORDER BY priority DESC, id"):
         if slots <= 0:
@@ -2903,6 +2938,8 @@ def schedule_once():
         if restart_holds(t):  # a Promote's restart waits for running deploys: a new one would hold it longer
             continue
         if braked and starts_claude(t):
+            continue
+        if taper and starts_claude(t) and claude >= taper["cap"]:
             continue
         if t["id"] in THREADS:  # resumed before its paused pipeline finished stopping
             continue
@@ -2926,6 +2963,8 @@ def schedule_once():
         THREADS[t["id"]] = th
         th.start()
         slots -= 1
+        if t["kind"] not in ("deploy", "release"):
+            claude += 1
 
 
 def exclusive_blocker(t):
@@ -6868,10 +6907,12 @@ def wait_reasons(tasks, s=None):
         return {t["id"]: "the queue is paused" for t in tasks if t["state"] == "queued"}
     if lim := limit_info(s):
         return {t["id"]: lim["words"] for t in tasks if t["state"] == "queued"}
-    braked = usage_info(s)["braked"]
+    usage = usage_info(s)
+    braked, taper = usage["braked"], usage["taper"]
     by_id = {t["id"]: t for t in tasks}
     find = lambda i: by_id.get(i) or task(i)  # the list holds the newest 500; an older one is read on its own
     free = int(s.get("max_parallel") or 1) - len(THREADS)
+    claude = claude_running(find) if taper else 0
     mine = {}
     for i in list(THREADS):
         name = (find(i) or {}).get("project")
@@ -6896,9 +6937,12 @@ def wait_reasons(tasks, s=None):
             why = f"{p.title} already runs {p.max_parallel} at once, its limit"
         elif free <= 0:
             why = "waiting for a free slot (all busy)"
+        elif taper and starts_claude(t) and claude >= taper["cap"]:
+            why = taper["words"]
         else:
             why = "starting now"
             free -= 1
+            claude += t["kind"] not in ("deploy", "release")
         out[t["id"]] = why
     return out
 
@@ -8004,6 +8048,8 @@ class H(BaseHTTPRequestHandler):
         if path == "/api/settings":
             if "usage_brake" in b:
                 b["usage_brake"] = min(100, max(0, int(float(b["usage_brake"] or 0))))
+            if "usage_taper" in b:
+                b["usage_taper"] = min(100, max(0, int(float(b["usage_taper"] or 0))))
             if "release_wait" in b:
                 b["release_wait"] = max(0, int(float(b["release_wait"] or 0)))
             if "research_repo" in b:  # "" turns research off

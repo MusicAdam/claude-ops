@@ -1242,7 +1242,7 @@ notes = """Project-specific guidance for design chats."""
 - **Header.** Only what you watch or act on: the tabs, the queue readouts (working, queued, needs you,
   paused), the usage meters, and the pause buttons. Hover a readout or meter for what it counts; the
   dashboard draws that tooltip itself, so it shows at once and survives the 3-second redraw.
-- **Settings tab.** Parallel, Promote wait, Usage brake, Model, Effort and the model per kind of work, each
+- **Settings tab.** Parallel, Promote wait, Usage brake, Taper from, Model, Effort and the model per kind of work, each
   with what it does written next to it, and **Spent**: what Claude has cost, priced at API rates.
 - **Analyze tab.** Run times and costs of the tasks created in the last day, 7 days, 30 days or all time, for
   the project picked in the header or every project (`GET /api/analyze?period=1|7|30|all&project=<name>`).
@@ -1286,7 +1286,8 @@ notes = """Project-specific guidance for design chats."""
   queue. Tasks that need you show the question or error; finished ones show the summary.
 - **Parallelism.** "Parallel" on the Settings tab is the global limit (default 3; setting `max_parallel`). Workers
   also split big tasks into subtasks (with "after" ordering) and use subagents inside a task. "Usage brake" next to it
-  is the usage brake (setting `usage_brake`, default 85; see Usage limits). "Promote wait" is the promote train's
+  is the usage brake (setting `usage_brake`, default 85; see Usage limits), and "Taper from" the usage taper that
+  starts fewer workers as the 5-hour window fills (setting `usage_taper`, default 50). "Promote wait" is the promote train's
   longest wait in minutes (setting `release_wait`, default 180; see [Promote after merge](#main-is-the-golden-version)).
 - **Models.** Each kind of work picks its Claude model. "Model" on the Settings tab is the global setting (`model`);
   **Per kind of work** below it sets `model:task` (task workers and Send to dev), `model:release` (the workers a release
@@ -1355,6 +1356,34 @@ notes = """Project-specific guidance for design chats."""
     and chats are never blocked. Held queued tasks say `Usage at 87% of the 5-hour window · starts again after 3:00 pm`. The
     brake lifts when that window resets or a newer reading is under the brake. You get one notification per window
     per reset: `Usage at 85% of the 5-hour window: no new tasks until 3:00 pm`.
+  - **Usage taper.** Below the brake, the queue starts fewer workers as the 5-hour window fills, so it reaches
+    the brake more slowly. The setting `usage_taper` is a percent: default 50, 0 turns the taper off. Set it as
+    **Taper from** on the Settings tab (`POST /api/settings {"usage_taper": 50}`, clamped to 0..100). Let pct be the
+    5-hour window's exact percent. When the taper is on and pct is above it, the taper cap is
+    `max(1, max_parallel - ceil((pct - usage_taper) / 10))`; otherwise there is no taper cap. With
+    `max_parallel` 6, taper 50 and brake 85:
+
+    | 5-hour usage | workers that start Claude |
+    |---|---|
+    | 0–50% | 6 |
+    | 50.x–60% | 5 |
+    | 60.x–70% | 4 |
+    | 70.x–80% | 3 |
+    | 80.x–84.x% | 2 |
+    | 85%+ | 0 (the brake) |
+
+    With `max_parallel` 3: 51–60% → 2, 61% and up → 1. The rules:
+    - It follows the **5-hour window only**; the 7-day window keeps only the brake. A stale reading counts as 0.
+    - It limits only **new starts of tasks that start a Claude session** (the same ones the brake holds). The
+      running Claude workers are the running tasks that are not a deploy or release; a Claude-starting task starts
+      only while there are fewer of them than the cap. Deploys, releases that only gate and tasks resuming past
+      `claude` start as before, up to `max_parallel`. Running work is never stopped, chats are never held, and a
+      project's own `max_parallel` still applies.
+    - The brake wins: at or above `usage_brake` nothing that starts Claude starts. With the brake off (0) the
+      taper still works on its own, never below 1.
+    - No notification: only the brake notifies. A task held only by the taper says
+      `Usage at 63% of the 5-hour window · 4 of 6 workers`, and while the cap is below `max_parallel` the header
+      meter's hover adds `Tapering: 4 of 6 workers`.
   - **The header meter** shows both windows, `5h 62% · 7d 14%`, with their reset times on hover. It turns amber at
     or above the brake, and red while the queue waits out the usage limit itself.
 - **Restarts.** Whenever the daemon stops (`./opsctl restart` or `stop`, a promote of claude-ops, launchd, a

@@ -680,6 +680,8 @@ details.tdparked .tditem { opacity: .8; }
         <span class="why">Promote train: a task marked Promote after merge is promoted once its project's queue is quiet (nothing queued, running, checking or merging), or at most this many minutes after the first such task merged. The Promote button promotes at once.</span></label>
       <label><span>Usage brake</span><span><input id="brake" type="number" min="0" max="100" step="5" style="width:64px"> %</span>
         <span class="why">At this percent of the 5-hour or 7-day usage window, start no new task that needs Claude until it resets (0 = off). Deploys, promotes and gates still start; chats are never held.</span></label>
+      <label><span>Taper from</span><span><input id="taper" type="number" min="0" max="100" step="5" style="width:64px"> %</span>
+        <span class="why">Above this percent of the 5-hour window, start fewer workers that need Claude: one fewer per 10% over it, never below 1 (0 = off). Running work carries on.</span></label>
     </div>
     <div class="card settings">
       <h2>Models</h2>
@@ -1029,7 +1031,9 @@ window.addEventListener("scroll", () => tipSync(), true);
 function renderUsage() {
   const u = state.usage || {windows: []}, el = $("#usage");
   if (document.activeElement !== $("#brake")) $("#brake").value = state.settings.usage_brake;
+  if (document.activeElement !== $("#taper")) $("#taper").value = state.settings.usage_taper;
   const tail = (u.braked ? `\n${u.braked.words}` : "") +
+    (u.taper ? `\nTapering: ${u.taper.cap} of ${u.taper.max} workers` : "") +
     (u.brake ? `\nBrake at ${u.brake}%: no new tasks start at or above it.` : "\nBrake off.");
   put(el, u.windows.map(w => {
     const cls = state.limit ? "danger" : u.brake && w.pct >= u.brake ? "alert" : "";
@@ -1638,6 +1642,7 @@ $("#pauseall").onclick = () => api("/api/pause-all", {}).then(refresh);
 $("#resumeall").onclick = () => api("/api/resume-all", {}).then(refresh);
 $("#trynow").onclick = () => api("/api/limit/clear", {}).then(refresh);
 $("#brake").onchange = () => api("/api/settings", {usage_brake: Math.min(100, Math.max(0, +$("#brake").value || 0))}).then(refresh);
+$("#taper").onchange = () => api("/api/settings", {usage_taper: Math.min(100, Math.max(0, +$("#taper").value || 0))}).then(refresh);
 $("#par").onchange = () => api("/api/settings", {max_parallel: Math.max(1, +$("#par").value || 1)}).then(refresh);
 $("#relwait").onchange = () => api("/api/settings", {release_wait: Math.max(0, +$("#relwait").value || 0)}).then(refresh);
 $("#model").onchange = () => api("/api/settings", {model: $("#model").value}).then(refresh);
