@@ -916,12 +916,15 @@ Research is ordinary queue work in the project it is about. A report lives in th
   stopped at its tier's limit and the task fails with `stopped at the T1 time limit (15 min)`, so Retry is one click.
   Its size cap is `--max-budget-usd` 1, 3 or 10 (API-equivalent dollars, as the old runs used).
 - **RES-5 Read when it merges.** A research task that is done and merged, and whose report you haven't opened, is a
-  **Read** to-do (`task:<id>:report`, with `report: {path}`). It counts as read once any dashboard view opens the
-  report: the server marks it when `/api/files` serves that path, so the step's **Open report**, the Research section,
-  Details, or a file link in a chat all clear it. The step also has **Mark read**, which clears it without opening it
-  (`POST /api/projects/<name>/research/read` with `{path}`, which Open report sends too; it stores `read` in the task's
-  `research`). Either takes the step off the list at once; if marking fails, the step comes back with the error.
-  Research tasks from before this have no flag, so nothing old shows up.
+  **Read** to-do (`task:<id>:report`, with `report: {path}`). The report counts as read when any dashboard view opens
+  it: the step's **Open report**, the Research section, or a link to the file in Details or a chat. Serving the file
+  (`GET /api/files`) marks every done, merged research task of the project that wrote that path; it stores `read` in
+  the task's `research`. A Read step also has **Mark read**, which marks it without opening it. Open report and Mark
+  read take the step off your list at once, before the server answers, and an `/api/state` answer from before the
+  mark can't bring it back. Both post `POST /api/projects/<name>/research/read` with `{path}` (trimmed); it answers
+  `marked` (the ids it marked) and `already` (ids read before). When both are empty no research task wrote that path:
+  the step comes back with "Found no research report at <path> to mark read", as does any error. Research tasks
+  from before this have no flag, so nothing old shows up.
 - **RES-6 Recurring research.** A schedule whose `research` column holds a tier is a recurring research job. Each run
   builds a fresh brief from its body (the question) with a dated slug, `<slug>-<YYYY-MM-DD>`, so runs don't overwrite
   each other. `opsd.py schedule add -p NAME --every 'day 07:00' --research T1 "question"` makes one; `POST
