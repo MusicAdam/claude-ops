@@ -215,6 +215,111 @@ class Conversation(unittest.TestCase):
         self.assertFalse(self.view()["topics"][0]["unread"])
 
 
+    # ---- ending topics: End, Reopen, End read topics older than
+    def reply(self, did, ago=0):
+        opsd.q("INSERT INTO design_msgs (design_id, role, text, ts) VALUES (?,?,?,?)",
+               (did, "assistant", "hi", time.time() - ago))
+
+    def todo_keys(self):
+        return [x["key"] for x in opsd.todos_list([], [], {}) if x["project"] == "demo"]
+
+    def test_end_and_reopen(self):
+        a, b = self.chat("a", ago=10), self.chat("b")
+        self.reply(a)
+        self.assertEqual(self.todo_keys(), [f"chat:{b}:read", f"chat:{a}:read"])
+        v = opsd.topic_end("demo", a)
+        t = next(t for t in v["topics"] if t["id"] == a)
+        self.assertTrue(t["ended"])
+        self.assertFalse(t["unread"])  # ending marks it read
+        self.assertEqual(self.todo_keys(), [f"chat:{b}:read"])
+        self.assertEqual(opsd.design(a)["ended"], t["ended"])  # stored on the row: survives a restart
+        v = opsd.topic_reopen("demo", str(a))
+        self.assertIsNone(next(t for t in v["topics"] if t["id"] == a)["ended"])
+        self.assertIn(f"chat:{a}:read", self.todo_keys())
+
+    def test_end_current_topic_starts_new(self):
+        a = self.chat("a")
+        self.assertEqual(self.view()["topic"], a)
+        self.assertIsNone(opsd.topic_end("demo", a)["topic"])
+
+    def test_latest_open_topic_is_default(self):
+        a, b = self.chat("a", ago=10), self.chat("b")
+        opsd.q("UPDATE designs SET ended=? WHERE id=?", (time.time(), b))
+        self.assertEqual(self.view()["topic"], a)
+
+    def test_end_refused_while_replying(self):
+        a = self.chat("a")
+        opsd.q("UPDATE designs SET state='thinking' WHERE id=?", (a,))
+        with self.assertRaisesRegex(ValueError, "still replying"):
+            opsd.topic_end("demo", a)
+        self.assertIsNone(opsd.design(a)["ended"])
+
+    def test_opening_ended_topic_reopens_it(self):
+        a, b = self.chat("a", ago=10), self.chat("b")
+        opsd.topic_end("demo", a)
+        v = opsd.conv_open("demo", "topic", a)
+        self.assertEqual(v["topic"], a)
+        self.assertIsNone(opsd.design(a)["ended"])
+
+    def test_say_into_ended_topic_reopens_it(self):
+        a = self.chat("a")
+        opsd.q("UPDATE designs SET ended=? WHERE id=?", (time.time(), a))
+        opsd.conv_open("demo", "topic", a)
+        opsd.q("UPDATE designs SET ended=? WHERE id=?", (time.time(), a))  # ended from the Chat tab meanwhile
+        opsd.conv_say("demo", "more")
+        self.assertIsNone(opsd.design(a)["ended"])
+
+    def test_reply_after_end_is_not_unread(self):
+        """Earlier topics and the to-do list agree: an ended topic's later reply is new in neither."""
+        a = self.chat("a")
+        opsd.topic_end("demo", a)
+        self.reply(a, ago=-5)  # a task's result note lands after you ended it
+        self.assertFalse(next(t for t in self.view()["topics"] if t["id"] == a)["unread"])
+        self.assertEqual(self.todo_keys(), [])
+
+    def test_unread_topics_are_all_on_the_left(self):
+        """Every topic Earlier topics flags new reply is a Read item on the left (designs 13/23/30/37 were not)."""
+        ids = [self.chat(str(i), ago=i) for i in range(4)]
+        for d in ids:
+            self.reply(d, ago=-5)
+        opsd.q("UPDATE designs SET ended=? WHERE id IN (?,?)", (time.time(), ids[0], ids[1]))
+        unread = {t["id"] for t in self.view()["topics"] if t["unread"]}
+        self.assertEqual(unread, set(ids[2:]))
+        self.assertTrue({f"chat:{d}:read" for d in unread} <= set(self.todo_keys()))
+
+    def test_end_read_older_than(self):
+        cur = self.chat("current")
+        old_read, old_unread, fresh = self.chat("old read", ago=10 * 86400), self.chat("old unread", ago=10 * 86400), \
+            self.chat("fresh")
+        opsd.q("UPDATE designs SET seen=updated")
+        self.reply(old_unread, ago=-5)
+        busy = self.chat("busy", ago=10 * 86400)
+        opsd.q("UPDATE designs SET state='thinking' WHERE id=?", (busy,))
+        opsd.conv_open("demo", "topic", cur)
+        opsd.q("UPDATE designs SET updated=? WHERE id=?", (time.time() - 20 * 86400, cur))
+        v = opsd.topics_end_read("demo", 7)
+        self.assertEqual(v["ended_now"], 1)
+        self.assertEqual([t["id"] for t in v["topics"] if t["ended"]], [old_read])
+        self.assertEqual(v["topic"], cur)
+        with self.assertRaises(ValueError):
+            opsd.topics_end_read("demo", "soon")
+
+    def test_end_research_thread(self):
+        opsd.q("DELETE FROM settings WHERE key='research_ended'")
+        real = opsd.research_topics
+        opsd.research_topics = lambda project: [{"id": "r:t1", "title": "R", "mode": "research", "kind": "research",
+                                                 "created": 1, "last": 1, "unread": False, "state": "idle",
+                                                 "ended": opsd.research_ended().get("t1")}]
+        try:
+            opsd.topic_end("demo", "r:t1")
+            self.assertIn("t1", json.loads(opsd.setting("research_ended")))
+            self.assertTrue(self.view()["topics"][0]["ended"])
+            opsd.topic_reopen("demo", "r:t1")
+            self.assertEqual(json.loads(opsd.setting("research_ended")), {})
+        finally:
+            opsd.research_topics = real
+
+
 class TopicBlock(unittest.TestCase):
     def setUp(self):
         opsd.init_db()

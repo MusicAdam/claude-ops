@@ -5157,22 +5157,37 @@ def research_topics(project):
     if not targets:
         return []
     when = lambda iso: datetime.datetime.fromisoformat(iso).timestamp() if iso else 0  # noqa: E731
+    ended = research_ended()
     with research.lock:
         threads = [t for t in research.load_threads().values() if t.get("target") in targets]
         jobs = {j["id"]: j for j in research.load_jobs()} if threads else {}
     return [{"id": f"r:{t['id']}", "title": (t.get("title") or "").strip().split("\n")[0] or "Research", "mode": "research",
              "kind": "research",
-             "target": t["target"], "created": when(t.get("created")), "unread": False, "state": "idle",
+             "target": t["target"], "created": when(t.get("created")), "unread": False,
+             "state": "thinking" if any((jobs.get(j) or {}).get("status") == "running" for j in t["turns"]) else "idle",
+             "ended": ended.get(t["id"]),
              "last": max([when(jobs[j].get("started")) for j in t["turns"] if j in jobs] + [when(t.get("created"))])}
             for t in threads]
 
 
+def research_ended():
+    """The research threads you ended in the Today view, {thread id: when}: the threads live in the research repo,
+    so the daemon keeps this in the setting research_ended."""
+    try:
+        v = json.loads(setting("research_ended") or "{}")
+    except ValueError:
+        v = {}
+    return v if isinstance(v, dict) else {}
+
+
 def topics(project):
-    """Every topic of project, newest activity first: its chats, ended ones too, and its research threads."""
+    """Every topic of project, newest activity first: its chats, ended ones too, and its research threads. A topic is
+    unread when it has a reply you haven't opened and is not ended: an ended topic is done, whatever lands in it
+    later (the Today list's Read items follow the same rule, see todos_list)."""
     out = [{"id": d["id"], "title": d["title"], "mode": "project" if d["kind"] == "project" else "design",
             "kind": d["kind"] or "design", "spec": d["spec"], "spec_draft": d["spec_draft"], "created": d["created"],
-            "last": d["updated"] or 0, "state": d["state"],
-            "unread": d["state"] != "thinking" and (d["replied"] or 0) > (d["seen"] or 0)}
+            "last": d["updated"] or 0, "state": d["state"], "ended": d["ended"],
+            "unread": d["state"] != "thinking" and not d["ended"] and (d["replied"] or 0) > (d["seen"] or 0)}
            for d in q(f"SELECT {CHAT_COLS},created FROM designs WHERE project=?", (project,))]
     return sorted(out + research_topics(project), key=lambda t: -(t["last"] or 0))
 
@@ -5186,7 +5201,8 @@ def conv_state(project, tops):
         c = {}
     ids = {t["id"]: t for t in tops}
     if not isinstance(c, dict) or "topic" not in c or (c["topic"] is not None and c["topic"] not in ids):
-        c = {"topic": tops[0]["id"], "mode": tops[0]["mode"]} if tops else {"topic": None, "mode": "design"}
+        latest = next((t for t in tops if not t["ended"]), None)  # the latest open topic, else a new one
+        c = {"topic": latest["id"], "mode": latest["mode"]} if latest else {"topic": None, "mode": "design"}
     if c["topic"] is not None:
         c = {"topic": c["topic"], "mode": ids[c["topic"]]["mode"]}
     if c.get("mode") not in MODES or (c["mode"] == "research" and not research_links(project)):
@@ -5222,6 +5238,8 @@ def conv_open(project, how, ref=None, mode=None):
         ref = int(ref) if str(ref).isdigit() else ref
         if ref not in ids:
             raise ValueError(f"no topic {ref} in {project}")
+        if ids[ref]["ended"]:  # opening an ended topic reopens it
+            topic_reopen(project, ref)
         c = {"topic": ref, "mode": ids[ref]["mode"]}
     elif how == "task":
         if (cur["mode"] if cur else c["mode"]) != "design":
@@ -5243,6 +5261,74 @@ def conv_open(project, how, ref=None, mode=None):
         raise ValueError(f"unknown how {how!r}")
     set_setting(f"conv:{project}", json.dumps(c))
     return conv_view(project)
+
+
+def topic_ref(project, ref):
+    """The topic ref names in project ("12", 12 or "r:<thread>"), from topics(); ValueError when there is none."""
+    ref = int(ref) if str(ref).isdigit() else ref
+    t = next((t for t in topics(project) if t["id"] == ref), None)
+    if not t:
+        raise ValueError(f"no topic {ref} in {project}")
+    return t
+
+
+def topic_end(project, ref):
+    """POST /api/conversation/end: you are done with this topic. It leaves Earlier topics for the Ended group, and
+    leaves the to-do list: its replies count as read, now and later. A chat is ended as End chat ends it, so the
+    Design and Chat tabs agree. Refused while Claude replies, rather than stopping the reply unasked."""
+    proj(project)
+    t = topic_ref(project, ref)
+    if t["state"] == "thinking":
+        raise ValueError(f"Claude is still replying in “{t['title']}”. Stop the reply, or wait for it, then end it.")
+    now = time.time()
+    if t["mode"] == "research":
+        with research.lock:  # research_ended is read and written whole: one writer at a time
+            e = research_ended()
+            e[t["id"][2:]] = now
+            set_setting("research_ended", json.dumps(e))
+    else:
+        q("UPDATE designs SET ended=?, seen=?, queued='[]' WHERE id=?", (now, now, t["id"]))
+    try:
+        c = json.loads(setting(f"conv:{project}") or "{}")
+    except ValueError:
+        c = {}
+    if isinstance(c, dict) and c.get("topic") == t["id"]:  # it was the current topic: the next message starts one
+        set_setting(f"conv:{project}", json.dumps({"topic": None, "mode": "design"}))
+    return conv_view(project)
+
+
+def topic_reopen(project, ref):
+    """POST /api/conversation/reopen: put an ended topic back under Earlier topics (and on the to-do list when it
+    gets a reply). Opening an ended topic, or sending it a message, does this too."""
+    proj(project)
+    t = topic_ref(project, ref)
+    if t["mode"] == "research":
+        with research.lock:
+            e = research_ended()
+            if e.pop(t["id"][2:], None) is not None:
+                set_setting("research_ended", json.dumps(e))
+    else:
+        q("UPDATE designs SET ended=NULL WHERE id=?", (t["id"],))
+    return conv_view(project)
+
+
+def topics_end_read(project, days):
+    """POST /api/conversation/end-read: end every open topic of project that you have read, that Claude isn't
+    replying in, that isn't the current one, and whose last activity is more than days old. Returns how many."""
+    proj(project)
+    try:
+        days = float(days)
+    except (TypeError, ValueError):
+        raise ValueError(f"days must be a number, not {days!r}")
+    if days < 0:
+        raise ValueError("days can't be negative")
+    tops = topics(project)
+    cur, cutoff = conv_state(project, tops)["topic"], time.time() - days * 86400
+    old = [t["id"] for t in tops if not t["ended"] and not t["unread"] and t["state"] != "thinking"
+           and t["id"] != cur and (t["last"] or 0) < cutoff]
+    for ref in old:
+        topic_end(project, ref)
+    return {**conv_view(project), "ended_now": len(old)}
 
 
 def topic_handoff(t, mode):
@@ -5271,6 +5357,8 @@ def conv_say(project, text):
     ids = {t["id"]: t for t in tops}
     c = conv_state(project, tops)
     cur, left = ids.get(c["topic"]), ids.get(c.get("from"))
+    if cur and cur["ended"]:  # a message into an ended topic reopens it, as it does an ended chat
+        topic_reopen(project, cur["id"])
     if cur and cur["mode"] != "research":
         return {"topic": cur["id"], "queued": design_say(cur["id"], text)}
     handoff = topic_handoff(left, c["mode"]) if left and not cur else ""
@@ -7017,10 +7105,14 @@ def todos_list(tasks, projects, last):
                                  f"Review {n} uncommitted {files(n)} in {f['title']}", commit_why(f["uncommitted"]),
                                  min((u["oldest"] for u in f["uncommitted"] if u["oldest"]), default=0),
                                  "project", name))
-    for d in q(f"SELECT * FROM (SELECT {CHAT_COLS} FROM designs WHERE ended IS NULL) "
-               "WHERE state!='thinking' AND COALESCE(replied,0)>seen"):
+    # Every chat you haven't ended waits on you once Claude is done replying: read its new reply, or answer it or
+    # end it. An ended chat is done: a reply that lands in it later doesn't bring it back (topics() agrees).
+    for d in q(f"SELECT * FROM (SELECT {CHAT_COLS} FROM designs WHERE ended IS NULL) WHERE state!='thinking'"):
+        unread = (d["replied"] or 0) > (d["seen"] or 0)
         out.append(todo_item(f"chat:{d['id']}:read", "Read", d["project"], d["title"] or f"Chat #{d['id']}",
-                             "Claude replied", d["replied"], "chat", d["id"]))
+                             "Claude replied" if unread else "Open: reply, or end it when you are done",
+                             d["replied"] if unread else max(d["seen"] or 0, d["replied"] or 0, d["updated"] or 0),
+                             "chat", d["id"], unread=unread))
     for r in q("SELECT * FROM todos WHERE closed IS NULL"):
         out.append(todo_item(f"todo:{r['id']}", r["verb"], r["project"], r["title"], r["why"], r["created"],
                              "chat" if r["source_kind"] == "design" else r["source_kind"], r["source_id"],
@@ -7393,6 +7485,12 @@ class H(BaseHTTPRequestHandler):
             return conv_open(b.get("project") or "", b.get("how"), b.get("ref"), b.get("mode"))
         if path == "/api/conversation/say":
             return conv_say(b.get("project") or "", b.get("text"))
+        if path == "/api/conversation/end":  # {project, ref}: you are done with that topic
+            return topic_end(b.get("project") or "", b.get("ref"))
+        if path == "/api/conversation/reopen":  # {project, ref}: put an ended topic back
+            return topic_reopen(b.get("project") or "", b.get("ref"))
+        if path == "/api/conversation/end-read":  # {project, days}: end the read topics older than days
+            return topics_end_read(b.get("project") or "", b.get("days"))
         if path == "/api/designs":
             text = (b.get("text") or "").strip()
             if b.get("spec"):  # open the chat about an OpenSpec change; a message is optional

@@ -510,7 +510,12 @@ a[data-task] { color: var(--accent); cursor: pointer; }
 .topicdiv::before, .topicdiv::after { content: ""; flex: 1; border-top: 1px solid var(--line); }
 .topicdiv span { max-width: 80%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 #convmodes .row { margin: 0 0 6px; }
-#convmodes #newtopic { font-size: 12px; padding: 3px 10px; }
+#convmodes :is(#newtopic, #endtopic) { font-size: 12px; padding: 3px 10px; }
+#convtop .topicrow { display: flex; gap: 8px; align-items: center; }
+#convtop .topicrow span { flex: 1; min-width: 0; }
+#convtop .topicrow button, #convtop .endread :is(button, select) { font-size: 11px; padding: 1px 8px; }
+#convtop .endread { margin: 6px 0; gap: 6px; }
+#convtop #endedtopics { margin: 6px 0 0; }
 .convnote { font-size: 12px; color: var(--muted); margin: 0 0 6px; }
 #saymode { font-size: 12px; margin-bottom: 6px; display: flex; gap: 8px; align-items: center; color: var(--warn); }
 #saymode button { padding: 1px 8px; font-size: 12px; }
@@ -2843,7 +2848,8 @@ function tdActions(it) {
     case "Commit": return [g.senddev_open ? A("details:" + g.senddev_open, `Sending… #${g.senddev_open}`, {primary: 1, title: "Open the task sending these files"})
       : A("senddev", "Commit these", {primary: 1, title: `Lands these files on ${g.direct_main || g.auto_release ? g.main_branch : g.dev_branch} through the gate, then clears them from your checkout`})];
     case "Read": return it.report ? [A("report", "Open report", {primary: 1, title: `Read ${it.report.path} as on ${g.dev_branch || "dev"}. Opening it takes it off your list`}), A("details", "Details")]
-      : [A("read", "Mark read", {primary: 1, title: "The reply is below. This takes it off your list"})];
+      : it.unread ? [A("read", "Mark read", {primary: 1, title: "The reply is below. It stays on your list until you end the topic"}), A("endtopic", "End topic", {title: "Done with it: off your list, under Ended in Earlier topics"})]
+      : [A("endtopic", "End topic", {primary: 1, title: "Done with it: off your list, under Ended in Earlier topics"}), A("reply", "Reply", {title: "Answer Claude in the message box below"})];
     case "Agree": return [A("reply", "Reply", {primary: 1, title: "Answer Claude in the message box below"})].concat(it.todo ? [A("done", "Done")] : []);
     case "Do": return [A(it.rtodo ? "rdone" : "done", "Done", {primary: 1, title: it.rtodo ? "Closes it in the research repo's to-dos" : ""})];
   }
@@ -2946,6 +2952,7 @@ async function tdDo(a) {
   if (a === "stopmain") return run(() => api(`/api/projects/${encodeURIComponent(it.project)}/stop`, {}), "Stopped. The release goes on by itself within a minute.");
   if (a === "promote" || a === "senddev") return run(() => api(`/api/projects/${encodeURIComponent(it.project)}/${a}`, {}));
   if (a === "read") return run(() => api(`/api/designs/${s.id}/seen`, {}));
+  if (a === "endtopic") return run(() => api("/api/conversation/end", {project: it.project, ref: s.id}).then(cv => { if (convProject() === it.project) TD.cv = cv; }));
   if (a === "done") return run(() => api(`/api/todos/${it.todo}/done`, {}));
   if (a === "rdone") return run(() => api(`/api/research/todos/${it.rtodo}`, {done: true}));
   if (a === "report") return run(() => tdOpenReport(it.project, it.report.path));
@@ -3068,21 +3075,50 @@ function convIntro() {
 function renderConv() {
   const cv = TD.cv;
   if (!cv) { put($("#convtop"), ""); put($("#convmodes"), ""); return; }
-  const now = Date.now() / 1000, older = cv.topics.filter(t => t.id !== cv.topic);
-  const top = older.length ? `<details id="earlier" ${TD.earlierOpen ? "open" : ""}><summary>Earlier topics (${older.length})${older.some(t => t.unread) ? ' <span class="s-review">●</span>' : ""}</summary>
-    ${older.map(t => `<div class="chatitem ${t.unread ? "unread" : ""}" data-topic="${esc(String(t.id))}"><div>${esc(t.title || "Untitled")}</div>
-      <div class="sub">${esc(modeWord(t.mode))}${t.spec ? " · OpenSpec" : ""} · ${t.state === "thinking" ? '<span class="pulse s-running">replying</span>' : t.unread ? '<span class="s-review">new reply</span>' : `${ago(t.last, now)} ago`}</div></div>`).join("")}</details>` : "";
+  // Earlier topics lists the open ones; End moves one to the folded Ended group, where Reopen (or opening it) puts it back.
+  const now = Date.now() / 1000, others = cv.topics.filter(t => t.id !== cv.topic);
+  const older = others.filter(t => !t.ended), ended = others.filter(t => t.ended), days = TD.endDays || 7;
+  const row = (t, btn) => `<div class="chatitem ${t.unread ? "unread" : ""}" data-topic="${esc(String(t.id))}"><div class="topicrow"><span>${esc(t.title || "Untitled")}</span>${btn}</div>
+      <div class="sub">${esc(modeWord(t.mode))}${t.spec ? " · OpenSpec" : ""} · ${t.state === "thinking" ? '<span class="pulse s-running">replying</span>' : t.unread ? '<span class="s-review">new reply</span>' : `${ago(t.ended || t.last, now)} ago`}</div></div>`;
+  const top = others.length ? `<details id="earlier" ${TD.earlierOpen ? "open" : ""}><summary>Earlier topics (${older.length})${older.some(t => t.unread) ? ' <span class="s-review">●</span>' : ""}</summary>
+    ${older.map(t => row(t, t.state === "thinking" ? "" : `<button data-end="${esc(String(t.id))}" title="Done with this topic: it moves under Ended and off your to-do list">End</button>`)).join("")}
+    ${older.length ? `<div class="row endread"><button id="endread" title="Ends every topic here you have read whose last activity is older than that">End read topics older than</button>
+      <select id="enddays">${[1, 7, 30, 90].map(n => `<option value="${n}" ${n === days ? "selected" : ""}>${n} day${n === 1 ? "" : "s"}</option>`).join("")}</select></div>` : ""}
+    ${ended.length ? `<details id="endedtopics" ${TD.endedOpen ? "open" : ""}><summary>Ended (${ended.length})</summary>
+      ${ended.map(t => row(t, `<button data-reopen="${esc(String(t.id))}" title="Put it back under Earlier topics">Reopen</button>`)).join("")}</details>` : ""}</details>` : "";
   if (put($("#convtop"), top)) {
+    const ref = id => /^\d+$/.test(id) ? +id : id;
     $("#convtop").querySelectorAll("[data-topic]").forEach(el => el.onclick = () => {
-      TD.earlierOpen = false; const id = el.dataset.topic; convOpen({how: "topic", ref: /^\d+$/.test(id) ? +id : id}); });
-    if ($("#earlier")) $("#earlier").ontoggle = e => { TD.earlierOpen = e.target.open; };
+      TD.earlierOpen = false; convOpen({how: "topic", ref: ref(el.dataset.topic)}); });
+    const act = (sel, what, body) => $("#convtop").querySelectorAll(sel).forEach(el => el.onclick = e => {
+      e.stopPropagation(); convAct(what, body(el)); });
+    act("[data-end]", "end", el => ({ref: ref(el.dataset.end)}));
+    act("[data-reopen]", "reopen", el => ({ref: ref(el.dataset.reopen)}));
+    act("#endread", "end-read", () => ({days: +$("#enddays").value}));
+    if ($("#enddays")) $("#enddays").onchange = e => { TD.endDays = +e.target.value; };
+    if ($("#earlier")) $("#earlier").ontoggle = e => { if (e.target.id === "earlier") TD.earlierOpen = e.target.open; };
+    if ($("#endedtopics")) $("#endedtopics").ontoggle = e => { e.stopPropagation(); TD.endedOpen = e.target.open; };
   }
   // One kind of new topic: plan & design, which queues tasks, starts research and edits your checkout when asked.
   // A topic left new in another mode (an older mode switch) goes back to plan & design.
   if (cv.topic === null && (cv.mode !== "design" || cv.from)) { convOpen({how: "new", mode: "design"}); return; }
-  const html = `<div class="row"><span style="flex:1"></span><button id="newtopic" title="Your next message starts a new topic" ${cv.topic === null ? "disabled" : ""}>New topic</button></div>
+  const cur = topicOf(cv.topic), busy = cur && cur.state === "thinking";
+  const html = `<div class="row"><span style="flex:1"></span>${cur ? `<button id="endtopic" ${busy ? "disabled" : ""} title="${busy ? "Claude is replying. Stop the reply, or wait for it, to end this topic" : "Done with this topic: it moves under Ended and off your to-do list"}">End topic</button>` : ""}
+    <button id="newtopic" title="Your next message starts a new topic" ${cv.topic === null ? "disabled" : ""}>New topic</button></div>
     ${cv.topic === null && cv.topics.length ? `<div class="convnote">Your next message starts a new topic.</div>` : ""}`;
-  if (put($("#convmodes"), html)) $("#newtopic").onclick = () => { convOpen({how: "new", mode: "design"}); $("#say").focus(); };
+  if (put($("#convmodes"), html)) {
+    $("#newtopic").onclick = () => { convOpen({how: "new", mode: "design"}); $("#say").focus(); };
+    if ($("#endtopic")) $("#endtopic").onclick = () => convAct("end", {ref: cv.topic});
+  }
+}
+// End or reopen a topic, or end the read ones older than some days: POST /api/conversation/<what>.
+async function convAct(what, body) {
+  const project = convProject(); if (!project) return;
+  try {
+    const cv = await api(`/api/conversation/${what}`, {project, ...body});
+    TD.cv = cv; $("#chatmsg").textContent = what === "end-read" ? `Ended ${cv.ended_now} topic${cv.ended_now === 1 ? "" : "s"}.` : "";
+  } catch (e) { $("#chatmsg").textContent = e.message; }
+  chatKey = ""; refresh(); await refreshDesign();
 }
 // A research topic: its thread's turns, drawn as the Research page draws them.
 async function loadResearchConv(ref) {

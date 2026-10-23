@@ -412,9 +412,10 @@ shows for every project in view whose `dev` has an `openspec/` folder, even when
 
 ### Which chats need you
 
-This applies to both the Design and the Chat tab. The Today view shows the same state differently: an unread chat
-is a **Read** to-do, and ● in **Earlier topics**. It has no **End chat** and no Ended group; a topic you leave stays
-under Earlier topics.
+This applies to both the Design and the Chat tab. The Today view shows the same state differently: every chat you
+haven't ended is a **Read** to-do once Claude is done replying (marked new until you read it), and an unread one is
+● in **Earlier topics**. Ending a topic there (**End**, **End topic**) is the same as **End chat**. An ended chat
+is done: a reply that lands in it later (a task's result note) makes it new nowhere.
 
 - **The list.** Chats are grouped as **Ready for you** (Claude has answered), **Claude is replying**, and
   **Ended**, which is folded away. A chat whose reply you haven't opened yet is marked ● and **new reply**, and
@@ -568,7 +569,7 @@ Their routes (`#tasks`, `#projects`, `#schedules`, …) still open them. The que
   | Promote | Promote dev → main; for a release waiting on you, Stop main when the app is running, else Reply… | Details |
   | Ship | Deploy (the Deploy dialog), one per target | |
   | Commit | Commit these: **Send to dev**, unchanged underneath. Its tooltip says it lands the files on `main` through the gate, then clears them from your checkout; `dev` in a project with Promote after merge off (and not straight to main). While one is open: Sending… #id | |
-  | Read | Mark read; for a report, Open report (RES-5) | Details (a report) |
+  | Read | A chat: Mark read when it is new, else End topic. A report: Open report (RES-5) | A chat: End topic, or Reply. A report: Details |
   | Agree | Reply (focuses the message box) | Done |
   | Do | Done (`POST /api/todos/<id>/done`; a research to-do: `POST /api/research/todos/<id>`) | |
 
@@ -584,10 +585,21 @@ Their routes (`#tasks`, `#projects`, `#schedules`, …) still open them. The que
     current topic is kept by the daemon (setting `conv:<project>`), so every browser shows the same one. With
     none kept, it is the project's topic with the latest activity.
   - **The timeline.** One scrolling timeline: the current topic's messages, under a divider line
-    `<date> · <topic title> · <mode>`. Above it, **Earlier topics (N)** is folded. Open it for every other topic of
-    the project, newest first: title, mode, last activity, and ● when it has a reply you haven't read. Click one to
+    `<date> · <topic title> · <mode>`. Above it, **Earlier topics (N)** is folded. Open it for every other open topic
+    of the project, newest first: title, mode, last activity, and ● when it has a reply you haven't read. Click one to
     make it the current topic. Sending a message into an older topic resumes it, as sending to an ended chat does.
-    Nothing is ended or tidied by you here: this view has no **End chat** (the API and the Design and Chat tabs keep it).
+  - **Ending topics.** You end a topic when you are done with it. It leaves Earlier topics and the to-do list, and
+    its replies count as read, now and later. A chat is ended as **End chat** ends it (`designs.ended`); a research
+    thread is listed in the setting `research_ended`. Both survive a restart.
+    - **End** on a row of Earlier topics, or **End topic** above the message box for the current one (your next
+      message then starts a new topic). Both are refused while Claude is replying: stop the reply or wait.
+    - **End read topics older than N days** (1, 7, 30 or 90) ends every open topic you have read, that Claude isn't
+      replying in, other than the current one, whose last activity is older than that.
+    - **Ended (N)**, folded at the bottom of Earlier topics, lists ended topics with **Reopen**. Opening one, or
+      sending it a message, reopens it too.
+    - With no current topic kept, the view picks the latest open topic, else starts a new one.
+    - API: `POST /api/conversation/end` and `/reopen` with `{project, ref}`, and `/end-read` with `{project, days}`.
+      Each answers with the conversation, as `GET /api/conversation` does.
   - **One kind of topic.** Above the message box there is only **New topic**, and a line under it when your next
     message starts one. Every new topic is plan & design: a design chat. You don't pick a mode first; you ask Claude.
     It queues tasks, starts research (it queues a research task, see RES-2) and, when you ask for a change made
@@ -628,8 +640,8 @@ Their routes (`#tasks`, `#projects`, `#schedules`, …) still open them. The que
     divider shows the new title, and Claude's next message says it took (`topic_from_reply()`).
   - **Queued messages.** While Claude replies, **Send** reads **Queue**, as in the Design and Chat tabs (see
     [Which chats need you](#which-chats-need-you)). A research topic doesn't queue: Send waits for its reply.
-  - **Read state.** Today never marks a chat read by itself: **Mark read** does, so an item does not vanish while you
-    read it. A task's own chat with its worker is in its details panel (**Details**), not here.
+  - **Read state.** Today never marks a chat read by itself: **Mark read** does. The item stays on the list, no
+    longer new, until you end the topic. A task's own chat with its worker is in its details panel (**Details**), not here.
   - The Design and Chat tabs stay under More as the full list view of the same rows.
 - **TODAY-3 Right: timeline.** Read-only status in three groups. Anything that needs a decision is in To-do, not
   here.
