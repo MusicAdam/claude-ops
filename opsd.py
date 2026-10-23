@@ -3124,6 +3124,85 @@ def project_documents(project):
     return sorted(out, key=lambda x: -x["mtime"])
 
 
+UNCOMMITTED_DIFF = 400  # diff lines the Commit to-do's card shows
+UNCOMMITTED_FILES = 500  # files it lists per repo
+UNCOMMITTED_READ = 2 << 20  # bytes of an untracked file read for its line count and diff
+EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"  # git's empty tree: what a repo with no commit yet diffs against
+
+
+def project_uncommitted(project):
+    """GET /api/projects/<name>/uncommitted: what the Commit to-do's card lists. Per repo with uncommitted files,
+    each file's status (new, changed, deleted), lines added and removed (git diff --numstat against HEAD; an untracked
+    text file's line count) and mtime, or binary; then one diff of them all, the first UNCOMMITTED_DIFF lines, an
+    untracked file as a diff against nothing. Read only: git status, diff and file reads, with no index lock taken.
+    {"repos": [{"repo", "files": [{path, status, added, removed, binary, mtime}], "more"}], "diff", "diff_lines",
+    "cut"}"""
+    p = proj(project)
+    repos, diff, total = [], [], 0
+
+    def git(r, *a):
+        return subprocess.run(["git", "--no-optional-locks", *a], cwd=r.src, capture_output=True, text=True,
+                              errors="replace", timeout=20)
+
+    def add(lines):
+        nonlocal total
+        total += len(lines)
+        diff.extend(lines[:max(0, UNCOMMITTED_DIFF - len(diff))])
+
+    for r in p.parts:
+        st = git(r, "status", "--porcelain", "-z", "--untracked-files=all")
+        if st.returncode:
+            continue
+        status, it = {}, iter(st.stdout.split("\0"))
+        for e in it:
+            if len(e) > 3:
+                xy = e[:2]
+                status[e[3:]] = ("new" if xy == "??" or "A" in xy else "deleted" if "D" in xy else "changed")
+                if e[0] in "RC":
+                    next(it, None)
+        if not status:
+            continue
+        base = "HEAD" if not git(r, "rev-parse", "-q", "--verify", "HEAD").returncode else EMPTY_TREE
+        num, it = {}, iter(git(r, "diff", "--numstat", "-z", base).stdout.split("\0"))
+        for e in it:
+            parts = e.split("\t", 2)
+            if len(parts) < 3:
+                continue
+            path = parts[2] or (next(it, ""), next(it, ""))[1]  # a rename: old and new path follow
+            num[path] = (None, None) if parts[0] == "-" else (int(parts[0]), int(parts[1]))
+        out, new = [], []  # new: the untracked files' diffs, after git's
+        for path in sorted(status)[:UNCOMMITTED_FILES]:
+            f = {"path": path, "status": status[path], "added": None, "removed": None, "binary": False, "mtime": None}
+            try:
+                f["mtime"] = os.lstat(r.src / path).st_mtime
+            except OSError:
+                pass
+            if path in num:
+                f["added"], f["removed"] = num[path]
+                f["binary"] = f["added"] is None
+            elif status[path] == "new":  # untracked: not in git's diff
+                try:
+                    with open(r.src / path, "rb") as fh:
+                        data = fh.read(UNCOMMITTED_READ)
+                except OSError:
+                    data = b""
+                if b"\0" in data[:8000]:
+                    f["binary"] = True
+                    new.append([f"diff --git a/{path} b/{path}", "new file", f"Binary file {path}"])
+                else:
+                    lines = data.decode("utf-8", "replace").splitlines()
+                    f["added"], f["removed"] = len(lines), 0
+                    new.append([f"diff --git a/{path} b/{path}", "new file", "--- /dev/null", f"+++ b/{path}",
+                         f"@@ -0,0 +1,{len(lines)} @@"] + ["+" + x for x in lines])
+            out.append(f)
+        add(git(r, "diff", "--no-color", "--no-ext-diff", base).stdout.splitlines())
+        for lines in new:
+            add(lines)
+        repos.append({"repo": str(r.src).replace(str(HOME), "~", 1), "files": out,
+                      "more": max(0, len(status) - UNCOMMITTED_FILES)})
+    return {"repos": repos, "diff": "\n".join(diff), "diff_lines": total, "cut": total > len(diff)}
+
+
 def research_home():
     """The claude-ops project whose checkout is the research repo (RES-7), or None."""
     repo = research.REPO
@@ -3439,6 +3518,22 @@ def uncommitted(p):
         except Exception:  # the other facts matter more than this one
             continue
     return out
+
+
+COMMIT_WHY_NAMES = 3  # paths the Commit to-do's why names; more are counted
+
+
+def commit_why(us):
+    """The Commit to-do's why: the first few uncommitted paths, relative to their repo, then how many more, per repo:
+    'docs/a.md, notes/b.md +1 more in ~/dev/research'."""
+    out, left = [], COMMIT_WHY_NAMES
+    for u in us:
+        names = (u.get("paths") or [])[:left]
+        left -= len(names)
+        more = u["count"] - len(names)
+        what = ", ".join(names) + (f" +{more} more" if more else "") if names else f"{more} {files(more)}"
+        out.append(f"{what} in {u['repo']}")
+    return "; ".join(out)
 
 
 def files(n):
@@ -6918,8 +7013,8 @@ def todos_list(tasks, projects, last):
                                  min(x["at"] for x in f["main_log"]), "project", name))
         if f.get("uncommitted"):
             n = sum(u["count"] for u in f["uncommitted"])
-            out.append(todo_item(f"project:{name}:commit", "Commit", name, f"Commit your changes in {f['title']}",
-                                 f"{n} uncommitted {files(n)} in " + ", ".join(u["repo"] for u in f["uncommitted"]),
+            out.append(todo_item(f"project:{name}:commit", "Commit", name,
+                                 f"Review {n} uncommitted {files(n)} in {f['title']}", commit_why(f["uncommitted"]),
                                  min((u["oldest"] for u in f["uncommitted"] if u["oldest"]), default=0),
                                  "project", name))
     for d in q(f"SELECT * FROM (SELECT {CHAT_COLS} FROM designs WHERE ended IS NULL) "
@@ -7113,10 +7208,11 @@ class H(BaseHTTPRequestHandler):
         if path == "/api/analyze":  # the Analyze tab: ?period=1|7|30|all&project=<name>
             qs = parse_qs(urlparse(self.path).query)
             return self.send(200, analysis(qs.get("period", ["7"])[0], qs.get("project", [""])[0]))
-        m = re.fullmatch(r"/api/projects/([\w-]+)/(research|documents)", path)  # a project's sections (TODAY-4)
+        m = re.fullmatch(r"/api/projects/([\w-]+)/(research|documents|uncommitted)", path)  # TODAY-4; the Commit card
         if m:
             try:
-                return self.send(200, (project_research if m.group(2) == "research" else project_documents)(m.group(1)))
+                return self.send(200, {"research": project_research, "documents": project_documents,
+                                       "uncommitted": project_uncommitted}[m.group(2)](m.group(1)))
             except ValueError as e:
                 return self.send(404, {"error": str(e)})
         if path == "/api/conversation":  # the Today view's conversation: ?project=<name>

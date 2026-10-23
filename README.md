@@ -89,6 +89,7 @@ The release, Promote and Promote after merge described here are for a project th
   files, the project card shows a banner with how many, where, and the date of the oldest change; expand it for
   the paths. The New task form warns that workers won't see them, `opsd.py add` prints the same warning, and a
   design chat's `[ops: ...]` line names them. Commit them to dev, or click **Send to dev**, for them to ship.
+  Today lists them too, as a **Commit** item that says they need your review and what they are (TODO-1).
 - **Send to dev** (a button on that banner) turns the stranded work into a normal queued change on dev, then
   clears it from your checkout, so there is exactly one copy. It queues a task of its own kind, `Send uncommitted
   changes in <repo folder> to dev` (marked `send to dev` in the list; a workspace reads `<workspace folder>
@@ -446,7 +447,15 @@ the uncommitted-files banner, Deploy. `/api/state` gathers them into one list, `
   - **Ship**: `main` has moved since the last deploy of a project with deploy targets, and no deploy is under
     way. This reads what the Deploy panel already knows: `main_since_kind` is `deploy` and `main_log` is not
     empty. A project with no recorded deploy of `main` yet shows no Ship item.
-  - **Commit**: your checkout has uncommitted files. It reuses the banner's list; no extra git call.
+  - **Commit**: your checkout has uncommitted files, which need your review before they can ship. Title:
+    `Review N uncommitted files in <project>`. Why: up to 3 of the paths, relative to the repo, then how many
+    more, per repo: `docs/research/foo.md, notes/bar.md +1 more in ~/dev/research`. Both reuse the banner's list;
+    no extra git call. Its card lists every file (the first 500 per repo): new, changed or deleted, lines added
+    and removed (`git diff --numstat` against HEAD; for an untracked text file, its line count; `binary` for a
+    binary file) and how old it is (mtime). Below that, a folded **Show diff**: the first 400 lines of the diff,
+    with a note when it is cut, an untracked file shown as a diff against nothing. The card reads these from
+    `GET /api/projects/<name>/uncommitted`, read only (git status and diff without an index lock, file reads):
+    `{repos: [{repo, files: [{path, status, added, removed, binary, mtime}], more}], diff, diff_lines, cut}`.
   - **Read**: a design or project chat with a reply you haven't opened, as the tab badges count them.
   - **Read** (a report): a research task merged into `dev` whose report you haven't opened (see
     [Research](#research), RES-5).
@@ -558,7 +567,7 @@ Their routes (`#tasks`, `#projects`, `#schedules`, …) still open them. The que
   | Fix | Retry | Retry with a note… |
   | Promote | Promote dev → main; for a release waiting on you, Stop main when the app is running, else Reply… | Details |
   | Ship | Deploy (the Deploy dialog), one per target | |
-  | Commit | Send to dev | |
+  | Commit | Commit these: **Send to dev**, unchanged underneath. Its tooltip says it lands the files on `main` through the gate, then clears them from your checkout; `dev` in a project with Promote after merge off (and not straight to main). While one is open: Sending… #id | |
   | Read | Mark read; for a report, Open report (RES-5) | Details (a report) |
   | Agree | Reply (focuses the message box) | Done |
   | Do | Done (`POST /api/todos/<id>/done`; a research to-do: `POST /api/research/todos/<id>`) | |

@@ -493,6 +493,14 @@ a[data-task] { color: var(--accent); cursor: pointer; }
 .stepcard .facts > * + *::before { content: "·"; margin-right: 6px; color: var(--muted); }
 .stepcard .facts a { cursor: pointer; color: var(--accent); }
 .stepcard .row { margin-top: 12px; }
+.stepcard table.unc { border-collapse: collapse; font-size: 13px; margin: 8px 0; max-width: 100%; }
+.stepcard table.unc td, .stepcard table.unc th { padding: 2px 10px 2px 0; text-align: left; vertical-align: baseline; }
+.stepcard table.unc .p { word-break: break-all; }
+.stepcard table.unc .n { white-space: nowrap; }
+.stepcard .unc .ust { font-size: 12px; }
+.stepcard .unc .ust.new, .stepcard .unc .add { color: var(--ok); }
+.stepcard .unc .ust.deleted, .stepcard .unc .del { color: var(--bad); }
+.stepcard pre.udiff { max-height: 28em; overflow: auto; white-space: pre; background: var(--bg); padding: 8px; border-radius: 6px; }
 .stepcard .skip { margin-left: auto; background: none; border-color: transparent; color: var(--muted); }
 /* Today's conversation: Earlier topics, the divider at the top of a topic, New topic */
 #convtop details { margin: 0 0 8px; }
@@ -2729,7 +2737,7 @@ new ResizeObserver(() => document.documentElement.style.setProperty("--hdr-h", $
 // among them (moved here from History). See README "Today view".
 const TD = {key: "", filter: "all", skip: {}, order: [], item: null, convKey: null, task: null, mode: null, busy: "",
             msg: "", note: "", panel: null, cv: null, rs: null, over: null, applied: "", starter: "", earlierOpen: false,
-            pane: "todo", dets: false, sec: "conv", sd: null};
+            pane: "todo", dets: false, sec: "conv", sd: null, unc: null, udiff: false};
 try {
   TD.key = localStorage.getItem("ops-todo") || "";
   TD.filter = localStorage.getItem("ops-todo-filter") || "all";
@@ -2785,6 +2793,7 @@ function renderToday() {
   const all = tdAll(), shown = tdShown(all), it = tdPick(shown);
   TD.item = it;
   if ((it ? it.key : "") !== TD.convKey) tdChanged(it);
+  if (it && it.verb === "Commit") tdLoadUncommitted(it);
   tdLeft(all, shown); tdStep(it, shown); tdSections(); tdTimeline(); tdPanel(); renderSayMode();
   $("#todayview").dataset.pane = TD.pane;
   document.querySelectorAll("#tdnav [data-pane]").forEach(b => b.classList.toggle("on", b.dataset.pane === TD.pane));
@@ -2794,7 +2803,7 @@ function renderToday() {
 function tdChanged(it) {
   TD.convKey = it ? it.key : "";
   TD.mode = it && it.verb === "Answer" ? tdAnswerMode(it) : null;
-  TD.task = null; TD.over = null; TD.msg = ""; TD.note = ""; chatKey = ""; TD.dets = false; tdClearStarter();
+  TD.task = null; TD.unc = null; TD.uncSig = ""; TD.udiff = false; TD.over = null; TD.msg = ""; TD.note = ""; chatKey = ""; TD.dets = false; tdClearStarter();
   refreshDesign();
 }
 const tdAnswerMode = it => ({a: "answer", id: it.source.id, words: `Your message answers #${it.source.id}'s question.`});
@@ -2830,8 +2839,9 @@ function tdActions(it) {
       return [A("promote", `Promote ${g.dev_branch} → ${g.main_branch}`, {primary: 1, title: `If the gate passes on ${g.dev_branch}, ${g.main_branch} moves to it`})];
     case "Ship": return (g.deploys || []).map((d, i) => A("deploy:" + d.name, `Deploy ${d.name}`, {primary: !i, disabled: !!(d.error || d.blocked), title: d.error || d.blocked || ""}))
       .concat(g.deploys && g.deploys.length ? [] : [A("projects", "Open in Projects", {primary: 1})]);
-    case "Commit": return [g.senddev_open ? A("details:" + g.senddev_open, `Sending to ${g.dev_branch}… #${g.senddev_open}`, {primary: 1})
-      : A("senddev", `Send to ${g.dev_branch}`, {primary: 1, title: `Queue a task that lands these changes on ${g.dev_branch} through the gate`})];
+    // Send to dev underneath. It reaches main by itself when its task promotes after merge (the project's default)
+    case "Commit": return [g.senddev_open ? A("details:" + g.senddev_open, `Sending… #${g.senddev_open}`, {primary: 1, title: "Open the task sending these files"})
+      : A("senddev", "Commit these", {primary: 1, title: `Lands these files on ${g.direct_main || g.auto_release ? g.main_branch : g.dev_branch} through the gate, then clears them from your checkout`})];
     case "Read": return it.report ? [A("report", "Open report", {primary: 1, title: `Read ${it.report.path} as on ${g.dev_branch || "dev"}. Opening it takes it off your list`}), A("details", "Details")]
       : [A("read", "Mark read", {primary: 1, title: "The reply is below. This takes it off your list"})];
     case "Agree": return [A("reply", "Reply", {primary: 1, title: "Answer Claude in the message box below"})].concat(it.todo ? [A("done", "Done")] : []);
@@ -2870,7 +2880,7 @@ function tdStep(it, shown) {
     <button class="ph skip" data-skip title="Move it to the end of the list, in this browser, until midnight">Skip →</button></div>
     <h2>${verbPill(it)}<span>${esc(it.title)}</span></h2>
     <div class="dets">${it.why ? `<div class="why">${esc(it.why)}</div>` : ""}
-    ${facts ? `<div class="facts">${facts}</div>` : ""}</div>
+    ${facts ? `<div class="facts">${facts}</div>` : ""}${it.verb === "Commit" ? tdUncommitted() : ""}</div>
     <div class="row">${acts.map(b => `<button data-ta="${esc(b.a)}" class="${b.primary ? "primary" : ""}" ${busy || b.disabled ? "disabled" : ""} title="${esc(b.title || "")}">${esc(b.label)}</button>`).join("")}
       <button class="skip" data-skip title="Move it to the end of the list, in this browser, until midnight">Skip for now →</button></div>
     ${TD.msg ? `<div class="err" style="margin-top:8px;white-space:pre-wrap">${esc(TD.msg)}</div>` : TD.note ? `<div class="muted" style="margin-top:8px">${esc(TD.note)}</div>` : ""}</div>`;
@@ -2880,6 +2890,33 @@ function tdStep(it, shown) {
   $("#tdstep").querySelectorAll("[data-skip]").forEach(b => b.onclick = tdSkip);
   $("#tdstep [data-back]").onclick = () => tdGo("todo");
   if ($("#tdstep [data-dets]")) $("#tdstep [data-dets]").onclick = () => { TD.dets = !TD.dets; renderToday(); };
+  if ($("#tdstep [data-udiff]")) $("#tdstep [data-udiff]").ontoggle = e => { TD.udiff = e.target.open; };
+}
+// The Commit item's files, from GET /api/projects/<name>/uncommitted: what each is, then the diff, folded.
+const UNC_STATUS = {new: "new", changed: "changed", deleted: "deleted"};
+function tdUncommitted() {
+  const u = TD.unc && TD.unc.key === TD.convKey ? TD.unc.data : null;
+  if (!u) return `<div class="muted unc">Reading the files…</div>`;
+  if (u.error) return `<div class="err unc">${esc(u.error)}</div>`;
+  const many = u.repos.length > 1;
+  const rows = u.repos.map(r => (many ? `<tr><th colspan="4" class="mono">${esc(r.repo)}</th></tr>` : "") + r.files.map(f =>
+    `<tr><td class="ust ${f.status}">${UNC_STATUS[f.status] || esc(f.status)}</td><td class="mono p" title="${esc(f.path)}">${esc(f.path)}</td>
+      <td class="mono n">${f.binary ? "binary" : f.added == null ? "" : `<span class="add">+${f.added}</span> <span class="del">−${f.removed}</span>`}</td>
+      <td class="muted">${f.mtime ? `${ago(f.mtime, state.now)} ago` : ""}</td></tr>`).join("")
+    + (r.more ? `<tr><td></td><td class="muted" colspan="3">…and ${r.more} more</td></tr>` : "")).join("");
+  const cut = u.cut ? `<div class="muted">Showing the first ${u.diff.split("\n").length} of ${u.diff_lines} lines.</div>` : "";
+  return `<table class="unc">${rows}</table>`
+    + (u.diff ? `<details class="unc" data-udiff ${TD.udiff ? "open" : ""}><summary>Show diff</summary><pre class="mono udiff">${
+        esc(u.diff).split("\n").map(l => /^\+(?!\+\+ )/.test(l) ? `<span class="add">${l}</span>` : /^-(?!-- )/.test(l) ? `<span class="del">${l}</span>` : l).join("\n")}</pre>${cut}</details>` : "");
+}
+async function tdLoadUncommitted(it) {
+  const key = it.key, sig = `${key}|${it.title}|${it.why}`;
+  if (TD.uncSig === sig) return;  // read, or being read
+  TD.uncSig = sig;
+  let data;
+  try { data = await api(`/api/projects/${encodeURIComponent(it.project)}/uncommitted`); } catch (e) { data = {error: e.message}; }
+  if (TD.convKey !== key) return;
+  TD.unc = {key, sig, data}; renderToday();
 }
 function tdSkip() {
   const it = TD.item; if (!it) return;

@@ -2,6 +2,8 @@
 Run from the repo root: /opt/homebrew/bin/python3 -m unittest discover -s tests -q"""
 import json
 import os
+import shutil
+import subprocess
 import sys
 import tempfile
 import time
@@ -84,8 +86,22 @@ class Todos(unittest.TestCase):
         got = {x["key"]: x for x in self.todos(fs)}
         self.assertEqual(set(got), {"project:web:promote", "project:game:ship", "project:game:commit"})
         self.assertEqual(got["project:game:ship"]["since"], now - 90)
-        self.assertEqual(got["project:game:commit"]["why"], "3 uncommitted files in ~/dev/game")
+        self.assertEqual(got["project:game:commit"]["why"], "3 files in ~/dev/game")  # no paths known
         self.assertEqual(got["project:game:commit"]["verb"], "Commit")
+
+    def test_commit_item(self):
+        one = [{"repo": "~/dev/research", "count": 1, "paths": ["docs/research/foo.md"], "oldest": 5}]
+        it = self.todos([project_facts("web", uncommitted=one)])[0]
+        self.assertEqual((it["title"], it["why"], it["verb"], it["group"]),
+                         ("Review 1 uncommitted file in Web", "docs/research/foo.md in ~/dev/research", "Commit", "ship"))
+        five = [{"repo": "~/dev/research", "count": 5, "paths": ["a.md", "b.md", "c/d.md", "e.md", "f.md"], "oldest": 5}]
+        it = self.todos([project_facts("web", uncommitted=five)])[0]
+        self.assertEqual(it["title"], "Review 5 uncommitted files in Web")
+        self.assertEqual(it["why"], "a.md, b.md, c/d.md +2 more in ~/dev/research")
+        two = [{"repo": "~/w/a", "count": 2, "paths": ["x", "y"], "oldest": 1},
+               {"repo": "~/w/b", "count": 2, "paths": ["z", "q"], "oldest": 1}]  # a workspace: 3 names in all
+        self.assertEqual(opsd.commit_why(two), "x, y in ~/w/a; z +1 more in ~/w/b")
+
 
     def test_unread_chat(self):
         old = time.time() - 100
@@ -158,6 +174,62 @@ class Todos(unittest.TestCase):
         self.assertEqual(opsd.chat_from(opsd.task(queued)), did)
         self.assertEqual(opsd.chat_from(opsd.task(child)), did)
         self.assertIsNone(opsd.chat_from(opsd.task(alone)))
+
+
+class Uncommitted(unittest.TestCase):
+    """GET /api/projects/<name>/uncommitted on a scratch repo: one changed, one new and one deleted file."""
+
+    def setUp(self):
+        self.dir = Path(tempfile.mkdtemp())
+        git = lambda *a: subprocess.run(["git", *a], cwd=self.dir, check=True, capture_output=True)
+        git("init", "-q")
+        (self.dir / "keep.txt").write_text("one\ntwo\nthree\n")
+        (self.dir / "gone.txt").write_text("a\nb\n")
+        git("add", ".")
+        git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "start")
+        (self.dir / "keep.txt").write_text("one\n2\nthree\nfour\n")
+        (self.dir / "gone.txt").unlink()
+        (self.dir / "docs").mkdir()
+        (self.dir / "docs" / "new.md").write_text("# hi\nthere\n")
+        (self.dir / "pic.bin").write_bytes(b"\x89PNG\0\0data")
+        self.saved = dict(opsd.PROJECTS)
+        p = FakeProject("scratch")
+        p.parts = [opsd.Part(type("P", (), {"repo": self.dir})(), "")]
+        opsd.PROJECTS["scratch"] = p
+
+    def tearDown(self):
+        opsd.PROJECTS.clear()
+        opsd.PROJECTS.update(self.saved)
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def test_files(self):
+        got = opsd.project_uncommitted("scratch")
+        self.assertEqual(len(got["repos"]), 1)
+        fs = {f["path"]: f for f in got["repos"][0]["files"]}
+        pick = lambda f: (f["status"], f["added"], f["removed"], f["binary"])
+        self.assertEqual(pick(fs["keep.txt"]), ("changed", 2, 1, False))
+        self.assertEqual(pick(fs["gone.txt"]), ("deleted", 0, 2, False))
+        self.assertEqual(pick(fs["docs/new.md"]), ("new", 2, 0, False))
+        self.assertEqual(pick(fs["pic.bin"]), ("new", None, None, True))
+        self.assertIsNone(fs["gone.txt"]["mtime"])
+        self.assertGreater(fs["keep.txt"]["mtime"], 0)
+        self.assertIn("+four", got["diff"])
+        self.assertIn("+++ b/docs/new.md\n@@ -0,0 +1,2 @@\n+# hi\n+there", got["diff"])
+        self.assertIn("Binary file pic.bin", got["diff"])
+        self.assertFalse(got["cut"])
+        self.assertEqual(got["diff_lines"], len(got["diff"].splitlines()))
+
+    def test_diff_cap(self):
+        (self.dir / "big.txt").write_text("".join(f"line {i}\n" for i in range(1000)))
+        got = opsd.project_uncommitted("scratch")
+        self.assertTrue(got["cut"])
+        self.assertEqual(len(got["diff"].splitlines()), opsd.UNCOMMITTED_DIFF)
+        self.assertGreater(got["diff_lines"], 1000)
+        self.assertEqual({f["path"]: f["added"] for f in got["repos"][0]["files"]}["big.txt"], 1000)
+
+    def test_unknown(self):
+        with self.assertRaises(ValueError):
+            opsd.project_uncommitted("nope")
 
 
 if __name__ == "__main__":
