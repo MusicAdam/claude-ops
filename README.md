@@ -40,7 +40,9 @@ several (see [Workspaces](#workspaces)). Read it, adjust it, then click **Reload
                                rebase onto dev ─▶ gate: the [[gate]] commands, in order
                                   │ conflict / fail: the worker is resumed with the error (max 3 rounds)
                                   ▼ pass
-                   "hold for review"? ── yes ─▶ build, wait for Try / Approve / Send back
+        "hold for review" and an [app] launch? ── yes ─▶ build, wait for Try / Approve / Send back
+        (a project with no [app] launch has nothing to try, so a held task merges like any other;
+         a worker with a question still stops as needs_input)
                                   │ no
                                   ▼
                             merge --no-ff into dev   (<worktrees>/dev)
