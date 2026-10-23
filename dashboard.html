@@ -845,7 +845,7 @@ a[data-task] { color: var(--accent); cursor: pointer; }
       <div id="convmodes" class="hidden"></div>
       <div id="saymode" class="hidden"></div>
       <textarea id="say"></textarea>
-      <div class="row"><label id="cprojwrap">Project <select id="cproj"></select></label><button class="primary" id="send">Send</button><span class="muted">⌘↩</span>
+      <div class="row"><label id="cprojwrap">Project <select id="cproj"></select></label><button class="primary" id="send">Send</button><span class="muted">↩</span>
         <button id="clip" title="Attach pictures (or paste or drop them on the message box)">📎</button><input type="file" id="clipfile" accept="image/*" multiple class="hidden">
         <button id="stopchat" class="danger hidden">Stop</button><span id="chatmsg" class="err"></span><span style="flex:1"></span>
         <button id="endchat" class="hidden" title="Take this chat off your list. It stays under Ended, where you can reopen it">End chat</button>
@@ -1321,6 +1321,14 @@ function openTask(id) {
   if (tab !== "tasks") showTab("tasks");
   selectTask(id); refresh();
 }
+// Chat boxes send on Enter, like the Claude Code CLI. Shift or Alt+Enter adds a line; Cmd/Ctrl+Enter always sends.
+// Never mid-IME-composition. On touch screens (no Shift on the keyboard) Enter adds a line and the ↑/Send button sends.
+function sendKey(e) {
+  if (e.key !== "Enter" || e.isComposing || e.keyCode === 229) return false;
+  if (e.metaKey || e.ctrlKey) return true;
+  if (e.shiftKey || e.altKey) return false;
+  return !matchMedia("(pointer: coarse)").matches;
+}
 document.addEventListener("keydown", e => {
   if (!dlg) return;
   if (e.key === "Escape") closeDeploy();
@@ -1533,11 +1541,11 @@ async function loadDetail(id, fresh) {
       <div class="tchat">${t.chat.map(m => m.role === "assistant" ? `<div class="msg">${md(m.text, undefined, links)}</div>`
           : `<div class="msg user">${userMd(m.text, links)}${m.role === "steer" ? `<div class="note">${steerNote(t, m)}</div>` : ""}</div>`).join("")}
         ${t.chat_live ? `<div class="live"><span class="pulse s-running">Claude is thinking</span>${t.chat_live.map(l => `<div>  ${esc(l)}</div>`).join("")}</div>` : ""}</div>
-      ${t.state === "paused" && t.can_chat ? `<textarea id="ask" placeholder="${t.chat_full ? "Chat with the worker now: ask, or have it change things in its worktree (it commits on the task's branch)" : "Ask about this work now (read-only)"}, or send a message the worker gets when you resume the task. Drop or paste screenshots to attach them. (⌘↩ chats now)" style="min-height:60px"></textarea>
+      ${t.state === "paused" && t.can_chat ? `<textarea id="ask" placeholder="${t.chat_full ? "Chat with the worker now: ask, or have it change things in its worktree (it commits on the task's branch)" : "Ask about this work now (read-only)"}, or send a message the worker gets when you resume the task. Drop or paste screenshots to attach them. (Enter chats now, Shift+Enter adds a line)" style="min-height:60px"></textarea>
         <div class="row">${t.chat_live ? btn("stopask", "Stop") : btn("ask", t.chat_full ? "Chat now" : "Ask", "primary")}${btn("steer", "Send when it resumes")}</div>`
-      : t.can_steer ? `<textarea id="ask" placeholder="Steer the worker: change direction, add a requirement, or ask what it is doing. It reads your message after its current step. Drop or paste screenshots to attach them. (⌘↩ sends)" style="min-height:60px"></textarea>
+      : t.can_steer ? `<textarea id="ask" placeholder="Steer the worker: change direction, add a requirement, or ask what it is doing. It reads your message after its current step. Drop or paste screenshots to attach them. (Enter sends, Shift+Enter adds a line)" style="min-height:60px"></textarea>
         <div class="row">${btn("steer", "Send", "primary")}</div>`
-      : t.can_chat ? `<textarea id="ask" placeholder="${t.chat_full ? "Chat with the worker: ask why it did something, or have it fix, test or change things. It works in the task's worktree with its full tools and commits on the task's branch. " + ({review: "Approve merges it.", needs_input: "Send answer resumes the task.", failed: "Retry runs the task again.", cancelled: "Retry runs the task again.", paused: "Resume continues the task."}[t.state] || "") : "Ask about this work: why it did something, how it works, what it tested. This task is finished and its worktree is gone, so Claude reads the code, and can queue a follow-up task for a change."} Drop or paste screenshots to attach them. (⌘↩ sends)" style="min-height:60px"></textarea>
+      : t.can_chat ? `<textarea id="ask" placeholder="${t.chat_full ? "Chat with the worker: ask why it did something, or have it fix, test or change things. It works in the task's worktree with its full tools and commits on the task's branch. " + ({review: "Approve merges it.", needs_input: "Send answer resumes the task.", failed: "Retry runs the task again.", cancelled: "Retry runs the task again.", paused: "Resume continues the task."}[t.state] || "") : "Ask about this work: why it did something, how it works, what it tested. This task is finished and its worktree is gone, so Claude reads the code, and can queue a follow-up task for a change."} Drop or paste screenshots to attach them. (Enter sends, Shift+Enter adds a line)" style="min-height:60px"></textarea>
         <div class="row">${t.chat_live ? btn("stopask", "Stop") : btn("ask", t.chat_full ? "Send" : "Ask", "primary")}</div>` : ""}</details>` : ""}
     <details data-k="body" ${t.state === "queued" ? "open" : ""}><summary>Task description</summary><pre>${pics(esc(t.body))}</pre></details>
     ${t.kind === "deploy" ? "" : `<details data-k="feed" open><summary>Worker activity</summary>
@@ -1568,7 +1576,7 @@ async function loadDetail(id, fresh) {
   document.querySelectorAll("#detail [data-act]").forEach(b => b.onclick = () => act(t.id, b.dataset.act));
   box.querySelectorAll("a.origin").forEach(a => a.onclick = () => openOrigin(t.origin));
   document.querySelectorAll("#detail textarea").forEach(el => { el.onfocus = () => typing = true; el.onblur = () => typing = !!el.value; });
-  const ask = $("#ask"); if (ask) ask.onkeydown = e => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) act(t.id, t.can_steer && !(t.state === "paused" && t.can_chat) ? "steer" : "ask"); };
+  const ask = $("#ask"); if (ask) ask.onkeydown = e => { if (sendKey(e)) { e.preventDefault(); act(t.id, t.can_steer && !(t.state === "paused" && t.can_chat) ? "steer" : "ask"); } };
 }
 
 // A task or chat another project's session sent: who sent it, as a link to that task or chat.
@@ -2715,7 +2723,7 @@ $("#say").onkeydown = e => {
     if ((e.key === "Enter" && !e.shiftKey) || e.key === "Tab") { e.preventDefault(); pickSlash(slash.k); return; }
   }
   if (open && e.key === "Escape") { e.preventDefault(); e.stopPropagation(); slash.shut = true; renderSlash(); return; }
-  if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) sendChat();
+  if (sendKey(e)) { e.preventDefault(); sendChat(); }
 };
 $("#stopchat").onclick = () => (tab === "today" && TD.rs && TD.rs.running ? api(`/api/research/jobs/${encodeURIComponent(TD.rs.job)}/stop`, {})
   : api(`/api/designs/${chatSel}/stop`, {})).then(refreshDesign);
@@ -2966,11 +2974,11 @@ async function tdSend(text) {
   } catch (e) { $("#chatmsg").textContent = e.message; }
 }
 const CONV_SAY = {design: "Talk through an idea, or ask Claude to queue a task, start research or change your checkout. Drop or paste screenshots to attach them.", project: TABTEXT.chat.say,
-                  research: "Ask about this project's research, or ask for new research. (⌘↩ sends)"};
+                  research: "Ask about this project's research, or ask for new research. (Enter sends, Shift+Enter adds a line)"};
 function tdPlaceholder() {
   const m = TD.mode;
   if (m) return {answer: `Your answer to #${m.id}'s question`, queue: "What should the task do? Write it as a brief that stands alone", reject: `What should #${m.id} change?`, retry: `A note for #${m.id}'s worker on this retry`}[m.a]
-    + ". Drop or paste screenshots to attach them. (⌘↩ sends)";
+    + ". Drop or paste screenshots to attach them. (Enter sends, Shift+Enter adds a line)";
   return CONV_SAY[TD.cv ? TD.cv.mode : "design"];
 }
 // On a phone's Today the message box is one line that grows with what you type, to at most 4 lines (the CSS caps it).
@@ -3973,7 +3981,7 @@ async function rsMountChat(box, target, kind) {
     <div class="rslog" id="rslog"></div>
     <div class="composer"><textarea id="rssay" rows="3" placeholder="Ask about this ${kind}, or ask for new research."></textarea>
       <div class="row"><select id="rscmodel">${RS_MODELS}</select><select id="rscsize" title="Stops the turn once its tokens, priced at API rates, pass this">${rsSizeOpts(st.size)}</select>
-        <button class="primary rw" id="rssend">Send</button><span class="muted">⌘↩</span></div></div>`;
+        <button class="primary rw" id="rssend">Send</button><span class="muted">↩</span></div></div>`;
   const say = $("#rssay"), log = $("#rslog"), send = $("#rssend");
   say.value = st.draft; $("#rscmodel").value = st.model;
   say.oninput = () => st.draft = say.value;
@@ -4028,7 +4036,7 @@ async function rsMountChat(box, target, kind) {
     wasRunning = true; await load(); log.scrollTop = log.scrollHeight;
   };
   send.onclick = submit;
-  say.onkeydown = e => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); submit(); } };
+  say.onkeydown = e => { if (sendKey(e)) { e.preventDefault(); submit(); } };
   await load();
 }
 function rsTurn(t) {

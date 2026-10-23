@@ -704,6 +704,11 @@ Below 700px Today is phone-first. The rules:
 - **HDR-2 Step card.** Compact by default, about 100px: one top row with **‹ To-do**, **Step k of n · project**,
   **Details ▾** and **Skip →**; then the title; then one row of action buttons that scrolls sideways. The why and
   the facts open under **Details ▾**.
+- **Sending a message.** In the Today composer, the Design and Chat tabs' message box, and a task page's ask or
+  steer box, **Enter** sends, **Shift+Enter** or **Alt/Option+Enter** adds a line, and **⌘/Ctrl+Enter** also sends.
+  Enter never sends while an input method (IME) is composing. On a touch screen **Enter** adds a line and you send
+  with the **↑** or **Send** button. With the `/` list open, Enter picks the command. The new-task brief, the
+  research question and the deploy confirm still send on **⌘/Ctrl+Enter**.
 - **HDR-3 Composer.** One row: attach (📎), the message box (it grows to at most 4 lines) and an **↑** send
   button. **New topic**, the line that says where a message goes, and the project picker sit above it.
 - **HDR-4 Room to talk.** While a step is open the conversation gets at least 60% of the screen height; the step
