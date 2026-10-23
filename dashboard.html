@@ -494,7 +494,7 @@ a[data-task] { color: var(--accent); cursor: pointer; }
 .stepcard .facts a { cursor: pointer; color: var(--accent); }
 .stepcard .row { margin-top: 12px; }
 .stepcard .skip { margin-left: auto; background: none; border-color: transparent; color: var(--muted); }
-/* Today's conversation: Earlier topics, the divider at the top of a topic, the mode chips */
+/* Today's conversation: Earlier topics, the divider at the top of a topic, New topic */
 #convtop details { margin: 0 0 8px; }
 #convtop summary { font-size: 12px; color: var(--muted); cursor: pointer; }
 #convtop details[open] { max-height: 40vh; overflow: auto; border-bottom: 1px solid var(--line); padding-bottom: 6px; }
@@ -502,8 +502,7 @@ a[data-task] { color: var(--accent); cursor: pointer; }
 .topicdiv::before, .topicdiv::after { content: ""; flex: 1; border-top: 1px solid var(--line); }
 .topicdiv span { max-width: 80%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 #convmodes .row { margin: 0 0 6px; }
-.convchips { margin: 0; }
-#convmodes :is(#newtopic, #queuetask) { font-size: 12px; padding: 3px 10px; }
+#convmodes #newtopic { font-size: 12px; padding: 3px 10px; }
 .convnote { font-size: 12px; color: var(--muted); margin: 0 0 6px; }
 #saymode { font-size: 12px; margin-bottom: 6px; display: flex; gap: 8px; align-items: center; color: var(--warn); }
 #saymode button { padding: 1px 8px; font-size: 12px; }
@@ -592,10 +591,7 @@ a[data-task] { color: var(--accent); cursor: pointer; }
   #tdcentre .composer > .row { display: contents; }
   #tdcentre .composer #convmodes { order: 0; flex-basis: 100%; min-width: 0; }
   #tdcentre .composer #convmodes .row { flex-wrap: nowrap; gap: 6px; margin: 0; }
-  #tdcentre .composer .convchips { flex: 0 1 auto; min-width: 0; flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; }
-  #tdcentre .composer .convchips::-webkit-scrollbar { display: none; }
-  #tdcentre .composer .convchips button { flex: none; white-space: nowrap; }
-  #tdcentre .composer #convmodes :is(#newtopic, #queuetask) { flex: none; white-space: nowrap; }
+  #tdcentre .composer #convmodes #newtopic { flex: none; white-space: nowrap; }
   #tdcentre .composer #saymode, #tdcentre .composer #cprojwrap, #tdcentre .composer #chatmsg:not(:empty) { order: 0; flex-basis: 100%; margin: 0; }
   #tdcentre .composer #chatmsg:empty, #tdcentre .composer .row > .muted, #tdcentre .composer .row > span[style],
   #tdcentre .composer :is(#endchat, #reopenchat) { display: none; }
@@ -2920,15 +2916,12 @@ async function tdDo(a) {
 async function tdSend(text) {
   const m = TD.mode;
   try {
-    const r = m.a === "queue" ? await api("/api/tasks", {project: m.project, body: text})
-      : await api(`/api/tasks/${m.id}/${m.a}`, m.a === "answer" ? {answer: text} : m.a === "reject" ? {feedback: text} : {note: text});
+    await api(`/api/tasks/${m.id}/${m.a}`, m.a === "answer" ? {answer: text} : m.a === "reject" ? {feedback: text} : {note: text});
     $("#say").value = ""; $("#chatmsg").textContent = ""; TD.mode = null; chatKey = "";
-    if (m.a === "queue") $("#chatmsg").innerHTML = `<span class="muted">Queued ${taskLink(r.id)} in ${esc(P(m.project).title || m.project)}.</span>`
-      + (r.warning ? ` ${esc(r.warning)}` : "");
     renderSayMode(); refresh(); refreshDesign();
   } catch (e) { $("#chatmsg").textContent = e.message; }
 }
-const CONV_SAY = {design: TABTEXT.design.say, project: TABTEXT.chat.say,
+const CONV_SAY = {design: "Talk through an idea, or ask Claude to queue a task, start research or change your checkout. Drop or paste screenshots to attach them.", project: TABTEXT.chat.say,
                   research: "Ask about this project's research, or ask for new research. (⌘↩ sends)"};
 function tdPlaceholder() {
   const m = TD.mode;
@@ -3029,12 +3022,12 @@ function topicDivider() {
 function convIntro() {
   const cv = TD.cv;
   if (!cv) return `<div class="muted" style="padding:20px 0">${convProject() ? "Loading…" : "Add a project to talk about it here."}</div>`;
-  const what = {design: "Describe an idea, a problem, or a feature you want. Claude reads the project's docs and dev code, asks questions, can draft OpenSpec changes and prototypes, and queues the work when you agree. It never edits code.",
+  const what = {design: "Describe an idea, a problem, or a feature you want. Claude reads the project's docs and dev code, asks questions, can draft OpenSpec changes and prototypes, and queues the work when you agree. Ask it to start research and it queues a research task; ask it to change something in your checkout and it does that there.",
                 project: "Talk to Claude in your checkout, as if you ran claude there. It can read, edit and run commands. Actions that would ask for permission are denied, since nobody can answer here.",
                 research: `Ask about the research project “${esc(cv.research.name || "")}”, or ask for new research. The agent reads its briefs and reports first.`}[cv.mode];
   return topicDivider() + `<div class="muted" style="padding:12px 0">${what}</div>`;
 }
-// Earlier topics above the timeline, and the mode chips and New topic above the message box.
+// Earlier topics above the timeline, and New topic above the message box.
 function renderConv() {
   const cv = TD.cv;
   if (!cv) { put($("#convtop"), ""); put($("#convmodes"), ""); return; }
@@ -3047,20 +3040,12 @@ function renderConv() {
       TD.earlierOpen = false; const id = el.dataset.topic; convOpen({how: "topic", ref: /^\d+$/.test(id) ? +id : id}); });
     if ($("#earlier")) $("#earlier").ontoggle = e => { TD.earlierOpen = e.target.open; };
   }
-  const r = cv.research, from = cv.topic === null && cv.from;
-  const chips = [["design", "plan & design", "Reads dev, runs commands and queues tasks; writes only its documents and OpenSpec changes: plans, designs, prototypes, never code"],
-                 ["project", "edit my checkout", "Plain Claude in your checkout: it can read, edit and run commands there"]]
-    .concat(r.on ? [["research", "research", r.name ? `A research chat about “${r.name}”` : `Link a research project to ${P(cv.project).title || cv.project} on the Research page first`]] : []);
-  const html = `<div class="row"><span class="tdchips convchips">${chips.map(([m, l, tip]) => `<button data-mode="${m}" class="${cv.mode === m ? "on" : ""}" title="${esc(tip)}" ${m === "research" && !r.name ? "disabled" : ""}>${l}</button>`).join("")}</span>
-    <span style="flex:1"></span><button id="queuetask" title="Queue what you type as a task in ${esc(P(cv.project).title || cv.project)}, without asking Claude: a worker builds it in its own worktree">Queue task</button><button id="newtopic" title="Your next message starts a new ${esc(modeWord(cv.mode))} topic" ${cv.topic === null && !from ? "disabled" : ""}>New topic</button></div>
-    ${from ? `<div class="convnote">Switched to ${esc(modeWord(cv.mode))}: your next message starts a new topic, with a short handoff of “${esc(from.title)}”.</div>`
-      : cv.topic === null && cv.topics.length ? `<div class="convnote">Your next message starts a new ${esc(modeWord(cv.mode))} topic.</div>` : ""}`;
-  if (put($("#convmodes"), html)) {
-    $("#convmodes").querySelectorAll("[data-mode]").forEach(b => b.onclick = () => b.classList.contains("on") || convOpen({how: "mode", mode: b.dataset.mode}));
-    $("#newtopic").onclick = () => { convOpen({how: "new"}); $("#say").focus(); };
-    $("#queuetask").onclick = () => tdMode({a: "queue", project: cv.project,
-      words: `Queues what you type as a task in ${P(cv.project).title || cv.project}. A worker builds it in its own worktree.`});
-  }
+  // One kind of new topic: plan & design, which queues tasks, starts research and edits your checkout when asked.
+  // A topic left new in another mode (an older mode switch) goes back to plan & design.
+  if (cv.topic === null && (cv.mode !== "design" || cv.from)) { convOpen({how: "new", mode: "design"}); return; }
+  const html = `<div class="row"><span style="flex:1"></span><button id="newtopic" title="Your next message starts a new topic" ${cv.topic === null ? "disabled" : ""}>New topic</button></div>
+    ${cv.topic === null && cv.topics.length ? `<div class="convnote">Your next message starts a new topic.</div>` : ""}`;
+  if (put($("#convmodes"), html)) $("#newtopic").onclick = () => { convOpen({how: "new", mode: "design"}); $("#say").focus(); };
 }
 // A research topic: its thread's turns, drawn as the Research page draws them.
 async function loadResearchConv(ref) {
