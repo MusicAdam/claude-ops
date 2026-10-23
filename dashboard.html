@@ -481,6 +481,7 @@ details.tdparked .tditem { opacity: .8; }
 .tdwaitbox label { display: flex; gap: 6px; align-items: baseline; cursor: pointer; min-width: 0; }
 .tdwaitbox label .wt { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
 .tdwaitbox .muted { font-size: 13px; }
+.tdwaitbox .whead { font-size: 13px; }
 .wrow { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
 .wrow .seg { display: inline-flex; }
 .wrow .seg button { border-radius: 0; font-size: 12px; padding: 3px 10px; background: none; color: var(--muted); }
@@ -2843,12 +2844,14 @@ function tdWaitBox(project, w, go) {
   const ts = tdWaitTasks(project), g = P(project), rel = !g.direct_main;
   if (!rel) w.until = "merged";  // straight to main: a merge is the release
   return `<div class="tdwaitbox">
+    <div class="whead">Park this item until tasks finish. It comes back when they do.</div>
     ${ts.length ? `<div class="wlist">${ts.map(t => `<label title="${esc(t.title)}"><input type="checkbox" data-wt="${t.id}" ${w.ids.includes(t.id) ? "checked" : ""}>
-      <span class="mono">#${t.id}</span><span class="wt">${esc(t.title)}</span><span class="muted">${esc(t.state)}</span></label>`).join("")}</div>`
-      : `<div class="muted">No task of ${esc(g.title)} is queued, running or in review.</div>`}
-    <input data-wother data-fld="wother" placeholder="Other task ids, e.g. 283, 290" value="${esc(w.other)}">
-    <div class="wrow"><span class="seg"><button data-wuntil="merged" class="${w.until === "merged" ? "on" : ""}" title="Once each is merged into ${esc(g.dev_branch || "dev")}">Merged</button>${rel
-      ? `<button data-wuntil="released" class="${w.until === "released" ? "on" : ""}" title="Once each is on ${esc(g.main_branch || "main")}">Released</button>` : ""}</span>${go}</div></div>`;
+      <span class="mono">#${t.id}</span><span class="wt">${esc(t.title)}</span><span class="muted">${esc(t.state)}</span></label>`).join("")}</div>
+      <div class="muted">Or type other task ids:</div>`
+      : `<div class="muted">Nothing of ${esc(g.title)} to wait on. Type a task id:</div>`}
+    <input data-wother data-fld="wother" placeholder="e.g. 283, 290" value="${esc(w.other)}">
+    <div class="wrow">${rel ? `<span class="muted">Come back when they're:</span><span class="seg"><button data-wuntil="merged" class="${w.until === "merged" ? "on" : ""}" title="Once each is merged into ${esc(g.dev_branch || "dev")}">Merged</button><button data-wuntil="released" class="${w.until === "released" ? "on" : ""}" title="Once each is on ${esc(g.main_branch || "main")}">Released</button></span>`
+      : `<span class="muted">Comes back when these merge.</span>`}${go}</div></div>`;
 }
 function tdWaitWire(box, w) {
   if (!box) return;

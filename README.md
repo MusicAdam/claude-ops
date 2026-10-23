@@ -639,10 +639,13 @@ stay on the right of the header.
   "Move to the end of the list until midnight" with an empty note, "Park it with this note" with one. A parked
   item's step has **Unpark** beside Skip. See TODO-6.
 
-  Every step also has **Wait for…** beside Skip. It opens a small chooser under the step: the item's project's
-  tasks that are queued, running, gating, merging or in review (id and title, a checkbox each), a box for any
-  other task ids (`283, 290`), and a **Merged / Released** toggle. Released shows only when the project is not
-  straight to main. **Wait** calls `POST /api/todos/wait` and the item goes to Parked. A parked item with a wait
+  Every step also has **Wait for…** beside Skip. It opens a small chooser under the step. A header line says
+  what it does: `Park this item until tasks finish. It comes back when they do.` Under it come the item's
+  project's tasks that are queued, running, gating, merging or in review (id and title, a checkbox each), then
+  `Or type other task ids:` and a box for them (`e.g. 283, 290`). With no such task the list is replaced by one
+  line, `Nothing of <Project> to wait on. Type a task id:`, above the box. Last comes `Come back when they're:`
+  and a **Merged / Released** toggle. A straight-to-main project has no toggle, only the muted text
+  `Comes back when these merge.`, since a merge is the release there. **Wait** calls `POST /api/todos/wait` and the item goes to Parked. A parked item with a wait
   reads `Waiting on #283, #284 to merge` (or `to release`) at the top of its step, with **Clear**, which sends
   `tasks: []` and so unparks it. The chooser opens with the item's current wait ticked.
 
