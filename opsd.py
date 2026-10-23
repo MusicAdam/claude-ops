@@ -46,6 +46,7 @@ PROJECTS_DIR = DATA / "projects"
 RUNS = DATA / "runs"
 PIDFILE = DATA / "opsd.pid"  # stop a daemon with kill $(cat "$OPS_DATA/opsd.pid"), never pkill -f
 IMAGES = DATA / "images"  # screenshots dropped or pasted into a message box
+CHAT_FILES = DATA / "designs"  # <design id>/: documents a design chat writes, such as a design doc or prototype
 DB = DATA / "ops.db"
 HOST = os.environ.get("OPS_HOST", "127.0.0.1")
 PORT = int(os.environ.get("OPS_PORT", "8788"))
@@ -4226,6 +4227,27 @@ def design(did):
     return q("SELECT * FROM designs WHERE id=?", (did,), one=True)
 
 
+# A design chat can't edit the project, but it may write documents of its own: a design doc, an HTML prototype,
+# a diagram. They go in a folder of its own outside every repo, and the dashboard serves and lists them.
+FILE_TEXT = "text/plain; charset=utf-8"
+FILE_TYPES = {".html": "text/html; charset=utf-8", ".htm": "text/html; charset=utf-8", ".md": FILE_TEXT,
+              ".txt": FILE_TEXT, ".json": "application/json", ".csv": FILE_TEXT, ".css": "text/css",
+              ".js": "text/javascript", ".svg": "image/svg+xml", ".png": "image/png", ".jpg": "image/jpeg",
+              ".gif": "image/gif", ".webp": "image/webp"}
+
+
+def chat_files(did):
+    """The files a design chat wrote, newest first: name, size, mtime and the URL the dashboard serves it at."""
+    out = []
+    folder = CHAT_FILES / str(did)
+    for f in folder.iterdir() if folder.is_dir() else []:
+        if f.is_file() and re.fullmatch(r"[\w.-]+", f.name):
+            st = f.stat()
+            out.append({"name": f.name, "size": st.st_size, "mtime": st.st_mtime,
+                        "url": f"/api/designs/{did}/files/{f.name}"})
+    return sorted(out, key=lambda x: -x["mtime"])
+
+
 # A chat is "ready for you" when Claude isn't replying, and has a new reply when its last answer (Claude's, or a
 # note from the queue) came after you last looked at it. Ending a chat takes it out of both until you reopen it.
 CHAT_COLS = ("id,project,title,state,updated,cost,kind,spec,spec_draft,seen,ended,(SELECT MAX(ts) FROM design_msgs m "
@@ -4277,7 +4299,9 @@ def news(did):
 
 def design_system_prompt(p, d=None, cwd=None):
     notes = f"## Notes for {p.title}\n\n{p.design_notes}\n" if p.design_notes else ""
+    did = d["id"] if d else 0
     out = (CODE / "design_prompt.md").read_text().format(project=p.title, dev_wt=cwd or p.dev_wt, dev=p.dev,
+                                                         files=CHAT_FILES / str(did), did=did,
                                                          notes=notes + peer_brief(p, "design"))
     if d and d["spec"]:
         out += "\n" + (CODE / "spec_prompt.md").read_text().format(change=d["spec"], path=SPEC_DIR / d["spec"],
@@ -4403,6 +4427,10 @@ def design_turn(did, text):
             return
         tools += spec_tools(cwd)
     tools += f",Bash({SEND_CMD}:*)"  # read-only still: it only asks another project to do something
+    if not chat:  # its own documents folder: the only place outside openspec/ it may write
+        files = CHAT_FILES / str(did)
+        files.mkdir(parents=True, exist_ok=True)
+        tools += f",Edit(/{files}/**)"  # Edit rules cover Write too
     kept, handoff = None, ""
     if why := chat_stale(d):  # cheaper to start over than to resume: a handoff note, then this turn
         kept, handoff = session_model(d, d["kind"]), chat_handoff(did, why[0])  # the fresh one keeps its model
@@ -4441,6 +4469,7 @@ def design_turn(did, text):
                "--verbose", "--permission-mode", "dontAsk", "--permission-prompts", "none", "--allowedTools", tools,
                "--strict-mcp-config", "--no-chrome", "--name", f"{p.name} design #{did}",
                "--append-system-prompt", system]
+        cmd += ["--add-dir", str(CHAT_FILES / str(did))]
         if spec_chat(d):  # deny rules win over the allowed-tools a command's own frontmatter grants
             cmd += ["--disallowedTools", SPEC_DENY]
     cmd += ["--add-dir", str(IMAGES)]
@@ -5892,10 +5921,12 @@ class H(BaseHTTPRequestHandler):
     def log_message(self, *a):
         pass
 
-    def send(self, code, body, ctype="application/json"):
+    def send(self, code, body, ctype="application/json", headers=None):
         data = body if isinstance(body, bytes) else json.dumps(body).encode()
         self.send_response(code)
         self.send_header("Content-Type", ctype)
+        for k, v in (headers or {}).items():
+            self.send_header(k, v)
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
@@ -5969,6 +6000,14 @@ class H(BaseHTTPRequestHandler):
                 t["deploy"] = json.loads(t["deploy"] or "{}")
                 t["log"] = log_tail(RUNS / str(tid) / "deploy.log", 8000)
             return self.send(200, t)
+        m = re.fullmatch(r"/api/designs/(\d+)/files/([\w.-]+)", path)  # a design chat's document; no / in a name
+        if m:
+            f = CHAT_FILES / m.group(1) / m.group(2)
+            if m.group(2).startswith(".") or not f.is_file():
+                return self.send(404, {"error": "no such file"})
+            # sandboxed: a prototype's scripts run, but in an origin of their own, so they can't drive the dashboard
+            return self.send(200, f.read_bytes(), FILE_TYPES.get(f.suffix.lower(), FILE_TEXT),
+                             {"Content-Security-Policy": "sandbox allow-scripts allow-forms allow-popups"})
         m = re.fullmatch(r"/api/images/([\w-]+(\.\w+))", path)
         if m and m.group(2) in IMAGE_TYPES.values() and (IMAGES / m.group(1)).is_file():
             ctype = next(k for k, v in IMAGE_TYPES.items() if v == m.group(2))
@@ -6013,6 +6052,7 @@ class H(BaseHTTPRequestHandler):
                 msg["tasks"] = [{"id": i, "title": t.get("title"), "state": t.get("state")}
                                 for i in ids for t in [task(i) or {}]]
             d["live"] = DESIGN_LIVE.get(did, [])[-12:]
+            d["files"] = chat_files(did) if d["kind"] != "project" else []
             return self.send(200, d)
         self.send(404, {"error": "not found"})
 

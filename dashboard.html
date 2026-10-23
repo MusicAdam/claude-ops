@@ -2094,7 +2094,7 @@ function renderChat() {
     d.seen = d.replied;
     api(`/api/designs/${d.id}/seen`, {}).then(() => { refresh(); refreshDesign(); }).catch(() => {});
   }
-  const key = d ? `${d.id}:${d.msgs.length}:${d.state}:${d.ended}:${d.live.length}:${JSON.stringify(d.msgs.map(m => m.tasks.map(t => t.state)))}:${d.spec_view ? hash(JSON.stringify(d.spec_view)) : ""}` : "none";
+  const key = d ? `${d.id}:${d.msgs.length}:${d.state}:${d.ended}:${d.live.length}:${JSON.stringify(d.msgs.map(m => m.tasks.map(t => t.state)))}:${d.spec_view ? hash(JSON.stringify(d.spec_view)) : ""}:${(d.files || []).map(f => f.name + f.mtime).join()}` : "none";
   $("#stopchat").classList.toggle("hidden", !thinking);
   $("#send").disabled = !!thinking;
   $("#rinfo").querySelectorAll("[data-cmd]").forEach(b => b.disabled = !!thinking);
@@ -2113,6 +2113,8 @@ function renderChat() {
     $("#chathead").insertAdjacentHTML("afterbegin", originLine(d.origin, "Started by"));
     $("#chathead").querySelector("a.origin").onclick = () => openOrigin(d.origin);
   }
+  // Documents a design chat wrote (a design doc, a prototype): its own folder, outside the repo
+  if (d && d.files && d.files.length) $("#chathead").insertAdjacentHTML("beforeend", `<div class="docs">Documents: ${d.files.map(f => `<a href="${esc(f.url)}" target="_blank" rel="noopener">${esc(f.name)}</a>`).join(" · ")}</div>`);
   if (d && d.ended) $("#chathead").insertAdjacentHTML("afterbegin", `<div class="callout">You ended this chat. Send a message or click Reopen to put it back on your list.</div>`);
   if (!d) { box.innerHTML = `<div class="muted" style="padding:20px 0">${TABTEXT[tab].intro}</div>`; return; }
   box.innerHTML = d.msgs.map(m => m.role === "user"
