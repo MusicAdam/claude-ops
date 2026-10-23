@@ -9,7 +9,7 @@ the golden version: it changes only when you promote.
 
 ```bash
 ./opsctl start                       # install + start the launchd service (runs at login, restarts if it dies)
-./opsctl open                        # dashboard: http://127.0.0.1:8788  (…/#today, …/#tasks, …/#projects, …/#design, …/#chat open those pages)
+./opsctl open                        # dashboard: http://127.0.0.1:8788  (…/#today, …/#tasks, …/#projects open those pages)
 ./opsctl status | log | stop | restart   # stop and restart pause running tasks; the next start resumes them
 ./opsctl pause | resume              # pause every running task now / resume every paused one
 ./opsd.py add-project ~/dev/myrepo   # or "+ Project" on the dashboard
@@ -35,7 +35,7 @@ the config has a comment on how to opt out. Read it, adjust it, then click **Rel
 ## Flow (per project)
 
 ```
- Design tab ──(you agree)──┐
+ Design topic ─(you agree)─┐
  Tasks tab ────────────────┴─▶ scheduler ──(up to N at once)──▶ worker: claude -p in <worktrees>/t<id>
                                                                   │ commits on task/<id>-<slug>
                                                                   ▼
@@ -285,8 +285,7 @@ run = "bin/swish release"
 ## Design mode
 
 A design chat is Claude talking with you about one project. You meet it as **plan & design** in the Today view's
-conversation (see [TODAY-2](#today-view)), where each design chat is a topic of the project's one conversation. The
-Design tab, under More, lists them all, as before.
+conversation (see [TODAY-2](#today-view)), where each design chat is a topic of the project's one conversation.
 
 It reads the project's docs and the latest dev code and changes the project through tasks
 (`--permission-mode dontAsk`). Two exceptions, both because you asked: for research it queues a research task
@@ -303,17 +302,18 @@ task only when they touch the same files. A worker that splits its task writes t
 
 ### OpenSpec changes
 
-If a project uses [OpenSpec](https://github.com/Fission-AI/OpenSpec), the Design tab lists its open changes
-(`openspec/changes/<name>/`, not `archive/`) under the chats, with how many `tasks.md` items are done.
-Click one to open its chat. A change that is only in your checkout is first copied into `dev`. The section
-shows for every project in view whose `dev` has an `openspec/` folder, even when it has no open changes.
+If a project uses [OpenSpec](https://github.com/Fission-AI/OpenSpec), the Today view's **Specs & designs**
+section (see [TODAY-4](#today-view)) lists its open changes (`openspec/changes/<name>/`, not `archive/`), with how
+many `tasks.md` items are done. Click one to open its chat as the current topic. A change that is only in your
+checkout is first copied into `dev`. The list shows for every repo of the project whose `dev` has an `openspec/`
+folder, even when it has no open changes.
 
-- **Set it up.** Each project in view, and each repo of a workspace, whose `dev` has no `openspec/` shows a muted
-  line in the section: `<project>[/<repo>]: not using OpenSpec · Set up`. In the all-projects view these lines
-  are folded under one **Set up OpenSpec…** toggle. **Set up** runs `openspec init --tools claude` for you.
-- **Refresh its commands.** **Refresh commands**, under the list of changes, runs `openspec update` in a repo that
-  uses OpenSpec, to bring its opsx commands and skills up to date with your CLI. When several repos in view use
-  OpenSpec, it lists them and you pick one.
+- **Set it up.** Each repo of the project (each repo of a workspace) whose `dev` has no `openspec/` shows a muted
+  line in the section: `<project>[/<repo>]: not using OpenSpec · Set up`. **Set up** runs
+  `openspec init --tools claude` for you.
+- **Refresh its commands.** **Refresh commands**, under the list of changes in Specs & designs, runs
+  `openspec update` in each repo of the project that uses OpenSpec, to bring its opsx commands and skills up to
+  date with your CLI. It commits the commands and skills that changed to `dev`.
 - **What those two do.** A change's chat can't run `openspec init` or `update`: they write into `.claude/`,
   outside `openspec/`. So the daemon runs them (`POST /api/openspec/init` and `/api/openspec/update`, with
   `project` and `sub`):
@@ -325,15 +325,14 @@ shows for every project in view whose `dev` has an `openspec/` folder, even when
   4. It fast-forwards `dev` to that commit, holding the project's merge lock, and removes the worktree.
 
   These commits skip the gate: they are docs and command files only, like a chat's edits. The section shows the
-  result under the list: `Set up: committed <n> files to dev at <sha>.`, `Nothing to do: the commands are up to date.`, or the
+  result above the list: `Set up: committed <n> files to dev at <sha>.`, `Nothing to do: the commands are up to date.`, or the
   CLI's error (its last 300 characters). Set up is refused when `dev` already has `openspec/`; Refresh is refused
   when it has none. Both are refused while one of the project's tasks is merging into `dev` (try again after the
   merge), and both are disabled when the `openspec` CLI isn't on the daemon's `PATH`. Once Set up lands, the
-  project shows **+ New change**.
+  project shows **New change**.
 
-- **Create one.** Click **+ New change** in the section, write one line on what the change should do, and click
-  **Start**. Pick the project first when several in view use OpenSpec, and the repo when the project has several
-  with `openspec/`. The button is disabled when the `openspec` CLI isn't on the daemon's `PATH`
+- **Create one.** Click **New change** in Specs & designs, write one line on what the change should do, and click
+  **Start**. Pick the repo first when the project has several with `openspec/`. The button is disabled when the `openspec` CLI isn't on the daemon's `PATH`
   (`npm i -g @fission-ai/openspec`). Start opens a design chat, `New change: <description>`, that works like a
   change's chat (its own worktree, edits only under `openspec/`) but has no change yet. Its first message is
   `/opsx:propose <description>` when the repo has that command (or the `openspec-propose` skill); otherwise it
@@ -348,11 +347,13 @@ shows for every project in view whose `dev` has an `openspec/` folder, even when
   - **Several:** the edits are saved but the chat stays unattached, and Claude is told to keep to one change per
     chat. Open each new change from the list.
 
-- **Read it.** The change opens in a reader beside its chat, like a docs site: the reader on the left and the
-  chat on the right, each scrolling on its own. The reader's header stays in view: the title, the path, overall
-  progress (`done/total`), the "Why", and the queue buttons. Below it are tabs for **Proposal**, **Design**,
-  **Tasks**, **Specs (N)** and **Other** (any other `.md` file), each shown only when it has content. The reader
-  remembers the tab for each change, and keeps your place when Claude or a worker edits the files.
+- **Read it.** When the current topic in Today is an OpenSpec change's chat, the conversation head shows
+  **Read the change**. It opens the change's reader, like a docs site, in Today's side drawer: the same drawer repo
+  files and research reports open in. The reader's header stays in view: the title, the path, overall progress
+  (`done/total`), the "Why", the queue buttons and the command buttons (see *What a change's chat can run*
+  below). Below it are tabs for **Proposal**, **Design**, **Tasks**, **Specs (N)** and **Other** (any other `.md`
+  file), each shown only when it has content. Each heading has a link to it. The reader remembers the tab for each
+  change, and keeps your place in each file, also when Claude or a worker edits the files.
   - **On this page** lists the tab's `##` and `###` headings and marks the one you are reading. Click one to
     jump to it. In a reader under 900px wide it is a **Sections** menu instead.
   - **Specs** shows each delta file (`specs/<capability>/spec.md`) as cards, one per `### Requirement:`, edged
@@ -360,8 +361,9 @@ shows for every project in view whose `dev` has an `openspec/` folder, even when
     its **WHEN**, **THEN** and **AND** lines as rows. A file that isn't in delta form shows as plain markdown.
   - **Tasks** shows one section per `##` phase of `tasks.md`, with its `done/total` and a progress bar. Phases
     that are fully done start folded.
-  - Below 1200px the window is too narrow for both: a **Read | Chat** switch shows one at a time, and remembers
-    your choice. Other chats keep the single chat column.
+  - **Closing it.** The drawer closes on Escape, on **Close**, on a click beside it, when you switch topic or
+    leave Today, and after you press a command or queue button, so you see the reply. On a phone it fills the
+    screen, like the file drawer.
 - **Change it.** Talk it through. This chat may edit files under `openspec/` and nothing else. It works in its
   own worktree (`<worktrees>/spec-<chat id>`, detached at `dev` and refreshed before each message). After each
   reply the queue commits its edits there and fast-forwards `dev` to them, so the next worker sees them. The
@@ -383,9 +385,9 @@ shows for every project in view whose `dev` has an `openspec/` folder, even when
   `init` and `update` (they write outside `openspec/`, which a chat can't save; use **Set up** and
   **Refresh commands** instead), and the ones that change your machine's OpenSpec setup (`config set`, `store setup`, `completion install`, `feedback`, …). It may still edit
   only `openspec/`, and so may its subagents. The reader's header shows a button for each command that applies
-  to the change, in this order (hover for what it does). A click sends the command as a chat message, through
-  the same path as **Send**, so it shows in the chat as if you typed it. The buttons are disabled while Claude is
-  replying. **Archive** asks first: `Archive <name>? This moves it to openspec/changes/archive and merges its
+  to the change, in this order (hover for what it does). A click sends the command's text into the topic as a
+  message, through the same path as **Send**, so it shows in the conversation as if you typed it. The buttons are
+  disabled while Claude is replying. **Archive** asks first: `Archive <name>? This moves it to openspec/changes/archive and merges its
   spec deltas into openspec/specs. Saved to dev after the reply.`
 
   | Command | Shown when | What it changes |
@@ -422,24 +424,19 @@ shows for every project in view whose `dev` has an `openspec/` folder, even when
 
 ### Which chats need you
 
-This applies to both the Design and the Chat tab. The Today view shows the same state differently: every chat you
-haven't ended is a **Read** to-do once Claude is done replying (marked new until you read it), and an unread one is
-● in **Earlier topics**. Ending a topic there (**End**, **End topic**) is the same as **End chat**. An ended chat
-is done: a reply that lands in it later (a task's result note) makes it new nowhere.
+The Today view shows which chats need you (see [TODAY-2](#today-view)). Every chat you haven't ended is a
+**Read** to-do once Claude is done replying (marked new until you read it), and an unread one is ● in **Earlier
+topics**. The to-do list and Earlier topics follow the project filter. An ended chat is done: a reply that lands in
+it later (a task's result note) makes it new nowhere.
 
-- **The list.** Chats are grouped as **Ready for you** (Claude has answered), **Claude is replying**, and
-  **Ended**, which is folded away. A chat whose reply you haven't opened yet is marked ● and **new reply**, and
-  sorts first.
-- **The tabs.** The Design and Chat tabs show how many chats have a new reply, and ● while Claude is replying in
-  one. They follow the project filter.
-- **End chat.** Click **End chat** under the message box, or × on a chat in the list, to move it under Ended.
-  Nothing is deleted, and ending a chat stops any reply in progress. To put it back, click **Reopen** or send it a
-  message. Opening an OpenSpec change reopens its chat as well.
-- Opening a chat marks its reply as read. Chats from before this feature start as read.
+- **Ending a chat.** Click **End** on its row in Earlier topics, or **End topic** above the message box, to move it
+  under **Ended**, folded at the bottom of Earlier topics. Nothing is deleted. To put it back, click **Reopen**
+  there or send it a message. Opening an OpenSpec change reopens its chat as well.
+- **Mark read** marks a reply as read. Chats from before this feature start as read.
 - **Queue a message.** While Claude is replying, the **Send** button reads **Queue**. A queued message shows
   faded at the end of the chat, and goes to Claude when the reply ends; several queued messages go together as
   one. A slash command goes on its own. **Edit** takes a queued message back into the message box. **Stop** ends
-  the reply early, and the queue goes next; **End chat** drops the queue. Task chats don't queue yet.
+  the reply early, and the queue goes next. Task chats don't queue yet.
 
 ## To-dos
 
@@ -467,7 +464,7 @@ the uncommitted-files banner, Deploy. `/api/state` gathers them into one list, `
     with a note when it is cut, an untracked file shown as a diff against nothing. The card reads these from
     `GET /api/projects/<name>/uncommitted`, read only (git status and diff without an index lock, file reads):
     `{repos: [{repo, files: [{path, status, added, removed, binary, mtime}], more}], diff, diff_lines, cut}`.
-  - **Read**: a design or project chat with a reply you haven't opened, as the tab badges count them.
+  - **Read**: a design or project chat with a reply you haven't opened, as ● in Earlier topics marks it.
   - **Read** (a report): a research task merged into `dev` whose report you haven't opened (see
     [Research](#research), RES-5).
   - **Do** (research): an open to-do in the research repo's `todos.json`, in its linked project (RES-8).
@@ -525,12 +522,14 @@ link. A reference whose target is missing is never a link that fails on click. T
 - **LINK-3 Repo files.** A relative repo path such as `docs/design.md`, `opsd.py:5914` or `README.md § Design mode`
   opens that file as it is on the project's dev worktree, in a side drawer. Markdown renders as on the page and
   scrolls to the `§` heading; other files show as numbered lines, scrolled to `:line`. An
-  `openspec/changes/<name>/…` path opens that change in the OpenSpec reader, and a design-folder file opens
+  `openspec/changes/<name>/…` path (a `spec:` link) opens that change's chat as the current topic in the Today
+  view, and switches the project filter to its project when it is out of view. A design-folder file opens
   from `/api/designs/<id>/files/<name>`. `GET /api/files?project=<name>&path=<rel>` serves the file: only one
   inside that project's dev worktree (symlinks resolved), not git-ignored, and 1 MB or smaller.
-- **LINK-4 Places in the app.** Names of places, such as Today view, Projects tab, Settings, Research tab, Analyze or Design
-  tab, link to that place's hash route. One table in `dashboard.html`, `APP_PLACES`, maps each phrase to its
-  route; a new place (the Today view's Scheduled, More → …) is one more row.
+- **LINK-4 Places in the app.** Names of places, such as Today view, Projects tab, Settings, Research tab or Analyze,
+  link to that place's hash route. The old names Design tab and Chat tab link to `#today`. One table in
+  `dashboard.html`, `APP_PLACES`, maps each phrase to its route; a new place (the Today view's Scheduled,
+  More → …) is one more row.
 - **LINK-5 URLs.** An http(s) URL opens in a new tab with `rel=noopener`. A trailing `.` `,` `)` `:` or `;` is
   the sentence's, not the link's.
 - **LINK-6 No broken links.** Before a message renders, the daemon checks every target in one batched request,
@@ -551,8 +550,10 @@ Claude usually writes one) links as that file.
 
 The dashboard opens on **Today** (`#today`): one page for the day, in three columns. The header holds the name,
 the project switcher and **More ▾**. The switcher (All projects, or one) filters all three columns. More holds
-the older pages: History (the old Tasks tab), Projects, Design, Chat, Research, Analyze, Settings and Schedules.
-Their routes (`#tasks`, `#projects`, `#schedules`, …) still open them. The queue readouts and pause buttons stay on the right of the header.
+the older pages: History (the old Tasks tab), Projects, Research, Analyze, Settings and Schedules, and
+**+ Project**. Their routes (`#tasks`, `#projects`, `#schedules`, …) still open them. The Design and Chat pages are
+gone: `#design` and `#chat` open Today and rewrite the address to `#today`. The queue readouts and pause buttons
+stay on the right of the header.
 
 - **TODAY-1 Left: To-do.** The `todos` list from `/api/state`, nothing else.
   - The top says **N things need you · ~M min** (the sum of `est_min`), over a progress bar: tasks done today ÷
@@ -605,7 +606,7 @@ Their routes (`#tasks`, `#projects`, `#schedules`, …) still open them. The que
     of the project, newest first: title, mode, last activity, and ● when it has a reply you haven't read. Click one to
     make it the current topic. Sending a message into an older topic resumes it, as sending to an ended chat does.
   - **Ending topics.** You end a topic when you are done with it. It leaves Earlier topics and the to-do list, and
-    its replies count as read, now and later. A chat is ended as **End chat** ends it (`designs.ended`); a research
+    its replies count as read, now and later. A chat's end is stored in `designs.ended`; a research
     thread is listed in the setting `research_ended`. Both survive a restart.
     - **End** on a row of Earlier topics, or **End topic** above the message box for the current one (your next
       message then starts a new topic). Both are refused while Claude is replying: stop the reply or wait.
@@ -626,8 +627,8 @@ Their routes (`#tasks`, `#projects`, `#schedules`, …) still open them. The que
     changes kind. If the kept state names a new topic of another kind (a mode switch from before), the view resets it
     to plan & design.
 
-    The backend modes stay (`MODES`, `conv_open()` with `how: "mode"`, the topic handoff a switch carries), and the
-    Design and Chat tabs still start their own kinds; the Today composer no longer offers a switch.
+    The backend modes stay (`MODES`, `conv_open()` with `how: "mode"`, the topic handoff a switch carries); the
+    Today composer no longer offers a switch.
   - **Which topic a message goes to** (`conv_open()` in opsd.py):
     1. Opening a to-do whose source is a chat (Read, Agree, …) makes that chat the current topic.
     2. Opening a to-do whose source is a task, or **Ask Claude about this**, continues the current plan & design
@@ -654,11 +655,10 @@ Their routes (`#tasks`, `#projects`, `#schedules`, …) still open them. The que
     subject clearly changes, with a fenced block in the language `topic`: `{"title": "..."}`. The design and project
     chat prompts say so (`design_prompt.md`, `PROJECT_CHAT_PROMPT`). The block is taken out of the reply, the
     divider shows the new title, and Claude's next message says it took (`topic_from_reply()`).
-  - **Queued messages.** While Claude replies, **Send** reads **Queue**, as in the Design and Chat tabs (see
+  - **Queued messages.** While Claude replies, **Send** reads **Queue** (see
     [Which chats need you](#which-chats-need-you)). A research topic doesn't queue: Send waits for its reply.
   - **Read state.** Today never marks a chat read by itself: **Mark read** does. The item stays on the list, no
     longer new, until you end the topic. A task's own chat with its worker is in its details panel (**Details**), not here.
-  - The Design and Chat tabs stay under More as the full list view of the same rows.
 - **TODAY-3 Right: timeline.** Read-only status in three groups. Anything that needs a decision is in To-do, not
   here.
   - **Working now**: running, checking and merging tasks, and research runs.
@@ -675,13 +675,15 @@ Their routes (`#tasks`, `#projects`, `#schedules`, …) still open them. The que
 - **TODAY-4 Centre: a project's sections.** Over the conversation, the project in view has four tabs:
   **Conversation · Specs & designs · Research · Tasks**. Conversation is TODAY-2. The tab you pick is kept in this
   browser.
-  - **Specs & designs.** The project's open OpenSpec changes, with done/total, and its drafts, as the Design tab
-    lists them (see [OpenSpec changes](#openspec-changes)); a repo without `openspec/` shows its **Set up** line.
-    Click a change to open its chat as the current topic. Below them, the documents its plan & design topics wrote:
+  - **Specs & designs.** The project's open OpenSpec changes, with done/total, and its drafts (see
+    [OpenSpec changes](#openspec-changes)); a repo without `openspec/` shows its **Set up** line.
+    Click a change to open its chat as the current topic; **Read the change** in the conversation head opens its
+    reader in the side drawer. Below them, the documents its plan & design topics wrote:
     the files in `~/.claude-ops/designs/<topic id>/` of the project's design rows, newest first, each opening from
-    `/api/designs/<id>/files/<name>` in a new tab (`GET /api/projects/<name>/documents`). Two buttons:
-    **New change** (the Design tab's + New change, for this project) and **New prototype**, which starts a plan &
-    design topic with `Make a one-file HTML prototype of: ` in the message box.
+    `/api/designs/<id>/files/<name>` in a new tab (`GET /api/projects/<name>/documents`). Three buttons:
+    **New change** (for this project), **New prototype**, which starts a plan & design topic with
+    `Make a one-file HTML prototype of: ` in the message box, and **Refresh commands**, which runs `openspec update`
+    in each repo of the project that uses OpenSpec and commits the opsx commands and skills that changed to `dev`.
   - **Research.** The reports in `docs/research/*.md` on the project's `dev` (each repo's, in a workspace), newest
     first: the title from the first heading, the date of the last commit that touched it, and a one-line summary from
     the first paragraph, with ● while it is unread. Click one to read it in the side drawer; that marks it read.
@@ -729,7 +731,7 @@ Below 700px Today is phone-first. The rules:
 ## Chat mode
 
 A project chat is plain Claude in the project folder, as if you ran `claude` there. You meet it as **edit my
-checkout** in the Today view's conversation (see [TODAY-2](#today-view)); the Chat tab, under More, lists them all. It works in your
+checkout** in the Today view's conversation (see [TODAY-2](#today-view)). It works in your
 checkout (`repo`), not a worktree, so it can read, edit, commit and run commands there, with your own
 settings and `CLAUDE.md`. Each chat keeps one Claude session across messages, until its context grows too big
 (see **Fresh sessions in chats** below).
@@ -939,8 +941,10 @@ opsd.py send <project> --chat "<message>"     # a project chat there, in its che
 ```
 
 - **It shows like everything else.** A sent task is queued in the other project and goes through its gate as
-  usual. A sent chat appears in its tab under **Ready for you** once it has replied. Both say **Sent by** (or
-  **Started by**) with a link to the task or chat that sent them, and the lists tag them `sent by …`.
+  usual. A sent chat is a **Read** to-do in the Today view once it has replied. Both say **Sent by** (or
+  **Started by**) with a link to the task or chat that sent them, and the lists tag them `sent by …`. A link to a
+  chat opens it as the current topic in Today, and switches the project filter to its project when it is out of
+  view.
 - **Context comes along.** The message starts with a line naming the sender, its title and where it works (its
   worktree and branch, or the folder a chat runs in), so the other session can read its files. The sender is told
   to make the message stand alone, like a design chat's task brief.
@@ -1084,8 +1088,9 @@ notes = """Project-specific guidance for design chats."""
 ## Other details
 
 - **Tabs.** The header has **Today** and **More ▾** (see [Today view](#today-view)). More holds History (the
-  Tasks page), Projects, Design, Chat, Research, Analyze, Settings and Schedules. `#today`, `#tasks`, `#projects`,
-  `#design`, `#chat`, `#analyze`, `#settings` and `#schedules` open one; the old `#queue` opens Tasks. The address bar follows the page you
+  Tasks page), Projects, Research, Analyze, Settings and Schedules, and **+ Project**. `#today`, `#tasks`,
+  `#projects`, `#analyze`, `#settings` and `#schedules` open one; the old `#queue` opens Tasks, and the old
+  `#design` and `#chat` open Today (the address changes to `#today`). The address bar follows the page you
   are on, so a reload stays there. With no page in the address, the dashboard opens on Today.
 - **Header.** Only what you watch or act on: the tabs, the queue readouts (working, queued, needs you,
   paused), the usage meters, and the pause buttons. Hover a readout or meter for what it counts; the
@@ -1139,7 +1144,7 @@ notes = """Project-specific guidance for design chats."""
 - **Models.** Each kind of work picks its Claude model. "Model" on the Settings tab is the global setting (`model`);
   **Per kind of work** below it sets `model:task` (task workers and Send to dev), `model:release` (the workers a release
   starts to merge main into dev, default `sonnet`), `model:design` (design and OpenSpec chats) and `model:chat`
-  (the Chat tab). Each is an alias (`opus`, `sonnet`, `haiku`), a full model id, or empty for the global setting,
+  (edit my checkout topics). Each is an alias (`opus`, `sonnet`, `haiku`), a full model id, or empty for the global setting,
   whose empty value is Claude Code's own default.
   - **Per task.** A task's own model beats its kind's setting: the Model dropdown on New task, `"model"` in a
     design chat's queue block (see `design_prompt.md`), `opsd.py add -p NAME --model sonnet "..."`, or
@@ -1237,7 +1242,7 @@ notes = """Project-specific guidance for design chats."""
 - **Ask the worker.** Once a worker stops (review, needs you, failed, done), you can ask it questions
   on the task page. Each question resumes its own Claude session, read-only, so it remembers the work.
   It also remembers the questions: if you then send feedback or retry, it builds on what you discussed.
-- **Screenshots.** Drop or paste an image into any message box: Design, Chat, Ask the worker, an answer,
+- **Screenshots.** Drop or paste an image into any message box: the Today conversation, Ask the worker, an answer,
   feedback, or a new task. It is saved in `~/.claude-ops/images/` and an `[image: <path>]` line goes in the
   text. The message shows it, and Claude (started with `--add-dir` on that folder) is told to read it.
   PNG, JPEG, GIF or WebP, up to 20 MB.
@@ -1297,7 +1302,7 @@ Nothing claude-ops runs may stop, signal or quit a process it did not start.
 | `research.py` | the research dashboard's API, runs, chats and watchdog (see [Research](#research)) |
 | `worker_prompt.md`, `design_prompt.md` | briefs for workers and design chats |
 | `spec_prompt.md` | added to a design chat's brief when it is about an OpenSpec change |
-| `spec_new_prompt.md` | added instead while a chat from **+ New change** has no change yet |
+| `spec_new_prompt.md` | added instead while a chat from **New change** has no change yet |
 | `dashboard.html` | the page |
 | `~/.claude-ops/projects/*.toml` | one config per project |
 | `~/.claude-ops/ops.db` | SQLite: tasks, events, settings, design chats |

@@ -116,19 +116,10 @@ ul.clog { max-height: 220px; }
 .hidden { display: none !important; }
 #limitbar { flex-basis: 100%; display: flex; gap: 12px; align-items: center; padding: 6px 12px; border-radius: 8px;
             border: 1px solid var(--warn); color: var(--warn); font-weight: 600; }
-#designview { display: grid; grid-template-columns: 260px 1fr; gap: 20px; padding: 20px; max-width: 1500px; margin: 0 auto; }
-@media (max-width: 900px) { #designview { grid-template-columns: 1fr; padding: 16px; } }
 .chatitem { padding: 8px 10px; border-radius: 6px; cursor: pointer; border: 1px solid transparent; }
-.chatitem.sel { background: var(--panel); border-color: var(--accent); }
 .chatitem .sub { color: var(--muted); font-size: 12px; }
-.chatitem { position: relative; }
-.chatitem .end { position: absolute; top: 4px; right: 4px; display: none; padding: 0 6px; font-size: 12px; line-height: 18px; }
-.chatitem:hover .end { display: block; }
-.chatitem > div:first-child { padding-right: 18px; }
 .chatitem.unread > div:first-child { font-weight: 600; }
 .chatitem.unread > div:first-child::before { content: "● "; color: var(--warn); }
-#chats > h2, #chats summary { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: 18px 10px 6px; }
-#chats > h2:first-child { margin-top: 0; }
 .tabs .cnt { font-size: 11px; padding: 0 6px; margin-left: 4px; border-radius: 99px; background: var(--warn); color: var(--bg); font-weight: 600; }
 .tabs .busy { margin-left: 4px; color: var(--accent); font-size: 10px; }
 #chat { display: flex; flex-direction: column; min-height: calc(100vh - 110px); }
@@ -182,32 +173,16 @@ ul.clog { max-height: 220px; }
 textarea.dropping { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent); }
 .chathead { color: var(--muted); font-size: 12px; margin: 0 0 12px; }
 .msg.ops { background: none; border-style: dashed; color: var(--muted); font-size: 12px; padding: 6px 12px; }
-#specs > h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: 18px 10px 6px; }
+.chathead .rdline { margin: 0; gap: 8px; flex-wrap: nowrap; }
+.chathead .rdline button { flex: none; }
 .spechead { color: var(--ink); font-size: 13px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); padding: 10px 14px; }
 .spechead .row { margin-top: 8px; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 .spechead .why { color: var(--muted); margin-top: 4px; }
-/* An OpenSpec change's chat: the reader (its files, docs-site style) and the chat side by side, each scrolling
-   on its own. Below 1200px a Read | Chat switch shows one at a time. */
-#rtoggle { display: none; margin-bottom: 10px; }
-#designview.reading { max-width: none; grid-template-columns: 230px minmax(0, 1fr); gap: 16px; padding: 16px; }
-#designview.reading > section:first-child { height: calc(100vh - var(--hdr-h, 64px) - 32px); overflow: auto; }
-#designview.reading #panes { display: grid; grid-template-columns: minmax(460px, 1fr) 420px; gap: 16px;
-                             height: calc(100vh - var(--hdr-h, 64px) - 32px); }
-#designview.reading #chat { min-height: 0; height: 100%; }
-#designview.reading .composer { padding-bottom: 2px; }
-@media (max-width: 1199px) {
-  #designview.reading #panes { display: flex; flex-direction: column; }
-  #designview.reading #rtoggle { display: flex; flex: none; }
-  #designview.reading #reader, #designview.reading #chat { flex: 1; min-height: 0; }
-  #designview.reading.pane-read #chat, #designview.reading.pane-chat #reader { display: none; }
-}
-@media (max-width: 900px) {
-  #designview.reading { grid-template-columns: 1fr; }
-  #designview.reading > section:first-child { height: auto; overflow: visible; }
-}
-#reader, #designview.reading #msgs, #designview.reading > section:first-child { color-scheme: light dark; }
-#reader { overflow: auto; background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
-          container-type: inline-size; overscroll-behavior: contain; }
+/* An OpenSpec change's reader (its files, docs-site style), in the side drawer over Today: Read the change */
+.rsdrawer.rdrawer { width: min(1080px, 100vw); padding: 0; display: flex; flex-direction: column; overflow: hidden; }
+.rdrawer > .rdbar { flex: none; padding: 8px 16px; border-bottom: 1px solid var(--line); }
+#reader { color-scheme: light dark; }
+#reader { flex: 1; min-height: 0; overflow: auto; background: var(--panel); container-type: inline-size; overscroll-behavior: contain; }
 #rhead { position: sticky; top: 0; z-index: 1; background: var(--panel); border-bottom: 1px solid var(--line);
          padding: 12px 20px 0; font-size: 13px; }
 #rinfo .why { color: var(--muted); margin-top: 4px; }
@@ -282,20 +257,11 @@ details.phase > summary::-webkit-details-marker { display: none; }
 details.phase > summary .prog { align-self: center; }
 details.phase[open] > summary { margin-bottom: 10px; }
 details.phase.full > summary h2 { color: var(--muted); }
-#specs > h2 { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-#specs > h2 button { font-size: 12px; text-transform: none; letter-spacing: 0; padding: 2px 8px; white-space: nowrap; flex: none; }
 .specline { font-size: 12px; color: var(--muted); padding: 3px 10px; }
 .specline button { font-size: 12px; padding: 0 2px; border: none; background: none; color: var(--accent); cursor: pointer; }
 .specline button:disabled { color: var(--muted); cursor: default; }
-#specbare summary { font-size: 12px; color: var(--muted); padding: 3px 10px; cursor: pointer; }
-#specres { font-size: 12px; padding: 3px 10px; }
-#specrefs .specline { padding-left: 22px; }
-#specform { margin: 0 4px 8px; padding: 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); display: flex; flex-direction: column; gap: 8px; }
-#specform input { width: 100%; }
-#specform .row { margin-top: 0; }
 .chathead code { font: 12px var(--mono); background: var(--panel); padding: 1px 4px; border-radius: 4px; user-select: all; }
 a.origin { color: var(--accent); cursor: pointer; text-decoration: underline; }
-.ptag { font-size: 11px; padding: 1px 6px; border-radius: 4px; background: var(--chip); color: var(--muted); }
 .projs { padding: 6px; }
 .projs > h2 { margin: 6px 8px 6px; }
 .prow { border-radius: 6px; border: 1px solid transparent; }
@@ -609,8 +575,7 @@ a[data-task] { color: var(--accent); cursor: pointer; }
   #tdcentre .composer #convmodes .row { flex-wrap: nowrap; gap: 6px; margin: 0; }
   #tdcentre .composer #convmodes #newtopic { flex: none; white-space: nowrap; }
   #tdcentre .composer #saymode, #tdcentre .composer #cprojwrap, #tdcentre .composer #chatmsg:not(:empty) { order: 0; flex-basis: 100%; margin: 0; }
-  #tdcentre .composer #chatmsg:empty, #tdcentre .composer .row > .muted, #tdcentre .composer .row > span[style],
-  #tdcentre .composer :is(#endchat, #reopenchat) { display: none; }
+  #tdcentre .composer #chatmsg:empty, #tdcentre .composer .row > .muted { display: none; }
   #tdcentre .composer #clip { order: 1; }
   #tdcentre .composer #say { order: 2; flex: 1; min-width: 0; min-height: 0; height: 40px; max-height: calc(4 * 1.45em + 18px);
                              resize: none; padding: 8px 12px; border-radius: 18px; }
@@ -627,7 +592,7 @@ a[data-task] { color: var(--accent); cursor: pointer; }
   <h1>Claude Ops</h1>
   <select id="proj" title="Project"></select>
   <nav class="tabs" id="nav"><button id="tab-today" title="What needs you, the step to take, and what is going on">Today</button><div class="more" id="more"><button id="morebtn" aria-haspopup="true" aria-expanded="false" title="The other pages">More ▾</button>
-    <div class="menu hidden" id="moremenu" role="menu"><button id="tab-tasks" title="Every task, the New task form, and each task's page">History</button><button id="tab-projects" title="Every project: branches, Promote, Play, Deploys, Archive, and its tasks">Projects</button><button id="tab-design" title="Plan work with Claude">Design</button><button id="tab-chat" title="Talk to Claude in the project folder, as in a terminal">Chat</button><button id="tab-research" class="hidden" title="The research repo: proposals, reports, projects, to-dos, sources and runs">Research</button><button id="tab-analyze" title="Where time and money went: run times and costs of tasks, and how to make them cheaper and faster">Analyze</button><button id="tab-settings" title="Parallel, promote wait, usage brake, models, effort, and what Claude has cost">Settings</button><button id="tab-schedules" title="Recurring jobs: schedules that queue a task on a timetable">Schedules</button><hr><button id="addproj" title="Add a git repository, or a folder of git repos, as a project">+ Project</button></div></div></nav>
+    <div class="menu hidden" id="moremenu" role="menu"><button id="tab-tasks" title="Every task, the New task form, and each task's page">History</button><button id="tab-projects" title="Every project: branches, Promote, Play, Deploys, Archive, and its tasks">Projects</button><button id="tab-research" class="hidden" title="The research repo: proposals, reports, projects, to-dos, sources and runs">Research</button><button id="tab-analyze" title="Where time and money went: run times and costs of tasks, and how to make them cheaper and faster">Analyze</button><button id="tab-settings" title="Parallel, promote wait, usage brake, models, effort, and what Claude has cost">Settings</button><button id="tab-schedules" title="Recurring jobs: schedules that queue a task on a timetable">Schedules</button><hr><button id="addproj" title="Add a git repository, or a folder of git repos, as a project">+ Project</button></div></div></nav>
   <span class="grow" style="flex:1"></span>
   <span class="stats" id="hdr"></span>
   <span class="stats hidden" id="usage"></span>
@@ -641,7 +606,22 @@ a[data-task] { color: var(--accent); cursor: pointer; }
 <div id="todayview" class="hidden" data-pane="todo">
   <aside class="side" id="tdleft"></aside>
   <section id="tdcentre"><div id="tdstep"></div><div id="tdsecbar"></div>
-    <div id="tdsec" class="tl hidden"><div id="tdsechead"></div><div id="tdsecmsg"></div><div id="tdseclist"></div></div></section>
+    <div id="tdsec" class="tl hidden"><div id="tdsechead"></div><div id="tdsecmsg"></div><div id="tdseclist"></div></div>
+    <section id="chat">
+      <div id="convtop" class="hidden"></div>
+      <div id="chathead" class="chathead"></div>
+      <div id="msgs"></div>
+      <div class="composer">
+        <div id="slash" class="hidden"></div>
+        <div id="convmodes" class="hidden"></div>
+        <div id="saymode" class="hidden"></div>
+        <textarea id="say"></textarea>
+        <div class="row"><label id="cprojwrap">Project <select id="cproj"></select></label><button class="primary" id="send">Send</button><span class="muted">↩</span>
+          <button id="clip" title="Attach pictures (or paste or drop them on the message box)">📎</button><input type="file" id="clipfile" accept="image/*" multiple class="hidden">
+          <button id="stopchat" class="danger hidden">Stop</button><span id="chatmsg" class="err"></span></div>
+      </div>
+    </section>
+  </section>
   <aside class="side" id="tdright"><div class="tl" id="tdtl"></div>
     <div id="tdpanel" class="hidden"><div id="tdphead"></div><div id="tdpother"></div><div id="tdpdet"></div></div></aside>
 </div>
@@ -672,7 +652,7 @@ a[data-task] { color: var(--accent); cursor: pointer; }
         <label><span>Tasks</span><select data-model="task"></select><span class="why">Workers on tasks, and on Send to dev.</span></label>
         <label><span>Releases</span><select data-model="release"></select><span class="why">Workers a release starts to merge main into dev.</span></label>
         <label><span>Design chats</span><select data-model="design"></select><span class="why">Design chats, including OpenSpec chats.</span></label>
-        <label><span>Chats</span><select data-model="chat"></select><span class="why">The Chat tab: Claude in your checkout.</span></label>
+        <label><span>Chats</span><select data-model="chat"></select><span class="why">Edit my checkout topics: Claude in your checkout.</span></label>
         <div class="muted">“same as Model” uses the Model setting. A session keeps the model it started with: a change applies to new tasks and chats, not to ones already under way.</div>
       </div>
     </div>
@@ -817,46 +797,8 @@ a[data-task] { color: var(--accent); cursor: pointer; }
     <div class="card" id="detail"></div>
   </section>
 </main>
-<div id="designview" class="hidden">
-  <section>
-    <button class="primary" id="newchat" style="width:100%;margin-bottom:12px"></button>
-    <div id="chats"></div>
-    <div id="specs" class="hidden">
-      <h2>OpenSpec changes <button id="specnew" title="Draft a new OpenSpec change with Claude">+ New change</button></h2>
-      <div id="specform" class="hidden">
-        <label id="snprojwrap">Project <select id="snproj"></select></label>
-        <label id="snsubwrap">Repo <select id="snsub"></select></label>
-        <input id="sndesc" placeholder="What should the change do? One line." maxlength="2000">
-        <div class="row"><button class="primary" id="snstart">Start</button><button id="sncancel">Cancel</button><span id="snmsg" class="err"></span></div>
-      </div>
-      <div id="speclist"></div>
-      <div class="specline" id="specfoot"><button id="specref">Refresh commands</button></div>
-      <div id="specrefs" class="hidden"></div>
-      <div id="specres" class="hidden"></div>
-      <div id="specbare"></div>
-    </div>
-  </section>
-  <div id="panes">
-  <div id="rtoggle" class="tabs"><button data-pane="read">Read</button><button data-pane="chat">Chat</button></div>
-  <section id="reader" class="hidden"><div id="rhead"><div id="rinfo"></div><div id="rnav"></div></div><div id="rbody"></div></section>
-  <section id="chat">
-    <div id="convtop" class="hidden"></div>
-    <div id="chathead" class="chathead"></div>
-    <div id="msgs"></div>
-    <div class="composer">
-      <div id="slash" class="hidden"></div>
-      <div id="convmodes" class="hidden"></div>
-      <div id="saymode" class="hidden"></div>
-      <textarea id="say"></textarea>
-      <div class="row"><label id="cprojwrap">Project <select id="cproj"></select></label><button class="primary" id="send">Send</button><span class="muted">↩</span>
-        <button id="clip" title="Attach pictures (or paste or drop them on the message box)">📎</button><input type="file" id="clipfile" accept="image/*" multiple class="hidden">
-        <button id="stopchat" class="danger hidden">Stop</button><span id="chatmsg" class="err"></span><span style="flex:1"></span>
-        <button id="endchat" class="hidden" title="Take this chat off your list. It stays under Ended, where you can reopen it">End chat</button>
-        <button id="reopenchat" class="hidden" title="Put this chat back on your list">Reopen</button></div>
-    </div>
-  </section>
-  </div>
-</div>
+<!-- An OpenSpec change's reader waits here, hidden, until Read the change moves it into the side drawer -->
+<div id="rpark" class="hidden"><section id="reader"><div id="rhead"><div id="rinfo"></div><div id="rnav"></div></div><div id="rbody"></div></section></div>
 <div id="dlg" class="hidden"></div>
 <script>
 const $ = s => document.querySelector(s);
@@ -1046,16 +988,8 @@ function renderUsage() {
   }).join(""));
   el.className = "stats" + (u.windows.length ? "" : " hidden");
 }
-// The Design and Chat tabs show how many open chats have a new reply for you, and ● while Claude is replying in one.
 // The Research tab shows ● while research runs.
 function renderTabCounts() {
-  for (const [t, kind, name] of [["design", "design", "Design"], ["chat", "project", "Chat"]]) {
-    const cs = (state.chats || []).filter(c => c.kind === kind && inView(c.project));
-    const unread = cs.reduce((a, c) => a + c.unread, 0), replying = cs.reduce((a, c) => a + c.replying, 0);
-    put($(`#tab-${t}`), name + (unread ? `<span class="cnt">${unread}</span>` : "") + (replying ? `<span class="busy pulse"></span>` : ""));
-    $(`#tab-${t}`).dataset.tip = $(`#tab-${t}`).dataset.tip || $(`#tab-${t}`).title;
-    $(`#tab-${t}`).title = [unread && `${unread} with a new reply for you`, replying && `Claude is replying in ${replying}`].filter(Boolean).join(", ") || $(`#tab-${t}`).dataset.tip;
-  }
   const rb = $("#tab-research"), rsn = (state.research && state.research.active) || 0;
   put(rb, "Research" + (rsn ? `<span class="busy pulse"></span>` : ""));
   rb.dataset.tip = rb.dataset.tip || rb.title;
@@ -1406,7 +1340,7 @@ clearSelection();
 
 function setFilter(name) {
   pf = name || ""; try { localStorage.setItem("ops-proj", pf); } catch {}
-  chatSel = null; chatData = null; chatKey = ""; chatSels = {};
+  chatSel = null; chatData = null; chatKey = "";
 }
 
 function selectTask(id) {
@@ -1604,8 +1538,13 @@ function originLine(o, verb) {
 function openOrigin(o) {
   if (o.ref.startsWith("schedule:")) { if (tab === "today") tdOpenPanel({kind: "schedule", id: o.id}); else showTab("schedules"); return; }
   if (o.ref.startsWith("task:")) return openTask(o.id);
-  if (!inView(o.project)) { setFilter(o.project); renderProjects(); renderHeader(); renderMains(); }
-  showTab(o.kind === "project" ? "chat" : "design"); selectChat(o.id);
+  openTopic(o.project, o.id);
+}
+// A chat as the current topic of its project in Today, switching the project filter to it when it is out of view
+function openTopic(project, id) {
+  if (!inView(project)) { setFilter(project); renderProjects(); renderHeader(); renderMains(); }
+  if (tab !== "today") showTab("today");
+  tdShowConv(); tdOpenChat(id);
 }
 
 // Where a message to a working worker stands. One that waits goes to the worker's next turn, and nothing merges first.
@@ -1670,7 +1609,7 @@ function modelShort(m) { const k = MODELS.find(a => String(m || "").toLowerCase(
 $("#proj").onchange = () => {
   setFilter($("#proj").value); if ($("#proj").value) setFocus($("#proj").value);
   if (tab === "today") { TD.convKey = null; TD.over = null; }  // the conversation follows the project
-  if (state) render(); refresh(); if (chatTab()) refreshDesign();
+  if (state) render(); refresh();
 };
 $("#addproj").onclick = () => { showTab("projects"); $("#addcard").classList.remove("hidden"); $("#ppath").focus(); };
 $("#pcancel").onclick = () => $("#addcard").classList.add("hidden");
@@ -1781,23 +1720,13 @@ function dailyChart(days) {
   return `<svg viewBox="0 0 ${W} ${H}"><text x="0" y="10">${money(max)}</text>${bars}${labels}</svg>`;
 }
 
-// ---------------------------------------------------------------- design and chat tabs
-// Both show chats from /api/designs: the Design tab those of kind "design", the Chat tab those of kind "project".
-const KIND = {design: "design", chat: "project"};
-const TABTEXT = {
-  design: {button: "New design chat", none: "No design chats yet.",
-           say: "Talk through an idea. When you agree on the work, ask Claude to queue it. Drop or paste screenshots to attach them.",
-           intro: "Start a design chat: describe an idea, a problem, or a feature you want. Claude reads the project docs and code, asks questions, and queues tasks when you agree. Or open an OpenSpec change on the left: read it, change it with Claude, and queue it."},
-  chat: {button: "New chat", none: "No chats yet.", say: "Ask or tell Claude anything about this project. Drop or paste screenshots to attach them.",
-         intro: "Talk to Claude in the project folder, as if you ran claude there. It can read, edit and run commands in your checkout. Actions that would ask for permission are denied, since nobody can answer here."}};
 // Today opens first. The address bar names the page you are on (#today, #tasks, …), so a reload stays there.
-let tab = "today", chatSel = null, chatData = null, chatKey = "", chatSels = {};
-try { chatSels = JSON.parse(localStorage.getItem("ops-chats") || "{}"); } catch {}
-const TABS = ["today", "tasks", "projects", "design", "chat", "analyze", "research", "settings", "schedules"];
+// The old #design and #chat pages are gone: their chats are Today's topics, so those addresses open Today.
+let tab = "today", chatSel = null, chatData = null, chatKey = "";
+const TABS = ["today", "tasks", "projects", "analyze", "research", "settings", "schedules"];
 if (TABS.includes(location.hash.slice(1))) tab = location.hash.slice(1);
 if (location.hash === "#queue") tab = "tasks";  // the old name of Tasks (History)
 if (/^#research(\/|$)/.test(location.hash)) tab = "research";
-const chatTab = () => tab === "design" || tab === "chat";
 
 function showTab(t) {
   const was = tab;
@@ -1805,10 +1734,8 @@ function showTab(t) {
   for (const k of TABS) $(`#tab-${k}`).classList.toggle("on", t === k);
   $("#morebtn").classList.toggle("on", t !== "today");
   closeMore();
-  // Today borrows the chat column and the task page; every other page has them back where they were.
+  // Today borrows the task page; every other page has it back where it was.
   if (was === "today" && t !== "today") tdLeave();
-  if (t === "today") $("#tdcentre").appendChild($("#chat"));
-  else if ($("#chat").parentElement !== $("#panes")) $("#panes").appendChild($("#chat"));
   $("#todayview").classList.toggle("hidden", t !== "today"); $("#tdnav").classList.toggle("hidden", t !== "today");
   document.body.classList.toggle("td", t === "today");
   renderSayMode();
@@ -1826,20 +1753,11 @@ function showTab(t) {
   $("#researchview").classList.toggle("hidden", t !== "research");
   if (t === "research") { rsRender(); refreshResearch(); rsUrl(false); }
   else if (location.hash !== "#" + t) history.replaceState(null, "", "#" + t);
-  $("#designview").classList.toggle("hidden", !chatTab());
   if (t === "today") { chatSel = null; chatData = null; chatKey = ""; TD.convKey = null; if (state) { renderProjects(); renderToday(); } }
-  if (!chatTab()) return;
-  chatSel = chatSels[t] || null; chatData = null; chatKey = "";
-  $("#newchat").textContent = TABTEXT[t].button;
-  $("#say").placeholder = TABTEXT[t].say;
-  if (state) renderProjects();
-  refreshDesign();
 }
 $("#tab-today").onclick = () => showTab("today");
 $("#tab-tasks").onclick = () => showTab("tasks");
 $("#tab-projects").onclick = () => showTab("projects");
-$("#tab-design").onclick = () => showTab("design");
-$("#tab-chat").onclick = () => showTab("chat");
 $("#tab-settings").onclick = () => showTab("settings");
 $("#tab-schedules").onclick = () => showTab("schedules");
 $("#tab-analyze").onclick = () => showTab("analyze");
@@ -1978,7 +1896,7 @@ function inline(s, ctx = {}) {
 // says their target exists: inline() wraps each in <span class="ref" data-ref>, and chatLinks checks them all in one
 // request and turns each into a link, or greys it with ⚠ and the reason. A reference is never a link that fails.
 // Places in the app a message may name, and the route each opens. Longer names win over shorter ones.
-const APP_PLACES = {"Today view": "#today", "Projects tab": "#projects", "Tasks tab": "#tasks", "Design tab": "#design", "Chat tab": "#chat",
+const APP_PLACES = {"Today view": "#today", "Projects tab": "#projects", "Tasks tab": "#tasks", "Design tab": "#today", "Chat tab": "#today",
   "Analyze tab": "#analyze", "Research tab": "#research", "Settings tab": "#settings", "Settings": "#settings",
   "Analyze": "#analyze"};
 const reEsc = t => t.replace(/[.*+?^$()|[\]{}\\]/g, "\\$&");
@@ -2006,7 +1924,7 @@ function lnRef(p, L, mode) {
   const [, path, line, sec] = m;
   if (/(^|\/)\.\.?(\/|$)/.test(path) || /^\d+$/.test(path)) return null;
   if ((m = path.match(/^(?:([\w.-]+)\/)?openspec\/changes\/([\w.-]+)/)) && m[2] !== "archive")
-    return {ref: `spec:${m[1] || ""}/${m[2]}`, href: "#design"};
+    return {ref: `spec:${m[1] || ""}/${m[2]}`, href: "#today"};
   const word = !path.includes("/");
   if (mode && word && !new RegExp(`\\.(${LN_EXT})$`, "i").test(path)) return null;
   return {ref: `file:${path}${line ? ":" + line : ""}${sec ? "§" + sec.trim() : ""}`, quiet: !!mode && word && !line && !sec,
@@ -2187,8 +2105,7 @@ async function openSpecLink(project, val) {
   const k = val.lastIndexOf("/");
   try {
     const r = await api("/api/designs", {project, sub: val.slice(0, k), spec: val.slice(k + 1)});
-    if (tab !== "design") showTab("design");
-    specsAt = 0; selectChat(r.id);
+    openTopic(project, r.id);
   } catch (err) { $("#chatmsg").textContent = err.message; }
 }
 // A repo file as on dev, in the research tab's side drawer: markdown rendered and scrolled to its § heading, any
@@ -2227,155 +2144,14 @@ async function openRepoFile(project, val) {
   }
 }
 
-// The list has three parts: chats ready for you (Claude has answered; a new reply is marked ●), chats where
-// Claude is still replying, and the chats you ended, folded away. Ending a chat only takes it off the list.
-let endedOpen = false, chatList = [];
-const unread = c => c.state !== "thinking" && (c.replied || 0) > (c.seen || 0);
-async function loadDesigns() {
-  if (tab === "today") return loadConv();
-  let chats = [];
-  try { chats = await api("/api/designs"); } catch { return; }
-  chats = chatList = chats.filter(c => inView(c.project) && (c.kind || "design") === KIND[tab]);
-  const now = Date.now() / 1000;
-  const item = c => `<div class="chatitem ${c.id === chatSel ? "sel" : ""} ${!c.ended && unread(c) ? "unread" : ""}" data-id="${c.id}">
-    <div>${esc(c.title)}</div><div class="sub">${pf ? "" : `<span class="ptag">${esc(P(c.project).title)}</span> `}${c.spec || c.spec_draft ? '<span class="ptag">OpenSpec</span> ' : ""}${c.origin ? `sent by ${esc(c.origin.words)} · ` : ""}${c.state === "thinking" ? '<span class="pulse s-running">replying</span> · ' : !c.ended && unread(c) ? '<span class="s-review">new reply</span> · ' : ""}${ago(c.ended || c.updated, now)} ago${c.cost ? ` · $${c.cost.toFixed(2)}` : ""}</div>
-    ${c.ended ? "" : `<button class="end" data-end="${c.id}" title="End chat: take it off your list">×</button>`}</div>`;
-  const ready = chats.filter(c => !c.ended && c.state !== "thinking"), busy = chats.filter(c => !c.ended && c.state === "thinking");
-  const ended = chats.filter(c => c.ended).sort((a, b) => b.ended - a.ended);
-  // Ready ones with a new reply first, then the rest, newest first within each.
-  ready.sort((a, b) => unread(b) - unread(a) || b.updated - a.updated);
-  const html = (!chats.length ? `<div class="muted">${TABTEXT[tab].none}</div>` : "")
-    + (ready.length ? `<h2>Ready for you (${ready.length})</h2>` + ready.map(item).join("") : "")
-    + (busy.length ? `<h2>Claude is replying (${busy.length})</h2>` + busy.map(item).join("") : "")
-    + (chats.length && !ready.length && !busy.length ? `<div class="muted" style="padding:0 10px">No open chats.</div>` : "")
-    + (ended.length ? `<details id="endedchats" ${endedOpen || ended.some(c => c.id === chatSel) ? "open" : ""}><summary>Ended (${ended.length})</summary>${ended.map(item).join("")}</details>` : "");
-  if (put($("#chats"), html)) {
-    document.querySelectorAll("#chats .chatitem").forEach(el => el.onclick = () => { selectChat(+el.dataset.id); });
-    document.querySelectorAll("#chats [data-end]").forEach(b => b.onclick = e => { e.stopPropagation(); endChat(+b.dataset.end); });
-    if ($("#endedchats")) $("#endedchats").ontoggle = e => { endedOpen = e.target.open; };
-  }
-  // A reply in an OpenSpec chat may have created, attached or archived a change: reload the list when one ends
-  const sig = chats.filter(c => c.spec || c.spec_draft).map(c => `${c.id}:${c.state}:${c.spec || ""}`).join();
-  refreshSpecs(sig !== specSig && (specSig = sig, true));
-  if (chatSel) await loadChat(); else renderChat();
-}
-const refreshDesign = single(loadDesigns);
+// Today's conversation: the current topic of the project in view (loadConv), polled while Claude replies.
+const refreshDesign = single(async () => { if (tab === "today") await loadConv(); });
 
-// ---------------------------------------------------------------- OpenSpec changes (Design tab)
-// The projects' openspec/changes/<name>/ folders. Opening one opens its design chat, where Claude can edit the
-// change; the header shows its files and queues it as one task or one task per phase. The section shows for
-// every project in view with openspec/ on dev, even with no changes, so + New change can draft the first one,
-// and for every one without it, with a Set up line (folded under one toggle in the all-projects view).
-let specs = {changes: [], repos: [], bare: [], drafts: [], cli: true}, specsAt = 0, specSig = "", specOpts = {hold: false, release: null};
-async function refreshSpecs(force) {
-  if (tab === "design" && (force || Date.now() - specsAt > 8000)) {
-    specsAt = Date.now();
-    try { specs = await api("/api/openspec"); } catch {}
-  }
-  const repos = tab === "design" ? specs.repos.filter(r => inView(r.project)) : [];
-  const bare = tab === "design" ? (specs.bare || []).filter(r => inView(r.project)) : [];
-  $("#specs").classList.toggle("hidden", !repos.length && !bare.length);
-  if (!repos.length || !specs.cli) { $("#specform").classList.add("hidden"); $("#specrefs").classList.add("hidden"); }
-  const btn = $("#specnew");
-  btn.disabled = !specs.cli;
-  btn.title = specs.cli ? "Draft a new OpenSpec change with Claude" : NO_CLI;
-  btn.classList.toggle("hidden", !repos.length);
-  const ref = $("#specref");
-  $("#specfoot").classList.toggle("hidden", !repos.length);
-  ref.disabled = !specs.cli || !!specBusy;
-  ref.textContent = specBusy.startsWith("update:") ? "Refreshing…" : "Refresh commands";
-  ref.title = !specs.cli ? NO_CLI : `Run openspec update${repos.length > 1 ? " in a repo you pick" : ""} and commit the opsx commands and skills that changed to dev`;
-  specActions(repos, bare);
-  const ptag = name => pf ? "" : `<span class="ptag">${esc(P(name).title)}</span> `;
-  // A chat that hasn't created its change yet: "<title> · drafting", until a reply makes the folder
-  const drafts = (tab === "design" ? specs.drafts : []).filter(c => inView(c.project)).map(c => `<div class="chatitem ${c.id === chatSel ? "sel" : ""}" data-id="${c.id}">
-    <div>${esc(c.title)} · <span class="muted">drafting</span></div><div class="sub">${ptag(c.project)}${c.sub ? `${esc(c.sub)} · ` : ""}${c.state === "thinking" ? '<span class="pulse s-running">replying</span>' : "no change yet"}</div></div>`);
-  const list = tab === "design" ? specs.changes.filter(s => inView(s.project)) : [];
-  const html = drafts.join("") + list.map(s => `<div class="chatitem ${s.chat && s.chat === chatSel ? "sel" : ""}" data-spec="${esc(s.name)}" data-sub="${esc(s.sub)}" data-project="${esc(s.project)}" title="${esc(s.why)}">
-    <div>${esc(s.title)}</div><div class="sub">${ptag(s.project)}${s.sub ? `${esc(s.sub)} · ` : ""}${s.has_tasks ? `${s.done}/${s.done + s.open} done` : "no tasks.md"}${s.where === "checkout" ? ' · <span class="s-review">only in your checkout</span>' : ""}</div></div>`).join("")
-    + (repos.length && !drafts.length && !list.length ? `<div class="muted" style="padding:0 10px">No open changes.</div>` : "");
-  if (!put($("#speclist"), html)) return;
-  document.querySelectorAll("#speclist .chatitem[data-id]").forEach(el => el.onclick = () => selectChat(+el.dataset.id));
-  document.querySelectorAll("#speclist .chatitem[data-spec]").forEach(el => el.onclick = async () => {
-    try {
-      const r = await api("/api/designs", {project: el.dataset.project, sub: el.dataset.sub, spec: el.dataset.spec});
-      specsAt = 0; selectChat(r.id);
-    } catch (e) { $("#chatmsg").textContent = e.message; }
-  });
-}
-// Set up (openspec init) and Refresh commands (openspec update): the daemon runs them in a throwaway worktree of
-// dev and commits only openspec/ and .claude/. One at a time; the result shows under the change list.
+// ---------------------------------------------------------------- OpenSpec changes
+// A change's chat (the daemon's spec_view): Read the change opens its files in the side drawer, where it is queued
+// as one task or one task per phase. Today's Specs & designs lists the changes, and sets up and refreshes OpenSpec.
+let specOpts = {hold: false, release: null};
 const NO_CLI = "Install the openspec CLI: npm i -g @fission-ai/openspec";
-let specBusy = "", specRes = null, bareOpen = false;
-const repoName = r => `${P(r.project).title}${r.sub ? `/${r.sub}` : ""}`;
-function specActions(repos, bare) {
-  const off = !specs.cli || specBusy ? "disabled" : "";
-  const tip = what => esc(!specs.cli ? NO_CLI : what === "init"
-    ? "Run openspec init --tools claude and commit openspec/ and .claude/ to dev"
-    : "Run openspec update and commit the opsx commands and skills that changed to dev");
-  const line = (r, what, text) => `<div class="specline">${esc(repoName(r))}${text} · <button data-run="${what}" data-project="${esc(r.project)}" data-sub="${esc(r.sub)}" title="${tip(what)}" ${off}>${
-    specBusy === `${what}:${r.project}:${r.sub}` ? (what === "init" ? "Setting up…" : "Refreshing…") : (what === "init" ? "Set up" : "Refresh")}</button></div>`;
-  const lines = bare.map(r => line(r, "init", ": not using OpenSpec")).join("");
-  const html = !bare.length ? "" : pf ? lines
-    : `<details id="specbaredet" ${bareOpen || specBusy.startsWith("init:") ? "open" : ""}><summary>Set up OpenSpec…</summary>${lines}</details>`;
-  const res = $("#specres");
-  res.className = specRes ? (specRes.err ? "err" : "muted") : "hidden";
-  res.textContent = specRes ? specRes.text : "";
-  const refs = repos.length > 1 ? repos.map(r => line(r, "update", "")).join("") : "";
-  for (const [el, h] of [[$("#specbare"), html], [$("#specrefs"), refs]]) {
-    if (!put(el, h)) continue;
-    el.querySelectorAll("[data-run]").forEach(b => b.onclick = () => specRun(b.dataset.run, b.dataset.project, b.dataset.sub));
-    if ($("#specbaredet")) $("#specbaredet").ontoggle = e => { bareOpen = e.target.open; };
-  }
-}
-async function specRun(what, project, sub) {
-  specBusy = `${what}:${project}:${sub}`; specRes = null;
-  refreshSpecs();
-  try {
-    const r = await api(`/api/openspec/${what}`, {project, sub});
-    specRes = {text: `${repoName({project, sub})}: ${r.text}`, err: false};
-  } catch (e) { specRes = {text: `${repoName({project, sub})}: ${e.message}`, err: true}; }
-  specBusy = ""; $("#specrefs").classList.add("hidden");
-  refreshSpecs(true);
-}
-$("#specref").onclick = () => {
-  const repos = specs.repos.filter(r => inView(r.project));
-  if (repos.length === 1) return specRun("update", repos[0].project, repos[0].sub);
-  $("#specrefs").classList.toggle("hidden");
-};
-// + New change: pick the project (only when several in view use OpenSpec) and the repo (only when the project has
-// several with openspec/), say in a line what the change should do, Start. That opens a drafting chat.
-function specPickers() {
-  const repos = specs.repos.filter(r => inView(r.project));
-  const projects = [...new Set(repos.map(r => r.project))];
-  const pv = projects.includes($("#snproj").value) ? $("#snproj").value : projects[0] || "";
-  $("#snproj").innerHTML = projects.map(n => `<option value="${esc(n)}" ${n === pv ? "selected" : ""}>${esc(P(n).title)}</option>`).join("");
-  $("#snprojwrap").classList.toggle("hidden", projects.length < 2);
-  const subs = repos.filter(r => r.project === pv).map(r => r.sub);
-  const sv = subs.includes($("#snsub").value) ? $("#snsub").value : subs[0] || "";
-  $("#snsub").innerHTML = subs.map(s => `<option value="${esc(s)}" ${s === sv ? "selected" : ""}>${esc(s || "(root)")}</option>`).join("");
-  $("#snsubwrap").classList.toggle("hidden", subs.length < 2);
-}
-$("#specnew").onclick = () => {
-  const f = $("#specform");
-  f.classList.toggle("hidden");
-  if (!f.classList.contains("hidden")) { specPickers(); $("#snmsg").textContent = ""; $("#sndesc").focus(); }
-};
-$("#snproj").onchange = specPickers;
-$("#sncancel").onclick = () => $("#specform").classList.add("hidden");
-async function startSpec() {
-  const text = $("#sndesc").value.trim();
-  if (!text) { $("#snmsg").textContent = "Say what the change should do."; return; }
-  $("#snstart").disabled = true;
-  try {
-    const r = await api("/api/openspec/new", {project: $("#snproj").value, sub: $("#snsub").value, text});
-    $("#sndesc").value = ""; $("#specform").classList.add("hidden");
-    specsAt = 0; selectChat(r.id);
-  } catch (e) { $("#snmsg").textContent = e.message; }
-  finally { $("#snstart").disabled = false; }
-}
-$("#snstart").onclick = startSpec;
-$("#sndesc").onkeydown = e => { if (e.key === "Enter") startSpec(); if (e.key === "Escape") $("#specform").classList.add("hidden"); };
 const hash = s => { let h = 5381; for (let i = 0; i < s.length; i++) h = (h * 33 ^ s.charCodeAt(i)) | 0; return h; };
 function specGone(d) {
   const s = d.spec_view, dev = esc(P(d.project).dev_branch || "dev");
@@ -2383,12 +2159,13 @@ function specGone(d) {
     : `<div class="spechead">The OpenSpec change <code>${esc(s.name)}</code> is no longer on ${dev}: it was removed.</div>`;
 }
 
-// ---------------------------------------------------------------- the reader: an OpenSpec change beside its chat
+// ---------------------------------------------------------------- the reader: an OpenSpec change, in the side drawer
 // Tabs per kind of file, an "On this page" outline, requirement cards and task phases, all parsed here from the
-// spec_view texts. The body is rebuilt only when the files or the tab change, keeping your place in it.
-let specTabs = {}, pane = "read";
-try { specTabs = JSON.parse(localStorage.getItem("ops-spectabs") || "{}"); pane = localStorage.getItem("ops-pane") || "read"; } catch {}
-const rd = {d: null, id: "", tab: "", sig: "", scroll: {}, folds: {}, io: null, hs: []};
+// spec_view texts. The body is rebuilt only when the files or the tab change, keeping your place in it. #reader
+// waits hidden in #rpark; Read the change moves it into the drawer, and closing the drawer puts it back.
+let specTabs = {};
+try { specTabs = JSON.parse(localStorage.getItem("ops-spectabs") || "{}"); } catch {}
+const rd = {d: null, id: "", tab: "", sig: "", scroll: {}, folds: {}, io: null, hs: [], open: null};
 const liveSpec = d => d && d.spec_view && !d.spec_view.missing ? d.spec_view : null;
 const bar = (done, total) => `<span class="bar"><i style="width:${total ? Math.round(100 * done / total) : 0}%"></i></span>`;
 const CHECK = /^\s*[-*]\s+\[([ xX])\]\s+/;  // as opsd.py's CHECKBOX
@@ -2482,16 +2259,31 @@ const bareCmds = s => !s.commands.some(c => c.id !== "validate");  // no opsx an
 const NO_OPSX = "Run Set up OpenSpec or Refresh OpenSpec commands to add the opsx commands.";
 function runCmd(s, c) {
   if (c.id === "archive" && !confirm(`Archive ${s.name}? This moves it to openspec/changes/archive and merges its spec deltas into openspec/specs. Saved to dev after the reply.`)) return;
+  rdClose();  // the reply shows in the topic
   sayChat(c.text);
 }
+// Read the change: the reader in the drawer files and reports open in. It closes on Escape, Close, a click beside
+// it, a command or queue button, and when the topic changes or you leave Today.
+function rdOpen() {
+  const d = chatData && chatSel === chatData.id ? chatData : null;
+  if (!liveSpec(d)) return;
+  rsCloseDoc();
+  const bg = document.createElement("div"), dr = document.createElement("aside");
+  bg.className = "rsdrawerbg"; bg.id = "rsdocbg"; dr.className = "rsdrawer rdrawer"; dr.id = "rsdoc";
+  dr.innerHTML = `<div class="row rdbar"><b>The change</b><span style="flex:1"></span><button id="rsdocx">Close</button></div>`;
+  dr.append($("#reader"));
+  document.body.append(bg, dr);
+  bg.onclick = rsCloseDoc; $("#rsdocx").onclick = rsCloseDoc;
+  rd.open = d.id; rd.id = "";  // rebuilt now it can scroll, back to your place in that tab
+  renderReader(d);
+}
+const rdShown = () => !!$("#rsdoc #reader");
+function rdClose() { if (rdShown()) rsCloseDoc(); }
 function renderReader(d) {
-  const s = liveSpec(d), dv = $("#designview"), reader = $("#reader");
+  const s = liveSpec(d), reader = $("#reader");
   keepPlace();
   rd.d = d;
-  dv.classList.toggle("reading", !!s);
-  reader.classList.toggle("hidden", !s);
-  dv.classList.toggle("pane-read", pane === "read"); dv.classList.toggle("pane-chat", pane !== "read");
-  $("#rtoggle").querySelectorAll("button").forEach(b => b.classList.toggle("on", b.dataset.pane === pane));
+  if (rdShown() && (!s || d.id !== rd.open)) rdClose();
   if (!s) { rd.id = ""; rd.io?.disconnect(); return; }
   if (put($("#rinfo"), readerHead(d))) {
     $("#rinfo").querySelectorAll("[data-plan]").forEach(b => b.onclick = () => queueSpec(b.dataset.plan));
@@ -2550,31 +2342,17 @@ $("#reader").addEventListener("click", e => {  // a link to a heading in the sam
   e.preventDefault(); toHeading(document.getElementById(decodeURIComponent(a.getAttribute("href").slice(1))));
 });
 new ResizeObserver(() => $("#reader").style.setProperty("--rhead-h", $("#rhead").offsetHeight + "px")).observe($("#rhead"));
-$("#rtoggle").querySelectorAll("button").forEach(b => b.onclick = () => {
-  keepPlace();
-  pane = b.dataset.pane; try { localStorage.setItem("ops-pane", pane); } catch {}
-  renderReader(rd.d);
-  if (pane === "chat") $("#msgs").scrollTop = $("#msgs").scrollHeight;
-  else if (rd.id) { $("#reader").scrollTop = rd.scroll[`${rd.id}|${rd.tab}`] || 0; markOutline(); }
-});
 async function queueSpec(plan) {
   const d = chatData;
   if (d.msgs.some(m => m.tasks.some(t => !["done", "cancelled", "failed"].includes(t.state)))
       && !confirm("Tasks from this chat are still open. Queue the change again?")) return;
+  rdClose();  // what happened shows in the topic
   try {
     const r = await api(`/api/designs/${d.id}/queue`, {plan, hold: specOpts.hold, release: specOpts.release});
     $("#chatmsg").textContent = ""; chatKey = ""; specOpts = {hold: false, release: null};
     delete $("#rinfo").dataset.html;  // redraw the header, whose boxes you ticked, even though its html is unchanged
     refreshDesign(); refresh();
   } catch (e) { $("#chatmsg").textContent = e.message; }
-}
-function selectChat(id) {
-  // Today: the chat stays under this step until you pick another item (a chat you just started, say)
-  if (tab === "today") { if (id) tdOpenChat(id); return; }
-  chatSel = id; chatKey = "";
-  if (state) renderProjects();
-  chatSels[tab] = id; try { localStorage.setItem("ops-chats", JSON.stringify(chatSels)); } catch {}
-  refreshDesign();
 }
 async function loadChat() {
   try { chatData = await api(`/api/designs/${chatSel}`); } catch { chatData = null; chatSel = null; }
@@ -2583,21 +2361,13 @@ async function loadChat() {
 function renderChat() {
   const d = chatData && chatSel === chatData.id ? chatData : null;
   const thinking = d && d.state === "thinking";
-  // Today has no End chat: a topic you leave stays under Earlier topics, and a message resumes it
-  $("#endchat").classList.toggle("hidden", !d || !!d.ended || tab === "today");
-  $("#reopenchat").classList.toggle("hidden", !d || !d.ended || tab === "today");
-  // You are looking at it: its latest reply is read. Only while the page is in view.
-  // On Today only Mark read does, so a Read item doesn't vanish while you read it.
-  if (d && tab !== "today" && !d.ended && !document.hidden && (d.replied || 0) > (d.seen || 0) && d.state !== "thinking") {
-    d.seen = d.replied;
-    api(`/api/designs/${d.id}/seen`, {}).then(() => { refresh(); refreshDesign(); }).catch(() => {});
-  }
-  const key = d ? `${d.id}:${tab === "today" ? d.title : ""}:${d.msgs.length}:${JSON.stringify(d.queued || [])}:${d.state}:${d.ended}:${d.live.length}:${JSON.stringify(d.msgs.map(m => m.tasks.map(t => t.state)))}:${d.spec_view ? hash(JSON.stringify(d.spec_view)) : ""}:${(d.files || []).map(f => f.name + f.mtime).join()}` : "none";
+  // Looking at a topic doesn't mark it read: only Mark read does, so a Read item doesn't vanish while you read it.
+  const key = d ? `${d.id}:${d.title}:${d.msgs.length}:${JSON.stringify(d.queued || [])}:${d.state}:${d.ended}:${d.live.length}:${JSON.stringify(d.msgs.map(m => m.tasks.map(t => t.state)))}:${d.spec_view ? hash(JSON.stringify(d.spec_view)) : ""}:${(d.files || []).map(f => f.name + f.mtime).join()}` : "none";
   $("#stopchat").classList.toggle("hidden", !thinking);
   // While Claude replies, a message waits in the chat's queue and goes when the reply ends
   $("#send").textContent = thinking ? "Queue" : "Send";
   $("#send").title = thinking ? "Claude is replying: this message goes as soon as the reply ends" : "";
-  if (tab === "today") renderSayMode();
+  renderSayMode();
   $("#rinfo").querySelectorAll("[data-cmd]").forEach(b => b.disabled = !!thinking);
   if (key === chatKey) return;
   // A chat you just opened, or a message you just sent, starts at the bottom
@@ -2606,20 +2376,21 @@ function renderChat() {
   renderReader(d); renderSlash();
   $("#chathead").innerHTML = d && d.kind === "project" ? `Runs in <code>${esc(d.cwd)}</code>`
     + (d.session_id ? ` · continue in a terminal: <code>cd ${esc(d.cwd)} && claude --resume ${esc(d.session_id)}</code>` : "")
-    : liveSpec(d) ? `Claude can edit this change's files. Its edits are saved to ${esc(P(d.project).dev_branch || "dev")} after each reply.`
+    : liveSpec(d) ? `<div class="row rdline"><button id="rdopen" title="Its proposal, design, tasks and specs in the side drawer, with Validate, Archive and the queue buttons">Read the change</button>
+      <span>Claude can edit this change's files. Its edits are saved to ${esc(P(d.project).dev_branch || "dev")} after each reply.</span></div>`
     : d && d.spec_view ? specGone(d)
     : d && d.spec_draft ? `<div class="spechead"><b>Drafting a new OpenSpec change</b>${d.spec_sub ? ` in <code>${esc(d.spec_sub)}/</code>` : ""}
       <div class="why">No change is attached yet. When a reply creates one folder in <code>openspec/changes/</code>, this chat becomes that change's chat and its files are saved to ${esc(P(d.project).dev_branch || "dev")}.</div></div>` : "";
+  if ($("#rdopen")) $("#rdopen").onclick = rdOpen;
   if (d && d.origin) {
     $("#chathead").insertAdjacentHTML("afterbegin", originLine(d.origin, "Started by"));
     $("#chathead").querySelector("a.origin").onclick = () => openOrigin(d.origin);
   }
   // Documents a design chat wrote (a design doc, a prototype): its own folder, outside the repo
   if (d && d.files && d.files.length) $("#chathead").insertAdjacentHTML("beforeend", `<div class="docs">Documents: ${d.files.map(f => `<a href="${esc(f.url)}" target="_blank" rel="noopener">${esc(f.name)}</a>`).join(" · ")}</div>`);
-  if (d && d.ended && tab !== "today") $("#chathead").insertAdjacentHTML("afterbegin", `<div class="callout">You ended this chat. Send a message or click Reopen to put it back on your list.</div>`);
-  if (!d) { box.innerHTML = tab === "today" ? convIntro() : `<div class="muted" style="padding:20px 0">${TABTEXT[tab].intro}</div>`; return; }
+  if (!d) { box.innerHTML = convIntro(); return; }
   const links = chatCtx(d.project, d.id, (d.files || []).map(f => f.name));
-  box.innerHTML = (tab === "today" ? topicDivider() : "") + d.msgs.map(m => m.role === "user"
+  box.innerHTML = topicDivider() + d.msgs.map(m => m.role === "user"
       ? `<div class="msg user">${userMd(m.text.replace(/^\[ops:[^\n]*\]\n\n/, ""), links)}</div>`
       : `<div class="msg ${m.role === "ops" ? "ops" : ""}">${md(m.text, undefined, links)}${m.tasks.length ? `<div class="chips">${m.tasks.map(t => `<button class="chip" data-task="${t.id}">#${t.id} ${esc(t.title || "")} · ${LABEL[t.state] || t.state}</button>`).join("")}</div>` : ""}</div>`).join("")
     + (thinking ? `<div class="live"><span class="pulse s-running">Claude is thinking</span>${d.live.map(l => `<div>  ${esc(l)}</div>`).join("")}</div>` : "")
@@ -2657,15 +2428,7 @@ async function sayChat(text) {  // a change's command button: sent as if typed, 
 async function sendChat() {
   const text = $("#say").value.trim();
   if (!text) return;
-  if (tab === "today") return TD.mode ? tdSend(text) : convSay(text);
-  try {
-    if (chatSel) await api(`/api/designs/${chatSel}/say`, {text});
-    else {
-      const project = pf || $("#cproj").value;
-      if (!project) throw new Error("pick a project");
-      const r = await api("/api/designs", {project, text, kind: KIND[tab]}); selectChat(r.id); }
-    $("#say").value = ""; $("#chatmsg").textContent = ""; chatKey = ""; renderSlash(); refreshDesign();
-  } catch (e) { $("#chatmsg").textContent = e.message; }
+  return TD.mode ? tdSend(text) : convSay(text);
 }
 $("#send").onclick = sendChat;
 $("#cproj").onchange = () => { if (tab === "today") { TD.applied = ""; chatKey = ""; refreshDesign(); } };
@@ -2730,26 +2493,13 @@ $("#say").onkeydown = e => {
 };
 $("#stopchat").onclick = () => (tab === "today" && TD.rs && TD.rs.running ? api(`/api/research/jobs/${encodeURIComponent(TD.rs.job)}/stop`, {})
   : api(`/api/designs/${chatSel}/stop`, {})).then(refreshDesign);
-async function endChat(id) {
-  const c = chatList.find(x => x.id === id);
-  if (c && c.state === "thinking" && !confirm("Claude is still replying. End the chat and stop the reply?")) return;
-  try {
-    await api(`/api/designs/${id}/end`, {});
-    if (id === chatSel) selectChat(null); else refreshDesign();
-    refresh();
-  } catch (e) { $("#chatmsg").textContent = e.message; }
-}
-$("#endchat").onclick = () => endChat(chatSel);
-$("#reopenchat").onclick = () => api(`/api/designs/${chatSel}/reopen`, {}).then(() => { chatKey = ""; refreshDesign(); refresh(); })
-  .catch(e => { $("#chatmsg").textContent = e.message; });
-$("#newchat").onclick = () => { selectChat(null); chatData = null; renderProjects(); $("#say").focus(); };
 
 // The header wraps to two lines on narrow windows or when it gains buttons; keep #detailcol just below it.
 new ResizeObserver(() => document.documentElement.style.setProperty("--hdr-h", $("header").offsetHeight + "px")).observe($("header"));
 
 // ---------------------------------------------------------------- Today: To-do | the step and its conversation | timeline
-// The left column is /api/state's todos; the centre is the selected one as a step, over the chat column (moved here
-// from the Design tab); the right column is read-only status, and a click opens a panel over it, the task page
+// The left column is /api/state's todos; the centre is the selected one as a step, over the chat column; the
+// right column is read-only status, and a click opens a panel over it, the task page
 // among them (moved here from History). See README "Today view".
 const TD = {key: "", filter: "all", skip: {}, order: [], item: null, convKey: null, task: null, mode: null, busy: "",
             msg: "", note: "", panel: null, cv: null, rs: null, over: null, applied: "", starter: "", earlierOpen: false,
@@ -3003,7 +2753,8 @@ async function tdSend(text) {
     renderSayMode(); refresh(); refreshDesign();
   } catch (e) { $("#chatmsg").textContent = e.message; }
 }
-const CONV_SAY = {design: "Talk through an idea, or ask Claude to queue a task, start research or change your checkout. Drop or paste screenshots to attach them.", project: TABTEXT.chat.say,
+const CONV_SAY = {design: "Talk through an idea, or ask Claude to queue a task, start research or change your checkout. Drop or paste screenshots to attach them.",
+                  project: "Ask or tell Claude anything about this project. Drop or paste screenshots to attach them.",
                   research: "Ask about this project's research, or ask for new research. (Enter sends, Shift+Enter adds a line)"};
 function tdPlaceholder() {
   const m = TD.mode;
@@ -3027,7 +2778,7 @@ function renderSayMode() {
     $("#saycancel").onclick = () => { TD.mode = null; renderSayMode(); };
   $("#convmodes").classList.toggle("hidden", !today);
   $("#convtop").classList.toggle("hidden", !today);
-  if (!today) { $("#say").placeholder = TABTEXT[chatTab() ? tab : "design"].say; $("#send").disabled = false; return; }
+  if (!today) { $("#send").disabled = false; return; }
   $("#say").placeholder = tdPlaceholder();
   const rs = !m && tdResearch();
   if (m) $("#send").textContent = SEND_WORDS[m.a];
@@ -3168,7 +2919,7 @@ async function loadResearchConv(ref) {
   renderResearchConv(th);
 }
 function renderResearchConv(th) {
-  $("#endchat").classList.add("hidden"); $("#reopenchat").classList.add("hidden");
+  rdClose();
   $("#stopchat").classList.toggle("hidden", !(TD.rs && TD.rs.running));
   const key = `rs:${TD.cv.topic}:${th ? JSON.stringify(th.turns.map(t => [t.id, t.status, t.steps])) : "none"}`;
   if (key === chatKey) return;
@@ -3232,7 +2983,8 @@ function tdSpecsHead(sd) {
     <input type="text" id="tdsndesc" placeholder="What should the change do? One line." maxlength="2000">
     <div class="row"><button class="primary" id="tdsnstart">Start</button><button id="tdformx">Cancel</button></div></div>` : "";
   return `<div class="row">${repos.length ? `<button id="tdnewchange" ${cli ? "" : "disabled"} title="${esc(cli ? "Draft a new OpenSpec change with Claude" : NO_CLI)}">+ New change</button>` : ""}
-    <button id="tdnewproto" title="Start a plan & design topic that makes a one-file HTML prototype">+ New prototype</button></div>${form}`;
+    <button id="tdnewproto" title="Start a plan & design topic that makes a one-file HTML prototype">+ New prototype</button>
+    ${repos.length ? `<button id="tdspecref" ${cli && !sd.busy ? "" : "disabled"} title="${esc(cli ? `Run openspec update in ${repos.length > 1 ? "each repo that uses OpenSpec" : "the repo"} and commit the opsx commands and skills that changed to dev` : NO_CLI)}">${sd.busy === "update" ? "Refreshing…" : "Refresh commands"}</button>` : ""}</div>${form}`;
 }
 function tdSpecsList(sd) {
   if (!sd.specs) return `<h3>OpenSpec changes</h3>` + tdLoading(sd, "specs", "the OpenSpec changes") + tdDocsList(sd);
@@ -3304,6 +3056,7 @@ function tdWireHead(sd) {
   on("#tdnewrs", () => form("research"));
   on("#tdformx", () => { sd.form = ""; tdSections(); });
   on("#tdnewproto", tdPrototype);
+  on("#tdspecref", tdSpecRefresh);
   on("#tdsnstart", tdStartChange);
   on("#tdrsstart", tdStartResearch);
   const d = $("#tdsndesc"); if (d) d.onkeydown = e => { if (e.key === "Enter") tdStartChange(); if (e.key === "Escape") { sd.form = ""; tdSections(); } };
@@ -3327,6 +3080,18 @@ function tdWireList(sd) {
     catch (e) { sd.res = {text: e.message, err: true}; }
     sd.busy = ""; tdReload("specs");
   });
+}
+// Refresh commands: openspec update in each repo of the project that uses OpenSpec, one after the other
+async function tdSpecRefresh() {
+  const sd = TD.sd, {repos} = tdSpecRepos(sd), out = [];
+  sd.busy = "update"; sd.res = null; tdSections();
+  let err = false;
+  for (const r of repos) {
+    const name = r.sub ? `${r.sub}: ` : "";
+    try { out.push(name + (await api("/api/openspec/update", {project: sd.project, sub: r.sub})).text); }
+    catch (e) { out.push(name + e.message); err = true; }
+  }
+  sd.busy = ""; sd.res = {text: out.join("\n"), err}; tdReload("specs");
 }
 async function tdPrototype() {
   await convOpen({how: "new", mode: "design"});
@@ -3410,7 +3175,7 @@ function tdPanelTask(on) {
 function tdPanelPush() { if (!TD.panel && phone()) history.pushState({td: "panel"}, "", location.hash); }
 function tdClosePanel() { if (history.state?.td === "panel") history.back(); else tdClosePanelNow(); }
 function tdClosePanelNow() { tdPanelTask(false); TD.panel = null; renderToday(); }
-function tdLeave() { if (TD.panel) { tdPanelTask(false); TD.panel = null; } TD.mode = null; }
+function tdLeave() { if (TD.panel) { tdPanelTask(false); TD.panel = null; } TD.mode = null; rdClose(); }
 function stageOf(t) {
   if (!t) return -1;
   const st = t.state, g = P(t.project);
@@ -3622,7 +3387,10 @@ async function rsOpenDoc(path) {
   try { const f = await rsApi("/file?path=" + encodeURIComponent(path)); body.replaceWith(rsMd(f.text)); }
   catch (e) { body.innerHTML = `<span class="err">Couldn't open ${esc(path)}: ${esc(e.message)}</span>`; }
 }
-function rsCloseDoc() { for (const id of ["#rsdoc", "#rsdocbg"]) { const el = rsq(id); if (el) el.remove(); } }
+function rsCloseDoc() {
+  if (rsq("#rsdoc #reader")) { keepPlace(); rd.io?.disconnect(); rd.open = null; rsq("#rpark").append(rsq("#reader")); }  // an OpenSpec change's reader
+  for (const id of ["#rsdoc", "#rsdocbg"]) { const el = rsq(id); if (el) el.remove(); }
+}
 document.addEventListener("keydown", e => { if (e.key === "Escape" && rsq("#rsdoc")) rsCloseDoc(); });
 document.addEventListener("click", async e => {
   const t = e.target.closest ? e.target : e.target.parentElement;
@@ -4405,16 +4173,17 @@ window.addEventListener("popstate", () => {
     rsApply(h);
     if (tab !== "research") showTab("research"); else rsRender();
   } else if (TABS.includes(h.slice(1)) && h.slice(1) !== tab) showTab(h.slice(1));
+  else if (/^#(design|chat)$/.test(h)) { if (tab !== "today") showTab("today"); else history.replaceState(null, "", "#today"); }
 });
 
 if (tab === "research") rsApply(location.hash);
 showTab(tab);
 // Poll while the page is in view. A hidden tab asks nothing, and catches up as soon as it is shown again.
 refresh(); setInterval(() => { if (!document.hidden) refresh.poll(); }, 3000);
-setInterval(() => { if (!document.hidden && (chatTab() || (tab === "today" && convBusy()))) refreshDesign.poll(); }, 1500);
+setInterval(() => { if (!document.hidden && tab === "today" && convBusy()) refreshDesign.poll(); }, 1500);
 document.addEventListener("visibilitychange", () => {
   if (document.hidden) return;
-  refresh.poll(); if (chatTab() || tab === "today") refreshDesign.poll();
+  refresh.poll(); if (tab === "today") refreshDesign.poll();
 });
 </script>
 </body>

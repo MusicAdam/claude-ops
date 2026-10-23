@@ -85,7 +85,7 @@ class LinkKinds(unittest.TestCase):
 
     def test_openspec_path(self):
         html, = self.md("See openspec/changes/add-links/design.md and `app/openspec/changes/x-y`")
-        self.assertIn('data-ref="spec:/add-links" data-href="#design"', html)
+        self.assertIn('data-ref="spec:/add-links" data-href="#today"', html)
         self.assertIn('data-ref="spec:app/x-y"', html)
 
     def test_design_file(self):
@@ -97,7 +97,7 @@ class LinkKinds(unittest.TestCase):
         html, = self.md("Open Settings, then the Research tab or the **Design tab**. Your settings stay.")
         self.assertIn('<a href="#settings" data-place>Settings</a>', html)
         self.assertIn('<a href="#research" data-place>Research tab</a>', html)
-        self.assertIn('<b><a href="#design" data-place>Design tab</a></b>', html)
+        self.assertIn('<b><a href="#today" data-place>Design tab</a></b>', html)  # its chats are Today's topics
         self.assertEqual(html.count("data-place"), 3)
 
     def test_url_trailing_punctuation(self):
@@ -189,6 +189,20 @@ class LinkTargets(unittest.TestCase):
             code, err = self.get(path)
             self.assertEqual(code, 404, path)
             self.assertTrue(err.startswith(why), (path, err))
+
+
+class OldPages(unittest.TestCase):
+    """The Design and Chat tabs are gone: #design and #chat are no pages, and the More menu has no button for them."""
+
+    def test_no_design_or_chat_tab(self):
+        import re
+        page = PAGE.read_text()
+        tabs = json.loads(re.search(r"^const TABS = (\[.*?\]);", page, re.M).group(1))
+        self.assertIn("today", tabs)
+        self.assertNotIn("design", tabs)
+        self.assertNotIn("chat", tabs)
+        for gone in ('id="tab-design"', 'id="tab-chat"', 'id="designview"', '"#design"', ': "#chat"'):
+            self.assertNotIn(gone, page)
 
 
 if __name__ == "__main__":
