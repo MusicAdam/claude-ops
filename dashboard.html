@@ -458,6 +458,13 @@ a[data-task] { color: var(--accent); cursor: pointer; }
 #tdcentre { display: flex; flex-direction: column; }
 #tdstep { flex: none; max-height: 55%; overflow: auto; }
 #tdcentre #chat { flex: 1; min-height: 0; }
+/* The project's sections beside its conversation: Conversation · Specs & designs · Research · Tasks */
+#tdsecbar { flex: none; } #tdsecbar .tdchips { margin: 0 0 8px; }
+#tdsec { flex: 1; min-height: 0; overflow: auto; padding-bottom: 16px; }
+#tdcentre.secopen #chat { display: none; }
+#tdsechead .row { margin: 0 0 8px; gap: 6px; flex-wrap: wrap; }
+#tdsechead textarea, #tdsechead input[type=text] { width: 100%; box-sizing: border-box; margin-bottom: 6px; }
+#tdsec .tlitem .t .dot { color: var(--warn); margin-right: 4px; }
 @media (max-width: 1099px) { #todayview { grid-template-columns: 280px minmax(0, 1fr); }
   #tdright { grid-column: 1; grid-row: 2; height: auto; } }
 @media (max-width: 900px) { #todayview { grid-template-columns: 1fr; padding: 16px; }
@@ -556,6 +563,9 @@ a[data-task] { color: var(--accent); cursor: pointer; }
   #tdstep { flex: 0 1 auto; min-height: 0; max-height: none; overflow: auto; padding-top: 6px; }
   #tdcentre #chat { flex: 1 0 auto; min-height: 60vh; }
   @supports (height: 100dvh) { #tdcentre #chat { min-height: 60dvh; } }
+  #tdsecbar .tdchips { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; margin-bottom: 6px; }
+  #tdsecbar .tdchips::-webkit-scrollbar { display: none; }
+  #tdsecbar .tdchips button { flex: none; white-space: nowrap; }
   .stepcard { padding: 6px 10px 8px; margin-bottom: 6px; }
   .stepcard .ph { display: inline-flex; }
   .stepcard .top { display: flex; align-items: center; gap: 6px; }
@@ -618,7 +628,8 @@ a[data-task] { color: var(--accent); cursor: pointer; }
 <div id="tip" class="hidden"></div>
 <div id="todayview" class="hidden" data-pane="todo">
   <aside class="side" id="tdleft"></aside>
-  <section id="tdcentre"><div id="tdstep"></div></section>
+  <section id="tdcentre"><div id="tdstep"></div><div id="tdsecbar"></div>
+    <div id="tdsec" class="tl hidden"><div id="tdsechead"></div><div id="tdsecmsg"></div><div id="tdseclist"></div></div></section>
   <aside class="side" id="tdright"><div class="tl" id="tdtl"></div>
     <div id="tdpanel" class="hidden"><div id="tdphead"></div><div id="tdpother"></div><div id="tdpdet"></div></div></aside>
 </div>
@@ -2722,18 +2733,19 @@ new ResizeObserver(() => document.documentElement.style.setProperty("--hdr-h", $
 // among them (moved here from History). See README "Today view".
 const TD = {key: "", filter: "all", skip: {}, order: [], item: null, convKey: null, task: null, mode: null, busy: "",
             msg: "", note: "", panel: null, cv: null, rs: null, over: null, applied: "", starter: "", earlierOpen: false,
-            pane: "todo", dets: false};
+            pane: "todo", dets: false, sec: "conv", sd: null};
 try {
   TD.key = localStorage.getItem("ops-todo") || "";
   TD.filter = localStorage.getItem("ops-todo-filter") || "all";
   TD.skip = JSON.parse(localStorage.getItem("ops-skip") || "{}");
+  TD.sec = localStorage.getItem("ops-td-sec") || "conv";
 } catch {}
 const TD_FILTERS = [["all", "All"], ["review", "Review"], ["unblock", "Unblock"], ["ship", "Ship"], ["only_me", "Only me"]];
 const SEND_WORDS = {answer: "Send answer", reject: "Send back", retry: "Retry", queue: "Queue task"};
 const STAGES = ["Queued", "Working", "Gate", "Review", "Merged", "Promoted"];
 const midnight = () => { const d = new Date(); d.setHours(0, 0, 0, 0); return d.getTime() / 1000; };
 const tdSave = () => { try { localStorage.setItem("ops-todo", TD.key); localStorage.setItem("ops-todo-filter", TD.filter);
-  localStorage.setItem("ops-skip", JSON.stringify(TD.skip)); } catch {} };
+  localStorage.setItem("ops-skip", JSON.stringify(TD.skip)); localStorage.setItem("ops-td-sec", TD.sec); } catch {} };
 const verbPill = x => `<span class="verb g-${esc(x.group)}">${esc(x.verb)}</span>`;
 const tdDoneToday = () => state.tasks.filter(t => t.state === "done" && t.finished >= midnight() && inView(t.project))
   .sort((a, b) => b.finished - a.finished);
@@ -2777,7 +2789,7 @@ function renderToday() {
   const all = tdAll(), shown = tdShown(all), it = tdPick(shown);
   TD.item = it;
   if ((it ? it.key : "") !== TD.convKey) tdChanged(it);
-  tdLeft(all, shown); tdStep(it, shown); tdTimeline(); tdPanel(); renderSayMode();
+  tdLeft(all, shown); tdStep(it, shown); tdSections(); tdTimeline(); tdPanel(); renderSayMode();
   $("#todayview").dataset.pane = TD.pane;
   document.querySelectorAll("#tdnav [data-pane]").forEach(b => b.classList.toggle("on", b.dataset.pane === TD.pane));
   const badge = $("#tdnav .badge"); badge.textContent = all.length; badge.classList.toggle("hidden", !all.length);
@@ -2824,9 +2836,10 @@ function tdActions(it) {
       .concat(g.deploys && g.deploys.length ? [] : [A("projects", "Open in Projects", {primary: 1})]);
     case "Commit": return [g.senddev_open ? A("details:" + g.senddev_open, `Sending to ${g.dev_branch}… #${g.senddev_open}`, {primary: 1})
       : A("senddev", `Send to ${g.dev_branch}`, {primary: 1, title: `Queue a task that lands these changes on ${g.dev_branch} through the gate`})];
-    case "Read": return [A("read", "Mark read", {primary: 1, title: "The reply is below. This takes it off your list"})];
+    case "Read": return it.report ? [A("report", "Open report", {primary: 1, title: `Read ${it.report.path} as on ${g.dev_branch || "dev"}. Opening it takes it off your list`}), A("details", "Details")]
+      : [A("read", "Mark read", {primary: 1, title: "The reply is below. This takes it off your list"})];
     case "Agree": return [A("reply", "Reply", {primary: 1, title: "Answer Claude in the message box below"})].concat(it.todo ? [A("done", "Done")] : []);
-    case "Do": return [A("done", "Done", {primary: 1})];
+    case "Do": return [A(it.rtodo ? "rdone" : "done", "Done", {primary: 1, title: it.rtodo ? "Closes it in the research repo's to-dos" : ""})];
   }
   return [];
 }
@@ -2878,7 +2891,7 @@ function tdSkip() {
   TD.skip[it.key] = Date.now(); TD.key = next && next !== it.key ? next : it.key; tdSave(); renderToday();
 }
 // The message box answers a task, sends it back, or retries it with a note, instead of talking in the chat above it.
-function tdMode(m) { tdClearStarter(); TD.mode = m; renderSayMode(); $("#say").focus(); }
+function tdMode(m) { tdShowConv(); tdClearStarter(); TD.mode = m; renderSayMode(); $("#say").focus(); }
 async function tdDo(a) {
   const it = TD.item; if (!it) return;
   const s = it.source || {};
@@ -2890,7 +2903,7 @@ async function tdDo(a) {
   if (a === "sendback") return tdMode({a: "reject", id: s.id, words: `Sends #${s.id} back to its worker: say what to change.`});
   if (a === "retrynote") return tdMode({a: "retry", id: s.id, words: `Retries #${s.id} with this note to its worker.`});
   if (a === "answer") return tdMode(tdAnswerMode(it));
-  if (a === "reply") { TD.mode = null; renderSayMode(); $("#say").focus(); return; }
+  if (a === "reply") { tdShowConv(); TD.mode = null; renderSayMode(); $("#say").focus(); return; }
   if (a === "diff" || a === "details") return tdOpenTask(s.id, a === "diff");
   if (a.startsWith("details:")) return tdOpenTask(+a.slice(8));
   if (a.startsWith("deploy:")) return openDeploy(it.project, a.slice(7));
@@ -2901,6 +2914,8 @@ async function tdDo(a) {
   if (a === "promote" || a === "senddev") return run(() => api(`/api/projects/${encodeURIComponent(it.project)}/${a}`, {}));
   if (a === "read") return run(() => api(`/api/designs/${s.id}/seen`, {}));
   if (a === "done") return run(() => api(`/api/todos/${it.todo}/done`, {}));
+  if (a === "rdone") return run(() => api(`/api/research/todos/${it.rtodo}`, {done: true}));
+  if (a === "report") return run(() => tdOpenReport(it.project, it.report.path));
 }
 async function tdSend(text) {
   const m = TD.mode;
@@ -2962,6 +2977,7 @@ function tdClearStarter() { if (TD.starter && $("#say").value === TD.starter) $(
 const aboutTask = (id, t) => `About #${id}${t && t.title ? ` (${t.title})` : ""}: `;
 async function convOpen(body) {
   const project = convProject(); if (!project) return;
+  tdShowConv();
   try { TD.cv = await api("/api/conversation", {project, ...body}); $("#chatmsg").textContent = ""; }
   catch (e) { $("#chatmsg").textContent = e.message; }
   chatKey = ""; await refreshDesign();
@@ -3067,6 +3083,180 @@ function renderResearchConv(th) {
   if (!th) { box.insertAdjacentHTML("beforeend", `<div class="err">Couldn't read this research conversation.</div>`); return; }
   box.append(...th.turns.flatMap(t => rsTurn({...t, question: (t.question || "").split("\n\n## Handoff from the topic before this one")[0]})));
   if (stick || (TD.rs && TD.rs.running)) toBottom(box);
+}
+
+// ---- the project's sections beside its conversation (README TODAY-4): Specs & designs, Research, Tasks. The lists
+// load when a section opens and at most every 8 s while it is open; Tasks reads /api/state. The forms sit in their
+// own element, so a poll that redraws the lists never wipes what you are typing.
+const TD_SECS = [["conv", "Conversation"], ["specs", "Specs & designs"], ["research", "Research"], ["tasks", "Tasks"]];
+const TD_TIERS = [["T0", "T0 · quick, ~5 min"], ["T1", "T1 · ~15 min"], ["T2", "T2 · deep, ~40 min"]];
+const TD_REPEATS = [["", "Don't repeat"], ["day 09:00", "Every day 09:00"], ["weekday 09:00", "Weekdays 09:00"],
+                    ["mon 09:00", "Every Monday 09:00"], ["hour", "Every hour"]];
+const PROTOTYPE = "Make a one-file HTML prototype of: ";
+const tdSd = project => ({project, at: {}, loading: {}, err: {}, specs: null, docs: null, rs: null, form: "", res: null, busy: ""});
+function tdShowConv() { if (TD.sec !== "conv") { TD.sec = "conv"; tdSave(); tdSections(); } }
+function tdSections() {
+  const project = convProject(), on = !!project && TD.sec !== "conv";
+  if (put($("#tdsecbar"), project ? `<div class="tdchips">${TD_SECS.map(([k, l]) => `<button data-sec="${k}" class="${TD.sec === k ? "on" : ""}">${l}</button>`).join("")}</div>` : ""))
+    $("#tdsecbar").querySelectorAll("[data-sec]").forEach(b => b.onclick = () => { TD.sec = b.dataset.sec; tdSave(); tdSections(); if (TD.sec === "conv") toBottom($("#msgs")); });
+  else $("#tdsecbar").querySelectorAll("[data-sec]").forEach(b => b.classList.toggle("on", b.dataset.sec === TD.sec));
+  $("#tdcentre").classList.toggle("secopen", on);
+  $("#tdsec").classList.toggle("hidden", !on);
+  if (!on) return;
+  if (!TD.sd || TD.sd.project !== project) TD.sd = tdSd(project);
+  const sd = TD.sd, sec = TD.sec;
+  if (sec !== "tasks" && !sd.loading[sec] && Date.now() - (sd.at[sec] || 0) > 8000) tdSecLoad(sec);
+  if (put($("#tdsechead"), sec === "specs" ? tdSpecsHead(sd) : sec === "research" ? tdResearchHead(sd) : "")) tdWireHead(sd);
+  $("#tdsechead").querySelectorAll("#tdsnstart, #tdrsstart").forEach(b => { b.disabled = !!sd.busy; });  // not in the html: a redraw would wipe the form
+  put($("#tdsecmsg"), sd.res ? `<div class="${sd.res.err ? "err" : "muted"}" style="margin:0 0 8px;white-space:pre-wrap">${esc(sd.res.text)}</div>` : "");
+  if (put($("#tdseclist"), sec === "specs" ? tdSpecsList(sd) : sec === "research" ? tdResearchList(sd) : tdTasksList(project)))
+    tdWireList(sd);
+}
+async function tdSecLoad(sec) {
+  const sd = TD.sd, p = encodeURIComponent(sd.project);
+  sd.loading[sec] = true; sd.at[sec] = Date.now();
+  const get = async (k, path) => { try { sd[k] = await api(path); sd.err[k] = ""; } catch (e) { sd.err[k] = e.message; } };
+  if (sec === "specs") await Promise.all([get("specs", "/api/openspec"), get("docs", `/api/projects/${p}/documents`)]);
+  else await get("rs", `/api/projects/${p}/research`);
+  sd.loading[sec] = false;
+  if (TD.sd === sd && tab === "today") tdSections();
+}
+const tdReload = sec => { if (TD.sd) TD.sd.at[sec] = 0; tdSections(); };
+const tdLoading = (sd, k, what) => sd.err[k] ? `<div class="muted">Couldn't load ${what}: ${esc(sd.err[k])}</div>` : `<div class="muted">Loading…</div>`;
+
+// Specs & designs: the project's open OpenSpec changes, its drafts and Set up lines, and its design documents.
+function tdSpecRepos(sd) {
+  const s = sd.specs || {}, mine = x => x.project === sd.project;
+  return {repos: (s.repos || []).filter(mine), bare: (s.bare || []).filter(mine), changes: (s.changes || []).filter(mine),
+          drafts: (s.drafts || []).filter(mine), cli: s.cli !== false};
+}
+function tdSpecsHead(sd) {
+  const {repos, cli} = tdSpecRepos(sd);
+  const form = sd.form === "change" ? `<div>${repos.length > 1 ? `<label>Repo <select id="tdsnsub">${repos.map(r => `<option value="${esc(r.sub)}">${esc(r.sub || "(root)")}</option>`).join("")}</select></label>` : ""}
+    <input type="text" id="tdsndesc" placeholder="What should the change do? One line." maxlength="2000">
+    <div class="row"><button class="primary" id="tdsnstart">Start</button><button id="tdformx">Cancel</button></div></div>` : "";
+  return `<div class="row">${repos.length ? `<button id="tdnewchange" ${cli ? "" : "disabled"} title="${esc(cli ? "Draft a new OpenSpec change with Claude" : NO_CLI)}">+ New change</button>` : ""}
+    <button id="tdnewproto" title="Start a plan & design topic that makes a one-file HTML prototype">+ New prototype</button></div>${form}`;
+}
+function tdSpecsList(sd) {
+  if (!sd.specs) return `<h3>OpenSpec changes</h3>` + tdLoading(sd, "specs", "the OpenSpec changes") + tdDocsList(sd);
+  const {repos, bare, changes, drafts, cli} = tdSpecRepos(sd);
+  const sub = x => x.sub ? `${esc(x.sub)} · ` : "";
+  const html = drafts.map(c => `<div class="tlitem" data-chat="${c.id}"><div class="t">${esc(c.title)} · <span class="muted">drafting</span></div>
+      <div class="sub">${sub(c)}${c.state === "thinking" ? '<span class="pulse s-running">replying</span>' : "no change yet"}</div></div>`).join("")
+    + changes.map(s => `<div class="tlitem" data-spec="${esc(s.name)}" data-sub="${esc(s.sub)}" title="${esc(s.why || s.title)}"><div class="t">${esc(s.title)}</div>
+      <div class="sub">${sub(s)}${s.has_tasks ? `${s.done}/${s.done + s.open} done` : "no tasks.md"}${s.where === "checkout" ? ' · <span class="s-review">only in your checkout</span>' : ""}</div></div>`).join("")
+    + (repos.length && !drafts.length && !changes.length ? `<div class="muted">No open changes.</div>` : "")
+    + bare.map(r => `<div class="specline">${esc(r.sub ? r.sub + ": " : "")}not using OpenSpec · <button data-init="${esc(r.sub)}" ${!cli || sd.busy ? "disabled" : ""}
+      title="${esc(cli ? "Run openspec init --tools claude and commit openspec/ and .claude/ to dev" : NO_CLI)}">${sd.busy === "init:" + r.sub ? "Setting up…" : "Set up"}</button></div>`).join("");
+  return `<h3>OpenSpec changes</h3>${html || `<div class="muted">No repo of this project is on dev yet.</div>`}` + tdDocsList(sd);
+}
+function tdDocsList(sd) {
+  const docs = sd.docs, now = Date.now() / 1000;
+  return `<h3>Design documents</h3>` + (!docs ? tdLoading(sd, "docs", "the design documents")
+    : docs.map(f => `<div class="tlitem"><div class="t"><a href="${esc(f.url)}" target="_blank" rel="noopener">${esc(f.name)}</a></div>
+      <div class="sub"><a data-chat="${f.design}" title="Open the topic that wrote it">${esc(f.title || `Topic #${f.design}`)}</a> · ${ago(f.mtime, now)} ago</div></div>`).join("")
+      || `<div class="muted">No documents yet. A plan & design topic writes them, such as a design doc or a prototype.</div>`);
+}
+
+// Research: New research (a queue task that writes docs/research/<slug>.md on its branch), the runs under way, the
+// reports on dev, and the project's recurring research.
+function tdResearchHead(sd) {
+  const opt = ([v, l], cur) => `<option value="${esc(v)}" ${v === cur ? "selected" : ""}>${esc(l)}</option>`;
+  const form = sd.form === "research" ? `<div><textarea id="tdrsq" rows="3" placeholder="What should the research answer?"></textarea>
+    <div class="row"><select id="tdrstier" title="How deep: time and size follow the tier">${TD_TIERS.map(t => opt(t, "T1")).join("")}</select>
+      <select id="tdrsevery" title="Run it again on a timetable: a recurring job in this project">${TD_REPEATS.map(t => opt(t, "")).join("")}</select>
+      <button class="primary" id="tdrsstart">Start</button><button id="tdformx">Cancel</button></div></div>` : "";
+  return `<div class="row"><button id="tdnewrs" title="Queue a research task in this project: its report lands in docs/research/ on ${esc(P(sd.project).dev_branch || "dev")}">+ New research</button></div>${form}`;
+}
+function tdResearchList(sd) {
+  const r = sd.rs, now = Date.now() / 1000, dev = esc((r && r.dev) || P(sd.project).dev_branch || "dev");
+  if (!r) return `<h3>Reports</h3>` + tdLoading(sd, "rs", "the research");
+  const day = ts => ts ? new Date(ts * 1000).toLocaleDateString(undefined, {month: "short", day: "numeric", year: "numeric"}) : "";
+  const run = (r.running || []).map(t => `<div class="tlitem" data-task="${t.id}" title="${esc((t.research && t.research.question) || t.title)}"><div class="t"><span class="id">#${t.id}</span>${esc(t.title)}</div>
+    <div class="sub"><span class="${LIVE.includes(t.state) ? "s-running" : ""}">${esc(LABEL[t.state] || t.state)}</span>${t.research ? ` · ${esc(t.research.tier)} · writes ${esc(t.research.path)}` : ""}</div></div>`).join("");
+  const reps = (r.reports || []).map(x => `<div class="tlitem" data-report="${esc(x.path)}" title="${esc(x.path)}"><div class="t">${x.unread ? '<span class="dot" title="Not opened yet">●</span>' : ""}${esc(x.title || x.path)}</div>
+    <div class="sub">${[day(x.date), esc(x.summary || "")].filter(Boolean).join(" · ")}</div></div>`).join("");
+  const sch = (r.schedules || []).map(x => `<div class="tlitem" data-sched="${x.id}" title="${esc(x.body || x.title)}"><div class="t">↻ ${esc(x.title)}</div>
+    <div class="sub">${[esc(x.every), x.paused ? '<span class="s-paused">paused</span>' : `next ${esc(when(x.next_at))}`, x.research ? esc(x.research) : "",
+      x.last_state ? `last: ${esc(LABEL[x.last_state] || x.last_state)}` : ""].filter(Boolean).join(" · ")}</div></div>`).join("");
+  return (run ? `<h3>Under way</h3>${run}` : "")
+    + `<h3>Reports</h3>${reps || `<div class="muted">No reports yet on ${dev}. New research writes one to docs/research/.</div>`}`
+    + `<h3>Recurring research</h3>${sch || `<div class="muted">None. Pick a repeat in New research to add one.</div>`}`;
+}
+async function tdOpenReport(project, path) {
+  try { await api(`/api/projects/${encodeURIComponent(project)}/research/read`, {path}); } catch {}
+  openRepoFile(project, path);
+  if (TD.sd && TD.sd.project === project) tdReload("research");
+  refresh();
+}
+
+// Tasks: the History list for this project, newest first.
+function tdTasksList(project) {
+  const ts = state.tasks.filter(t => t.project === project).sort((a, b) => b.id - a.id).slice(0, 100), now = state.now;
+  return `<h3>Tasks</h3>` + (ts.map(t => `<div class="tlitem" data-task="${t.id}" title="${esc(t.title)}"><div class="t"><span class="id">#${t.id}</span>${esc(t.title)}</div>
+    <div class="sub">${[`<span class="s-${esc(t.state)}">${esc(t.phase && LIVE.includes(t.state) ? t.phase : LABEL[t.state] || t.state)}</span>`,
+      t.kind !== "task" ? esc(t.kind) : "", t.research ? `research ${esc(t.research.tier)}` : "",
+      `${ago(t.finished || t.started || t.created, now)} ago`].filter(Boolean).join(" · ")}</div></div>`).join("")
+    || `<div class="muted">No tasks in this project yet.</div>`);
+}
+
+function tdWireHead(sd) {
+  const h = $("#tdsechead"), on = (sel, fn) => { const el = h.querySelector(sel); if (el) el.onclick = fn; };
+  const form = f => { sd.form = sd.form === f ? "" : f; sd.res = null; tdSections(); const el = $(f === "change" ? "#tdsndesc" : "#tdrsq"); if (el) el.focus(); };
+  on("#tdnewchange", () => form("change"));
+  on("#tdnewrs", () => form("research"));
+  on("#tdformx", () => { sd.form = ""; tdSections(); });
+  on("#tdnewproto", tdPrototype);
+  on("#tdsnstart", tdStartChange);
+  on("#tdrsstart", tdStartResearch);
+  const d = $("#tdsndesc"); if (d) d.onkeydown = e => { if (e.key === "Enter") tdStartChange(); if (e.key === "Escape") { sd.form = ""; tdSections(); } };
+  const q = $("#tdrsq"); if (q) q.onkeydown = e => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) tdStartResearch(); };
+}
+function tdWireList(sd) {
+  const l = $("#tdseclist");
+  l.querySelectorAll("[data-chat]").forEach(el => el.onclick = e => { e.preventDefault(); tdShowConv(); tdOpenChat(+el.dataset.chat); });
+  l.querySelectorAll("[data-task]").forEach(el => el.onclick = () => tdOpenTask(+el.dataset.task));
+  l.querySelectorAll("[data-sched]").forEach(el => el.onclick = () => tdOpenPanel({kind: "schedule", id: +el.dataset.sched}));
+  l.querySelectorAll("[data-report]").forEach(el => el.onclick = () => tdOpenReport(sd.project, el.dataset.report));
+  l.querySelectorAll("[data-spec]").forEach(el => el.onclick = async () => {
+    try {
+      const r = await api("/api/designs", {project: sd.project, sub: el.dataset.sub, spec: el.dataset.spec});
+      tdShowConv(); tdOpenChat(r.id);
+    } catch (e) { sd.res = {text: e.message, err: true}; tdSections(); }
+  });
+  l.querySelectorAll("[data-init]").forEach(b => b.onclick = async () => {
+    const sub = b.dataset.init; sd.busy = "init:" + sub; sd.res = null; tdSections();
+    try { sd.res = {text: (await api("/api/openspec/init", {project: sd.project, sub})).text, err: false}; }
+    catch (e) { sd.res = {text: e.message, err: true}; }
+    sd.busy = ""; tdReload("specs");
+  });
+}
+async function tdPrototype() {
+  await convOpen({how: "new", mode: "design"});
+  const say = $("#say");
+  if (!say.value.trim()) say.value = PROTOTYPE;
+  say.focus(); say.setSelectionRange(say.value.length, say.value.length);
+}
+async function tdStartChange() {
+  const sd = TD.sd, text = ($("#tdsndesc") || {}).value?.trim(), sub = $("#tdsnsub") ? $("#tdsnsub").value : (tdSpecRepos(sd).repos[0] || {}).sub || "";
+  if (!text) { sd.res = {text: "Say what the change should do.", err: true}; return tdSections(); }
+  sd.busy = "change"; tdSections();
+  try {
+    const r = await api("/api/openspec/new", {project: sd.project, sub, text});
+    sd.form = ""; sd.res = null; sd.busy = ""; sd.at.specs = 0; tdShowConv(); tdOpenChat(r.id);
+  } catch (e) { sd.busy = ""; sd.res = {text: e.message, err: true}; tdSections(); }
+}
+async function tdStartResearch() {
+  const sd = TD.sd, question = $("#tdrsq").value.trim(), tier = $("#tdrstier").value, every = $("#tdrsevery").value;
+  if (!question) { sd.res = {text: "Write the question first.", err: true}; return tdSections(); }
+  sd.busy = "research"; tdSections();
+  try {
+    const r = await api(`/api/projects/${encodeURIComponent(sd.project)}/research`, {question, tier, every});
+    sd.form = "";
+    sd.res = {text: `Queued #${r.id}: writes ${r.path}${r.schedule ? `, and again ${TD_REPEATS.find(x => x[0] === every)[1].toLowerCase()} (schedule #${r.schedule})` : ""}.`, err: false};
+  } catch (e) { sd.res = {text: e.message, err: true}; }
+  sd.busy = ""; tdReload("research"); refresh();
 }
 
 // ---- the timeline: read-only, what runs, what waits, what got done today
