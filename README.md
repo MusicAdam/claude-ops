@@ -658,7 +658,7 @@ stay on the right of the header.
   | Promote | Promote dev → main; for a release waiting on you, Stop main when the app is running, else Reply… | Details; for a project with a launch step, ▶ Play dev (■ Stop dev while it runs) |
   | Ship | Deploy (the Deploy dialog), one per target, each with its own count: `Deploy <target> (N)`, `(up to date)`, `(first deploy)`, or `(?)` when its last deployed commit is gone | For a project with a launch step, ▶ Play main (■ Stop main while it runs; off until it is built or while a play is under way) |
   | Commit | Commit these: **Send to dev**, unchanged underneath. Its tooltip says it lands the files on `main` through the gate, then clears them from your checkout; `dev` in a project with Promote after merge off (and not straight to main). While one is open: Sending… #id | |
-  | Read | A chat: Mark read when it is new, else End topic. A report: Open report (RES-5) | A chat: End topic, or Reply. A report: Details |
+  | Read | A chat: Mark read when it is new, else End topic. A report: Open report (RES-5) | A chat: End topic, or Reply. A report: Mark read, Details |
   | Agree | Reply (focuses the message box; sending closes it) | Done |
   | Do | Done (`POST /api/todos/<id>/done`); the same for one you added yourself (**+ Add**) | |
   | Every verb | | Wait for… (the chooser above), beside Skip |
@@ -912,9 +912,12 @@ Research is ordinary queue work in the project it is about. A report lives in th
   stopped at its tier's limit and the task fails with `stopped at the T1 time limit (15 min)`, so Retry is one click.
   Its size cap is `--max-budget-usd` 1, 3 or 10 (API-equivalent dollars, as the old runs used).
 - **RES-5 Read when it merges.** A research task that is done and merged, and whose report you haven't opened, is a
-  **Read** to-do (`task:<id>:report`, with `report: {path}`). Opening the report, from that step's **Open report** or
-  from the Research section, marks it read (`POST /api/projects/<name>/research/read` with `{path}`; it stores
-  `read` in the task's `research`). Research tasks from before this have no flag, so nothing old shows up.
+  **Read** to-do (`task:<id>:report`, with `report: {path}`). It counts as read once any dashboard view opens the
+  report: the server marks it when `/api/files` serves that path, so the step's **Open report**, the Research section,
+  Details, or a file link in a chat all clear it. The step also has **Mark read**, which clears it without opening it
+  (`POST /api/projects/<name>/research/read` with `{path}`, which Open report sends too; it stores `read` in the task's
+  `research`). Either takes the step off the list at once; if marking fails, the step comes back with the error.
+  Research tasks from before this have no flag, so nothing old shows up.
 - **RES-6 Recurring research.** A schedule whose `research` column holds a tier is a recurring research job. Each run
   builds a fresh brief from its body (the question) with a dated slug, `<slug>-<YYYY-MM-DD>`, so runs don't overwrite
   each other. `opsd.py schedule add -p NAME --every 'day 07:00' --research T1 "question"` makes one; `POST

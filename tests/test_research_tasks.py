@@ -186,6 +186,30 @@ class ResearchTasks(unittest.TestCase):
         self.assertEqual(self.todos(), [])
         self.assertEqual(opsd.report_read("web", r["path"]), [])  # already read
 
+    def test_serving_the_report_marks_it_read(self):
+        r = opsd.queue_research("web", "Is Rust worth it?")
+        commit(self.root, r["path"], "# Rust\n\nYes.\n", 1_700_000_100)
+        p = opsd.PROJECTS["web"]
+        f, why = opsd.serve_repo_file(p, r["path"])  # not merged yet: served, but nothing marked
+        self.assertTrue(f and not why)
+        self.assertIsNone(opsd.research_of(opsd.task(r["id"])).get("read"))
+        opsd.upd(r["id"], state="done", merged="abc123")
+        opsd.serve_repo_file(p, "README.md")  # another file marks nothing
+        self.assertEqual([x["key"] for x in self.todos()], [f"task:{r['id']}:report"])
+        self.assertEqual(opsd.serve_repo_file(p, "./" + r["path"])[1], None)
+        read = opsd.research_of(opsd.task(r["id"]))["read"]
+        self.assertTrue(read)
+        self.assertEqual(self.todos(), [])
+        opsd.serve_repo_file(p, r["path"])  # already read: stays as it was
+        self.assertEqual(opsd.research_of(opsd.task(r["id"]))["read"], read)
+
+    def test_mark_read_route(self):
+        r = opsd.queue_research("web", "Is Rust worth it?")
+        opsd.upd(r["id"], state="done", merged="abc123")
+        h = opsd.H.__new__(opsd.H)
+        self.assertEqual(h.route("/api/projects/web/research/read", {"path": r["path"]}), {"ok": True, "marked": [r["id"]]})
+        self.assertEqual(self.todos(), [])
+
     def test_unread_in_listing(self):
         r = opsd.queue_research("web", "Is Rust worth it?")
         commit(self.root, r["path"], "# Rust\n\nYes.\n", 1_700_000_100)
