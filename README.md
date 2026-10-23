@@ -402,6 +402,51 @@ This applies to both the Design and the Chat tab.
   one. A slash command goes on its own. **Edit** takes a queued message back into the message box. **Stop** ends
   the reply early, and the queue goes next; **End chat** drops the queue. Task chats don't queue yet.
 
+## To-dos
+
+Things that need you live in several places: Tasks' **Needs you**, unread chats, a release **waiting on you**,
+the uncommitted-files banner, Deploy. `/api/state` gathers them into one list, `todos`, for a Today view to show.
+
+- **TODO-1 Derived, not stored.** Most items are a live query on each state build. An item appears when its
+  state does and goes when the state changes: there is nothing to tick off.
+  - **Answer**: a task (not a release or deploy) in needs_input. Why: its question.
+  - **Fix**: a task in failed. Why: its error.
+  - **Try**: a task in review whose project has a launch step (the same test as `can_play`). **Review**: the
+    same without one; you read its diff and summary.
+  - **Promote**: a release or deploy in needs_input (**waiting on you**), or `dev` ahead of `main` in a project
+    with **Promote after merge** off and no release under way.
+  - **Ship**: `main` has moved since the last deploy of a project with deploy targets, and no deploy is under
+    way. This reads what the Deploy panel already knows: `main_since_kind` is `deploy` and `main_log` is not
+    empty. A project with no recorded deploy of `main` yet shows no Ship item.
+  - **Commit**: your checkout has uncommitted files. It reuses the banner's list; no extra git call.
+  - **Read**: a design or project chat with a reply you haven't opened, as the tab badges count them.
+- **TODO-2 Two kinds Claude adds.** **Do**: something only you can do (grant Full Disk Access, add an API key,
+  run a command that needs your password). **Agree**: Claude proposed something and waits for your yes. These
+  are stored in the `todos` table. Two ways in:
+  - A design or project chat reply with a fenced block in the language `todo`, holding a JSON list of
+    `{"verb": "Do" | "Agree", "title", "why"}`. The block is taken out of the reply you see, as a `queue` block
+    is. The item's source is that chat.
+  - A worker's result JSON with an optional `todos` list of the same shape. The task doesn't stop for it. The
+    source is that task.
+
+  Every item links to its source. An open item with the same project and title is not added twice.
+- **TODO-3 Closing.** Derived items close by themselves. A stored item closes with
+  `POST /api/todos/<id>/done` (your Done button), or when Claude writes `{"close": <id>}` in a `todo` block.
+  Closed items stay in the table.
+- **TODO-4 Order and groups.** Each item has a group: `unblock` (Answer, Fix), `ship` (Promote, Ship, Commit),
+  `review` (Try, Review, Agree, Read), `only_me` (Do). The list runs unblock, ship, review, only_me, oldest first
+  within a group.
+
+Each item is `{key, verb, group, project, title, why, since, est_min, source: {kind, id}}`. `key` stays the same
+across polls (`task:231:review`, `chat:42:read`, `project:diskgame:commit`, `todo:7`). `since` is when the state
+began, as near as the queue knows: a task's last event, a chat's last reply, the oldest uncommitted file, the
+oldest commit not yet promoted or deployed. `est_min` is a guess at minutes: Answer 2, Fix 5, Try 5, Review 3,
+Agree 2, Read 3, Promote 1, Ship 2, Commit 2, Do 5. `source.kind` is `task`, `chat` or `project`: a stored item
+points at the chat or task that added it, and has `todo`, its id for the Done button.
+
+There is no `done_today` count yet: derived items leave no record when they close, so only stored items could be
+counted, and a number that skips most of what you did would mislead.
+
 ## Chat mode
 
 The Chat tab is plain Claude in the project folder, as if you ran `claude` there. It works in your

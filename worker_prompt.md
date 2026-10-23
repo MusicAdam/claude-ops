@@ -74,5 +74,10 @@ question, answer and keep working.
   (approximate, with `~`), function names, what you established about how the code works now, and any
   trap you found. Pointers, not pasted code. Leave the section out when you read no code for it.
 
+Any result may also carry `"todos": [{{"verb": "Do", "title": "...", "why": "..."}}]`: things only the
+owner can do, such as granting Full Disk Access, adding an API key or running a command that needs their
+password. They go on the owner's to-do list and the task does not wait for them. Never list work a task
+could do.
+
 The user reads `summary` and `question` on the dashboard. Write plain language: lead with what changed,
 then how to see it, then anything you decided for them. Short sentences.

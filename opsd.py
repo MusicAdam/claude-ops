@@ -689,6 +689,8 @@ def init_db():
     q("""CREATE TABLE IF NOT EXISTS design_msgs (id INTEGER PRIMARY KEY, design_id INTEGER, role TEXT,
         text TEXT, ts REAL, task_ids TEXT, note TEXT)""")
     q("CREATE INDEX IF NOT EXISTS design_msgs_design ON design_msgs (design_id, id)")
+    q("""CREATE TABLE IF NOT EXISTS todos (id INTEGER PRIMARY KEY, project TEXT, verb TEXT, title TEXT, why TEXT,
+        source_kind TEXT, source_id INTEGER, created REAL, closed REAL)""")  # what Claude asks of you (see To-dos)
     dcols = {r["name"] for r in q("PRAGMA table_info(designs)")}
     for col, decl in (("kind", "TEXT DEFAULT 'design'"),  # databases from before project chats
                       ("spec", "TEXT"), ("spec_sub", "TEXT DEFAULT ''"),  # and before OpenSpec chats
@@ -1871,6 +1873,9 @@ def _pipeline(p, tid):
                 return fail(p, tid, "worker stopped without writing a result.\n" + err)
             status = res.get("status")
             upd(tid, summary=res.get("summary") or task(tid)["summary"])
+            if res.get("todos"):  # what only you can do, for your to-do list; the task goes on regardless
+                if said := todo_add(p.name, res["todos"], "task", tid):
+                    ev(tid, "to-dos: " + said)
             applying = sending and not senddev_of(task(tid)).get("applied")
             if status == "split":
                 if sending:
@@ -4545,6 +4550,8 @@ def design_turn(did, text, fresh_why=None):
         attached = spec_attach(p, d, before) if before is not None else None  # (text, note) or None
         saved = spec_land(p, design(did)) if d["spec"] or attached else ""  # before any task it queues starts from dev
         reply, ids, note = (reply, [], "") if chat else queue_from_reply(p, reply, did)
+        reply, todo_note = todos_from_reply(p, reply, did)
+        note = "; ".join(x for x in (note, todo_note) if x)
         first = not q("SELECT id FROM design_msgs WHERE design_id=? AND role='assistant' LIMIT 1", (did,))
         q("INSERT INTO design_msgs (design_id, role, text, ts, task_ids, note) VALUES (?,?,?,?,?,?)",
           (did, "assistant", reply, time.time(), json.dumps(ids), note))
@@ -5180,7 +5187,12 @@ PROJECT_CHAT_PROMPT = ("You are talking with the owner through the claude-ops da
                        f"To show the owner a picture, such as a screenshot, copy it into {IMAGES} under a name of "
                        "letters, digits, - and _ with a .png, .jpg, .gif or .webp ending, then embed it with "
                        "`![what it shows](/api/images/<name>)`. The dashboard can't show a picture from anywhere else "
-                       "on disk, such as /tmp or the repo.")
+                       "on disk, such as /tmp or the repo. "
+                       "When the owner alone must do something (grant Full Disk Access, add an API key, run a command "
+                       "that needs their password), or you proposed something and wait for their yes, add it to their "
+                       "to-do list: a fenced block in the language `todo` holding a JSON list of "
+                       '{"verb": "Do" or "Agree", "title", "why"}. Never add work a task or you could do. Close an '
+                       'item that is settled with {"close": <id>} in a `todo` block; the dashboard tells you the ids.')
 CHAT_STATES = ("review", "needs_input", "failed", "done", "cancelled", "paused")  # the worker is not running
 CHAT_NEXT = {"review": "Approve merges the branch with your commits (the gate runs again first); Send back with "
                        "feedback sends the worker back to work",
@@ -5952,6 +5964,131 @@ def suggestions(rows, a):
     return sorted(out, key=lambda x: -(x["save"] or 0))
 
 
+# ---------------------------------------------------------------- to-dos
+# Everything that needs you, in one list for /api/state (README "To-dos"). Most items are derived on each state
+# build from what the tasks, chats and project facts already say; only Do and Agree, which Claude adds, are stored.
+
+TODO_GROUP = {"Answer": "unblock", "Fix": "unblock", "Promote": "ship", "Ship": "ship", "Commit": "ship",
+              "Try": "review", "Review": "review", "Agree": "review", "Read": "review", "Do": "only_me"}
+TODO_ORDER = ("unblock", "ship", "review", "only_me")
+TODO_MIN = {"Answer": 2, "Fix": 5, "Try": 5, "Review": 3, "Agree": 2, "Read": 3, "Promote": 1, "Ship": 2,
+            "Commit": 2, "Do": 5}  # a guess at the minutes each takes you
+TODO_BLOCK = re.compile(r"```todo[ \t]*\n(.*?)```", re.S)
+
+
+def todo_item(key, verb, project, title, why, since, kind, sid, **extra):
+    return {"key": key, "verb": verb, "group": TODO_GROUP[verb], "project": project, "title": title,
+            "why": why or "", "since": since or 0, "est_min": TODO_MIN[verb], "source": {"kind": kind, "id": sid},
+            **extra}
+
+
+def todo_add(project, items, kind, sid):
+    """Store what Claude asks of you: a list of {"verb": "Do"|"Agree", "title", "why"}, or {"close": id}.
+    kind is 'design' (a chat) or 'task'. Returns a note on what it did, for Claude's next turn."""
+    added, closed, bad = [], [], []
+    for it in items if isinstance(items, list) else [items]:
+        if not isinstance(it, dict):
+            bad.append("an item that is not an object")
+        elif "close" in it:
+            try:
+                tid = int(str(it["close"]).lstrip("#"))
+            except ValueError:
+                bad.append(f"close {it['close']!r} is not an id")
+                continue
+            if todo_done(tid, project):
+                closed.append(tid)
+            else:
+                bad.append(f"no open to-do #{tid} in {project}")
+        elif it.get("verb") not in ("Do", "Agree") or not str(it.get("title") or "").strip():
+            bad.append(f"an item needs verb Do or Agree and a title, not {json.dumps(it)[:120]}")
+        else:
+            title = str(it["title"]).strip()
+            if q("SELECT id FROM todos WHERE project=? AND title=? AND closed IS NULL", (project, title), one=True):
+                continue  # already on your list
+            added.append(q("INSERT INTO todos (project, verb, title, why, source_kind, source_id, created) VALUES "
+                           "(?,?,?,?,?,?,?)", (project, it["verb"], title, str(it.get("why") or ""), kind, sid,
+                                               time.time())))
+    notes = ([f"added to-do {', '.join(f'#{i}' for i in added)}"] if added else []) + \
+            ([f"closed to-do {', '.join(f'#{i}' for i in closed)}"] if closed else []) + \
+            [f"a to-do was skipped: {b}" for b in bad]
+    return "; ".join(notes)
+
+
+def todo_done(tid, project=None):
+    """Close a stored to-do (Done, or {"close": id} from Claude). True when it was open."""
+    return bool(q("UPDATE todos SET closed=? WHERE id=? AND closed IS NULL" + (" AND project=?" if project else "")
+                  + " RETURNING id", (time.time(), tid, *([project] if project else []))))
+
+
+def todos_from_reply(p, reply, did):
+    """Store the reply's ```todo blocks. Returns (reply without them, note for Claude)."""
+    notes = []
+    for block in TODO_BLOCK.findall(reply):
+        try:
+            items = json.loads(block)
+        except ValueError as e:
+            notes.append(f"your last todo block was not valid JSON ({e}); nothing from it was added")
+            continue
+        notes.append(todo_add(p.name, items, "design", did))
+    return TODO_BLOCK.sub("", reply).strip(), "; ".join(n for n in notes if n)
+
+
+def todos_list(tasks, projects, last):
+    """The to-do list for /api/state, from what state_payload already read: its tasks (with last, their latest
+    events), its projects (main_info, so no git call here), and two small queries for chats and stored items."""
+    out = []
+    for t in tasks:
+        k, st = t["kind"], t["state"]
+        since = (last.get(t["id"]) or {}).get("ts") or t["finished"] or t["started"] or t["created"]
+
+        def item(key, verb, why, t=t, since=since):
+            return todo_item(key, verb, t["project"], t["title"], why, since, "task", t["id"])
+        if st == "needs_input":
+            if k in ("release", "deploy"):
+                out.append(item(f"task:{t['id']}:promote", "Promote", why=t["question"]))
+            else:
+                out.append(item(f"task:{t['id']}:answer", "Answer", why=t["question"]))
+        elif st == "failed":
+            out.append(item(f"task:{t['id']}:fix", "Fix", why=t["error"]))
+        elif st == "review":
+            p = PROJECTS.get(t["project"])
+            if p and p.launch:  # can_play in GET /api/tasks/<id>
+                out.append(item(f"task:{t['id']}:try", "Try", why="Play it, then approve or send it back"))
+            else:
+                out.append(item(f"task:{t['id']}:review", "Review", why="Read the diff and summary, then approve"))
+    for f in projects:
+        if f.get("error"):
+            continue
+        name = f["name"]
+        rel = f.get("release")
+        if f.get("ahead") and not f.get("auto_release") and not (rel and rel["state"] not in ENDED):
+            n = len(f["ahead"])
+            out.append(todo_item(f"project:{name}:promote", "Promote", name, f"Promote {f['title']}",
+                                 f"{f['dev_branch']} is {n}{'+' if n >= 30 else ''} change{'s' if n != 1 else ''} "
+                                 f"ahead of {f['main_branch']}",
+                                 min((x["at"] for x in f.get("dev_log") or []), default=0), "project", name))
+        if f.get("main_since_kind") == "deploy" and f.get("main_log") and not f.get("deploy_open"):  # see main_since
+            n = len(f["main_log"])
+            out.append(todo_item(f"project:{name}:ship", "Ship", name, f"Deploy {f['title']}",
+                                 f"{f['main_branch']} has {n} change{'s' if n != 1 else ''} since the last deploy",
+                                 min(x["at"] for x in f["main_log"]), "project", name))
+        if f.get("uncommitted"):
+            n = sum(u["count"] for u in f["uncommitted"])
+            out.append(todo_item(f"project:{name}:commit", "Commit", name, f"Commit your changes in {f['title']}",
+                                 f"{n} uncommitted {files(n)} in " + ", ".join(u["repo"] for u in f["uncommitted"]),
+                                 min((u["oldest"] for u in f["uncommitted"] if u["oldest"]), default=0),
+                                 "project", name))
+    for d in q(f"SELECT * FROM (SELECT {CHAT_COLS} FROM designs WHERE ended IS NULL) "
+               "WHERE state!='thinking' AND COALESCE(replied,0)>seen"):
+        out.append(todo_item(f"chat:{d['id']}:read", "Read", d["project"], d["title"] or f"Chat #{d['id']}",
+                             "Claude replied", d["replied"], "chat", d["id"]))
+    for r in q("SELECT * FROM todos WHERE closed IS NULL"):
+        out.append(todo_item(f"todo:{r['id']}", r["verb"], r["project"], r["title"], r["why"], r["created"],
+                             "chat" if r["source_kind"] == "design" else r["source_kind"], r["source_id"],
+                             todo=r["id"]))
+    return sorted(out, key=lambda x: (TODO_ORDER.index(x["group"]), x["since"], x["key"]))
+
+
 # ---------------------------------------------------------------- http
 
 def state_payload():
@@ -5990,7 +6127,7 @@ def state_payload():
         "active": len(THREADS), "data_dir": str(DATA),
         "research": research.state(),  # its own count: research runs take no task slot
         "design_cost": (q("SELECT SUM(cost) AS c FROM designs", one=True) or {}).get("c") or 0,
-        "chats": chat_counts()}
+        "chats": chat_counts(), "todos": todos_list(tasks, projects, last)}
 
 
 STATE_CACHE = {"at": 0.0, "data": None, "busy": False}
@@ -6188,6 +6325,10 @@ class H(BaseHTTPRequestHandler):
     def route(self, path, b):
         if path == "/api/images":
             return save_image(b.get("data"))
+        if m := re.fullmatch(r"/api/todos/(\d+)/done", path):
+            if not todo_done(int(m.group(1))):
+                raise ValueError("no open to-do with that id")
+            return {"ok": True}
         if path == "/api/tasks":
             if not (b.get("body") or "").strip():
                 raise ValueError("describe the task")
