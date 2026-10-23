@@ -701,7 +701,6 @@ def init_db():
             q(f"ALTER TABLE designs ADD COLUMN {col} {decl}")
             if col == "seen":  # chats from before count as read, so they don't all show a new reply at once
                 q("UPDATE designs SET seen=updated")
-    q("UPDATE designs SET state='idle' WHERE state='thinking'")  # a reply cut off by a restart
     q("CREATE TABLE IF NOT EXISTS task_msgs (id INTEGER PRIMARY KEY, task_id INTEGER, role TEXT, text TEXT, ts REAL)")
     q("CREATE INDEX IF NOT EXISTS task_msgs_task ON task_msgs (task_id, id)")
     if "delivered" not in {r["name"] for r in q("PRAGMA table_info(task_msgs)")}:  # databases from before steering
@@ -2669,6 +2668,7 @@ def shutdown():
     """The daemon is stopping (opsctl restart or stop, launchd, a kill): start nothing new, pause every running
     task for the next daemon to resume, and give a merge, which can't be paused, a moment to finish."""
     STOPPING.set()
+    set_setting("cut_task_chats", json.dumps(list(TASK_CHAT_LIVE)))  # replies on_term stops: resume_chats redoes them
     deadline = time.time() + 45  # launchd's ExitTimeOut (opsctl) is 60
     paused = []
     for t in q(f"SELECT id FROM tasks WHERE state IN ({','.join('?' * len(ACTIVE))})", ACTIVE):
@@ -4408,8 +4408,10 @@ def mcp_servers(p):
     return json.dumps({"mcpServers": found}), [n for n in p.chat_mcp if n not in found]
 
 
-def design_turn(did, text):
+def design_turn(did, text, fresh_why=None):
+    """One chat turn. fresh_why: start a fresh session, with a handoff, for that reason (its old one is gone)."""
     d = design(did)
+    orig = text
     p = proj(d["project"])
     DESIGN_LIVE[did] = []
     chat = d["kind"] == "project"
@@ -4432,13 +4434,15 @@ def design_turn(did, text):
         files.mkdir(parents=True, exist_ok=True)
         tools += f",Edit(/{files}/**)"  # Edit rules cover Write too
     kept, handoff = None, ""
-    if why := chat_stale(d):  # cheaper to start over than to resume: a handoff note, then this turn
+    # cheaper to start over than to resume (chat_stale), or nothing to resume (fresh_why): a handoff note, then this turn
+    if why := ((fresh_why, None) if fresh_why else chat_stale(d)):
         kept, handoff = session_model(d, d["kind"]), chat_handoff(did, why[0])  # the fresh one keeps its model
         q("UPDATE designs SET session_id=NULL, last_call=NULL, ctx_tokens=NULL WHERE id=?", (did,))
-        q("INSERT INTO design_msgs (design_id, role, text, ts) VALUES (?,?,?,?)",
-          (did, "ops", f"Started a fresh session: {why[1]}, and every reply rereads all of it. The new session "
-                       "gets a copy of this conversation so far (the oldest messages cut if it is long).",
-           time.time()))
+        if why[1]:
+            q("INSERT INTO design_msgs (design_id, role, text, ts) VALUES (?,?,?,?)",
+              (did, "ops", f"Started a fresh session: {why[1]}, and every reply rereads all of it. The new session "
+                           "gets a copy of this conversation so far (the oldest messages cut if it is long).",
+               time.time()))
         d = design(did)
     slash = text.strip().startswith("/")  # the CLI runs a slash command only from the start of the prompt
     if handoff and not slash:
@@ -4486,13 +4490,21 @@ def design_turn(did, text):
     def on_model(m):
         q("UPDATE designs SET session_model=? WHERE id=?", (m, did))
 
-    cost = 0.0
+    cost, retry = 0.0, False
     try:
         reply, cost = stream_claude(cmd, cwd, RUNS / f"design-{did}", DESIGN_LIVE[did], DESIGN_PROCS, did,
                                     on_session, env=dict(os.environ, OPS_FROM=f"chat:{did}", OPS_DAEMON=DAEMON_URL),
                                     on_model=on_model, on_call=lambda ctx: q(
                                         "UPDATE designs SET last_call=?, ctx_tokens=? WHERE id=?",
                                         (time.time(), ctx, did)))
+        if STOPPING.is_set():  # the restart stopped it: the chat stays replying, and resume_chats picks it up
+            return
+        if reply.startswith("(no reply;") and LOST_SESSION in reply and d["session_id"] and not fresh_why:
+            retry = True  # Claude has no file for the session: start a fresh one rather than make you resend
+            q("INSERT INTO design_msgs (design_id, role, text, ts) VALUES (?,?,?,?)",
+              (did, "ops", "Claude could not find this chat's session, so it starts a fresh one with a copy of the "
+                           "conversation so far, and answers your message there.", time.time()))
+            return
         if design(did)["ended"] and reply.startswith("(no reply;"):  # End stopped it; say so, not the exit code
             reply = "You ended the chat; the reply was stopped."
         attached = spec_attach(p, d, before) if before is not None else None  # (text, note) or None
@@ -4510,15 +4522,60 @@ def design_turn(did, text):
               (did, "ops", " ".join(x for x in (text, saved) if x), time.time(),
                "; ".join(x for x in (note, saved and "your last reply's edits: " + saved) if x)))
     except Exception as e:
-        q("INSERT INTO design_msgs (design_id, role, text, ts) VALUES (?,?,?,?)",
-          (did, "assistant", f"(chat error: {e})", time.time()))
+        if not STOPPING.is_set():
+            q("INSERT INTO design_msgs (design_id, role, text, ts) VALUES (?,?,?,?)",
+              (did, "assistant", f"(chat error: {e})", time.time()))
     finally:
         DESIGN_PROCS.pop(did, None)
         DESIGN_LIVE.pop(did, None)
-        # A chat ended mid-reply stays read: what the stopped turn wrote last isn't a new reply when you reopen it
+        # A chat ended mid-reply stays read: what the stopped turn wrote last isn't a new reply when you reopen it.
+        # It stays replying when a restart stopped it (resume_chats) or it goes again in a fresh session (retry).
         now = time.time()
-        q("UPDATE designs SET state='idle', updated=?, cost=cost+?, seen=CASE WHEN ended IS NULL THEN seen ELSE ? END "
-          "WHERE id=?", (now, cost, now, did))
+        q("UPDATE designs SET state=CASE WHEN ? THEN state ELSE 'idle' END, updated=?, cost=cost+?, "
+          "seen=CASE WHEN ended IS NULL THEN seen ELSE ? END WHERE id=?",
+          (STOPPING.is_set() or retry, now, cost, now, did))
+        if retry:  # here, as the turn's early returns skip anything after the finally
+            design_turn(did, orig, fresh_why="Claude could not find its session")
+
+
+LOST_SESSION = "No conversation found with session ID"  # claude's error when --resume names a session it has no file for
+RESUME_NOTE = ("[ops: claude-ops restarted while you were replying to the message below, which stopped your reply and "
+               "any command it was running. Check what you had already done, then pick up where you left off and "
+               "answer it. The owner did not resend it.]\n\n")
+
+
+def resumed(text):
+    """The message of a turn a restart cut off, to send again: with a note, unless it is a slash command, which the
+    CLI runs only from the start of the prompt."""
+    return text if text.strip().startswith("/") else RESUME_NOTE + text
+
+
+def resume_chats():
+    """On start: answer the messages the last daemon was replying to when it stopped (a release restarts it), so
+    you don't have to send them again. Chats it left replying, and the task chats shutdown listed in cut_task_chats."""
+    for d in q("SELECT id, project, ended FROM designs WHERE state='thinking'"):
+        m = q("SELECT text FROM design_msgs WHERE design_id=? AND role='user' ORDER BY id DESC LIMIT 1", (d["id"],),
+              one=True)
+        if d["ended"] or not m or d["project"] not in PROJECTS:
+            q("UPDATE designs SET state='idle' WHERE id=?", (d["id"],))
+            continue
+        q("INSERT INTO design_msgs (design_id, role, text, ts) VALUES (?,?,?,?)",
+          (d["id"], "ops", "claude-ops restarted while Claude was replying, which stopped the reply. Claude is picking "
+                           "it up again; you don't need to resend your message.", time.time()))
+        threading.Thread(target=design_turn, args=(d["id"], resumed(m["text"])), daemon=True).start()
+    try:
+        cut = json.loads(setting("cut_task_chats") or "[]")
+    except ValueError:
+        cut = []
+    set_setting("cut_task_chats", "[]")
+    for tid in cut:
+        t = task(tid)
+        m = q("SELECT role, text FROM task_msgs WHERE task_id=? AND role IN ('user','assistant') ORDER BY id DESC "
+              "LIMIT 1", (tid,), one=True)
+        if not t or not t["session_id"] or t["state"] not in CHAT_STATES or not m or m["role"] != "user":
+            continue
+        TASK_CHAT_LIVE[tid] = []  # as task_ask: the dashboard shows it replying, and no worker starts meanwhile
+        threading.Thread(target=task_chat_turn, args=(tid, resumed(m["text"])), daemon=True).start()
 
 
 def queue_from_reply(p, reply, did):
@@ -5170,6 +5227,8 @@ def task_chat_turn(tid, text):
                 cwd.rmdir()
             except OSError:
                 pass
+    if STOPPING.is_set():  # the restart stopped it; the next daemon answers again (resume_chats)
+        return
     q("INSERT INTO task_msgs (task_id, role, text, ts) VALUES (?,?,?,?)", (tid, "assistant", reply, time.time()))
     TASK_CHAT_LIVE.pop(tid, None)
 
@@ -5351,7 +5410,7 @@ task's or chat's id, and {back}. {when}
 # A task page asks for its worker's transcript every few seconds, and a transcript grows to megabytes. It only
 # ever grows, so each read starts where the last one stopped.
 FEEDS = {}  # task id -> (bytes read, the newest activity entries)
-STEPS = {}  # task id -> ((size, mtime) of the transcript, last_step's answer)
+STEP_SEEN = {}  # task id -> ((size, mtime) of the transcript, last_step's answer)
 FEEDS_LOCK = threading.Lock()
 
 
@@ -5407,15 +5466,15 @@ def last_step(tid):
     f = RUNS / str(tid) / "claude.jsonl"
     try:
         st = os.stat(f)
-        if STEPS.get(tid, (None,))[0] == (st.st_size, st.st_mtime):
-            return STEPS[tid][1]  # the transcript has not moved since the last poll
+        if STEP_SEEN.get(tid, (None,))[0] == (st.st_size, st.st_mtime):
+            return STEP_SEEN[tid][1]  # the transcript has not moved since the last poll
         with open(f, "rb") as fh:
             fh.seek(max(0, fh.seek(0, 2) - (256 << 10)))
             lines = fh.read().decode(errors="replace").splitlines()
     except OSError:
         return None
-    STEPS[tid] = ((st.st_size, st.st_mtime), step_of(lines, st.st_mtime))
-    return STEPS[tid][1]
+    STEP_SEEN[tid] = ((st.st_size, st.st_mtime), step_of(lines, st.st_mtime))
+    return STEP_SEEN[tid][1]
 
 
 def step_of(lines, ts):
@@ -6295,6 +6354,7 @@ def start_up():
     try:
         load_projects()
         recover()
+        resume_chats()
     except Exception as e:  # serve anyway: a broken project or task shouldn't keep the dashboard down
         print("startup error:", e, flush=True)
     READY.set()
