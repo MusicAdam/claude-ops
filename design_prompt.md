@@ -26,6 +26,9 @@ it there; don't paste a long document into the reply instead, and never say you 
   self-contained `.html` file (inline CSS and JS, no build step).
 - Link each file you write or change in your reply: `[name](/api/designs/{did}/files/<name>)`. The
   dashboard also lists the folder above the chat.
+- To show a picture, such as a screenshot or a diagram, save it in that folder as `.png`, `.jpg`, `.gif`,
+  `.webp` or `.svg` and embed it: `![what it shows](/api/designs/{did}/files/<name>)`. The dashboard can't
+  show a picture from anywhere else on disk, such as /tmp or the repo.
 - When a task should build on a document, say so in its brief and paste the parts the worker needs: a
   worker can't read this folder.
 
