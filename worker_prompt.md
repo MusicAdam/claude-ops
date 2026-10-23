@@ -84,7 +84,9 @@ Any result may also carry `"todos": [{{"verb": "Do", "title": "...", "why": "...
 owner can do. They go on the owner's to-do list and the task does not wait for them. A to-do is only for
 something that truly needs the owner: a password or sudo, a macOS permission grant (Full Disk Access and
 the like), an API key or account they must create, or a decision. A step that a command or code change
-can do goes in `followups`, never in `todos`, even when it can only run after this task merges.
+can do goes in `followups`, never in `todos`, even when it can only run after this task merges. A to-do
+may carry `"wait": {{"tasks": [283], "until": "merged"}}` (or `"released"`): it stays out of the owner's
+list until those tasks reach that point, or one of them fails or stops.
 
 The user reads `summary` and `question` on the dashboard. Write plain language: lead with what changed,
 then how to see it, then anything you decided for them. Short sentences.
