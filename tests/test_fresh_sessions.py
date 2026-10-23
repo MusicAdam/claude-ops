@@ -240,5 +240,82 @@ class TaskChat(Base):
                 opsd.upd(a[0], state="cancelled")
 
 
+LOST = """#!/bin/sh
+printf '%s\\n' "$@" >> "$FAKE_ARGS"
+for a in "$@"; do [ "$a" = --resume ] && { echo "No conversation found with session ID: gone-sid" >&2; exit 1; }; done
+echo '{"type":"system","subtype":"init","session_id":"new-sid","model":"claude-test"}'
+echo '{"type":"assistant","session_id":"new-sid","message":{"content":[{"type":"text","text":"hi back"}]}}'
+echo '{"type":"result","session_id":"new-sid","total_cost_usd":0}'
+"""
+
+
+class ChatRestart(Base):
+    """A restart (a release reloads the code) stops a chat's reply; the next daemon answers it, so you don't resend."""
+
+    def msgs(self, did):
+        return opsd.q("SELECT role,text FROM design_msgs WHERE design_id=? ORDER BY id", (did,))
+
+    def test_stopped_turn_writes_nothing_and_stays_replying(self):
+        did = self.chat(sid="old-sid")
+        self.say(did, "user", "a question")
+        opsd.q("UPDATE designs SET state='thinking' WHERE id=?", (did,))
+        opsd.STOPPING.set()
+        try:
+            opsd.design_turn(did, "a question")
+        finally:
+            opsd.STOPPING.clear()
+        self.assertEqual(opsd.design(did)["state"], "thinking")
+        self.assertEqual([m["role"] for m in self.msgs(did)], ["user"])
+
+    def test_next_daemon_answers_the_cut_off_message(self):
+        did = self.chat(sid="old-sid")
+        self.say(did, "user", "a question")
+        opsd.q("UPDATE designs SET state='thinking' WHERE id=?", (did,))
+        self.args.unlink(missing_ok=True)
+        before = set(opsd.threading.enumerate())
+        opsd.resume_chats()
+        for t in set(opsd.threading.enumerate()) - before:
+            t.join(10)
+        args = self.args.read_text().split("\n")
+        self.assertEqual(args[args.index("--resume") + 1], "old-sid")
+        prompt = "\n".join(args[args.index("-p") + 1:])
+        self.assertIn("claude-ops restarted while you were replying", prompt)
+        self.assertIn("a question", prompt)
+        msgs = self.msgs(did)
+        self.assertTrue(msgs[1]["role"] == "ops" and "don't need to resend" in msgs[1]["text"])
+        self.assertEqual(msgs[-1]["text"], "hi back")
+        self.assertEqual(opsd.design(did)["state"], "idle")
+
+    def test_ended_chat_is_not_resumed(self):
+        did = self.chat(sid="old-sid")
+        self.say(did, "user", "a question")
+        opsd.q("UPDATE designs SET state='thinking', ended=? WHERE id=?", (time.time(), did))
+        opsd.resume_chats()
+        self.assertEqual(opsd.design(did)["state"], "idle")
+        self.assertEqual(len(self.msgs(did)), 1)
+
+    def test_lost_session_starts_fresh_instead_of_no_reply(self):
+        fake = Path(DATA) / "fake-lost"
+        fake.write_text(LOST)
+        fake.chmod(0o755)
+        was, opsd.CLAUDE = opsd.CLAUDE, str(fake)
+        try:
+            did = self.chat(sid="gone-sid")
+            self.say(did, "user", "earlier")
+            self.say(did, "assistant", "earlier answer")
+            self.turn(did, "next question")
+        finally:
+            opsd.CLAUDE = was
+        msgs = self.msgs(did)
+        self.assertFalse(any(m["text"].startswith("(no reply") for m in msgs))
+        self.assertTrue(any(m["role"] == "ops" and "could not find this chat's session" in m["text"] for m in msgs))
+        self.assertEqual(msgs[-1]["text"], "hi back")
+        self.assertEqual(opsd.design(did)["session_id"], "new-sid")
+        self.assertIn("## Handoff from your earlier session", self.args.read_text())
+
+    def test_steps_and_transcript_cache_are_apart(self):
+        self.assertIsNot(opsd.STEPS, opsd.STEP_SEEN)  # one name for both made shutdown call poll() on a task id
+
+
 if __name__ == "__main__":
     unittest.main()
