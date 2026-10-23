@@ -2625,6 +2625,7 @@ function tdChanged(it) {
   TD.convKey = it ? it.key : "";
   TD.mode = it && it.verb === "Answer" ? tdAnswerMode(it) : null;
   TD.task = null; TD.unc = null; TD.uncSig = ""; TD.udiff = false; TD.over = null; TD.msg = ""; TD.note = ""; chatKey = ""; TD.dets = false; tdClearStarter();
+  renderConv();  // the last item's End topic waits until this one's conversation loads
   refreshDesign();
 }
 const tdAnswerMode = it => ({a: "answer", id: it.source.id, words: `Your message answers #${it.source.id}'s question.`});
@@ -2947,7 +2948,7 @@ async function tdDo(a) {
   if (a === "stopmain") return run(() => api(`/api/projects/${encodeURIComponent(it.project)}/stop`, {}), "Stopped. The release goes on by itself within a minute.");
   if (a === "promote" || a === "senddev") return run(() => api(`/api/projects/${encodeURIComponent(it.project)}/${a}`, {}));
   if (a === "read") return run(() => api(`/api/designs/${s.id}/seen`, {}));
-  if (a === "endtopic") return run(() => api("/api/conversation/end", {project: it.project, ref: s.id}).then(cv => { if (convProject() === it.project) TD.cv = cv; }));
+  if (a === "endtopic") return run(() => api("/api/conversation/end", {project: it.project, ref: s.id}).then(cv => convSet(cv, convFor())));
   if (a === "done") return run(() => api(`/api/todos/${it.todo}/done`, {}));
   if (a === "report" || a === "markreport") return tdOpenReport(it.project, it.report.path, a === "report");
 }
@@ -3001,15 +3002,24 @@ const tdResearch = () => !!(TD.cv && TD.cv.mode === "research" && (TD.cv.topic =
 const convProject = () => (TD.over && TD.over.key === TD.convKey && TD.over.project) || (TD.item && TD.item.project) || pf || $("#cproj").value || "";
 // Text put in an empty message box (Ask Claude about the research runs); taken out again if you leave it as it was.
 function tdClearStarter() { if (TD.starter && $("#say").value === TD.starter) $("#say").value = ""; TD.starter = ""; }
+// TD.cv is the conversation of one item and project (TD.cvFor). Click another item and, until its conversation loads,
+// TD.cv is still the old one: End topic waits (convReady) instead of acting on it, and an answer that comes back for an
+// item or project no longer in view is dropped (convSet), so a slow one never overwrites a newer one.
+const convFor = () => `${TD.convKey}|${convProject()}`;
+const convReady = () => !!TD.cv && TD.cvFor === convFor() && TD.cv.project === convProject();
+function convSet(cv, want) {
+  if (want !== convFor() || (cv && cv.project !== convProject())) return false;
+  TD.cv = cv; TD.cvFor = want; return true;
+}
 async function convOpen(body) {
-  const project = convProject(); if (!project) return;
+  const project = convProject(), want = convFor(); if (!project) return;
   tdShowConv();
-  try { TD.cv = await api("/api/conversation", {project, ...body}); $("#chatmsg").textContent = ""; }
+  try { if (convSet(await api("/api/conversation", {project, ...body}), want)) $("#chatmsg").textContent = ""; }
   catch (e) { $("#chatmsg").textContent = e.message; }
   chatKey = ""; await refreshDesign();
 }
 async function loadConv() {
-  const it = TD.item, key = TD.convKey, s = (it && it.source) || {}, project = convProject();
+  const it = TD.item, key = TD.convKey, s = (it && it.source) || {}, project = convProject(), want = convFor();
   if (s.kind === "task") {
     try { TD.task = await api(`/api/tasks/${s.id}`); } catch { TD.task = null; }
     if (TD.convKey !== key) return;
@@ -3026,8 +3036,7 @@ async function loadConv() {
     }
     if (!cv && project) cv = await api(`/api/conversation?project=${encodeURIComponent(project)}`);
   } catch { cv = null; }
-  if (TD.convKey !== key || convProject() !== project) return;
-  TD.cv = cv;
+  if (!convSet(cv, want)) return;
   const t = cv ? cv.topic : null;
   if (typeof t === "number") {
     TD.rs = null;
@@ -3078,9 +3087,10 @@ function renderConv() {
   if (put($("#convtop"), top)) {
     const ref = id => /^\d+$/.test(id) ? +id : id;
     $("#convtop").querySelectorAll("[data-topic]").forEach(el => el.onclick = () => {
+      if (!convReady()) return;  // the last item's topics, still listed while this one's loads
       TD.earlierOpen = false; convOpen({how: "topic", ref: ref(el.dataset.topic)}); });
     const act = (sel, what, body) => $("#convtop").querySelectorAll(sel).forEach(el => el.onclick = e => {
-      e.stopPropagation(); convAct(what, body(el)); });
+      e.stopPropagation(); if (convReady()) convAct(what, body(el)); });
     act("[data-end]", "end", el => ({ref: ref(el.dataset.end)}));
     act("[data-reopen]", "reopen", el => ({ref: ref(el.dataset.reopen)}));
     act("#endread", "end-read", () => ({days: +$("#enddays").value}));
@@ -3090,23 +3100,29 @@ function renderConv() {
   }
   // One kind of new topic: plan & design, which queues tasks, starts research and edits your checkout when asked.
   // A topic left new in another mode (an older mode switch) goes back to plan & design.
-  if (cv.topic === null && (cv.mode !== "design" || cv.from)) { convOpen({how: "new", mode: "design"}); return; }
+  // Until the clicked item's conversation loads, TD.cv is the last one's: End topic and New topic wait for it.
+  const ready = convReady();
+  if (ready && cv.topic === null && (cv.mode !== "design" || cv.from)) { convOpen({how: "new", mode: "design"}); return; }
   const cur = topicOf(cv.topic), busy = cur && cur.state === "thinking";
-  const html = `<div class="row"><span style="flex:1"></span>${cur ? `<button id="endtopic" ${busy ? "disabled" : ""} title="${busy ? "Claude is replying. Stop the reply, or wait for it, to end this topic" : "Done with this topic: it moves under Ended and off your to-do list"}">End topic</button>` : ""}
-    <button id="newtopic" title="Your next message starts a new topic" ${cv.topic === null ? "disabled" : ""}>New topic</button></div>
+  const html = `<div class="row"><span style="flex:1"></span>${cur ? `<button id="endtopic" ${busy || !ready ? "disabled" : ""} title="${!ready ? "Loading this item's conversation…" : busy ? "Claude is replying. Stop the reply, or wait for it, to end this topic" : "Done with this topic: it moves under Ended and off your to-do list"}">End topic</button>` : ""}
+    <button id="newtopic" title="Your next message starts a new topic" ${cv.topic === null || !ready ? "disabled" : ""}>New topic</button></div>
     ${cv.topic === null && cv.subject ? `<div class="convnote">Your next message starts this item's own topic.</div>`
       : cv.topic === null && cv.topics.length ? `<div class="convnote">Your next message starts a new topic.</div>` : ""}`;
   if (put($("#convmodes"), html)) {
     $("#newtopic").onclick = () => { convOpen({how: "new", mode: "design"}); $("#say").focus(); };
-    if ($("#endtopic")) $("#endtopic").onclick = () => convAct("end", {ref: cv.topic});
+    // put() keeps these buttons, handlers and all, while the html is unchanged: read the topic when clicked, not now.
+    if ($("#endtopic")) $("#endtopic").onclick = () => { if (convReady()) convAct("end", {ref: TD.cv.topic}); };
   }
 }
-// End or reopen a topic, or end the read ones older than some days: POST /api/conversation/<what>.
+// End or reopen a topic, or end the read ones older than some days: POST /api/conversation/<what>, for the project of
+// the conversation shown (TD.cv.project), which the topics listed belong to. A refusal is shown, and the conversation
+// reloads either way, so the view is right without leaving it.
 async function convAct(what, body) {
-  const project = convProject(); if (!project) return;
+  const project = TD.cv && TD.cv.project, want = TD.cvFor; if (!project) return;
   try {
     const cv = await api(`/api/conversation/${what}`, {project, ...body});
-    TD.cv = cv; $("#chatmsg").textContent = what === "end-read" ? `Ended ${cv.ended_now} topic${cv.ended_now === 1 ? "" : "s"}.` : "";
+    const n = cv.ended_now;
+    if (convSet(cv, want)) $("#chatmsg").textContent = what === "end-read" ? `Ended ${n} topic${n === 1 ? "" : "s"}.` : "";
   } catch (e) { $("#chatmsg").textContent = e.message; }
   chatKey = ""; refresh(); await refreshDesign();
 }

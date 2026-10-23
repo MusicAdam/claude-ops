@@ -30,13 +30,14 @@ class Conversation(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         opsd.init_db()
-        repo = Path(DATA) / "repo"
-        repo.mkdir()
-        subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
-        subprocess.run(["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@example.com", "commit",
-                        "-q", "--allow-empty", "-m", "init"], check=True)
         opsd.PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
-        (opsd.PROJECTS_DIR / "demo.toml").write_text(f'repo = "{repo}"\n')
+        for name in ("demo", "other"):  # other: a second project, for a topic ref sent with the wrong project
+            repo = Path(DATA) / f"repo-{name}"
+            repo.mkdir()
+            subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
+            subprocess.run(["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@example.com", "commit",
+                            "-q", "--allow-empty", "-m", "init"], check=True)
+            (opsd.PROJECTS_DIR / f"{name}.toml").write_text(f'repo = "{repo}"\n')
         opsd.load_projects()
         fake = Path(DATA) / "fake-claude"
         fake.write_text(FAKE)
@@ -267,6 +268,28 @@ class Conversation(unittest.TestCase):
         opsd.q("UPDATE designs SET state='thinking' WHERE id=?", (a,))
         with self.assertRaisesRegex(ValueError, "still replying"):
             opsd.topic_end("demo", a)
+        self.assertIsNone(opsd.design(a)["ended"])
+
+    def test_end_in_its_own_project(self):
+        # The Today view sends End topic with the project of the conversation shown (the project conv_view returns),
+        # and the ref of a topic listed there.
+        a = self.chat("a")
+        o = opsd.q("INSERT INTO designs (project, title, kind, created, updated) VALUES (?,?,?,?,?)",
+                   ("other", "o", "design", time.time(), time.time()))
+        self.assertEqual(self.view()["project"], "demo")
+        self.assertEqual(opsd.conv_view("other")["project"], "other")
+        self.assertEqual(opsd.conv_open("other", "topic", o)["project"], "other")
+        v = self.post("/api/conversation/end", {"project": "other", "ref": o})
+        self.assertEqual(v["project"], "other")
+        self.assertTrue(next(t for t in v["topics"] if t["id"] == o)["ended"])
+        self.assertNotIn(a, [t["id"] for t in v["topics"]])  # only other's topics
+        self.assertIsNone(opsd.design(a)["ended"])
+
+    def test_end_refuses_a_ref_of_another_project(self):
+        # A topic of demo sent with other (what a stale view used to send) is refused, not ended or ignored.
+        a = self.chat("a")
+        with self.assertRaisesRegex(ValueError, f"no topic {a} in other"):
+            opsd.topic_end("other", a)
         self.assertIsNone(opsd.design(a)["ended"])
 
     def test_opening_ended_topic_reopens_it(self):

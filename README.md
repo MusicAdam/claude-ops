@@ -689,6 +689,10 @@ stay on the right of the header.
     thread is listed in the setting `research_ended`. Both survive a restart.
     - **End** on a row of Earlier topics, or **End topic** above the message box for the current one (your next
       message then starts a new topic). Both are refused while Claude is replying: stop the reply or wait.
+    - They act on the topic shown, in the project of the conversation shown (the `project` that
+      `GET /api/conversation` returns), never in whatever project the view moved to since. After you click another
+      to-do, End topic and New topic are disabled, and the rows of Earlier topics do nothing, until its conversation has
+      loaded. If an end is refused anyway, the view shows why and reloads the conversation.
     - **End read topics older than N days** (1, 7, 30 or 90) ends every open topic you have read, that Claude isn't
       replying in, other than the current one, whose last activity is older than that.
     - **Ended (N)**, folded at the bottom of Earlier topics, lists ended topics with **Reopen**. Opening one, or
