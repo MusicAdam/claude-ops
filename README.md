@@ -165,12 +165,20 @@ The release, Promote and Promote after merge described here are for a project th
   - For claude-ops itself, every merge restarts the daemon to load the new code. As a restart pauses every
     running task in every project and starts their gates over, it waits until no task is running, checking or
     merging, for at most 15 minutes, and no new task starts meanwhile (they say `waiting for claude-ops to
-    restart`). A Promote still restarts at once.
+    restart`). A running deploy, in any project, holds the restart with no time limit: after 15 minutes it
+    restarts only once no deploy is running. A Promote restarts sooner: see below.
   - Not for a project with `[[deploy]]` targets: a deploy moves main too, and builds from the main a release
     checked. There the option is ignored, with a line in the daemon log.
 - Promoting claude-ops itself restarts the daemon to load the new code (`opsctl restart`: running
   tasks pause and resume). If the new daemon doesn't answer within 30 s, the release's log says so; its
   output is in `runs/<id>/restart.log`.
+- A running deploy, in any project, always holds a restart that loads new code, a Promote's or a merge's: a
+  restart would cut its command off, and a cut-off deploy fails rather than publish twice. The restart waits,
+  with no time limit, until no deploy is running (a deploy that has finished its command and only moves main
+  doesn't count), and the release or merge says so in its log (`claude-ops restarts to load the new code once
+  deploy #259 finishes`). Meanwhile no new deploy starts: it says `waiting for claude-ops to restart`. A
+  Promote waits for nothing else: other tasks keep starting, and pause and resume across the restart. A
+  manual `opsctl restart` or `stop` doesn't wait.
 - The daemon opens its port first, then loads projects and resumes tasks. Until then the dashboard says
   "claude-ops is starting up" and refuses actions. `opsctl start` and `restart` wait up to 30 s for it to
   answer, and print the end of `opsd.log` if it doesn't. A new main worktree gets its `[worktree]` setup on
@@ -250,7 +258,9 @@ run = "bin/swish release"
   The daemon runs the command itself, as it runs the gate, so the Bash guard that watches Claude doesn't apply.
 - **Failure** (non-zero exit): the task fails and shows the end of the log. The target's record, main and the
   worktree stay as they are, so you can look around in it. **Retry** starts the deploy over, resetting the worktree.
-  A deploy cut off by a restart of claude-ops fails the same way rather than run again by itself.
+  A deploy cut off by a restart of claude-ops fails the same way rather than run again by itself. A restart
+  that loads new code (a Promote or merge of claude-ops) waits for running deploys, so only a manual
+  `opsctl restart`, a stop or a crash cuts one off.
 - **Success:** the target records what it shipped: the worktree's commit after the command (so a build-number bump
   the command made is what `from` targets deploy next), the time, the task and the version. If the command made
   commits, they are kept at `refs/ops/deploy-<id>` and main fast-forwards to them as a release would move it (the

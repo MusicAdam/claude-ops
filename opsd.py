@@ -2398,7 +2398,7 @@ def release_pipeline(p, tid):
         set_setting(f"promoted_from:{p.name}", before)
     finish(p, tid, merged=t["base"], note=f"{p.main} is now {p.show(t['base'])}")  # and releases what merged since
     if Path(p.repo).resolve() == CODE and p.revs(p.main) != before:
-        restart_self(tid)
+        restart_when_idle(tid, deploys_only=True)
 
 
 def is_service():
@@ -2410,32 +2410,79 @@ def is_service():
 
 
 RESTART_IDLE_MAX = 15 * 60  # seconds a direct_main merge of claude-ops waits for the queue to go idle before restarting
-RESTART_AFTER = {}  # {"tid", "since"}: a restart waiting for idle. Not a setting: the next daemon has the new code
+# {"tid", "since", "deploys_only", "told"}: a restart waiting. Not a setting: the next daemon has the new code
+RESTART_AFTER = {}
+RESTART_LOCK = threading.Lock()  # the release thread and the scheduler both try the restart
 
 
-def restart_when_idle(tid):
-    """A direct_main merge moved main of claude-ops itself. A restart pauses every running task in every project and
-    starts their gates over, so it waits until none is running, checking or merging (at most RESTART_IDLE_MAX), and
-    starts no new task meanwhile. restart_if_idle, from the scheduler, does it. A Promote, which you click, restarts at
-    once."""
-    if not RESTART_AFTER:
-        RESTART_AFTER.update(tid=tid, since=time.time())
-    ev(tid, f"claude-ops restarts to load the new code once no task is running (at most "
-            f"{RESTART_IDLE_MAX // 60} min); new tasks wait for it")
+def running_deploys():
+    """Deploys a restart would cut off: their command runs, and recover() fails them rather than run it again. One at
+    start_at 'promote' has finished its command and only moves main, which a restart resumes."""
+    return q(f"SELECT id FROM tasks WHERE kind='deploy' AND start_at!='promote' AND state IN "
+             f"({','.join('?' * len(ACTIVE))}) ORDER BY id", ACTIVE)
+
+
+def deploy_words(deploys):
+    ids = [f"#{t['id']}" for t in deploys]
+    return ("deploy " if len(ids) == 1 else "deploys ") + ", ".join(ids)
+
+
+def restart_holds(t):
+    """Whether a restart waiting to load new code holds queued task t back. A merge's restart (restart_when_idle)
+    holds every task; a Promote's holds only deploys, which it must not cut off."""
+    return bool(RESTART_AFTER) and (not RESTART_AFTER.get("deploys_only") or t.get("kind") == "deploy")
+
+
+def restart_when_idle(tid, deploys_only=False):
+    """main of claude-ops itself moved: restart to load the new code, but never while a deploy runs, in any project
+    (it publishes things, and recover() won't run a cut-off one again), however long it takes. A direct_main merge
+    (deploys_only False) also waits for every other task, as a restart pauses them and starts their gates over, but
+    for at most RESTART_IDLE_MAX. A Promote, which you click, waits only for deploys. Meanwhile new deploys don't
+    start, nor, for a merge, other tasks. restart_if_idle, from the scheduler, does it; here it runs once at once."""
+    with RESTART_LOCK:
+        if not RESTART_AFTER:
+            RESTART_AFTER.update(tid=tid, since=time.time(), deploys_only=deploys_only, told=False)
+        elif deploys_only and not RESTART_AFTER["deploys_only"]:  # a Promote while a merge's restart waits: sooner
+            RESTART_AFTER.update(tid=tid, deploys_only=True, told=False)
+        else:
+            ev(tid, f"claude-ops restarts to load the new code with #{RESTART_AFTER['tid']}'s restart, already waiting")
+            return
+    if restart_if_idle():
+        return
+    deploys = running_deploys()
+    if deploys_only:
+        ev(tid, f"claude-ops restarts to load the new code once {deploy_words(deploys)} finishes; new deploys wait "
+                f"for it")
+    else:
+        ev(tid, f"claude-ops restarts to load the new code once no task is running (at most {RESTART_IDLE_MAX // 60} "
+                f"min, but never while a deploy runs"
+                + (f": {deploy_words(deploys)} runs now" if deploys else "") + "); new tasks wait for it")
 
 
 def restart_if_idle():
-    if not RESTART_AFTER or STOPPING.is_set():
-        return
-    busy = q(f"SELECT id FROM tasks WHERE state IN ({','.join('?' * len(ACTIVE))})", ACTIVE)
-    if busy and time.time() - RESTART_AFTER["since"] < RESTART_IDLE_MAX:
-        return
-    tid = RESTART_AFTER["tid"]
-    RESTART_AFTER.clear()
+    """Restart if the restart waiting can go now; True if it did."""
+    with RESTART_LOCK:
+        if not RESTART_AFTER or STOPPING.is_set():
+            return False
+        tid = RESTART_AFTER["tid"]
+        deploys = running_deploys()
+        busy = [] if RESTART_AFTER["deploys_only"] else \
+            q(f"SELECT id FROM tasks WHERE state IN ({','.join('?' * len(ACTIVE))})", ACTIVE)
+        over = time.time() - RESTART_AFTER["since"] >= RESTART_IDLE_MAX
+        if deploys:  # no time limit
+            if busy and over and not RESTART_AFTER["told"]:
+                RESTART_AFTER["told"] = True
+                ev(tid, f"{RESTART_IDLE_MAX // 60} min passed, but {deploy_words(deploys)} still runs: claude-ops "
+                        f"restarts once it finishes")
+            return False
+        if busy and not over:
+            return False
+        RESTART_AFTER.clear()
     if busy:
         ev(tid, f"restarting after {RESTART_IDLE_MAX // 60} min although tasks still run: "
                 + ", ".join(f"#{t['id']}" for t in busy))
     restart_self(tid)
+    return True
 
 
 def restart_self(tid):
@@ -2676,7 +2723,8 @@ def scheduler():
 
 def schedule_once():
     waiting = limited()  # first, so the limit clears and its tasks requeue even while the queue is paused
-    if setting("paused") == "1" or STOPPING.is_set() or waiting or RESTART_AFTER:
+    held = RESTART_AFTER and not RESTART_AFTER.get("deploys_only")  # a merge's restart waits for the queue to go idle
+    if setting("paused") == "1" or STOPPING.is_set() or waiting or held:
         return
     braked = usage_braked()  # running work carries on; no new Claude session starts until the window resets
     slots = int(setting("max_parallel") or 1) - len(THREADS)
@@ -2685,6 +2733,8 @@ def schedule_once():
             break
         p = PROJECTS.get(t["project"])
         if not p or setting(f"paused:{p.name}") == "1":
+            continue
+        if restart_holds(t):  # a Promote's restart waits for running deploys: a new one would hold it longer
             continue
         if braked and starts_claude(t):
             continue
@@ -6571,7 +6621,7 @@ STATE_WORDS = {"running": "working", "gating": "checking", "needs_input": "needs
 def wait_reasons(tasks, s=None):
     """Why each queued task has not started yet, in the scheduler's own order of checks."""
     s = settings_now() if s is None else s
-    if STOPPING.is_set() or RESTART_AFTER:
+    if STOPPING.is_set() or (RESTART_AFTER and not RESTART_AFTER.get("deploys_only")):
         return {t["id"]: "waiting for claude-ops to restart" for t in tasks if t["state"] == "queued"}
     if s.get("paused") == "1":
         return {t["id"]: "the queue is paused" for t in tasks if t["state"] == "queued"}
@@ -6593,6 +6643,8 @@ def wait_reasons(tasks, s=None):
             why = "its project is not loaded"
         elif s.get(f"paused:{p.name}") == "1":
             why = f"{p.title} is paused"
+        elif restart_holds(t):
+            why = "waiting for claude-ops to restart"
         elif braked and starts_claude(t):
             why = braked["words"]
         elif dep and dep["state"] != "done":
