@@ -711,7 +711,8 @@ def init_db():
                       ("spec_draft", "INTEGER DEFAULT 0"),  # and before New change: drafting, no change yet
                       ("session_model", "TEXT"),  # and before models per kind: the model its session started on
                       ("last_call", "REAL"), ("ctx_tokens", "INTEGER"),  # its session's last call (see chat_stale)
-                      ("queued", "TEXT DEFAULT '[]'")):  # and before queued messages: sent while Claude replies
+                      ("queued", "TEXT DEFAULT '[]'"),  # and before queued messages: sent while Claude replies
+                      ("subject", "TEXT")):  # and before a topic per to-do: what it is about (see conv_open)
         if col not in dcols:
             q(f"ALTER TABLE designs ADD COLUMN {col} {decl}")
             if col == "seen":  # chats from before count as read, so they don't all show a new reply at once
@@ -4968,7 +4969,7 @@ def link_check(project, refs, heads=None):
 
 # A chat is "ready for you" when Claude isn't replying, and has a new reply when its last answer (Claude's, or a
 # note from the queue) came after you last looked at it. Ending a chat takes it out of both until you reopen it.
-CHAT_COLS = ("id,project,title,state,updated,cost,kind,spec,spec_draft,seen,ended,(SELECT MAX(ts) FROM design_msgs m "
+CHAT_COLS = ("id,project,title,state,updated,cost,kind,spec,spec_draft,seen,ended,subject,(SELECT MAX(ts) FROM design_msgs m "
              "WHERE m.design_id=designs.id AND m.role!='user') AS replied")
 
 
@@ -5200,7 +5201,7 @@ def topics(project):
     later (the Today list's Read items follow the same rule, see todos_list)."""
     out = [{"id": d["id"], "title": d["title"], "mode": "project" if d["kind"] == "project" else "design",
             "kind": d["kind"] or "design", "spec": d["spec"], "spec_draft": d["spec_draft"], "created": d["created"],
-            "last": d["updated"] or 0, "state": d["state"], "ended": d["ended"],
+            "last": d["updated"] or 0, "state": d["state"], "ended": d["ended"], "subject": d["subject"],
             "unread": d["state"] != "thinking" and not d["ended"] and (d["replied"] or 0) > (d["seen"] or 0)}
            for d in q(f"SELECT {CHAT_COLS},created FROM designs WHERE project=?", (project,))]
     return sorted(out + research_topics(project), key=lambda t: -(t["last"] or 0))
@@ -5223,6 +5224,8 @@ def conv_state(project, tops):
         c["mode"] = "design"
     if c.get("from") not in ids:
         c.pop("from", None)
+    if c["topic"] is not None or not isinstance(c.get("subject"), str) or not SUBJECT.fullmatch(c["subject"]):
+        c.pop("subject", None)
     return c
 
 
@@ -5232,7 +5235,8 @@ def conv_view(project):
     tops = topics(project)
     c = conv_state(project, tops)
     links = research_links(project)
-    return {"project": project, "topic": c["topic"], "mode": c["mode"], "modes": MODES, "topics": tops,
+    return {"project": project, "topic": c["topic"], "mode": c["mode"], "subject": c.get("subject"), "modes": MODES,
+            "topics": tops,
             "from": next((t for t in tops if t["id"] == c.get("from")), None),
             "research": {"on": bool(research.current()), "name": links[0]["name"] if links else None}}
 
@@ -5254,8 +5258,9 @@ def conv_pin(project):
 def conv_open(project, how, ref=None, mode=None):
     """Which topic the next message goes to (README: TODAY-2), kept in conv:<project>:
     chat/topic: that one (a to-do whose source is a chat, or a click in Earlier topics);
-    task: the current plan & design topic, else the latest one, else a new one (a to-do whose source is a task,
-    or Ask Claude about this); new: a new topic in the current mode, or mode; mode: switch mode, which starts a new
+    subject: the open plan & design topic about ref (a to-do's or a panel's subject, see SUBJECT), else none yet:
+    the first message makes it (conv_say); task: the current plan & design topic, else the latest one, else a new
+    one (Ask Claude about the research runs); new: a new topic in the current mode, or mode; mode: switch mode, which starts a new
     topic of that kind carrying a handoff of the one that was open (switching back before you send returns to it)."""
     proj(project)
     tops = topics(project)
@@ -5269,6 +5274,11 @@ def conv_open(project, how, ref=None, mode=None):
         if ids[ref]["ended"]:  # opening an ended topic reopens it
             topic_reopen(project, ref)
         c = {"topic": ref, "mode": ids[ref]["mode"]}
+    elif how == "subject":
+        if not isinstance(ref, str) or not SUBJECT.fullmatch(ref):
+            raise ValueError(f"no subject {ref!r}")
+        mine = next((t for t in tops if t.get("subject") == ref and t["mode"] == "design" and not t["ended"]), None)
+        c = {"topic": mine["id"], "mode": "design"} if mine else {"topic": None, "mode": "design", "subject": ref}
     elif how == "task":
         if (cur["mode"] if cur else c["mode"]) != "design":
             latest = next((t for t in tops if t["mode"] == "design"), None)
@@ -5289,6 +5299,63 @@ def conv_open(project, how, ref=None, mode=None):
         raise ValueError(f"unknown how {how!r}")
     set_setting(f"conv:{project}", json.dumps(c))
     return conv_view(project)
+
+
+# A topic's subject: the one thing it is about, so a to-do or a panel opens its own topic (conv_open how=subject).
+SUBJECT = re.compile(r"task:\d+|project:[^:\s]+:(?:promote|ship|commit)|schedule:\d+")
+SUBJECT_CHARS = 4_000  # the note a subject topic's first turn carries
+
+
+def subject_about(project, subject):
+    """A new subject topic's title, the line you see at its start and the note Claude gets with its first message:
+    what the task, project item or schedule is, as the dashboard knows it now."""
+    kind, _, rest = subject.partition(":")
+    if kind == "task":
+        t = task(int(rest)) or {}
+        tid, title = int(rest), t.get("title") or ""
+        lines = [f"This topic is about task #{tid} of {project}: “{title or '(gone)'}”."]
+        if t:
+            lines.append(f"State: {t['state']}" + (f" ({t['phase']})" if t.get("phase") else "") + ".")
+            gate = q("SELECT text FROM events WHERE task_id=? AND text LIKE 'gate %' ORDER BY id DESC LIMIT 1",
+                     (tid,), one=True)
+            if gate:
+                lines.append(f"Gate: {clip(gate['text'], 300)}")
+            for k, head in (("question", "Its question"), ("error", "Its error"), ("summary", "Its summary")):
+                if t.get(k):
+                    lines.append(f"{head}: {clip(t[k], 600)}")
+            p = PROJECTS.get(t["project"])
+            if p and t.get("branch"):
+                try:
+                    st = diffstat(p, t)
+                except Exception:
+                    st = ""
+                if st:
+                    lines.append(f"Files changed (git diff --stat):\n{clip(st, 1200)}")
+            if t.get("body"):
+                lines.append(f"Its brief:\n{clip(t['body'], 1500)}")
+        return {"title": f"#{tid} {title}".strip(), "line": f"About task #{tid}",
+                "note": "\n\n".join(lines)[:SUBJECT_CHARS]}
+    if kind == "schedule":
+        s = q("SELECT * FROM schedules WHERE id=?", (int(rest),), one=True) or {}
+        title = s.get("title") or f"Schedule #{rest}"
+        note = (f"This topic is about the recurring job “{title}” (schedule #{rest}) of {project}"
+                + (f", every {s['every']}" if s.get("every") else "") + "."
+                + (f"\n\nWhat it runs:\n{clip(s['body'], 2500)}" if s.get("body") else ""))
+        return {"title": title, "line": f"About the schedule “{title}”", "note": note[:SUBJECT_CHARS]}
+    name, _, what = rest.partition(":")
+    p = proj(name)
+    try:
+        info = main_info(p, settings_now())
+        it = next((i for i in todos_list([], [info], {}) if i["key"] == subject), None)
+    except Exception:
+        info, it = {}, None
+    verb = {"promote": "Promote", "ship": "Deploy", "commit": "Review uncommitted files in"}[what]
+    title = it["title"] if it else f"{verb} {p.title}"
+    lines = [f"This topic is about the to-do “{title}” of {name}" + (f": {it['why']}" if it and it["why"] else ".")]
+    if what == "ship" and info.get("main_log"):
+        lines.append(f"On {p.main} since the last deploy, newest first:\n" + "\n".join(
+            f"- {'#' + str(c['task']) + ' ' if c.get('task') else ''}{c['title']}" for c in info["main_log"][:15]))
+    return {"title": title, "line": f"About {title}", "note": "\n\n".join(lines)[:SUBJECT_CHARS]}
 
 
 def topic_ref(project, ref):
@@ -5404,8 +5471,13 @@ def conv_say(project, text):
         new = f"r:{r['thread']}"
     else:
         now = time.time()
-        new = q("INSERT INTO designs (project, title, created, updated, kind) VALUES (?,?,?,?,?)",
-                (project, title_of(text)[:80], now, now, c["mode"]))
+        about = subject_about(project, c["subject"]) if c.get("subject") and c["mode"] == "design" else None
+        new = q("INSERT INTO designs (project, title, created, updated, kind, subject) VALUES (?,?,?,?,?,?)",
+                (project, (about["title"] if about else title_of(text))[:80], now, now, c["mode"],
+                 c.get("subject") if about else None))
+        if about:  # the same mechanism as a handoff: the note goes to Claude with the first message
+            q("INSERT INTO design_msgs (design_id, role, text, ts, note) VALUES (?,?,?,?,?)",
+              (new, "ops", about["line"], now, about["note"]))
         if handoff:  # the note goes to Claude with the first message (news); the line is what you see
             q("INSERT INTO design_msgs (design_id, role, text, ts, note) VALUES (?,?,?,?,?)",
               (new, "ops", f"Switched from {MODES[left['mode']]} to {MODES[c['mode']]}: this topic starts with a "
@@ -7023,7 +7095,9 @@ TODO_BLOCK = re.compile(r"```todo[ \t]*\n(.*?)^[ \t]*```[ \t]*$", re.S | re.M)
 
 
 def todo_item(key, verb, project, title, why, since, kind, sid, **extra):
-    return {"key": key, "verb": verb, "group": TODO_GROUP[verb], "project": project, "title": title,
+    """subject: the topic the item opens on Today (conv_open how=subject); a chat's item opens its chat instead."""
+    subject = f"task:{sid}" if kind == "task" else key if kind == "project" else None
+    return {"key": key, "subject": subject, "verb": verb, "group": TODO_GROUP[verb], "project": project, "title": title,
             "why": why or "", "since": since or 0, "est_min": TODO_MIN[verb], "source": {"kind": kind, "id": sid},
             **extra}
 
@@ -7612,7 +7686,7 @@ class H(BaseHTTPRequestHandler):
             else:
                 set_setting(f"paused:{p.name}", "1" if act == "pause" else "0")
             return
-        if path == "/api/conversation":  # pick the topic: {project, how: chat|topic|task|new|mode, ref?, mode?}
+        if path == "/api/conversation":  # pick the topic: {project, how: chat|topic|subject|task|new|mode, ref?, mode?}
             return conv_open(b.get("project") or "", b.get("how"), b.get("ref"), b.get("mode"))
         if path == "/api/conversation/say":
             return conv_say(b.get("project") or "", b.get("text"))
