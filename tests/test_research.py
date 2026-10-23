@@ -187,7 +187,7 @@ class Research(unittest.TestCase):
 
     def test_off_answers_404(self):
         opsd.set_setting("research_repo", "")
-        for path in ("/api/research/proposals", "/api/research/jobs", "/api/research/todos"):
+        for path in ("/api/research/proposals", "/api/research/jobs", "/api/research/projects"):
             self.assertEqual(self.get(path), (404, {"error": "research is off"}))
         self.assertEqual(self.post("/api/research/archive", {"slug": "x"}), (404, {"error": "research is off"}))
         self.assertIsNone(self.state()["research"])
@@ -199,6 +199,21 @@ class Research(unittest.TestCase):
         self.assertEqual(self.post("/api/settings", {"research_repo": str(self.repo)})[0], 200)
         self.assertEqual(self.state()["settings"]["research_repo"], str(self.repo.resolve()))
 
+    def test_research_turns_on_without_a_todo_list(self):
+        """RES-8 retired the research repo's own to-do list: no dashboard/todos.py or todos.json is needed or read."""
+        self.assertFalse((self.repo / "dashboard/todos.py").exists())
+        self.assertFalse((self.repo / "dashboard/todos.json").exists())
+        opsd.set_setting("research_repo", "")
+        self.assertEqual(self.post("/api/settings", {"research_repo": str(self.repo)})[0], 200)
+        self.assertIsNotNone(self.state()["research"])
+        self.assertEqual(self.get("/api/research/proposals")[0], 200)
+        self.assertEqual(self.post("/api/research/archive", {"slug": "old-idea"})[0], 200)
+        self.assertNotIn("rtodo", json.dumps(opsd.todos_list([], [], {})))
+        (self.repo / "dashboard/projects.json").unlink()  # what the repo check still needs
+        code, body = self.post("/api/settings", {"research_repo": str(self.repo)})
+        self.assertEqual(code, 400)
+        self.assertIn("dashboard/projects.json", body["error"])
+
     # ---- reads
 
     def test_the_dashboard_tab_reads_answer(self):
@@ -209,7 +224,7 @@ class Research(unittest.TestCase):
         self.assertIn('id="tab-research"', page)
         self.assertIn('id="researchview"', page)
         reads = {
-            '"/proposals': "/proposals", '"/projects': "/projects", '"/jobs': "/jobs", '"/todos': "/todos",
+            '"/proposals': "/proposals", '"/projects': "/projects", '"/jobs': "/jobs",
             '"/references': "/references", '"/jobs/': "/jobs/20261004-100000-aaaa",
             '"/threads?target=': "/threads?target=proposal:llm-search-tools", '"/threads/': "/threads/20261005-090000-bbbb",
             '"/file?path=': "/file?path=reports/2026-10-04-llm-search-tools.md", '"/slug?q=': "/slug?q=robots%3F",
@@ -239,10 +254,6 @@ class Research(unittest.TestCase):
         self.assertEqual(refs["https://example.com/a"]["section"], "Search")
         self.assertEqual(refs["https://example.com/a"]["citedIn"], ["reports/2026-10-04-llm-search-tools.md"])
         self.assertEqual(refs["https://example.org/b"]["section"], "Cited in reports, not in the registry")
-
-        todos = self.get("/api/research/todos")[1]
-        want = self.file("dashboard/todos.json")["todos"][0]
-        self.assertEqual(todos, [{**want, "effectiveProject": "ai-search"}])
 
         jobs = self.get("/api/research/jobs")[1]
         self.assertEqual([j["id"] for j in jobs], ["20261004-100000-aaaa"])  # chats show only when they ran research
@@ -283,7 +294,7 @@ class Research(unittest.TestCase):
         b = opsd.DATA / "research-backup" / names[0]
         self.assertEqual((b / "archived.json").read_text(), before)
         self.assertEqual(sorted(p.name for p in b.iterdir()),
-                         ["archived.json", "jobs.json", "notes", "projects.json", "threads.json", "todos.json"])
+                         ["archived.json", "jobs.json", "notes", "projects.json", "threads.json"])
         self.assertEqual((b / "notes" / "ai-search.md").read_text(), "# Project: AI search\n\nSearch ideas\n")
         self.assertFalse(list(b.glob("*.jsonl")))
         self.restart()  # a new daemon backs up again before its first write
@@ -317,17 +328,12 @@ class Research(unittest.TestCase):
         self.post("/api/research/assign", {"slug": "old-idea", "project": "music-daw"})
         self.post("/api/research/projects/music-daw/notes", {"text": "# Project: Music DAW"})
         self.post("/api/research/projects/ai-search", {"description": "Search, renamed"})
-        code, todo = self.post("/api/research/todos", {"text": "Call Bob", "project": "music-daw"})
-        self.assertEqual((code, todo["id"]), (200, 2))
-        self.post("/api/research/todos/1", {"done": True})
         self.assertEqual(self.file("dashboard/archived.json"),
                          {"llm-search-tools": datetime.now().strftime("%Y-%m-%d"), "old-idea": "2026-10-02"})
         projects = self.file("dashboard/projects.json")
         self.assertEqual(projects["members"], {"llm-search-tools": "ai-search", "old-idea": "music-daw"})
         self.assertEqual(projects["projects"]["ai-search"]["description"], "Search, renamed")
         self.assertEqual((self.repo / "projects/music-daw.md").read_text(), "# Project: Music DAW\n")
-        todos = self.file("dashboard/todos.json")["todos"]
-        self.assertEqual([(t["text"], bool(t["done"])) for t in todos], [("Email the vendor", True), ("Call Bob", False)])
         self.post("/api/research/projects/music-daw/delete")
         self.assertNotIn("music-daw", self.file("dashboard/projects.json")["projects"])
         left = [p for p in self.repo.rglob("*") if p.name.endswith(".tmp") or ".partial" in p.name]
@@ -342,8 +348,7 @@ class Research(unittest.TestCase):
         writes = [("/api/research/archive", {"slug": "old-idea"}), ("/api/research/assign", {"slug": "old-idea"}),
                   ("/api/research/projects", {"name": "X"}), ("/api/research/projects/ai-search", {"name": "Y"}),
                   ("/api/research/projects/ai-search/notes", {"text": "n"}),
-                  ("/api/research/projects/ai-search/delete", {}), ("/api/research/todos", {"text": "t"}),
-                  ("/api/research/todos/1", {"done": True}), ("/api/research/todos/1/delete", {}),
+                  ("/api/research/projects/ai-search/delete", {}),
                   ("/api/research/dispatch", {"question": "Anything?"}),
                   ("/api/research/chat", {"target": "project:ai-search", "message": "hi"}),
                   ("/api/research/jobs/20261004-100000-aaaa/stop", {})]
@@ -353,7 +358,6 @@ class Research(unittest.TestCase):
             self.assertEqual(code, 409, path)
             self.assertEqual(out, {"error": research.READONLY, "readonly": True})
         self.assertEqual(self.get("/api/research/proposals")[0], 200)
-        self.assertEqual(self.get("/api/research/todos")[0], 200)
         self.assertTrue(self.state()["research"]["readonly"])
         self.assertEqual({p: p.read_bytes() for p in self.repo.rglob("*") if p.is_file()}, snapshot)
         self.assertEqual(self.backups(), [])
@@ -409,7 +413,7 @@ class Research(unittest.TestCase):
         self.assertEqual(args[args.index("--max-budget-usd") + 1], "10")
         self.assertEqual(args[args.index("--permission-mode") + 1], "dontAsk")
         self.assertIn("--chrome", args)
-        self.assertIn(f"Bash({self.repo.resolve()}/bin/todo:*)", args)
+        self.assertFalse([a for a in args if "bin/todo" in a])
         self.assertNotIn("--resume", args)
         self.assertEqual((SCRATCH / "cwd").read_text().strip(), str(self.repo.resolve()))
         saved = next(j for j in self.file("logs/dashboard/jobs.json") if j["id"] == job["id"])
@@ -425,9 +429,21 @@ class Research(unittest.TestCase):
         self.wait_done(out["turn"]["id"])
         args = (SCRATCH / "args").read_text().split("\n")
         self.assertEqual(args[args.index("--resume") + 1], "chat-sid")
-        self.assertEqual(args[args.index("-p") + 1], "And then?")
+        # The fixture's thread predates CONTEXT_VERSION 4, so it is told once that bin/todo is retired.
+        self.assertEqual(args[args.index("-p") + 1], "(Dashboard update, applies from now on:")  # one line per arg
+        sent = (SCRATCH / "args").read_text()
+        self.assertIn("is retired", sent)
+        self.assertNotIn("bin/todo add", sent)
+        self.assertIn("\n\nAnd then?\n", sent)
         thread = self.file("logs/dashboard/threads.json")["20261005-090000-bbbb"]
         self.assertEqual(thread["turns"], ["20261005-090000-cccc", out["turn"]["id"]])
+        self.assertEqual(thread["ctx"], research.CONTEXT_VERSION)
+        code, out = self.post("/api/research/chat", {"target": "project:ai-search", "message": "Next?",
+                                                     "thread": "20261005-090000-bbbb"})
+        self.assertEqual(code, 200, out)
+        self.wait_done(out["turn"]["id"])
+        args = (SCRATCH / "args").read_text().split("\n")
+        self.assertEqual(args[args.index("-p") + 1], "Next?")
 
     def test_shutdown_leaves_research_runs_alone(self):
         os.environ["FAKE_SLEEP"] = "30"
@@ -639,96 +655,6 @@ class Research(unittest.TestCase):
         self.assertEqual(self.state()["research"]["links"], {"plugins": [{"id": "ai-search", "name": "AI search"}]})
         opsd.set_setting("research_repo", "")
         self.assertIsNone(self.state()["research"])
-
-    # ---- to-do -> task
-
-    def queue(self, tid=1, **kw):
-        body = {"project": "plugins", "title": "Email it", "body": "Email the vendor\nFrom research to-do #1",
-                "priority": "high", "hold": True, "release": False, **kw}
-        code, out = self.post(f"/api/research/todos/{tid}/task", body)
-        if code == 200:  # its fake project would trip /api/state in later tests
-            self.addCleanup(opsd.q, "DELETE FROM tasks WHERE id=?", (out["id"],))
-        return code, out
-
-    def set_task(self, tid, **kw):
-        opsd.upd(tid, **kw)
-
-    def test_queue_task_creates_and_links(self):
-        self.fake_projects()
-        before = self.file("dashboard/todos.json")["todos"][0]
-        code, out = self.queue()
-        self.assertEqual(code, 200, out)
-        t = opsd.task(out["id"])
-        self.assertEqual((t["project"], t["title"], t["body"], t["priority"], t["hold"], t["auto_release"]),
-                         ("plugins", "Email it", "Email the vendor\nFrom research to-do #1", 1, 1, 0))
-        after = self.file("dashboard/todos.json")["todos"][0]
-        self.assertEqual(after, {**before, "task": out["id"]})
-        self.assertEqual(len(self.backups()), 1)
-        todo = self.get("/api/research/todos")[1][0]
-        self.assertEqual(todo["taskState"], {"state": "queued", "merged": False})
-        # A later edit through todos.update() keeps `task`.
-        self.assertEqual(self.post("/api/research/todos/1", {"text": "Email the vendor again"})[0], 200)
-        after = self.file("dashboard/todos.json")["todos"][0]
-        self.assertEqual((after["text"], after["task"]), ("Email the vendor again", out["id"]))
-
-    def test_queue_task_refusals(self):
-        self.fake_projects()
-        code, out = self.queue(project="nope")
-        self.assertEqual(code, 400, out)
-        self.assertIn("nope", out["error"])
-        _, first = self.queue()
-        code, out = self.queue()  # live task
-        self.assertEqual(code, 400, out)
-        self.assertIn(f"#{first['id']}", out["error"])
-        self.set_task(first["id"], state="cancelled")
-        code, second = self.queue(priority="normal", hold=False, release=None)
-        self.assertEqual(code, 200, second)
-        self.assertEqual(self.file("dashboard/todos.json")["todos"][0]["task"], second["id"])
-        t = opsd.task(second["id"])
-        self.assertEqual((t["priority"], t["hold"]), (0, 0))
-        self.post("/api/research/todos/1", {"done": True})
-        self.set_task(second["id"], state="failed")
-        code, out = self.queue()  # done to-do
-        self.assertEqual(code, 400, out)
-        self.assertIn("done", out["error"])
-        self.listen_old()
-        snapshot = (self.repo / "dashboard/todos.json").read_bytes()
-        code, out = self.queue()
-        self.assertEqual(code, 409, out)
-        self.assertEqual((self.repo / "dashboard/todos.json").read_bytes(), snapshot)
-
-    def test_gone_task_reads_as_none(self):
-        data = self.file("dashboard/todos.json")
-        data["todos"][0]["task"] = 999999
-        (self.repo / "dashboard/todos.json").write_text(json.dumps(data))
-        self.assertIsNone(self.get("/api/research/todos")[1][0]["taskState"])
-
-    def test_watchdog_closes_a_todo_when_its_task_merges(self):
-        self.fake_projects()
-        _, out = self.queue()
-        tid = out["id"]
-        self.set_task(tid, state="done", merged="", finished=time.time())  # done without a merge
-        research.watchdog_pass()
-        self.assertIsNone(self.file("dashboard/todos.json")["todos"][0]["done"])
-        finished = datetime(2026, 10, 20, 23, 30).timestamp()
-        self.set_task(tid, merged='{"main": "abc"}', finished=finished)
-        snapshot = (self.repo / "dashboard/todos.json").read_bytes()
-        old = self.listen_old()
-        research.watchdog_pass()  # read-only: nothing
-        self.assertEqual((self.repo / "dashboard/todos.json").read_bytes(), snapshot)
-        old.close()
-        research.watchdog_pass()
-        research.watchdog_pass()
-        todo = self.file("dashboard/todos.json")["todos"][0]
-        self.assertEqual(todo["done"], "2026-10-20")
-        self.assertEqual(todo["notes"], f"Closed by task #{tid}, merged 2026-10-20.")
-        self.assertEqual(self.get("/api/research/todos")[1][0]["taskState"], {"state": "done", "merged": True})
-        # Reopened by hand: it stays open.
-        self.post("/api/research/todos/1", {"done": False})
-        research.watchdog_pass()
-        todo = self.file("dashboard/todos.json")["todos"][0]
-        self.assertIsNone(todo["done"])
-        self.assertEqual(todo["notes"].count("Closed by"), 1)
 
 
 if __name__ == "__main__":

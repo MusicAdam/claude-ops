@@ -467,7 +467,6 @@ the uncommitted-files banner, Deploy. `/api/state` gathers them into one list, `
   - **Read**: a design or project chat with a reply you haven't opened, as ● in Earlier topics marks it.
   - **Read** (a report): a research task merged into `dev` whose report you haven't opened (see
     [Research](#research), RES-5).
-  - **Do** (research): an open to-do in the research repo's `todos.json`, in its linked project (RES-8).
 - **TODO-2 Two kinds Claude adds.** **Do**: something that truly needs you: a password or sudo, a macOS
   permission grant (Full Disk Access and the like), an API key or account you must create. **Agree**: a
   decision; Claude proposed something and waits for your yes. A step that a command or code change can do is
@@ -499,11 +498,10 @@ the uncommitted-files banner, Deploy. `/api/state` gathers them into one list, `
   behind the task is skipped. Each body stands alone, like a split task: goal, exact steps, acceptance.
 
 Each item is `{key, verb, group, project, title, why, since, est_min, source: {kind, id}}`. `key` stays the same
-across polls (`task:231:review`, `chat:42:read`, `project:diskgame:commit`, `todo:7`, `task:240:report`,
-`rtodo:12`). `since` is when the state
-began, as near as the queue knows: a task's last event, a chat's last reply, the oldest uncommitted file, the
+across polls (`task:231:review`, `chat:42:read`, `project:diskgame:commit`, `todo:7`, `task:240:report`).
+`since` is when the state began, as near as the queue knows: a task's last event, a chat's last reply, the oldest uncommitted file, the
 oldest commit not yet promoted or deployed. `est_min` is a guess at minutes: Answer 2, Fix 5, Try 5, Review 3,
-Agree 2, Read 3, Promote 1, Ship 2, Commit 2, Do 5. `source.kind` is `task`, `chat`, `project` or `research_todo`: a stored item
+Agree 2, Read 3, Promote 1, Ship 2, Commit 2, Do 5. `source.kind` is `task`, `chat` or `project`: a stored item
 points at the chat or task that added it, and has `todo`, its id for the Done button.
 
 There is no `done_today` count yet: derived items leave no record when they close, so only stored items could be
@@ -583,7 +581,7 @@ stay on the right of the header.
   | Commit | Commit these: **Send to dev**, unchanged underneath. Its tooltip says it lands the files on `main` through the gate, then clears them from your checkout; `dev` in a project with Promote after merge off (and not straight to main). While one is open: Sending… #id | |
   | Read | A chat: Mark read when it is new, else End topic. A report: Open report (RES-5) | A chat: End topic, or Reply. A report: Details |
   | Agree | Reply (focuses the message box; sending closes it) | Done |
-  | Do | Done (`POST /api/todos/<id>/done`; a research to-do: `POST /api/research/todos/<id>`) | |
+  | Do | Done (`POST /api/todos/<id>/done`) | |
 
   The Ship step also lists its changelog, open, under the why: `main_log`, the rows the Projects card's
   `main` changelog shows (task or short sha, repo, title, how long ago), at most 15, then **and N more**, which
@@ -805,13 +803,10 @@ Research is ordinary queue work in the project it is about. A report lives in th
 
   Its reports then go to its own `docs/research/` the same way. The daily scout becomes a schedule there:
   `./opsd.py schedule add -p research --every 'day 07:00' --research T1 "Daily scout: new leads in my interest areas"`.
-- **RES-8 Research to-dos in their project.** While research is on, each open to-do in the research repo's
-  `dashboard/todos.json` is a **Do** item in Today (`rtodo:<id>`, with `rtodo: <id>`). Its project is the claude-ops
-  project its research project links to (`repo`), or, when unlinked or stale, the claude-ops project whose `repo` is
-  the research repo (RES-7). With neither it is not shown. A to-do whose queued task (see **To-do → task** below) is
-  still live is left out: it closes when that task merges. It is read through the repo's own `todos.py`, and
-  **Done** closes it in `todos.json` through `POST /api/research/todos/<id>` (`{done: true}`), so the old lock and
-  read-only rule hold.
+- **RES-8 (retired).** The research repo had its own to-do list (`dashboard/todos.json`, `todos.py`,
+  `bin/todo` and a todo skill), shown as Do items in Today and in a To-dos tab under Research. Since 2026-10-23
+  there is one to-do system: the claude-ops to-dos ([To-dos](#to-dos)). claude-ops no longer reads or writes
+  the research repo's list, and research turns on without it. Don't reuse the id.
 - **RES-9 The Research tab is legacy.** It stays under More, read-only in spirit: for the history of the research
   repo's proposals, reports and runs. Old reports are not moved. New research goes through the queue.
 
@@ -821,20 +816,20 @@ Before RES-1, research ran outside the queue, in the research repo, and that pat
 claude-ops also serves the research dashboard's data and runs, which used to need their own server
 (`~/dev/research/dashboard/server.py`, port 8787). The code is `research.py`; `opsd.py` only routes to it.
 The API is `/api/research/...`, with the old server's endpoints and response shapes: `proposals`, `projects`
-(with `/<id>/activity`, `/<id>/notes`, `/<id>/delete`), `assign`, `archive`, `references`, `todos`,
+(with `/<id>/activity`, `/<id>/notes`, `/<id>/delete`), `assign`, `archive`, `references`,
 `jobs` (and `/<id>`, `/<id>/stop`), `threads` (`?target=` and `/<id>`), `file?path=`, `slug?q=`, `dispatch`
 and `chat`. `file` serves only `.md` files inside the research repo.
 
-- **Setting.** `research_repo` (Settings) is the research repo's path. Research is off while it is empty: the
+- **Setting.** `research_repo` (Settings) is the research repo's path. A path is refused unless it has
+  `dashboard/projects.json` and `briefs/`. Research is off while it is empty: the
   research API answers 404 `{error: "research is off"}` and `/api/state` has `research: null`.
 - **Same files, same places.** Nothing is migrated. It reads and writes what the old server did:
-  `dashboard/projects.json`, `dashboard/archived.json`, `dashboard/todos.json`, `projects/<id>.md` (project
+  `dashboard/projects.json`, `dashboard/archived.json`, `projects/<id>.md` (project
   notes), `logs/dashboard/jobs.json`, `logs/dashboard/threads.json`, `logs/dashboard/<job>.jsonl`, `briefs/`,
   `reports/` and `sources/registry.md`. Every state JSON file is written atomically (a temp file in the same
-  folder, fsync, `os.replace`). To-dos go through the repo's own `dashboard/todos.py`, loaded by path, so its
-  `.todos.lock` is shared with `bin/todo` and the skill.
+  folder, fsync, `os.replace`). The repo's old to-do list is not touched (RES-8 is retired).
 - **Runs and chats are as before.** No worktree, gate or merge: `claude -p` in the research repo with the
-  old flags, tools, prompts, run sizes ($1/$3/$10) and time limits (T0 5, T1 15, T2 40, chat 15 minutes), in
+  old flags, tools (minus `bin/todo`), prompts, run sizes ($1/$3/$10) and time limits (T0 5, T1 15, T2 40, chat 15 minutes), in
   their own process group.
 - **Single writer.** The old server guards its files with an in-process lock, so two writers would lose
   updates. Before every write, and before each watchdog pass, claude-ops tries port 8787
@@ -842,7 +837,7 @@ and `chat`. `file` serves only `.md` files inside the research repo.
   dashboard is running. Stop it to make changes here.", readonly: true}` and the watchdog skips its pass (the
   old server's watchdog covers it). Reads always work. `/api/state` shows `research.readonly`.
 - **Backup.** Before the first write after each daemon start, the state files (`projects.json`,
-  `archived.json`, `todos.json`, `jobs.json`, `threads.json` and the notes in `projects/`) are copied to
+  `archived.json`, `jobs.json`, `threads.json` and the notes in `projects/`) are copied to
   `~/.claude-ops/research-backup/<YYYYmmdd-HHMMSS>/`. The newest 10 are kept. The `.jsonl` transcripts are not
   copied: only their own claude process writes them, and only by appending. If the backup fails, the write is
   refused with a 500 that names the error.
@@ -878,19 +873,6 @@ and `chat`. `file` serves only `.md` files inside the research repo.
   answering, and treat the repo as read-only context, never editing files there. That run or chat turn also gets
   `--add-dir <repo>` so it may read there; tools and flags are otherwise unchanged. A standalone project, a stale
   link or a checkout path that doesn't exist gets neither.
-- **To-do → task.** `POST /api/research/todos/<id>/task` with `{project, title, body, priority, hold, release}`
-  queues a task from a to-do. It is a research write (research on, not read-only or 409, backup first). It
-  refuses, with a 400 that names the task or project, a to-do that is done, one whose `task` is still live (any
-  state but failed or cancelled), and a project that isn't configured. It creates the task as `/api/tasks` does
-  (`priority` 1, 0 or -1; `release` null takes the project default), stores `task: <id>` on the to-do under
-  `todos._locked()` (so the lock stays shared with `bin/todo`; `todos.update()` keeps the key but can't set
-  it), and returns `{id}`. Queueing again after the task failed or was cancelled replaces `task`. `todos` adds
-  `taskState: {state, merged}` to each to-do with a `task`, read from the tasks table, or null if that row is gone.
-- **Closing on merge.** Each watchdog pass closes every open to-do whose `task` is done with a non-empty
-  `merged`: `done` becomes the date the task finished (local time) and notes get the line
-  `Closed by task #N, merged <date>.` A task done without a merge closes nothing. A to-do is closed only while
-  `done` is null and its notes lack that line, so one you reopen by hand stays open. The pass is skipped while
-  read-only, like the rest of the watchdog.
 
 ### The Research tab (legacy)
 
@@ -898,7 +880,7 @@ The dashboard's **Research** tab replaces the old page. It shows only while `res
 under Research). It has the old page's views in claude-ops' look: proposals grouped by research project, each
 with its report, brief, chat and run log; the projects themselves (create, edit, delete, notes, activity); runs
 (a new question or an existing brief, with tier, size, model, project and notes), each with its live feed and a
-Stop button; to-dos; and the source registry. Reports render with the dashboard's own markdown, and a link to a
+Stop button; and the source registry. Reports render with the dashboard's own markdown, and a link to a
 `.md` file opens it in a side drawer. What is open is in the URL (`#research/p/<slug>/report`,
 `#research/project/<id>/chat`, `#research/run` …), so the back button and links from a phone work.
 
@@ -912,13 +894,6 @@ Stop button; to-dos; and the source registry. Reports render with the dashboard'
   research project linked to it. Click one to open `#research/project/<id>`. No chips while research is off.
 - **Header count.** While research runs or chat turns are under way, the header's working chip adds
   `· K research`. They take no task slot, so they are not in `N/max`. Click it to open the tab on the runs.
-- **Queue task.** Each open to-do has a **Queue task** button beside Edit and Delete (a write control, so
-  disabled while read-only). It opens an inline form: title (the to-do text), body (the text, its notes and
-  `From research to-do #<id>`, plus `, proposal <slug>` if it has one), code project (the one the to-do's
-  research project links to, or none if unlinked or stale), Hold, priority and Promote after merge. Changing the
-  code project there doesn't change the link. The to-do then shows `↳ task #N · <state>`; click it to open the
-  task. A task that no longer exists shows muted as `task #N (gone)`. Once the task fails or is cancelled the
-  button comes back.
 
 ### Cutover from the old server
 

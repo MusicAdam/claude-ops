@@ -2952,7 +2952,7 @@ def schedules_from_reply(p, reply, did):
 # ---------------------------------------------------------------- research tasks (README: ## Research)
 # A research run is a normal task flagged research (RES-1): its brief has the worker write one report to
 # docs/research/<slug>.md in its worktree, and it gates and merges like code. A merged report you haven't opened is a
-# Read to-do (RES-5); the open to-dos in the research repo's todos.json are Do items in their project (RES-8).
+# Read to-do (RES-5). Research to-dos are ordinary claude-ops to-dos: the research repo's own list is retired (RES-8).
 
 RESEARCH_DIR = "docs/research"
 # tier -> (minutes per worker turn, --max-budget-usd, what the tier means): research.py's TIME_LIMIT_MIN and RUN_SIZES
@@ -3251,44 +3251,6 @@ def project_uncommitted(project):
         repos.append({"repo": str(r.src).replace(str(HOME), "~", 1), "files": out,
                       "more": max(0, len(status) - UNCOMMITTED_FILES)})
     return {"repos": repos, "diff": "\n".join(diff), "diff_lines": total, "cut": total > len(diff)}
-
-
-def research_home():
-    """The claude-ops project whose checkout is the research repo (RES-7), or None."""
-    repo = research.REPO
-    return next((p.name for p in PROJECTS.values() if repo and Path(p.repo).expanduser().resolve() == repo), None)
-
-
-def research_todo_items():
-    """The open to-dos of the research repo's todos.json, as Do items in the project their research project links
-    to, else in the research repo's own project (RES-8). Skipped: done ones, ones whose queued task is still live,
-    and any with no project to show in. [] while research is off."""
-    try:
-        if not research.current():
-            return []
-        todos, links = research.todos.list_todos(), research.load_projects()["projects"]
-    except Exception as e:
-        print(f"research to-dos: {e}", flush=True)
-        return []
-    home, out = research_home(), []
-    live = research.task_rows(t.get("task") for t in todos if not t.get("done"))
-    for t in todos:
-        r = live.get(t.get("task")) if isinstance(t.get("task"), int) else None
-        if t.get("done") or (r and r["state"] not in research.DEAD):
-            continue
-        rid = (links.get(t.get("effectiveProject") or "") or {}).get("repo")
-        project = rid if isinstance(rid, str) and rid in PROJECTS else home
-        if not project:
-            continue
-        try:
-            since = datetime.datetime.strptime(t.get("created") or "", "%Y-%m-%d").timestamp()
-        except ValueError:
-            since = 0
-        why = (t.get("notes") or "").strip() or f"Research to-do #{t['id']}" + (
-            f" ({t['effectiveProject']})" if t.get("effectiveProject") else "")
-        out.append(todo_item(f"rtodo:{t['id']}", "Do", project, t.get("text") or f"To-do #{t['id']}", why, since,
-                             "research_todo", t["id"], rtodo=t["id"]))
-    return out
 
 
 RESTART_NOTE = ("The task queue restarted while you were working. Any command you were running was stopped. "
@@ -7177,7 +7139,6 @@ def todos_list(tasks, projects, last):
         out.append(todo_item(f"todo:{r['id']}", r["verb"], r["project"], r["title"], r["why"], r["created"],
                              "chat" if r["source_kind"] == "design" else r["source_kind"], r["source_id"],
                              todo=r["id"]))
-    out += research_todo_items()
     return sorted(out, key=lambda x: (TODO_ORDER.index(x["group"]), x["since"], x["key"]))
 
 
