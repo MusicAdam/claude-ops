@@ -82,5 +82,17 @@ class Analyze(unittest.TestCase):
         self.assertNotIn("Opus on release", " ".join(s["text"] for s in opsd.analysis("7")["suggestions"]))
 
 
+    def test_daily_covers_the_period(self):
+        days = opsd.analysis("7")["daily"]
+        self.assertIn(len(days), (7, 8))  # 7 × 24 h back can start part way through an eighth calendar day
+        self.assertEqual(days[-1]["day"], time.strftime("%Y-%m-%d"))
+        self.assertAlmostEqual(sum(d["cost"] for d in days), 21.6)
+
+    def test_medians_are_of_tasks(self):
+        s = opsd.analysis("7", "b")["summary"]  # b: tasks $3.0 and $2.0, releases $2.0 and $2.5
+        self.assertEqual(s["work_n"], 2)
+        self.assertAlmostEqual(s["cost_med"], 2.5)
+        self.assertEqual(s["n"], 4)
+
 if __name__ == "__main__":
     unittest.main()
