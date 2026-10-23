@@ -307,7 +307,10 @@ a.origin { color: var(--accent); cursor: pointer; text-decoration: underline; }
 .arow .pname { font-weight: 600; }
 .arow button { padding: 2px 10px; font-size: 12px; }
 .ktag { font-size: 11px; padding: 0 6px; border-radius: 4px; border: 1px solid var(--accent); color: var(--accent); }
-.deploys h3 { font-size: 12px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: 14px 0 4px; font-weight: 600; }
+.sect h3 { font-size: 12px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: 14px 0 4px; font-weight: 600; }
+.sect:first-child h3, .callout + .sect h3 { margin-top: 4px; }
+.dep details { font-size: 12px; margin-top: 2px; }
+.dlog { margin-top: 8px; font-size: 13px; }
 .dep { border-top: 1px solid var(--line); padding: 7px 0; }
 .dep .l1 { display: flex; flex-wrap: wrap; gap: 4px 8px; align-items: baseline; }
 .dep .dname { font-weight: 600; }
@@ -878,25 +881,27 @@ function projBody(g) {
   const pl = g.play, playing = !!(pl && pl.phase);
   const msg = mainMsg[g.name] || (pl && pl.error ? `<span class="err">${pl.stop ? "Stop" : "Play"} ${esc(pl.where === "dev" ? g.dev_branch : g.main_branch)} failed: ${esc(pl.error)}</span>` : "") || (!r ? "" : busy ? `Release #${r.id}: ${esc(r.phase || LABEL[r.state] || r.state)}`
     : r.state === "failed" ? `<span class="err">Release #${r.id} failed: ${esc((r.error || "").split("\n")[0])}</span>` : "");
-  return dirtyHtml(g) + sentHtml(g) + `<div>${esc(g.main_branch)} (golden): <span class="mono">${esc(g.main)}</span>${g.running ? ' · <span class="s-running">running now</span>' : ""}</div>` +
+  const promotable = g.ahead.length || (g.has_app && (!g.has_build || g.stale));
+  const where = (b, sha, run) => `<span class="nw">${esc(b)} <span class="mono">${esc(sha)}</span>${run ? ' · <span class="s-running">running</span>' : ""}</span>`;
+  // Release: main and dev, what Promote would bring, and the buttons that act on them.
+  return dirtyHtml(g) + sentHtml(g) + `<div class="sect"><h3>Release</h3>` +
+    `<div>${where(g.main_branch + " (golden)", g.main, g.running)} · ${where(g.dev_branch, g.dev, g.dev_running)} · ${g.ahead.length ? `<span class="s-review nw">${g.ahead.length} merge${g.ahead.length === 1 ? "" : "s"} to promote</span>` : `<span class="nw">nothing to promote</span>`}</div>` +
     (g.has_app && g.stale && g.built ? `<div class="s-review">The build is of ${esc(g.built)}, older than ${esc(g.main_branch)}. Promote to rebuild.</div>` : "") +
     (g.has_app && !g.has_build ? `<div class="s-review">Not built yet. Promote to build it.</div>` : "") +
-    mainLogHtml(g) +
-    `<div>${esc(g.dev_branch)}: <span class="mono">${esc(g.dev)}</span> · ${g.ahead.length ? `${g.ahead.length} merge(s) waiting to promote` : "nothing waiting"}${g.dev_running ? ' · <span class="s-running">running now</span>' : ""}</div>` +
     (g.can_launch && g.dev_stale ? `<div class="s-review">${esc(g.dev_branch)} needs build: it moved since its last build. Play ${esc(g.dev_branch)} builds it first.</div>` : "") +
     (g.train ? `<div class="s-review">Promote after merge: ${g.train.ids.map(taskLink).join(", ")} ${trainWords(g.train)}.</div>` : "") +
-    devLogHtml(g) +
-    `<div class="muted" style="font-size:12px;margin-top:4px">gate: ${g.gate.length ? esc(g.gate.join(", ")) : "none configured"}</div>
-    <div class="row">
+    devLogHtml(g) + (g.deploys.length ? "" : mainLogHtml(g)) +
+    `<div class="row">
       ${g.can_launch ? `<button class="primary" data-p="${g.name}" data-a="play" ${g.has_build && !playing ? "" : "disabled"}>Play ${esc(g.main_branch)}</button>` : ""}
       ${g.can_launch ? `<button data-p="${g.name}" data-a="play" data-where="dev" title="Run ${esc(g.dev_branch)} in its worktree, to try it before you promote${g.has_app ? `. Builds it first if it moved since its last build` : ""}" ${playing ? "disabled" : ""}>Play ${esc(g.dev_branch)}</button>` : ""}
       ${g.running ? `<button data-p="${g.name}" data-a="stop" title="Quit ${esc(g.title)} running from ${esc(g.main_branch)}" ${playing ? "disabled" : ""}>■ Stop ${esc(g.main_branch)}</button>` : ""}
       ${g.dev_running ? `<button data-p="${g.name}" data-a="stop" data-where="dev" title="Quit ${esc(g.title)} running from ${esc(g.dev_branch)}" ${playing ? "disabled" : ""}>■ Stop ${esc(g.dev_branch)}</button>` : ""}
-      ${!g.direct_main || busy || g.ahead.length || (g.has_app && (!g.has_build || g.stale)) ? `<button data-p="${g.name}" data-a="promote" title="Queues a release: if the gate passes on ${esc(g.dev_branch)}, ${esc(g.main_branch)} moves to it" ${busy || (!g.ahead.length && (!g.has_app || (g.has_build && !g.stale))) ? "disabled" : ""}>${busy ? `Release #${r.id} in progress` : `Promote ${esc(g.dev_branch)} → ${esc(g.main_branch)}`}</button>` : ""}
+      ${!g.direct_main || busy || promotable ? `<button data-p="${g.name}" data-a="promote" title="Queues a release: if the gate (${g.gate.length ? esc(g.gate.join(", ")) : "none configured"}) passes on ${esc(g.dev_branch)}, ${esc(g.main_branch)} moves to it" ${busy || !promotable ? "disabled" : ""}>${busy ? `Release #${r.id} in progress` : `Promote ${esc(g.dev_branch)} → ${esc(g.main_branch)}`}</button>` : ""}
       <button data-p="${g.name}" data-a="${g.paused ? "resume" : "pause"}" title="Pause or resume this project's tasks">${g.paused ? "▶ Resume" : "❚❚ Pause"}</button>
       ${g.direct_main ? `<span class="muted" title="Set by direct_main = true in the project's toml">Merges go straight to ${esc(g.main_branch)}</span>` : `<label title="New tasks start with &quot;Promote after merge&quot; ticked: once one merges into dev, the queue promotes dev to main, as the Promote button does. You can still untick it on a task. Tasks already queued keep theirs."><input type="checkbox" data-rel="${g.name}" ${g.auto_release ? "checked" : ""}> Promote after merge by default</label>`}
       <span style="flex:1"></span>${archiveBtn(g)}
-    </div>` + archiveAskHtml(g) + (msg ? `<div class="muted" style="margin-top:8px;white-space:pre-wrap">${msg}</div>` : "") + projTasksHtml(g) + deploysHtml(g);
+    </div><div class="muted" style="font-size:12px">gate: ${g.gate.length ? esc(g.gate.join(", ")) : "none configured"}</div>` + archiveAskHtml(g) + (msg ? `<div class="muted" style="margin-top:8px;white-space:pre-wrap">${msg}</div>` : "") +
+    `</div>` + deploysHtml(g) + projTasksHtml(g);
 }
 // Changelogs: what is on dev and not on main (Promote empties it), and what main gained since its last deploy (a
 // deploy empties it; without deploy targets, what the last promote brought in). One row per task, else per commit.
@@ -906,7 +911,7 @@ const nTasks = log => { const t = log.filter(c => c.task).length, o = log.length
   return [t ? `${t} task${t === 1 ? "" : "s"}` : "", o ? `${o} other commit${o === 1 ? "" : "s"}` : ""].filter(Boolean).join(" and "); };
 function devLogHtml(g) {
   const log = g.dev_log || [];
-  return log.length ? `<details data-k="devlog"><summary>${esc(g.dev_branch)} changelog: ${nTasks(log)} not on ${esc(g.main_branch)} yet</summary>${logRows(log)}</details>` : "";
+  return log.length ? `<details data-k="devlog"><summary>Promote would bring ${nTasks(log)} from ${esc(g.dev_branch)}</summary>${logRows(log)}</details>` : "";
 }
 function mainLogHtml(g) {
   const log = g.main_log || [], m = esc(g.main_branch), since = g.main_since ? ` <span class="mono">${esc(g.main_since)}</span>` : "";
@@ -973,21 +978,31 @@ const sentHtml = g => { const ids = g.senddev_pending || [];
 const day = iso => { const d = new Date(iso), y = d.getFullYear() !== new Date().getFullYear();
   return d.toLocaleDateString("en-GB", {day: "numeric", month: "short", ...(y ? {year: "numeric"} : {})}); };
 const taskLink = id => `<a data-task="${id}">#${id}</a>`;
+// What a deploy of d would ship: the commits between its last deploy and what it deploys now.
+const nCommits = n => `${n} commit${n === 1 ? "" : "s"}`;
+function depStatus(d) {
+  const from = d.from ? ` from ${esc(d.from)}` : "";
+  if (d.error) return `<span class="err">${esc(d.error)}</span>`;
+  if (d.blocked) return `<span class="s-review">${esc(d.blocked)}</span>`;
+  if (d.log_unknown) return `<span class="s-review" title="The commit it last deployed is gone from git (a rewritten history)">changes not deployed${from}: unknown</span>`;
+  if (d.behind == null) return "";
+  return d.behind ? `<span class="s-review nw">${nCommits(d.behind)} not deployed${from}</span>` : `<span class="nw">up to date</span>`;
+}
+const depLog = d => (d.log || []).length ? logRows(d.log) : "";
 function deploysHtml(g) {
-  if (!g.deploys.length) return g.deploys_loading ? `<div class="deploys"><h3>Deploys</h3><div class="muted">reading…</div></div>` : "";
+  if (!g.deploys.length) return g.deploys_loading ? `<div class="sect deploys"><h3>Deploys</h3><div class="muted">reading…</div></div>` : "";
   const open = g.deploy_open;
-  return `<div class="deploys"><h3>Deploys</h3>` + g.deploys.map(d => {
-    const l = d.last, base = d.from || g.main_branch;
-    const last = l ? `<span class="nw">${esc(shas(l.commit))}${l.version ? ` (${esc(l.version)})` : ""}</span> · <span class="nw">${ago(l.time, state.now)} ago</span> · ${taskLink(l.task)}` : "never deployed";
-    const why = d.error ? `<span class="err">${esc(d.error)}</span>` : d.blocked ? `<span class="s-review">${esc(d.blocked)}</span>`
-      : d.behind == null ? "" : d.behind ? `<span class="s-review nw">${d.behind} behind ${esc(base)}</span>` : `<span class="nw">up to date</span>`;
+  return `<div class="sect deploys"><h3>Deploys</h3>` + g.deploys.map(d => {
+    const l = d.last;
+    const last = l ? `<span class="nw" title="Last deployed ${esc(shas(l.commit))}${l.version ? ` (${esc(l.version)})` : ""} by #${l.task}">last ${ago(l.time, state.now)} ago ${taskLink(l.task)}${l.version ? ` · ${esc(l.version)}` : ""}</span>` : "never deployed";
     const stop = d.error || d.blocked || (d.version && d.version.error);
     const queued = d.open && d.open !== open ? `<span class="nw">${taskLink(d.open)} queued</span>` : "";  // its own, waiting behind the open one
     const btn = open ? `<a class="btn" data-task="${open}" title="A deploy of ${esc(g.title)} is open. Open it">Deploying… #${open}</a>
         <button data-deploy="${esc(d.name)}" data-p="${esc(g.name)}" ${stop ? "disabled" : ""} title="Queue another deploy behind it">Queue deploy</button>`
       : `<button class="primary" data-deploy="${esc(d.name)}" data-p="${esc(g.name)}" ${stop ? `disabled title="${esc(stop)}"` : ""}>Deploy</button>`;
+    const log = depLog(d) ? `<details data-k="deploylog:${esc(d.name)}"><summary>Changelog: ${nTasks(d.log)}</summary>${depLog(d)}</details>` : "";
     return `<div class="dep"><div class="l1"><span class="dname">${esc(d.name)}</span>
-      <span class="what">${[last, why, queued].filter(Boolean).join(" · ")}</span>${btn}</div>${d.has_version ? `<div class="l2">${versionLine(d.version)}</div>` : ""}</div>`;
+      <span class="what">${[depStatus(d), last, queued].filter(Boolean).join(" · ")}</span>${btn}</div>${log}${d.has_version ? `<div class="l2">${versionLine(d.version)}</div>` : ""}</div>`;
   }).join("") + `</div>`;
 }
 function versionLine(v) {
@@ -1018,6 +1033,9 @@ function openDeploy(project, name) {
   $("#dlg").innerHTML = `<div class="box" role="dialog" aria-modal="true" aria-labelledby="dtitle">
     <h2 id="dtitle">Deploy ${esc(name)}</h2>
     <div><span class="mono">${esc(d.commit ? d.commit.show : "")}</span> ${esc(d.commit ? d.commit.subject : "")}</div>${fromLine}
+    <div class="dlog">${depLog(d) ? `<div>What it ships: ${nTasks(d.log)} since its last deploy</div>${depLog(d)}`
+      : d.log_unknown ? `<div class="s-review">What it ships is unknown: the commit it last deployed is gone from git.</div>`
+      : !d.last ? `<div class="muted">First deploy: no changelog yet.</div>` : d.behind === 0 ? `<div class="muted">Nothing new since its last deploy.</div>` : ""}</div>
     ${busy}${opts}
     ${d.note ? `<label class="notebox">${esc(d.note)} <span class="muted">(required)</span><textarea id="dnote"></textarea></label>` : ""}
     <div class="row"><button class="primary" id="dgo"></button><button id="dcancel">Cancel</button></div>

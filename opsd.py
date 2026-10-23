@@ -2755,7 +2755,7 @@ def main_info(p, s=None):
     opens = q("SELECT id,state,deploy FROM tasks WHERE project=? AND kind='deploy' AND state NOT IN (?,?,?) "
               "ORDER BY state='queued', priority DESC, id", (p.name, *ENDED))  # the one under way first
     deploys = [dict(x, open=next((o["id"] for o in opens if json.loads(o["deploy"] or "{}").get("target") == x["name"]),
-                                 None)) for x in f.get("deploys") or []]
+                                 None), log=x.get("log") and titled(p, x["log"])) for x in f.get("deploys") or []]
     return {"name": p.name, "title": p.title, "main_branch": p.main, "dev_branch": p.dev, "direct_main": p.direct_main,
             "main": p.show(f["main"]), "built": p.show(built), "dev": p.show(f["dev"]), "ahead": f["ahead"],
             "has_app": bool(p.build), "can_launch": bool(p.launch),
@@ -3958,7 +3958,7 @@ def target_facts(p, t, main, s):
     rec = deploy_record(p, t.name, s)
     out = {"name": t.name, "repo": t.repo or None, "from": t.from_ or None, "note": t.note or None, "run": t.run,
            "has_version": bool(t.version), "error": t.error, "blocked": None, "commit": None, "behind": None,
-           "version": None,
+           "log": None, "log_unknown": False, "version": None,
            "last": rec and {"commit": rec.get("commit"), "show": target_show(p, t, rec.get("commit") or ""),
                             "time": rec.get("time"), "task": rec.get("task"), "version": rec.get("version")}}
     if t.error:
@@ -3974,11 +3974,13 @@ def target_facts(p, t, main, s):
     commit = target_commit(p, t, revs)
     out["commit"] = {"sha": commit, "show": target_show(p, t, commit), "subject": subject}
     if rec and rec.get("revs"):
-        try:
-            out["behind"] = sum(int(r.git("rev-list", "--count", f"{old}..{sha}"))
-                                for (r, sha), old in zip(p.pairs(revs), rec["revs"].split()) if r in t.parts(p))
-        except RuntimeError:
-            pass  # the recorded commit is gone (a rewritten history): how far behind is unknown
+        try:  # what a deploy now would ship: its repos' commits since the last deploy, newest first
+            mine = [(r, old, sha) for (r, sha), old in zip(p.pairs(revs), rec["revs"].split()) if r in t.parts(p)]
+            out["behind"] = sum(int(r.git("rev-list", "--count", f"{old}..{sha}")) for r, old, sha in mine)
+            out["log"] = sorted(([r.sub, *c] for r, old, sha in mine for c in first_parent_log(r, old, sha)),
+                                key=lambda c: -c[2])
+        except RuntimeError:  # the recorded commit is gone (a rewritten history): what it would ship is unknown
+            out["behind"], out["log"], out["log_unknown"] = None, None, True
     if t.version:
         out["version"] = version_facts(p, t, revs)
     return out
