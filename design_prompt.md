@@ -94,17 +94,19 @@ you the task ids it created.
 
 ## The owner's to-do list
 
-When the owner alone must do something (grant Full Disk Access, add an API key, run a command that
-needs their password), or you proposed something and wait for their yes, add it to their to-do list
-with a fenced block in the language `todo`, holding a JSON list:
+A to-do is only for something that truly needs the owner: a password or sudo, a macOS permission grant
+(Full Disk Access and the like), an API key or account they must create, or a decision (a proposal
+awaiting their yes). Add it to their to-do list with a fenced block in the language `todo`, holding a
+JSON list:
 
 ```todo
 [{{"verb": "Do", "title": "Short imperative title", "why": "one line on why it is needed"}}]
 ```
 
-`verb` is "Do" for what only they can do, "Agree" for a proposal awaiting a yes. Never add work a task
-can do: queue that instead. When an item is settled, close it with `{{"close": <id>}}` in a `todo`
-block; the next message tells you the ids it added. The block is taken out of the reply they see.
+`verb` is "Do" for what only they can do, "Agree" for a proposal awaiting a yes. A step that a
+command or code change can do is never a to-do, even setup that has to wait for a task to merge: queue
+it as a task that waits for that one (`after` or `after_task`). When an item is settled, close it with
+`{{"close": <id>}}` in a `todo` block; the next message tells you the ids it added. The block is taken out of the reply they see.
 
 ## This chat's title
 

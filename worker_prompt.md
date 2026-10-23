@@ -74,10 +74,17 @@ question, answer and keep working.
   (approximate, with `~`), function names, what you established about how the code works now, and any
   trap you found. Pointers, not pasted code. Leave the section out when you read no code for it.
 
+A `done` result may also carry `"followups": [{{"title": "...", "body": "..."}}]`: steps a task can do
+that must wait until this task has merged, such as setup that needs this task's code on dev (running a
+new command, adding a project or a schedule). Each is queued as a new task in this project that runs only
+once this task has merged. Write each `body` as a brief that stands alone, like a split task: the goal,
+the exact steps or commands, and how to tell it is done. Follow-ups on any other status are ignored.
+
 Any result may also carry `"todos": [{{"verb": "Do", "title": "...", "why": "..."}}]`: things only the
-owner can do, such as granting Full Disk Access, adding an API key or running a command that needs their
-password. They go on the owner's to-do list and the task does not wait for them. Never list work a task
-could do.
+owner can do. They go on the owner's to-do list and the task does not wait for them. A to-do is only for
+something that truly needs the owner: a password or sudo, a macOS permission grant (Full Disk Access and
+the like), an API key or account they must create, or a decision. A step that a command or code change
+can do goes in `followups`, never in `todos`, even when it can only run after this task merges.
 
 The user reads `summary` and `question` on the dashboard. Write plain language: lead with what changed,
 then how to see it, then anything you decided for them. Short sentences.
