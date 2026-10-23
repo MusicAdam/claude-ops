@@ -15,6 +15,7 @@ the golden version: it changes only when you promote.
 ./opsd.py add-project ~/dev/myrepo   # or "+ Project" on the dashboard
 ./opsd.py add -p myrepo "Fix the crash when the save file is empty"
 ./opsd.py add -p myrepo --model sonnet "Rename the config key"   # its worker runs on Sonnet (see Models)
+./opsd.py add -p myrepo --research T1 "Which vector database suits a small app?"   # a research task (RES-2)
 ./opsd.py schedule add -p myrepo --every 'mon 09:00' "Check dependencies"   # a recurring job (see Recurring jobs)
 ./opsd.py deploy -p myrepo "store test" --version patch --note "Fixes the crash"   # see Deploys
 ./opsd.py send myrepo --design "How does the save format work?"   # what a worker or chat runs to ask a peer project
@@ -260,8 +261,10 @@ A design chat is Claude talking with you about one project. You meet it as **pla
 conversation (see [TODAY-2](#today-view)), where each design chat is a topic of the project's one conversation. The
 Design tab, under More, lists them all, as before.
 
-It reads the project's docs and the latest dev code but cannot edit the project (`--permission-mode dontAsk` with read-only tools). It can write
-documents of its own, such as a design doc or a one-file HTML prototype, in `~/.claude-ops/designs/<chat id>/`:
+It reads the project's docs and the latest dev code and changes the project through tasks
+(`--permission-mode dontAsk`). Two exceptions, both because you asked: for research it queues a research task
+(`opsd.py add -p NAME --research T1 "question"`), and for a change you want made directly in your checkout it edits
+your checkout (see *What a topic may run* in [TODAY-2](#today-view)). It can write documents of its own, such as a design doc or a one-file HTML prototype, in `~/.claude-ops/designs/<chat id>/`:
 the only place it may Write or Edit, outside every repo. Its reply links them, the dashboard lists them above
 the chat, and `/api/designs/<id>/files/<name>` serves them (HTML sandboxed, so a prototype's scripts can't call
 the dashboard's API). Workers can't see that folder, so a brief that builds on a document quotes it. When you
@@ -559,34 +562,40 @@ Their routes (`#tasks`, `#projects`, `#schedules`, …) still open them. The que
     the project, newest first: title, mode, last activity, and ● when it has a reply you haven't read. Click one to
     make it the current topic. Sending a message into an older topic resumes it, as sending to an ended chat does.
     Nothing is ended or tidied by you here: this view has no **End chat** (the API and the Design and Chat tabs keep it).
-  - **Mode switch.** Chips above the message box say what Claude may do:
-    - **plan & design**: a design chat. It reads `dev`, writes only its documents folder and, for an OpenSpec
-      change, `openspec/`. It can draft OpenSpec changes and prototypes, never code.
-    - **edit my checkout**: a project chat, in your checkout.
-    - **research**: a research chat about the research project linked to this project (the first one, by name).
-      Hidden while research is off; shown but disabled when no research project is linked to it.
+  - **One kind of topic.** Above the message box there is only **New topic**, and a line under it when your next
+    message starts one. Every new topic is plan & design: a design chat. You don't pick a mode first; you ask Claude.
+    It queues tasks, starts research (it queues a research task, see RES-2) and, when you ask for a change made
+    directly in your checkout, edits it there. See *What a topic may run* below.
 
-    Switching mode while a topic is open starts a new topic of that kind, and one line under the chips says so:
-    `Switched to <mode>: your next message starts a new topic, with a short handoff of “<title>”.` Its first
-    message carries that handoff (as `chat_handoff()` builds it for a fresh session, but about 2k tokens at most) to
-    Claude, as a dashboard note, and the new topic shows the line above as its first entry. Switching back before
-    you send returns to the topic you left. A topic never changes kind: picking an older topic switches the chips to
-    its mode. A research topic's handoff goes at the end of its first message, and the timeline hides it.
+    Older topics keep their kind. An **edit my checkout** (project chat) or **research** topic from before still
+    opens and continues as that kind, and the divider and **Earlier topics** still show its mode word. A topic never
+    changes kind. If the kept state names a new topic of another kind (a mode switch from before), the view resets it
+    to plan & design.
+
+    The backend modes stay (`MODES`, `conv_open()` with `how: "mode"`, the topic handoff a switch carries), and the
+    Design and Chat tabs still start their own kinds; the Today composer no longer offers a switch.
   - **Which topic a message goes to** (`conv_open()` in opsd.py):
     1. Opening a to-do whose source is a chat (Read, Agree, …) makes that chat the current topic.
     2. Opening a to-do whose source is a task, or **Ask Claude about this**, continues the current plan & design
        topic: the current topic if it is one, else the project's latest plan & design topic, else a new one starts
        with your next message. The message box gets the starter text (`About #231: `) when it is empty.
-    3. **New topic** starts a fresh one in the current mode: your next message opens it. The line under the chips
-       says so.
+    3. **New topic** starts a fresh plan & design topic (`how: "new"`, `mode: "design"`): your next message opens
+       it. The line under the button says so.
     4. Otherwise a message continues the current topic.
-    5. **Queue task**, beside New topic, skips Claude: the message box becomes the brief of a new task in the
-       project (`POST /api/tasks`, as the Tasks page's form does), and the line over the box says so. Send reads
-       **Queue task**; the row under the box links the new task. Cancel returns the box to the conversation.
-  - **What each mode may run.** Both plan & design and edit my checkout run any shell command you could at the
-    CLI, past the guard (`guard_settings()`). Plan & design's prompt keeps it off the project's files: it finds out,
-    checks and queues, and writes only its documents. Edit my checkout can also queue a task in its own project with
-    `opsd.py send`.
+
+    To queue a task, ask Claude. The Tasks page's own **Queue task** form still queues one without Claude.
+  - **What a topic may run.** Plan & design and edit my checkout both run any shell command you could at the CLI,
+    past the guard (`guard_settings()`). Plan & design's prompt (`design_prompt.md`) sets its limits:
+    - By default it reads `dev`, writes only its documents folder and, for an OpenSpec change, `openspec/`, and
+      queues tasks for code.
+    - When you ask for research, it runs `opsd.py add -p <project> --research T0|T1|T2 "question"`, which queues a
+      research task (RES-2), and tells you the task id.
+    - Only when you explicitly ask for a change made directly in your checkout does it edit files there and run
+      commands in it. It may then use Edit and Write on the checkout (`Edit(/<repo>/**)`, with `--add-dir <repo>`);
+      an OpenSpec change's chat doesn't get this. It doesn't commit unless you ask.
+
+    An older edit my checkout topic is plain Claude in your checkout, as before, and can queue a task in its own
+    project with `opsd.py send`.
   - **Titles.** A new topic is titled from its first message, as chats are. Claude may retitle it when the
     subject clearly changes, with a fenced block in the language `topic`: `{"title": "..."}`. The design and project
     chat prompts say so (`design_prompt.md`, `PROJECT_CHAT_PROMPT`). The block is taken out of the reply, the
@@ -648,8 +657,7 @@ Below 700px Today is phone-first. The rules:
   **Details ▾** and **Skip →**; then the title; then one row of action buttons that scrolls sideways. The why and
   the facts open under **Details ▾**.
 - **HDR-3 Composer.** One row: attach (📎), the message box (it grows to at most 4 lines) and an **↑** send
-  button. The mode chips (with **New topic**), the line that says where a message goes, and the project picker sit
-  above it.
+  button. **New topic**, the line that says where a message goes, and the project picker sit above it.
 - **HDR-4 Room to talk.** While a step is open the conversation gets at least 60% of the screen height; the step
   card scrolls inside what is left.
 - **PHONE-2 Back.** **‹ To-do** returns to the list, and so does the phone's back gesture: opening a step or a
@@ -703,7 +711,8 @@ Research is ordinary queue work in the project it is about. A report lives in th
   the promote train, Try and Review, steering) should treat it as a task. `/api/state` shows `research` on each task
   (null on others).
 - **RES-2 Asking for one.** **New research** in the project's Research section (TODAY-4), or
-  `POST /api/projects/<name>/research` with `{question, tier, every?, hold?}`. `tier` is `T0`, `T1` (the default) or
+  `POST /api/projects/<name>/research` with `{question, tier, every?, hold?}`, or from the CLI
+  `opsd.py add -p NAME --research T0|T1|T2 "question"` (what a plan & design topic runs when you ask it for research). `tier` is `T0`, `T1` (the default) or
   `T2`. The slug is made from the question's words, unique among the reports on `dev` and the project's open research
   tasks. The task is titled `Research: <question>`. With `every` (any [schedule](#recurring-jobs) form) it also makes
   a recurring research job and queues the first run now, as the schedule's last task. It answers

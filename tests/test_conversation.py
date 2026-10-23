@@ -114,6 +114,24 @@ class Conversation(unittest.TestCase):
         v = opsd.conv_open("demo", "new")
         self.assertEqual((v["topic"], v["mode"], v["from"]), (None, "project", None))
 
+    def test_new_topic_from_older_checkout_topic_is_plan_and_design(self):
+        # the Today composer's New topic always asks for plan & design; the older topic keeps its own kind
+        p = self.chat("edit", kind="project")
+        opsd.conv_open("demo", "chat", p)
+        v = opsd.conv_open("demo", "new", mode="design")
+        self.assertEqual((v["topic"], v["mode"], v["from"]), (None, "design", None))
+        r = opsd.conv_say("demo", "Plan the next thing")
+        self.assertEqual(opsd.design(r["topic"])["kind"], "design")
+        self.assertEqual(opsd.design(p)["kind"], "project")
+        opsd.conv_open("demo", "topic", p)
+        self.assertEqual(opsd.conv_say("demo", "carry on")["topic"], p)  # it still opens and continues as itself
+
+    def test_design_prompt_names_checkout_and_research_command(self):
+        p = opsd.PROJECTS["demo"]
+        out = opsd.design_system_prompt(p)
+        self.assertIn(str(p.repo), out)
+        self.assertIn("opsd.py add -p demo --research T1", out)
+
     def test_gone_topic_falls_back_to_latest(self):
         a = self.chat("a", ago=100)
         b = self.chat("b", ago=10)

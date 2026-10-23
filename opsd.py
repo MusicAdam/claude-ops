@@ -5,7 +5,8 @@
   opsd.py add-project PATH [NAME]      detect PATH and write ~/.claude-ops/projects/NAME.toml
   opsd.py add -p NAME [--model M] [--effort E] "text..."   queue a task through the running daemon; --model opus,
                                        sonnet, haiku or a full model id (else the setting model:task, then model);
-                                       --effort low, medium, high, xhigh or max (else the setting effort)
+                                       --effort low, medium, high, xhigh or max (else the setting effort);
+                                       --research T0|T1|T2 queues a research run whose question is the text
   opsd.py schedule add -p NAME --every 'mon 09:00' [--body TEXT] [--hold] [--model M] [--effort E] "title..."
                                        a recurring job: queue that task on that timetable (README: Recurring jobs);
                                        --research T0|T1|T2 makes it a research job whose question is the text
@@ -2968,7 +2969,8 @@ def new_research(project, b):
     if every:
         every_text(every)  # refused before anything is queued
     question = (b.get("question") or "").strip()
-    out = queue_research(project, question, tier, bool(b.get("hold")))
+    out = queue_research(project, question, tier, bool(b.get("hold")), model=b.get("model") or None,
+                         effort=b.get("effort") or None)
     out["schedule"] = None
     if every:
         out["schedule"] = add_schedule({"project": project, "title": f"Research: {title_of(question)}"[:120],
@@ -4906,7 +4908,8 @@ def design_system_prompt(p, d=None, cwd=None):
     notes = f"## Notes for {p.title}\n\n{p.design_notes}\n" if p.design_notes else ""
     did = d["id"] if d else 0
     out = (CODE / "design_prompt.md").read_text().format(project=p.title, dev_wt=cwd or p.dev_wt, dev=p.dev,
-                                                         files=CHAT_FILES / str(did), did=did,
+                                                         files=CHAT_FILES / str(did), did=did, checkout=p.repo,
+                                                         research=f"{OPSD_CMD} add -p {shlex.quote(p.name)} --research",
                                                          notes=notes + peer_brief(p, "design"))
     if d and d["spec"]:
         out += "\n" + (CODE / "spec_prompt.md").read_text().format(change=d["spec"], path=SPEC_DIR / d["spec"],
@@ -5230,6 +5233,8 @@ def design_turn(did, text, fresh_why=None):
         files = CHAT_FILES / str(did)
         files.mkdir(parents=True, exist_ok=True)
         tools += f",Edit(/{files}/**)"  # Edit rules cover Write too
+        if not spec_chat(d):  # the owner's checkout, only when they ask for a change made there (design_prompt.md)
+            tools += f",Edit(/{p.repo}/**)"
     kept, handoff = None, ""
     # cheaper to start over than to resume (chat_stale), or nothing to resume (fresh_why): a handoff note, then this turn
     if why := ((fresh_why, None) if fresh_why else chat_stale(d)):
@@ -5275,6 +5280,8 @@ def design_turn(did, text, fresh_why=None):
                "--settings", guard_settings(None),
                "--append-system-prompt", system]
         cmd += ["--add-dir", str(CHAT_FILES / str(did))]
+        if not spec_chat(d):
+            cmd += ["--add-dir", str(p.repo)]
         if spec_chat(d):  # deny rules win over the allowed-tools a command's own frontmatter grants
             cmd += ["--disallowedTools", SPEC_DENY]
     cmd += ["--add-dir", str(IMAGES)]
@@ -6073,7 +6080,8 @@ def task_chat_turn(tid, text):
 # dashboard like any other. How it ends (a task) or its first reply (a chat) goes back to the sender: an event on
 # a task, a note in a chat, which a design chat's next turn reads.
 
-SEND_CMD = f"{shlex.quote(sys.executable)} {shlex.quote(str(CODE / 'opsd.py'))} send"
+OPSD_CMD = f"{shlex.quote(sys.executable)} {shlex.quote(str(CODE / 'opsd.py'))}"
+SEND_CMD = f"{OPSD_CMD} send"
 PEER_KINDS = {"task": "task", "design": "design chat", "chat": "chat"}  # what `send` starts -> words
 PEER_HOPS = 3  # a send passed on this many times is refused, so two projects can't keep each other busy
 PEER_MAX = 10  # sends one task or chat may make
@@ -7459,6 +7467,20 @@ def send_cli(argv):
         sys.exit(f"not sent: the claude-ops daemon at {url} did not answer ({e.reason})")
 
 
+def add_request(project, words):
+    """opsd.py add -p PROJECT [--model M] [--effort E] [--research T0|T1|T2] TEXT: (path, body) to post. With
+    --research it queues a one-off research run whose question is TEXT (RES-2), else a task. TEXT from stdin when not
+    given."""
+    opts, words = {}, list(words)
+    while words[:1] in (["--model"], ["--effort"], ["--research"]) and len(words) >= 2:
+        opts[words[0][2:]], words = words[1], words[2:]
+    text = " ".join(words) or sys.stdin.read()
+    if "research" in opts:
+        return (f"/api/projects/{quote(project, safe='')}/research",
+                {"question": text, "tier": opts.pop("research"), **opts})
+    return "/api/tasks", {"project": project, "body": text, **opts}
+
+
 if __name__ == "__main__":
     args = sys.argv[1:]
     cmd = args.pop(0) if args else "serve"
@@ -7477,11 +7499,8 @@ if __name__ == "__main__":
     elif cmd == "send" and args and not args[0].startswith("-"):
         send_cli(args)
     elif cmd == "add" and len(args) >= 2 and args[0] == "-p":
-        words, opts = args[2:], {}
-        while words[:1] in (["--model"], ["--effort"]) and len(words) >= 2:
-            opts[words[0][2:]], words = words[1], words[2:]
         try:
-            out = post("/api/tasks", {"project": args[1], "body": " ".join(words) or sys.stdin.read(), **opts})
+            out = post(*add_request(args[1], args[2:]))
         except HTTPError as e:
             sys.exit(json.loads(e.read() or b"{}").get("error") or str(e))
         if w := (json.loads(out or "{}") or {}).get("warning"):

@@ -310,5 +310,23 @@ class ResearchTodoBridge(unittest.TestCase):
         self.assertEqual(opsd.research_todo_items(), [])
 
 
+class AddCli(unittest.TestCase):
+    """opsd.py add -p NAME [--research T0|T1|T2]: what it posts to the daemon (a plan & design chat starts research
+    this way)."""
+
+    def test_research_flag_posts_a_research_run(self):
+        self.assertEqual(opsd.add_request("my app", ["--research", "T2", "vector", "dbs?"]),
+                         ("/api/projects/my%20app/research", {"question": "vector dbs?", "tier": "T2"}))
+
+    def test_research_flag_mixes_with_model_and_effort(self):
+        path, body = opsd.add_request("demo", ["--model", "sonnet", "--research", "T0", "--effort", "low", "q"])
+        self.assertEqual((path, body), ("/api/projects/demo/research",
+                                        {"question": "q", "tier": "T0", "model": "sonnet", "effort": "low"}))
+
+    def test_without_flag_a_task(self):
+        self.assertEqual(opsd.add_request("demo", ["--effort", "high", "fix", "it"]),
+                         ("/api/tasks", {"project": "demo", "body": "fix it", "effort": "high"}))
+
+
 if __name__ == "__main__":
     unittest.main()
