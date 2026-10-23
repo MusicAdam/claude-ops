@@ -467,24 +467,32 @@ the uncommitted-files banner, Deploy. `/api/state` gathers them into one list, `
   - **Read**: a design or project chat with a reply you haven't opened, as ● in Earlier topics marks it.
   - **Read** (a report): a research task merged into `dev` whose report you haven't opened (see
     [Research](#research), RES-5).
-- **TODO-2 Two kinds Claude adds.** **Do**: something that truly needs you: a password or sudo, a macOS
+- **TODO-2 Two kinds Claude adds, and your own.** **Do**: something that truly needs you: a password or sudo, a macOS
   permission grant (Full Disk Access and the like), an API key or account you must create. **Agree**: a
   decision; Claude proposed something and waits for your yes. A step that a command or code change can do is
   never a to-do, even setup that has to wait for a task to merge: a chat queues it as a task, a worker as a
   follow-up (TODO-5). The worker, design and follow-up chat prompts all give this same list. These
   are stored in the `todos` table. In every chat block (`queue`, `todo`, `schedule`, `topic`) a fence closes
-  the block only on a line of its own, so three backticks inside a JSON string are content. Two ways in:
+  the block only on a line of its own, so three backticks inside a JSON string are content. Three ways in:
   - A design or project chat reply with a fenced block in the language `todo`, holding a JSON list of
-    `{"verb": "Do" | "Agree", "title", "why"}`. The block is taken out of the reply you see, as a `queue` block
-    is. The item's source is that chat.
+    `{"verb": "Do" | "Agree", "title", "why", "wait"?}`. The block is taken out of the reply you see, as a
+    `queue` block is. The item's source is that chat. `wait` parks the new item until tasks end (TODO-6):
+    `{"tasks": [283], "until": "merged" | "released"}`, and/or `{"after": [0]}`, 0-based indices into the tasks
+    the same reply's `queue` block queued, which become their new ids. A task id that isn't there, or an index
+    out of range, is noted back to Claude as a skipped wait, and the item is still added, unparked.
   - A research chat turn's reply with the same block (see [Research chats add to-dos](#legacy-research-runs-in-the-research-repo)).
     It goes to the claude-ops project the research project links to (`repo`), else to the project whose
     checkout is the research repo. Its source is kind `research`, id `r:<thread>` (Today shows it as a chat and
     opens that research topic).
   - A worker's result JSON with an optional `todos` list of the same shape. The task doesn't stop for it. The
-    source is that task.
+    source is that task. Its `wait` may hold `tasks`, not `after`.
+  - Your own: `POST /api/todos {project, title, why?, wait?}` (the Today list's **+ Add** row, TODAY-1) stores
+    a **Do** with `source_kind` `owner` and no source id. `wait` is `{tasks, until}`, as above; with it the item
+    is created parked. An unknown project, an empty title or an unknown task id is a 400 that says so, and
+    nothing is added.
 
-  Every item links to its source. An open item with the same project and title is not added twice.
+  Every item but your own links to its source. An open item with the same project and title is not added
+  twice: Claude's is skipped quietly, yours is a 400.
 - **TODO-3 Closing.** Derived items close by themselves. A stored item closes with
   `POST /api/todos/<id>/done` (your Done button), or when Claude writes `{"close": <id>}` in a `todo` block. A stored Agree also closes when you send a message
   in the chat (or research topic) that added it, even if the message waits in the chat's queue; a Do stays open.
@@ -506,25 +514,47 @@ Each item is `{key, verb, group, project, title, why, since, est_min, source: {k
 across polls (`task:231:review`, `chat:42:read`, `project:diskgame:commit`, `todo:7`, `task:240:report`).
 `since` is when the state began, as near as the queue knows: a task's last event, a chat's last reply, the oldest uncommitted file, the
 oldest commit not yet promoted or deployed. `est_min` is a guess at minutes: Answer 2, Fix 5, Try 5, Review 3,
-Agree 2, Read 3, Promote 1, Ship 2, Commit 2, Do 5. `source.kind` is `task`, `chat` or `project`: a stored item
-points at the chat or task that added it, and has `todo`, its id for the Done button. Every item also has
-`note` (your note to self, `""` when none); a parked item has `parked: {since, wake_task}` and a skipped one
+Agree 2, Read 3, Promote 1, Ship 2, Commit 2, Do 5. `source.kind` is `task`, `chat`, `project` or `owner`: a
+stored item points at the chat or task that added it, and has `todo`, its id for the Done button; one you added
+yourself has kind `owner` and id `null`, and no source link. Every item also has `note` (your note to self, `""`
+when none); a parked item has `parked: {since, wake_tasks, wake_on, wake_task}` (`wake_task` is the first of
+`wake_tasks`, or null, kept for one release for older dashboards) and a skipped one
 `skipped: <ts>` (TODO-6).
 
-- **TODO-6 Notes and parking.** Notes live in the table `todo_notes (key, note, parked, skipped, wake_task,
-  updated)`, keyed by the item's `key`.
-  - `POST /api/todos/note {key, note}` saves the note and re-reads `wake_task`: the first `#(\d+)` or
-    `task (\d+)` in it (any case), else none. Editing a parked item's note keeps it parked; clearing it does
-    not unpark it.
-  - `POST /api/todos/skip {key}`: with a non-empty note it parks the item (`parked` = now); otherwise it skips
-    it (`skipped` = now). A skip lasts until local midnight.
+- **TODO-6 Notes and parking.** Notes live in the table `todo_notes (key, note, parked, skipped, wake_tasks,
+  wake_on, wake_set, updated)`, keyed by the item's `key`. It works for any item, derived or stored.
+  - **A wait** is a set of tasks, `wake_tasks` (a JSON list of ids), and a target, `wake_on`: `merged` (the
+    default) or `released`. A database from before wait sets has a `wake_task` column; each row with one gets
+    `wake_tasks` `[N]` on start.
+  - `POST /api/todos/note {key, note}` saves the note. When no explicit wait is set (`wake_set` 0) it also
+    re-reads the wait from the note: its first `#(\d+)` or `task (\d+)` (any case) gives `wake_tasks` `[N]`
+    until merged, else none. A wait set by the picker or by Claude (`wake_set` 1) is never changed by a note
+    edit. Editing a parked item's note keeps it parked; clearing it does not unpark it.
+  - `POST /api/todos/wait {key, tasks: [ids], until}` sets an explicit wait and parks the item (the **Wait
+    for…** chooser, TODAY-2). `until` is `merged` or `released` (default `merged`). An unknown task id is a 400
+    that names it. `released` when every listed task's project is straight to main (`direct_main`) is accepted
+    and stored as `merged`: there, merged is released. `tasks: []` clears the wait and unparks the item.
+  - `POST /api/todos/skip {key}`: with a non-empty note or an explicit wait it parks the item (`parked` = now);
+    otherwise it skips it (`skipped` = now). A skip lasts until local midnight.
   - `POST /api/todos/unpark {key}` clears `parked` and `skipped`.
   - Order: unparked items as TODO-4, then skipped ones in the order you skipped them, then parked ones, which
     carry `parked` for the dashboard to group.
-  - **Auto-wake.** On each state build, a parked item whose `wake_task` is no longer queued, running or
-    merging (any other state, or deleted) is unparked and not skipped, and ` · #249 <word>` is added to its
-    note, with the word for the task's state: merged (done), failed, needs you, in review, paused, gone. A note
-    with no task number never wakes; it stays parked until you unpark it.
+  - **Auto-wake.** On each state build, a parked item with a wait wakes (is unparked and not skipped) when
+    either:
+    - every listed task has reached the target. `merged`: the task is done (with a merge; a task done with no
+      code to merge counts too). `released`: also, every commit in its `merged` is an ancestor of its project's
+      `main`. In a straight-to-main project merged counts as released. A task that is merged but not yet
+      released keeps a `released` wait parked.
+    - any listed task stops short: failed, needs you (needs_input), in review, paused, cancelled, or deleted.
+
+    On wake, one entry per task is added to its note: ` · #283 merged, #284 failed`, with the word for each
+    task: merged or released (the target reached), done (done with nothing merged), failed, needs you, in
+    review, paused, cancelled, gone (deleted), or the state of one still under way (queued, running…). A note
+    with no task number and no explicit wait never wakes; it stays parked until you unpark it.
+  - **The released check** reads `main`'s tip from the project facts the state build already has, so it adds
+    no `git rev-parse`. Per project it keeps which merge commits `main` contains, against that tip: while
+    `main` doesn't move, no git call; when it moves, one `git rev-list --ignore-missing <shas> --not <main>`
+    per repo for the commits still waited on.
   - A row is deleted when its key is no longer in `todos` (the item went by itself), or when its note is empty
     and it is neither parked nor skipped since today's midnight. Items of a project whose facts failed to load
     keep their rows.
@@ -592,7 +622,13 @@ stay on the right of the header.
     midnight. With a note it parks the item: it leaves the list, the chip counts and the **N things need you**
     total, and goes to a folded **Parked (N)** section at the bottom. Both are kept on the server (TODO-6), so
     every device agrees. A parked row shows its verb, title, project, the note and `parked 4d` (its age since
-    parking). An item with a note shows the note on its row, muted and cut with an ellipsis.
+    parking). A parked item with a wait says so on its row: `Waiting on #283, #284 to merge` (or `to
+    release`). An item with a note shows the note on its row, muted and cut with an ellipsis.
+  - **+ Add** sits at the top of the list (on a phone, at the top of the To-do column). It opens a small form:
+    a title, an optional why, and the project: the project switcher's, or a select when it shows All projects.
+    **Wait for…** in it opens the same chooser as on a step (TODAY-2), so the new item starts parked. **Add**
+    calls `POST /api/todos` (TODO-2); the item is a **Do** you close with **Done**. An error (a duplicate title,
+    an unknown task) shows under the form, which keeps what you typed.
   - The next item selected when one leaves the list is never a parked one.
 - **TODAY-2 Centre: the step.** The selected item as one step: **Step k of n** (k within the filter) · project,
   the title, the why, and key facts. For a task: its number, the gate result, how many files it changed, and how
@@ -602,6 +638,13 @@ stay on the right of the header.
   type (after about 500 ms, and on blur) through `POST /api/todos/note`. Skip's tooltip says what it will do:
   "Move to the end of the list until midnight" with an empty note, "Park it with this note" with one. A parked
   item's step has **Unpark** beside Skip. See TODO-6.
+
+  Every step also has **Wait for…** beside Skip. It opens a small chooser under the step: the item's project's
+  tasks that are queued, running, gating, merging or in review (id and title, a checkbox each), a box for any
+  other task ids (`283, 290`), and a **Merged / Released** toggle. Released shows only when the project is not
+  straight to main. **Wait** calls `POST /api/todos/wait` and the item goes to Parked. A parked item with a wait
+  reads `Waiting on #283, #284 to merge` (or `to release`) at the top of its step, with **Clear**, which sends
+  `tasks: []` and so unparks it. The chooser opens with the item's current wait ticked.
 
   | Verb | Primary | Others |
   |---|---|---|
@@ -614,7 +657,8 @@ stay on the right of the header.
   | Commit | Commit these: **Send to dev**, unchanged underneath. Its tooltip says it lands the files on `main` through the gate, then clears them from your checkout; `dev` in a project with Promote after merge off (and not straight to main). While one is open: Sending… #id | |
   | Read | A chat: Mark read when it is new, else End topic. A report: Open report (RES-5) | A chat: End topic, or Reply. A report: Details |
   | Agree | Reply (focuses the message box; sending closes it) | Done |
-  | Do | Done (`POST /api/todos/<id>/done`) | |
+  | Do | Done (`POST /api/todos/<id>/done`); the same for one you added yourself (**+ Add**) | |
+  | Every verb | | Wait for… (the chooser above), beside Skip |
 
   The Ship step also lists its changelog, open, under the why: `main_log`, the rows the Projects card's
   `main` changelog shows (task or short sha, repo, title, how long ago), at most 15, then **and N more**, which
