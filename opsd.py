@@ -3158,8 +3158,9 @@ def research_reports(p):
 
 def report_read(project, path, merged_only=False):
     """Mark the report at path read: every research task of project that wrote it (with merged_only, only those done
-    and merged). Returns their ids (RES-5)."""
+    and merged: what a Read step lists). Returns their ids (RES-5)."""
     proj(project)
+    path = os.path.normpath(path.strip()) if path and path.strip() else ""
     only = " AND state='done' AND merged IS NOT NULL AND merged!=''" if merged_only else ""
     return [r["id"] for r in q("UPDATE tasks SET research=json_set(research, '$.read', ?) WHERE project=? AND "
                                "research IS NOT NULL AND json_extract(research, '$.path')=? AND "
@@ -3167,12 +3168,23 @@ def report_read(project, path, merged_only=False):
                                (time.time(), project, path))]
 
 
+def report_mark(project, path):
+    """POST /api/projects/<name>/research/read (RES-5): marked, the tasks this read; already, those read before. Both
+    empty means no research task of the project wrote path, which the dashboard says rather than keep the step."""
+    marked = report_read(project, path)
+    path = os.path.normpath(path.strip()) if path and path.strip() else ""
+    already = [r["id"] for r in q("SELECT id FROM tasks WHERE project=? AND research IS NOT NULL AND "
+                                  "json_extract(research, '$.path')=? AND json_extract(research, '$.read') IS NOT "
+                                  "NULL", (project, path)) if r["id"] not in marked]
+    return {"ok": True, "path": path, "marked": marked, "already": already}
+
+
 def serve_repo_file(p, rel):
     """GET /api/files: repo_file, and a merged research report served this way counts as read (RES-5), whichever
     dashboard view opened it."""
     f, why = repo_file(p, rel)
-    if f:
-        report_read(p.name, os.path.relpath(f, os.path.realpath(p.dev_wt)), merged_only=True)
+    if f and report_read(p.name, os.path.relpath(f, os.path.realpath(p.dev_wt)), merged_only=True):
+        state_changed()  # a GET, so do_POST didn't: the next poll drops the Read step
     return f, why
 
 
@@ -7554,7 +7566,7 @@ def state_payload():
         "chats": chat_counts(), "todos": todos_list(tasks, projects, last), "schedules": schedules_view()}
 
 
-STATE_CACHE = {"at": 0.0, "data": None, "busy": False}
+STATE_CACHE = {"at": 0.0, "data": None, "busy": False, "gen": 0}
 STATE_TTL = 1.0  # seconds a built /api/state answers requests; every open tab polls it every few seconds
 STATE_LOCK = threading.Lock()
 
@@ -7572,16 +7584,25 @@ def state_bytes():
         c["busy"] = True
 
     def build():
+        gen = c["gen"]
         try:
             data = json.dumps(state_payload()).encode()
-            c["data"], c["at"] = data, time.time()
+            if c["gen"] == gen:  # an action since it started: what it read may be from before, so don't keep it
+                c["data"], c["at"] = data, time.time()
+            return data
         finally:
             c["busy"] = False
     if stale is None:
-        build()  # nothing to show yet: build it now
-        return c["data"]
+        return build()  # nothing to show yet: build it now
     threading.Thread(target=build, daemon=True).start()
     return stale
+
+
+def state_changed():
+    """An action changed what /api/state shows: the next request builds it afresh, and a build already under way,
+    which may have read the database before the change, is not kept (a Read step came back after Open report)."""
+    STATE_CACHE["gen"] += 1
+    STATE_CACHE["data"] = None
 
 
 class H(BaseHTTPRequestHandler):
@@ -7626,9 +7647,9 @@ class H(BaseHTTPRequestHandler):
         self.timed(self.get)
 
     def do_POST(self):
-        STATE_CACHE["data"] = None  # an action changes what /api/state shows: the next poll builds it afresh
+        state_changed()  # an action changes what /api/state shows: the next poll builds it afresh
         self.timed(self.post)
-        STATE_CACHE["data"] = None
+        state_changed()
 
     def get(self):
         if not self.host_ok():
@@ -7801,7 +7822,7 @@ class H(BaseHTTPRequestHandler):
         if m := re.fullmatch(r"/api/projects/([\w-]+)/research", path):  # New research (RES-2)
             return new_research(m.group(1), b)
         if m := re.fullmatch(r"/api/projects/([\w-]+)/research/read", path):  # you opened a report (RES-5)
-            return {"ok": True, "marked": report_read(m.group(1), (b.get("path") or "").strip())}
+            return report_mark(m.group(1), str(b.get("path") or ""))
         m = re.fullmatch(r"/api/schedules/(\d+)(?:/(run|pause|resume|delete))?", path)
         if m:
             sid, act = int(m.group(1)), m.group(2)

@@ -8,9 +8,13 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
+from urllib.error import HTTPError
+from urllib.parse import quote
+from urllib.request import Request, urlopen
 
 if "opsd" not in sys.modules:
     os.environ["OPS_DATA"] = tempfile.mkdtemp()
@@ -207,8 +211,76 @@ class ResearchTasks(unittest.TestCase):
         r = opsd.queue_research("web", "Is Rust worth it?")
         opsd.upd(r["id"], state="done", merged="abc123")
         h = opsd.H.__new__(opsd.H)
-        self.assertEqual(h.route("/api/projects/web/research/read", {"path": r["path"]}), {"ok": True, "marked": [r["id"]]})
+        self.assertEqual(h.route("/api/projects/web/research/read", {"path": r["path"]}),
+                         {"ok": True, "path": r["path"], "marked": [r["id"]], "already": []})
         self.assertEqual(self.todos(), [])
+
+    def serve(self):
+        """A dashboard server on a free port, stopped after the test."""
+        srv = opsd.ThreadingHTTPServer(("127.0.0.1", 0), opsd.H)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+        return f"http://127.0.0.1:{srv.server_port}"
+
+    def call(self, url, body=None):
+        req = Request(url, data=None if body is None else json.dumps(body).encode(),
+                      headers={"Content-Type": "application/json", "X-Ops": "1"})
+        try:
+            with urlopen(req) as r:
+                return r.status, r.read()
+        except HTTPError as e:
+            with e:
+                return e.code, e.read()
+
+    def test_opening_a_merged_report_reads_it(self):
+        r = opsd.queue_research("web", "Is Rust worth it?")
+        commit(self.root, r["path"], "# Rust\n\nYes.\n", 1_700_000_100)
+        commit(self.root, "docs/other.md", "# Other\n", 1_700_000_200)
+        url = self.serve() + "/api/files?project=web&path="
+        self.assertEqual(self.call(url + quote(r["path"]))[0], 200)  # not merged yet: opening it marks nothing
+        self.assertIsNone(opsd.research_of(opsd.task(r["id"])).get("read"))
+        opsd.upd(r["id"], state="done", merged="abc123")
+        self.assertEqual(self.call(url + "docs/other.md")[0], 200)  # another file marks nothing
+        self.assertEqual([x["key"] for x in self.todos()], [f"task:{r['id']}:report"])
+        self.assertEqual(self.call(url + quote(r["path"])), (200, b"# Rust\n\nYes.\n"))
+        self.assertTrue(opsd.research_of(opsd.task(r["id"])).get("read"))
+        self.assertEqual(self.todos(), [])
+
+    def test_mark_read_says_what_it_found(self):
+        r = opsd.queue_research("web", "Is Rust worth it?")
+        opsd.upd(r["id"], state="done", merged="abc123")
+        opsd.READY.set()  # projects are loaded: the API answers
+        url = self.serve() + "/api/projects/web/research/read"
+        code, body = self.call(url, {"path": "docs/research/nothing.md"})
+        self.assertEqual((code, json.loads(body)["marked"], json.loads(body)["already"]), (200, [], []))
+        code, body = self.call(url, {"path": f"  {r['path']}\n"})  # whitespace around it still matches
+        self.assertEqual((code, json.loads(body)["marked"]), (200, [r["id"]]))
+        self.assertEqual(self.todos(), [])
+        body = json.loads(self.call(url, {"path": r["path"]})[1])  # a second mark: read before, not missing
+        self.assertEqual((body["marked"], body["already"]), ([], [r["id"]]))
+
+    def test_a_state_build_from_before_an_action_is_not_kept(self):
+        started, go = threading.Event(), threading.Event()
+        real = opsd.state_payload
+
+        def slow():
+            started.set()
+            go.wait(5)
+            return {"old": True}
+        opsd.STATE_CACHE.update(data=b"{}", at=0.0, busy=False)
+        opsd.state_payload = slow
+        self.addCleanup(setattr, opsd, "state_payload", real)
+        self.addCleanup(opsd.STATE_CACHE.update, data=None, at=0.0, busy=False)
+        self.assertEqual(opsd.state_bytes(), b"{}")  # stale at once; the rebuild runs behind it
+        started.wait(5)
+        opsd.state_changed()  # e.g. POST /research/read lands while that rebuild still reads the old state
+        go.set()
+        for _ in range(50):
+            if not opsd.STATE_CACHE["busy"]:
+                break
+            time.sleep(0.02)
+        self.assertIsNone(opsd.STATE_CACHE["data"])  # so the next poll builds afresh instead of showing the old list
 
     def test_unread_in_listing(self):
         r = opsd.queue_research("web", "Is Rust worth it?")

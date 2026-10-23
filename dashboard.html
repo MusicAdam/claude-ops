@@ -911,6 +911,7 @@ async function loadState() {
   // Bound but still loading projects: keep what we last drew, and say why nothing moves.
   if (s.starting) { $("#hdr").innerHTML = `<span class="err">claude-ops is starting up…</span>`; return; }
   state = s;
+  tdDropGone(s);
   render();
   if (sel) loadDetail(sel);
   if (tab === "today") refreshDesign.poll();  // the conversation under the step
@@ -3249,22 +3250,38 @@ function tdResearchList(sd) {
     + `<h3>Reports</h3>${reps || `<div class="muted">No reports yet on ${dev}. New research writes one to docs/research/.</div>`}`
     + `<h3>Recurring research</h3>${sch || `<div class="muted">None. Pick a repeat in New research to add one.</div>`}`;
 }
-// Open report and Mark read (RES-5): the report's Read step leaves the list at once; if marking it read fails, it
-// comes back, with the error where the other to-do actions show theirs. The server also marks it read when it serves it.
+// Open report and Mark read (RES-5): the report's Read step leaves the list at once, before the mark returns, and
+// comes back with the reason, where the other to-do actions show theirs, only if the mark fails or finds no report
+// to mark. The server also marks it read when it serves the file.
 async function tdOpenReport(project, path, open = true) {
   const mine = x => x.report && x.report.path === path && x.project === project;
   const gone = (state.todos || []).filter(mine), was = TD.key;
-  if (gone.length) { state.todos = state.todos.filter(x => !mine(x)); TD.msg = ""; renderToday(); }
+  gone.forEach(x => TD_GONE.set(x.key, Infinity));
+  if (gone.length) { state.todos = state.todos.filter(x => !mine(x)); TD.msg = ""; delete $("#tdstep").dataset.html; renderToday(); }
   if (open) openRepoFile(project, path);
-  try { await api(`/api/projects/${encodeURIComponent(project)}/research/read`, {path}); }
-  catch (e) {
+  let why = "";
+  try {
+    const r = await api(`/api/projects/${encodeURIComponent(project)}/research/read`, {path});
+    if (!r.marked.length && !(r.already || []).length) why = `Found no research report at ${path} to mark read`;
+  } catch (e) { why = `Couldn't mark ${path} read: ${e.message}`; }
+  if (why) {
+    gone.forEach(x => TD_GONE.delete(x.key));
     const back = gone.filter(x => !tdItem(x.key));
     state.todos = (state.todos || []).concat(back);
-    if (back.some(x => x.key === was)) TD.key = was;
-    TD.msg = `Couldn't mark ${path} read: ${e.message}`; renderToday(); return;
+    if (back.some(x => x.key === was)) { TD.key = was; tdSave(); }  // the step again, so the message shows under it
+    TD.msg = why; renderToday(); return;
   }
+  gone.forEach(x => TD_GONE.set(x.key, Date.now() + TD_GONE_MS));
   if (TD.sd && TD.sd.project === project) tdReload("research");
   refresh();
+}
+// Steps you just cleared. An /api/state answer from before the clear would still list one and bring it back, so
+// loadState drops these keys for a while after the server confirmed.
+const TD_GONE = new Map(), TD_GONE_MS = 20000;
+function tdDropGone(s) {
+  const now = Date.now();
+  for (const [k, until] of TD_GONE) if (until < now) TD_GONE.delete(k);
+  if (TD_GONE.size && s.todos) s.todos = s.todos.filter(x => !TD_GONE.has(x.key));
 }
 
 // Tasks: the History list for this project, newest first.
