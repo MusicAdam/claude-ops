@@ -5387,8 +5387,9 @@ def conv_say(project, text):
     cur, left = ids.get(c["topic"]), ids.get(c.get("from"))
     if cur and cur["ended"]:  # a message into an ended topic reopens it, as it does an ended chat
         topic_reopen(project, cur["id"])
-    if cur and cur["mode"] != "research":
+    if cur:
         todos_agree_close(cur["id"])
+    if cur and cur["mode"] != "research":
         return {"topic": cur["id"], "queued": design_say(cur["id"], text)}
     handoff = topic_handoff(left, c["mode"]) if left and not cur else ""
     if c["mode"] == "research":
@@ -7068,8 +7069,8 @@ def todo_done(tid, project=None):
 def todos_agree_close(did):
     """The owner sent a message in chat did: close the open Agree to-dos that chat added. Do items stay open.
     Called from the owner's own send paths only, not from system inserts (ops notes, task results, the brief)."""
-    q("UPDATE todos SET closed=? WHERE verb='Agree' AND source_kind='design' AND source_id=? AND closed IS NULL",
-      (time.time(), did))
+    q("UPDATE todos SET closed=? WHERE verb='Agree' AND source_kind IN ('design','research') AND source_id=? "
+      "AND closed IS NULL", (time.time(), did))
 
 
 def todos_from_reply(p, reply, did):
@@ -7239,7 +7240,7 @@ def todos_list(tasks, projects, last, now=None):
                              "chat", d["id"], unread=unread))
     for r in q("SELECT * FROM todos WHERE closed IS NULL"):
         out.append(todo_item(f"todo:{r['id']}", r["verb"], r["project"], r["title"], r["why"], r["created"],
-                             "chat" if r["source_kind"] == "design" else r["source_kind"], r["source_id"],
+                             "chat" if r["source_kind"] in ("design", "research") else r["source_kind"], r["source_id"],
                              todo=r["id"]))
     out.sort(key=lambda x: (TODO_ORDER.index(x["group"]), x["since"], x["key"]))
     return todo_notes_apply(out, tasks, projects, now or time.time())

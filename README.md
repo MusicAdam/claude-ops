@@ -476,13 +476,17 @@ the uncommitted-files banner, Deploy. `/api/state` gathers them into one list, `
   - A design or project chat reply with a fenced block in the language `todo`, holding a JSON list of
     `{"verb": "Do" | "Agree", "title", "why"}`. The block is taken out of the reply you see, as a `queue` block
     is. The item's source is that chat.
+  - A research chat turn's reply with the same block (see [Research chats add to-dos](#legacy-research-runs-in-the-research-repo)).
+    It goes to the claude-ops project the research project links to (`repo`), else to the project whose
+    checkout is the research repo. Its source is kind `research`, id `r:<thread>` (Today shows it as a chat and
+    opens that research topic).
   - A worker's result JSON with an optional `todos` list of the same shape. The task doesn't stop for it. The
     source is that task.
 
   Every item links to its source. An open item with the same project and title is not added twice.
 - **TODO-3 Closing.** Derived items close by themselves. A stored item closes with
   `POST /api/todos/<id>/done` (your Done button), or when Claude writes `{"close": <id>}` in a `todo` block. A stored Agree also closes when you send a message
-  in the chat that added it, even if the message waits in the chat's queue; a Do stays open.
+  in the chat (or research topic) that added it, even if the message waits in the chat's queue; a Do stays open.
   Closed items stay in the table.
 - **TODO-4 Order and groups.** Each item has a group: `unblock` (Answer, Fix), `ship` (Promote, Ship, Commit),
   `review` (Try, Review, Agree, Read), `only_me` (Do). The list runs unblock, ship, review, only_me, oldest first
@@ -891,6 +895,16 @@ and `chat`. `file` serves only `.md` files inside the research repo.
 - **Runs and chats are as before.** No worktree, gate or merge: `claude -p` in the research repo with the
   old flags, tools (minus `bin/todo`), prompts, run sizes ($1/$3/$10) and time limits (T0 5, T1 15, T2 40, chat 15 minutes), in
   their own process group.
+- **Research chats add to-dos.** A chat is told the design chats' to-do rule and block format (`todo_rule()`),
+  naming the claude-ops project its to-dos go to: the one its research project links to (`repo`), else the one
+  whose checkout is the research repo. With neither it is told it can't add to-dos. When a turn ends, its reply's
+  ```` ```todo ```` blocks go through `todo_add` into the claude-ops `todos` table ([To-dos](#to-dos)), so a Do
+  shows in Today. It happens once per turn: new chat jobs carry `todosTaken: false` in `jobs.json`, set to true
+  when taken (on the next read of the chat or watchdog pass, and only when claude-ops may write), so a restart
+  adds nothing twice and turns from before this are never read. The blocks are hidden from the reply you see;
+  in their place a line says what happened (`added to-do #12`, or that nothing was added because no claude-ops
+  project fits). That note (`todoNote`) is also put before your next message in that chat, so Claude learns the
+  ids. `CONTEXT_VERSION` 5 tells older threads the new rule once.
 - **Single writer.** The old server guards its files with an in-process lock, so two writers would lose
   updates. Before every write, and before each watchdog pass, claude-ops tries port 8787
   (`OPS_RESEARCH_OLD_PORT` overrides it). If anything answers, the write gets 409 `{error: "The old research
