@@ -256,8 +256,11 @@ run = "bin/swish release"
 
 ## Design mode
 
-The Design tab is a chat with Claude about one project. It reads the project's docs and the latest
-dev code but cannot edit the project (`--permission-mode dontAsk` with read-only tools). It can write
+A design chat is Claude talking with you about one project. You meet it as **plan & design** in the Today view's
+conversation (see [TODAY-2](#today-view)), where each design chat is a topic of the project's one conversation. The
+Design tab, under More, lists them all, as before.
+
+It reads the project's docs and the latest dev code but cannot edit the project (`--permission-mode dontAsk` with read-only tools). It can write
 documents of its own, such as a design doc or a one-file HTML prototype, in `~/.claude-ops/designs/<chat id>/`:
 the only place it may Write or Edit, outside every repo. Its reply links them, the dashboard lists them above
 the chat, and `/api/designs/<id>/files/<name>` serves them (HTML sandboxed, so a prototype's scripts can't call
@@ -389,7 +392,9 @@ shows for every project in view whose `dev` has an `openspec/` folder, even when
 
 ### Which chats need you
 
-This applies to both the Design and the Chat tab.
+This applies to both the Design and the Chat tab. The Today view shows the same state differently: an unread chat
+is a **Read** to-do, and ● in **Earlier topics**. It has no **End chat** and no Ended group; a topic you leave stays
+under Earlier topics.
 
 - **The list.** Chats are grouped as **Ready for you** (Claude has answered), **Claude is replying**, and
   **Ended**, which is folded away. A chat whose reply you haven't opened yet is marked ● and **new reply**, and
@@ -524,11 +529,50 @@ Their routes (`#tasks`, `#projects`, `#schedules`, …) still open them. The que
 
   **Send back…**, **Retry with a note…** and **Answer** use the message box below: a line above it says where the
   message goes, with **Cancel**.
-- **Centre, below: the conversation.** The existing chat view and message box. It shows the item's source chat.
-  For a task: the chat it came from (a peer's chat that sent it, or the design chat that queued it, or its parent's),
-  else the task's own chat with its worker. For a project item, or with nothing selected: the project's most recent
-  open design chat; with none, the message box starts a new design chat. Today never marks a chat read by itself:
-  **Mark read** does, so an item does not vanish while you read it.
+- **TODAY-2 Centre, below: one conversation per project.** One running conversation for the project in view,
+  with one message box. With All projects it is the selected item's project, else the last one you used (a
+  **Project** picker shows when there is neither). It replaces the Design chat list, the Chat list and research
+  chats on this page.
+  - **Topics.** The conversation is made of topics. A topic is an ordinary chat row (`designs`: a design chat, a
+    project chat or an OpenSpec change's chat) or a research thread, each with its own Claude session, fresh-session
+    handoff and files, stored as before. Old chats are topics as they are; nothing is migrated. The project's
+    current topic is kept by the daemon (setting `conv:<project>`), so every browser shows the same one. With
+    none kept, it is the project's topic with the latest activity.
+  - **The timeline.** One scrolling timeline: the current topic's messages, under a divider line
+    `<date> · <topic title> · <mode>`. Above it, **Earlier topics (N)** is folded. Open it for every other topic of
+    the project, newest first: title, mode, last activity, and ● when it has a reply you haven't read. Click one to
+    make it the current topic. Sending a message into an older topic resumes it, as sending to an ended chat does.
+    Nothing is ended or tidied by you here: this view has no **End chat** (the API and the Design and Chat tabs keep it).
+  - **Mode switch.** Chips above the message box say what Claude may do:
+    - **plan & design**: a design chat. It reads `dev`, writes only its documents folder and, for an OpenSpec
+      change, `openspec/`. It can draft OpenSpec changes and prototypes, never code.
+    - **edit my checkout**: a project chat, in your checkout.
+    - **research**: a research chat about the research project linked to this project (the first one, by name).
+      Hidden while research is off; shown but disabled when no research project is linked to it.
+
+    Switching mode while a topic is open starts a new topic of that kind, and one line under the chips says so:
+    `Switched to <mode>: your next message starts a new topic, with a short handoff of “<title>”.` Its first
+    message carries that handoff (as `chat_handoff()` builds it for a fresh session, but about 2k tokens at most) to
+    Claude, as a dashboard note, and the new topic shows the line above as its first entry. Switching back before
+    you send returns to the topic you left. A topic never changes kind: picking an older topic switches the chips to
+    its mode. A research topic's handoff goes at the end of its first message, and the timeline hides it.
+  - **Which topic a message goes to** (`conv_open()` in opsd.py):
+    1. Opening a to-do whose source is a chat (Read, Agree, …) makes that chat the current topic.
+    2. Opening a to-do whose source is a task, or **Ask Claude about this**, continues the current plan & design
+       topic: the current topic if it is one, else the project's latest plan & design topic, else a new one starts
+       with your next message. The message box gets the starter text (`About #231: `) when it is empty.
+    3. **New topic** starts a fresh one in the current mode: your next message opens it. The line under the chips
+       says so.
+    4. Otherwise a message continues the current topic.
+  - **Titles.** A new topic is titled from its first message, as chats are. Claude may retitle it when the
+    subject clearly changes, with a fenced block in the language `topic`: `{"title": "..."}`. The design and project
+    chat prompts say so (`design_prompt.md`, `PROJECT_CHAT_PROMPT`). The block is taken out of the reply, the
+    divider shows the new title, and Claude's next message says it took (`topic_from_reply()`).
+  - **Queued messages.** While Claude replies, **Send** reads **Queue**, as in the Design and Chat tabs (see
+    [Which chats need you](#which-chats-need-you)). A research topic doesn't queue: Send waits for its reply.
+  - **Read state.** Today never marks a chat read by itself: **Mark read** does, so an item does not vanish while you
+    read it. A task's own chat with its worker is in its details panel (**Details**), not here.
+  - The Design and Chat tabs stay under More as the full list view of the same rows.
 - **TODAY-3 Right: timeline.** Read-only status in three groups. Anything that needs a decision is in To-do, not
   here.
   - **Working now**: running, checking and merging tasks, and research runs.
@@ -545,13 +589,15 @@ Their routes (`#tasks`, `#projects`, `#schedules`, …) still open them. The que
 - **TODAY-4 One poll.** The page reads `/api/state` every 3 seconds, as before. Other reads are for what you
   opened: the selected task (`GET /api/tasks/<id>`, as History does), the conversation shown, and the list of
   chats once when an item has no chat of its own. `GET /api/tasks/<id>` gains `chat_from`, the design chat that
-  queued the task or its parent, for the conversation.
+  queued the task or its parent. The conversation reads `GET /api/conversation?project=<name>` with each poll,
+  and the current topic (`GET /api/designs/<id>`, or `/api/research/threads/<id>`).
 - **Layout.** Desktop, 1100px and wider, has the three columns. Narrower windows stack them; the phone layout is
   a later task.
 
 ## Chat mode
 
-The Chat tab is plain Claude in the project folder, as if you ran `claude` there. It works in your
+A project chat is plain Claude in the project folder, as if you ran `claude` there. You meet it as **edit my
+checkout** in the Today view's conversation (see [TODAY-2](#today-view)); the Chat tab, under More, lists them all. It works in your
 checkout (`repo`), not a worktree, so it can read, edit, commit and run commands there, with your own
 settings and `CLAUDE.md`. Each chat keeps one Claude session across messages, until its context grows too big
 (see **Fresh sessions in chats** below).
