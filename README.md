@@ -846,12 +846,13 @@ Below 700px Today is phone-first. The rules:
 - **HDR-3 Composer.** One row: attach (📎), the message box (it grows to at most 4 lines) and an **↑** send
   button. **New topic**, the line that says where a message goes, and the project picker sit above it.
 - **HDR-4 Room to talk.** While a step is open the conversation gets at least 60% of the screen height; the step
-  card scrolls inside what is left.
+  card scrolls inside what is left. A long conversation never pushes the composer off the screen.
 - **PHONE-2 Back.** **‹ To-do** returns to the list, and so does the phone's back gesture: opening a step or a
   details panel adds a history entry, and going back closes one level (the panel, then the step).
 - **PHONE-3 Fits the screen.** The page is sized to the visible viewport (`100dvh`, falling back to `100vh`), so
   the bottom bar is never under the browser's toolbar, and it keeps clear of the notch and home indicator
-  (safe-area insets). Nothing scrolls sideways except the step's action row; tab rows that could overflow hide
+  (safe-area insets). The page itself never scrolls: in the Now pane only the message list does, and it
+  doesn't drag the page or set off pull-to-refresh. Nothing scrolls sideways except the step's action row; tab rows that could overflow hide
   their scrollbar and still scroll sideways.
 - **PHONE-4 Quick chat.** The quick chat (TODAY-6) opens full screen, with no drag or resize. Minimise and
   close work as on a desktop.
