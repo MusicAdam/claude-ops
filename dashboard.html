@@ -2777,7 +2777,7 @@ function tdStep(it, shown) {
   const skipTip = note.trim() ? "Park it with this note: it moves to Parked until you unpark it, or the task it names ends"
     : "Move it to the end of the list until midnight. With a note, it parks instead";
   const noteIn = `<input class="tdnote" data-tdnote data-fld="note" maxlength="300" placeholder="Note to self, e.g. wait for #249" value="${esc(note)}" title="Saves as you type">`;
-  const unpark = cls => it.parked ? `<button class="${cls}" data-unpark title="Back into the list at its normal place">Unpark</button>` : "";
+  const unpark = cls => (it.parked || it.skipped) ? `<button class="${cls}" data-unpark title="Back into the list at its normal place">${it.parked ? "Unpark" : "Unskip"}</button>` : "";
   const html = `<div class="stepcard${TD.dets ? " open" : ""}"><div class="top"><button class="ph back" data-back title="Back to the list">‹ To-do</button>
     <div class="k">${it.parked ? `Parked ${ago(it.parked.since, state.now)}` : `Step ${shown.indexOf(it) + 1} of ${shown.length}`} · ${esc(P(it.project).title)}</div>
     ${dets ? `<button class="ph" data-dets aria-expanded="${TD.dets}">Details ${TD.dets ? "▴" : "▾"}</button>` : ""}
