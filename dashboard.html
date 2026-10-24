@@ -411,12 +411,19 @@ a[data-task] { color: var(--accent); cursor: pointer; }
 .menu button:hover { background: var(--chip); color: var(--ink); }
 .menu hr { border: 0; border-top: 1px solid var(--line); margin: 4px 2px; width: auto; }
 /* Today: To-do | the step and its conversation | the timeline. Each side column scrolls on its own. */
-#todayview { display: grid; grid-template-columns: 300px minmax(0, 1fr) 320px; gap: 20px; padding: 16px 20px 0;
-             max-width: 1700px; margin: 0 auto; }
+#todayview { display: grid; grid-template-columns: 300px minmax(0, 1fr) var(--td-right, 320px); gap: 20px;
+             padding: 16px 20px 0; max-width: 1700px; margin: 0 auto; position: relative; }
 #todayview > * { height: calc(100vh - var(--hdr-h, 64px) - 16px); min-width: 0; }
 #todayview > .side { overflow: auto; padding-bottom: 16px; }
 #tdright { position: relative; }
 #tdcentre { display: flex; flex-direction: column; }
+/* The handle in the gap left of #tdright: drag to resize the right column (README "Today view", Layout).
+   Out of the grid flow, so the stacked layouts don't see it; the media queries below hide it. */
+#tdgrip { position: absolute; top: 16px; right: calc(20px + var(--td-right, 320px) + 6px); width: 8px;
+          cursor: col-resize; touch-action: none; z-index: 1; }
+#tdgrip::after { content: ""; position: absolute; top: 0; bottom: 0; left: 3px; width: 2px; border-radius: 1px; }
+#tdgrip:hover::after, #tdgrip.on::after { background: var(--accent); }
+#todayview.tddrag { user-select: none; cursor: col-resize; }
 #tdstep { flex: none; max-height: 55%; overflow: auto; }
 #tdcentre #chat { flex: 1; min-height: 0; }
 /* The project's sections beside its conversation: Conversation · Specs & designs · Research · Tasks */
@@ -426,7 +433,7 @@ a[data-task] { color: var(--accent); cursor: pointer; }
 #tdsechead .row { margin: 0 0 8px; gap: 6px; flex-wrap: wrap; }
 #tdsechead textarea, #tdsechead input[type=text] { width: 100%; box-sizing: border-box; margin-bottom: 6px; }
 #tdsec .tlitem .t .dot { color: var(--warn); margin-right: 4px; }
-@media (max-width: 1099px) { #todayview { grid-template-columns: 280px minmax(0, 1fr); }
+@media (max-width: 1099px) { #todayview { grid-template-columns: 280px minmax(0, 1fr); } #todayview > #tdgrip { display: none; }
   #tdright { grid-column: 1; grid-row: 2; height: auto; } }
 @media (max-width: 900px) { #todayview { grid-template-columns: 1fr; padding: 16px; }
   #todayview > *, #tdright { height: auto; grid-row: auto; } #tdcentre #chat { min-height: 70vh; } }
@@ -678,6 +685,7 @@ details.tdparked .tditem { opacity: .8; }
   </section>
   <aside class="side" id="tdright"><div class="tl" id="tdtl"></div>
     <div id="tdpanel" class="hidden"><div id="tdphead"></div><div id="tdpother"></div><div id="tdpdet"></div></div></aside>
+  <div id="tdgrip" title="Drag to resize · double-click for 320px"></div>
 </div>
 <nav id="tdnav" class="hidden"><button data-pane="todo"><i>☰<span class="badge hidden"></span></i>To-do</button><button data-pane="now"><i>▶</i>Now</button><button data-pane="activity"><i>◷</i>Activity</button></nav>
 <main id="settingsview" class="hidden">
@@ -1822,7 +1830,7 @@ function showTab(t) {
   closeMore();
   // Today borrows the task page; every other page has it back where it was.
   if (was === "today" && t !== "today") tdLeave();
-  $("#todayview").classList.toggle("hidden", t !== "today"); $("#tdnav").classList.toggle("hidden", t !== "today");
+  $("#todayview").classList.toggle("hidden", t !== "today"); if (t === "today") tdRightApply(false); $("#tdnav").classList.toggle("hidden", t !== "today");
   document.body.classList.toggle("td", t === "today");
   renderSayMode();
   $("#tasksview").classList.toggle("hidden", t !== "tasks");
@@ -2608,6 +2616,38 @@ const STAGES = ["Queued", "Working", "Gate", "Review", "Merged", "Promoted"];
 const midnight = () => { const d = new Date(); d.setHours(0, 0, 0, 0); return d.getTime() / 1000; };
 const tdSave = () => { try { localStorage.setItem("ops-todo", TD.key); localStorage.setItem("ops-todo-filter", TD.filter);
   localStorage.setItem("ops-td-sec", TD.sec); localStorage.removeItem("ops-skip"); } catch {} };
+// The right column's width, set by dragging #tdgrip; desktop only (the narrower layouts stack the columns).
+const TD_WIDE = matchMedia("(min-width: 1100px)");
+let tdRight = 0;  // px, or 0 for the default 320px
+try { tdRight = parseInt(localStorage.getItem("ops-td-right")) || 0; } catch {}
+function tdRightFit(w) {  // 240px to half the view, and the centre keeps at least 420px
+  const v = $("#todayview"), cs = getComputedStyle(v);
+  const inner = v.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight);
+  return Math.round(Math.max(240, Math.min(w, v.clientWidth / 2, inner - 300 - 2 * 20 - 420)));
+}
+function tdRightApply(save) {  // shows the saved width, clamped to this window; only a drag saves
+  const v = $("#todayview");
+  if (!tdRight || !TD_WIDE.matches) { v.style.removeProperty("--td-right"); return; }
+  if (!v.clientWidth) { v.style.setProperty("--td-right", tdRight + "px"); return; }  // hidden: fit it when shown
+  const w = tdRightFit(tdRight);
+  v.style.setProperty("--td-right", w + "px");
+  if (save) { tdRight = w; try { localStorage.setItem("ops-td-right", String(w)); } catch {} }
+}
+$("#tdgrip").onpointerdown = e => {
+  if (!TD_WIDE.matches || e.button !== 0) return;
+  e.preventDefault();
+  const el = e.currentTarget, v = $("#todayview"), x0 = e.clientX, w0 = $("#tdright").getBoundingClientRect().width;
+  el.setPointerCapture(e.pointerId); el.classList.add("on"); v.classList.add("tddrag");
+  el.onpointermove = m => { tdRight = tdRightFit(w0 - (m.clientX - x0)); tdRightApply(false); };
+  el.onpointerup = el.onpointercancel = () => {
+    el.onpointermove = el.onpointerup = el.onpointercancel = null; el.classList.remove("on"); v.classList.remove("tddrag");
+    if (tdRight) tdRightApply(true);
+  };
+};
+$("#tdgrip").ondblclick = () => {
+  tdRight = 0; try { localStorage.removeItem("ops-td-right"); } catch {} tdRightApply(false);
+};
+addEventListener("resize", () => tdRightApply(false));
 const verbPill = x => `<span class="verb g-${esc(x.group)}">${esc(x.verb)}</span>`;
 const tdDoneToday = () => state.tasks.filter(t => t.state === "done" && t.finished >= midnight() && inView(t.project))
   .sort((a, b) => b.finished - a.finished);
