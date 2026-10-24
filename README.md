@@ -430,7 +430,10 @@ topics**. The to-do list and Earlier topics follow the project filter. An ended 
 it later (a task's result note) makes it new nowhere.
 
 - **Ending a chat.** Click **End** on its row in Earlier topics, or **End topic** above the message box, to move it
-  under **Ended**, folded at the bottom of Earlier topics. Nothing is deleted. To put it back, click **Reopen**
+  under **Ended**, folded at the bottom of Earlier topics. Its replies count as read and its queued messages are
+  dropped. Ending never waits for Claude: if Claude is replying, End stops the reply and ends the chat at once, and
+  the stopped reply, when it finishes, leaves the chat ended and read (it never reopens it, sends the queue, or puts
+  it back on the to-do list). Research topics stop their running research turns. Nothing is deleted. To put it back, click **Reopen**
   there, click the topic under Ended, follow a link to it, or send it a message. Opening an OpenSpec change reopens
   its chat as well. A view from before you ended it never reopens it: an open reopens only when the `ended` it
   sends matches the stored one (compare-and-set, see TODAY-2).
@@ -863,8 +866,12 @@ stay on the right of the header.
     older one-chat `{project, did, min, seen}` is read as one tab).
   - **Close.** **×** in a tab closes that tab; closing the last tab closes the window, and closing the active one
     moves to its right-hand neighbour (or left, when it was last). **×** in the title bar closes the window and
-    every tab: the next open starts fresh. No topic is ended: each stays an open topic in its project's Earlier
-    topics, and its unread replies go on the to-do list like any design chat's.
+    every tab: the next open starts fresh. Closing ends the topic of every tab it closes, as **End topic** does
+    (see "Ending a chat"): it moves under **Ended**, its replies count as read, its queued messages are dropped,
+    and a reply in progress is stopped first. Nothing is deleted; **Reopen** there puts it back. A tab with no
+    topic yet (no message sent) just closes. The tab closes even when ending fails (no network, the topic is
+    gone), and the error shows nowhere. Minimise and Esc never end anything. A tab whose topic was deleted
+    elsewhere closes without ending.
   - **Today never changes.** Opening, using or closing the quick chat, in any tab, leaves the header filter, the selected
     to-do and its step, and every project's shown topic alone. A project whose `conv:<project>` keeps no topic
     shows its latest open topic, which a new quick chat would become. So before it creates the topic, the daemon

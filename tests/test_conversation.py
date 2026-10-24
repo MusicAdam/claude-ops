@@ -263,12 +263,45 @@ class Conversation(unittest.TestCase):
         opsd.q("UPDATE designs SET ended=? WHERE id=?", (time.time(), b))
         self.assertEqual(self.view()["topic"], a)
 
-    def test_end_refused_while_replying(self):
+    def test_end_stops_a_reply(self):
+        # End doesn't wait for Claude: it stops the reply, drops the queue and ends the topic at once.
         a = self.chat("a")
-        opsd.q("UPDATE designs SET state='thinking' WHERE id=?", (a,))
-        with self.assertRaisesRegex(ValueError, "still replying"):
+        opsd.q("UPDATE designs SET state='thinking', queued=? WHERE id=?", (json.dumps(["later"]), a))
+        proc, stopped, real = object(), [], opsd.stop
+        opsd.DESIGN_PROCS[a], opsd.stop = proc, stopped.append
+        try:
             opsd.topic_end("demo", a)
-        self.assertIsNone(opsd.design(a)["ended"])
+        finally:
+            opsd.stop = real
+            opsd.DESIGN_PROCS.pop(a, None)
+        self.assertEqual(stopped, [proc])
+        d = opsd.design(a)
+        self.assertTrue(d["ended"])
+        self.assertEqual(opsd.queued_of(d), [])
+
+    def test_reply_finishing_after_end_keeps_it_ended(self):
+        # The stopped reply's turn ends after the topic did: it must not reopen it, mark it unread or send the queue.
+        a = self.chat("a", kind="project")
+        opsd.q("INSERT INTO design_msgs (design_id, role, text, ts) VALUES (?,?,?,?)", (a, "user", "hi", time.time()))
+        opsd.q("UPDATE designs SET state='thinking', queued=? WHERE id=?", (json.dumps(["later"]), a))
+        real = opsd.stop
+        opsd.stop = lambda proc: None
+        try:
+            opsd.topic_end("demo", a)
+        finally:
+            opsd.stop = real
+        opsd.q("UPDATE designs SET queued=? WHERE id=?", (json.dumps(["sent while it stopped"]), a))
+        opsd.design_turn(a, "hi")  # the fake claude answers: the reply lands after the end
+        d = opsd.design(a)
+        self.assertTrue(d["ended"])
+        self.assertEqual(d["state"], "idle")
+        self.assertEqual(opsd.queued_of(d), [])
+        self.assertEqual(self.said, [])
+        t = next(t for t in opsd.topics("demo") if t["id"] == a)
+        self.assertTrue(t["ended"])
+        self.assertFalse(t["unread"])
+        self.assertEqual(opsd.q("SELECT COUNT(*) AS n FROM design_msgs WHERE design_id=? AND role='user'",
+                                (a,), one=True)["n"], 1)  # the queued message never went
 
     def test_end_in_its_own_project(self):
         # The Today view sends End topic with the project of the conversation shown (the project conv_view returns),
