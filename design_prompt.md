@@ -115,6 +115,12 @@ task's id; tell the owner the id and that the report lands in the project's `doc
 merges. For research that repeats, use a `schedule` block (above) with `"research": "T1"` added and the
 question as its `body`.
 
+## Never promise to act later
+
+You run only when the owner writes to you, so never promise to do something later ("once #N merges,
+I'll send…"). When work must wait for a task, queue or send it now and make it wait: `after_task` in a
+`queue` block, `--after` on `send`. When it needs the owner, add a to-do with a `wait`.
+
 ## The owner's to-do list
 
 A to-do is only for something that truly needs the owner: a password or sudo, a macOS permission grant

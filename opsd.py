@@ -6990,9 +6990,10 @@ def tell_sender(tid, how):
                                              f"which you sent, {gist(how, 1500)}", [tid])
 
 
-def send_peer(ref, project, kind, text, title="", hold=False, model=None, effort=None):
+def send_peer(ref, project, kind, text, title="", hold=False, model=None, effort=None, after=None):
     """Start a task or chat in project for the session ref names. Returns {kind, id, project, said}.
-    model, effort: the task's, as add_task takes them; a chat starts on its kind's model, at the effort setting."""
+    model, effort: the task's, as add_task takes them; a chat starts on its kind's model, at the effort setting.
+    after: a task id (12 or "#12"), in any project, the new task waits on until it merges (its depends_on)."""
     p, text = proj(project), (text or "").strip()
     if kind not in PEER_KINDS:
         raise ValueError(f"kind is one of {', '.join(PEER_KINDS)}")
@@ -7002,6 +7003,13 @@ def send_peer(ref, project, kind, text, title="", hold=False, model=None, effort
     effort = effort_name(effort)
     if effort and kind != "task":
         raise ValueError("--effort is for tasks; a chat runs at the effort setting")
+    if after is not None:
+        if kind != "task":
+            raise ValueError("--after is for tasks; a chat can't wait on a task")
+        a = str(after).strip().lstrip("#")
+        if not a.isdigit() or not task(int(a)):
+            raise ValueError(f"no task #{a}")
+        after = int(a)
     if not text:
         raise ValueError("say what the other project should do")
     o = origin_of(ref)
@@ -7021,12 +7029,13 @@ def send_peer(ref, project, kind, text, title="", hold=False, model=None, effort
         head = (f"[ops: sent by {who}, a Claude session in the claude-ops queue, not typed by the owner. "
                 f"{place + '. ' if place else ''}You may read its files; change only your own worktree. "
                 "When this task ends, the queue tells the sender how it went.]")
-        tid = add_task(p.name, f"{head}\n\n{text}", title, hold=hold, origin=o, model=model, effort=effort)
-        ev(tid, f"sent by {who}")
+        tid = add_task(p.name, f"{head}\n\n{text}", title, hold=hold, depends_on=after, origin=o, model=model,
+                       effort=effort)
+        ev(tid, f"sent by {who}" + (f", after #{after}" if after else ""))
         if o:
             tell_origin(o, f"Sent task #{tid} to {p.title}: {task(tid)['title']}", [tid])
         return {"kind": "task", "id": tid, "project": p.name,
-                "said": f"Queued task #{tid} in {p.title} ({p.name}). It shows on the dashboard"
+                "said": f"Queued task #{tid} in {p.title} ({p.name})" + (f", after #{after}" if after else "") + ". It shows on the dashboard"
                         + ("; the queue tells you here when it ends." if o else ".")}
     head = (f"[ops: this chat was started by {who}, a Claude session in the claude-ops queue, not by the owner. "
             f"{place + '. ' if place else ''}Your first reply goes back to it. The owner sees this chat on the "
@@ -7065,6 +7074,10 @@ The claude-ops queue also runs {names}. To hand work to one of them, as you woul
 - `--design`: a design chat there instead, to ask how something works or talk an idea through.
 - `--chat`: a chat in that project's checkout, which can edit files there.
 - `--title "..."` names it; `--hold` has the owner try a task before it merges.
+- `--after <task id>` (tasks only) holds it in that queue until that task merges.
+
+Nothing wakes you when another task merges, so never promise to do something later ("once #N merges, I'll
+send…"). When work must wait for a task, send it now with `--after`.
 
 The other session can't see this conversation, so the message must stand alone: the goal and why, exactly what
 to do, and how to tell it is done. The queue adds who sent it and where you work. The command prints the new
@@ -8324,7 +8337,7 @@ class H(BaseHTTPRequestHandler):
             return openspec_run(proj(b["project"]), b.get("sub") or "", path.rsplit("/", 1)[1])
         if path == "/api/send":  # opsd.py send, from a session the queue started
             return send_peer(b.get("from"), b["project"], b.get("kind") or "task", b.get("text"), b.get("title") or "",
-                             bool(b.get("hold")), b.get("model"), b.get("effort"))
+                             bool(b.get("hold")), b.get("model"), b.get("effort"), b.get("after"))
         if path == "/api/settings":
             if "usage_brake" in b:
                 b["usage_brake"] = min(100, max(0, int(float(b["usage_brake"] or 0))))
@@ -8578,8 +8591,8 @@ def post(path, body):
 
 
 def send_cli(argv):
-    """opsd.py send PROJECT [--design|--chat] [--title T] [--hold] [--model M] [--effort E] [TEXT...]; TEXT from stdin when not
-    given."""
+    """opsd.py send PROJECT [--design|--chat] [--title T] [--hold] [--model M] [--effort E] [--after TASK] [TEXT...]; TEXT from
+    stdin when not given. --after takes 12 or #12."""
     body, words, it = {"project": argv[0], "kind": "task", "from": os.environ.get("OPS_FROM", "")}, [], iter(argv[1:])
     for a in it:
         if a in ("--task", "--design", "--chat"):
@@ -8590,6 +8603,9 @@ def send_cli(argv):
             body["hold"] = True
         elif a in ("--model", "--effort"):
             body[a[2:]] = next(it, "")
+        elif a == "--after":
+            v = next(it, "").strip().lstrip("#")
+            body["after"] = int(v) if v.isdigit() else v
         else:
             words.append(a)
     body["text"] = " ".join(words) if words else sys.stdin.read()
