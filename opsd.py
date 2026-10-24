@@ -7435,7 +7435,8 @@ def turns_bucket(n):
 
 def analysis(period="7", project=""):
     """The /api/analyze body: run times and costs of the tasks created in the period, per project and overall,
-    broken down, with the dearest and slowest tasks and the suggestions computed from them."""
+    broken down, with the dearest and slowest tasks and the suggestions computed from them. project is a
+    comma-separated list of project names (the header's project filter); empty means every project."""
     now = time.time()
     days = {"1": 1, "7": 7, "30": 30}.get(period)
     since = now - days * 86400 if days else 0
@@ -7475,12 +7476,13 @@ def analysis(period="7", project=""):
                 "waited_total": sum(r["waited"] for r in rs), "ran_total": sum(rans),
                 "wasted": sum(r["cost"] for r in wasted), "wasted_n": len(wasted)}
 
+    scope = {x.strip() for x in project.split(",") if x.strip()}
+    if scope:
+        rows, chats = [r for r in rows if r["project"] in scope], [c for c in chats if c["project"] in scope]
     per_project = sorted(({"project": name, "title": PROJECTS[name].title if name in PROJECTS else name,
                            **summary([r for r in rows if r["project"] == name],
                                      [c for c in chats if c["project"] == name])}
                           for name in {r["project"] for r in rows}), key=lambda s: -s["cost"])
-    if project:
-        rows, chats = [r for r in rows if r["project"] == project], [c for c in chats if c["project"] == project]
     total = sum(r["cost"] for r in rows)
     day = lambda ts: time.strftime("%Y-%m-%d", time.localtime(ts))  # noqa: E731
     daily = {}
@@ -8186,7 +8188,7 @@ class H(BaseHTTPRequestHandler):
         if m and m.group(2) in IMAGE_TYPES.values() and (IMAGES / m.group(1)).is_file():
             ctype = next(k for k, v in IMAGE_TYPES.items() if v == m.group(2))
             return self.send(200, (IMAGES / m.group(1)).read_bytes(), ctype)
-        if path == "/api/analyze":  # the Analyze tab: ?period=1|7|30|all&project=<name>
+        if path == "/api/analyze":  # the Analyze tab: ?period=1|7|30|all&project=<name>[,<name>…]
             qs = parse_qs(urlparse(self.path).query)
             return self.send(200, analysis(qs.get("period", ["7"])[0], qs.get("project", [""])[0]))
         m = re.fullmatch(r"/api/projects/([\w-]+)/(research|documents|uncommitted)", path)  # TODAY-4; the Commit card

@@ -579,7 +579,7 @@ link. A reference whose target is missing is never a link that fails on click. T
   opens that file as it is on the project's dev worktree, in a side drawer. Markdown renders as on the page and
   scrolls to the `§` heading; other files show as numbered lines, scrolled to `:line`. An
   `openspec/changes/<name>/…` path (a `spec:` link) opens that change's chat as the current topic in the Today
-  view, and switches the project filter to its project when it is out of view. A design-folder file opens
+  view, and adds its project to the project filter when it is out of view. A design-folder file opens
   from `/api/designs/<id>/files/<name>`. `GET /api/files?project=<name>&path=<rel>` serves the file: only one
   inside that project's dev worktree (symlinks resolved), not git-ignored, and 1 MB or smaller.
 - **LINK-4 Places in the app.** Names of places, such as Today view, Projects tab, Settings, Research tab or Analyze,
@@ -605,11 +605,26 @@ Claude usually writes one) links as that file.
 ## Today view
 
 The dashboard opens on **Today** (`#today`): one page for the day, in three columns. The header holds the name,
-the project switcher and **More ▾**. The switcher (All projects, or one) filters all three columns. More holds
-the older pages: History (the old Tasks tab), Projects, Research, Analyze, Settings and Schedules, and
+the project switcher and **More ▾**. The switcher filters all three columns, and every other page, to a set of
+projects. More holds the older pages: History (the old Tasks tab), Projects, Research, Analyze, Settings and Schedules, and
 **+ Project**. Their routes (`#tasks`, `#projects`, `#schedules`, …) still open them. The Design and Chat pages are
 gone: `#design` and `#chat` open Today and rewrite the address to `#today`. The queue readouts and pause buttons
 stay on the right of the header.
+
+- **The project switcher.** It opens a checklist: **All projects** at the top, then every project that isn't
+  archived, each with a tick box. A tick applies at once. **All projects** clears every tick, and so does unticking
+  the last one. The button reads `All projects`, the one project's title, or `A, B +N` when more are ticked (about
+  2 titles fit, then a count).
+  - **One ticked** works as one project: lists leave out project tags, the project pickers hide, and new tasks
+    and to-dos go to it.
+  - **Two or more ticked** work like All projects, limited to the set: lists show project tags, and every project
+    picker (New task, the conversation's **Project**, + Add's select, the schedule form, the quick chat's default)
+    shows but lists only the ticked projects. It starts on the focused project if that is ticked, else on the
+    first ticked one.
+  - Opening something in a project outside the set (a task, a to-do, a chat link) adds that project to the set.
+    Nothing you click in the set shrinks it. A project that is removed or archived drops out of the set.
+  - It changes the view only: the queue, the workers and the schedules run as before. The set is kept in this
+    browser (localStorage `ops-proj`, a JSON array of names; an older plain name reads as a set of one).
 
 - **TODAY-1 Left: To-do.** The `todos` list from `/api/state`, nothing else.
   - The top says **N things need you · ~M min** (the sum of `est_min`), over a progress bar: tasks done today ÷
@@ -617,7 +632,7 @@ stay on the right of the header.
     the same list as the timeline's **Done today**.
   - Filter chips, each with its count: **All**, **Review** (Try, Review, Agree, Read), **Unblock** (Answer, Fix),
     **Ship** (Promote, Ship, Commit), **Only me** (Do).
-  - Each item shows its verb, title, project (with All projects) and age.
+  - Each item shows its verb, title, project (unless one project is ticked in the switcher) and age.
   - The selection is the item's `key`, so it survives polls and reloads. When the selected item leaves the list
     (you acted on it, or its state changed), the item after it is selected.
   - **Skip for now** is one click. With an empty note it moves the item to the end of the list until local
@@ -627,7 +642,8 @@ stay on the right of the header.
     parking). A parked item with a wait says so on its row: `Waiting on #283, #284 to merge` (or `to
     release`). An item with a note shows the note on its row, muted and cut with an ellipsis.
   - **+ Add** sits at the top of the list (on a phone, at the top of the To-do column). It opens a small form:
-    a title, an optional why, and the project: the project switcher's, or a select when it shows All projects.
+    a title, an optional why, and the project: the switcher's when one is ticked, else a select of the projects
+    in view (every project, or the ticked ones).
     **Wait for…** in it opens the same chooser as on a step (TODAY-2), so the new item starts parked. **Add**
     calls `POST /api/todos` (TODO-2); the item is a **Do** you close with **Done**. An error (a duplicate title,
     an unknown task) shows under the form, which keeps what you typed.
@@ -675,8 +691,9 @@ stay on the right of the header.
   **Send back…**, **Retry with a note…** and **Answer** use the message box below: a line above it says where the
   message goes, with **Cancel**.
 - **TODAY-2 Centre, below: one conversation per project.** One running conversation for the project in view,
-  with one message box. With All projects it is the selected item's project, else the last one you used (a
-  **Project** picker shows when there is neither). It replaces the Design chat list, the Chat list and research
+  with one message box. With one project ticked in the switcher it is that project. Otherwise it is the selected
+  item's project, else the last one you used (a **Project** picker shows when there is neither; it lists the
+  projects in view). It replaces the Design chat list, the Chat list and research
   chats on this page.
   - **Topics.** The conversation is made of topics. A topic is an ordinary chat row (`designs`: a design chat, a
     project chat or an OpenSpec change's chat) or a research thread, each with its own Claude session, fresh-session
@@ -821,8 +838,9 @@ stay on the right of the header.
     the page stays clickable. Drag it by its title bar; resize it from its bottom-left or bottom-right corner (at
     least 320×300). It stays inside the window, also after the browser window shrinks. Its place and size are kept
     in this browser (localStorage).
-  - **Title bar.** The project picker (every project that isn't archived, without All projects), the topic's title
-    once it has one, **–** (minimise) and **×** (close).
+  - **Title bar.** The project picker (every project that isn't archived, without All projects; it starts on
+    the switcher's project when one is ticked, else on the focused one if it is in view, else the first in view),
+    the topic's title once it has one, **–** (minimise) and **×** (close).
   - **Body.** The topic's messages, drawn as in the Today conversation (markdown, links, pictures, the reply as it
     streams in), and a message box. Enter sends and Shift+Enter adds a line, as in every chat box; while Claude
     replies, **Send** reads **Queue**. Drop or paste screenshots to attach them.
@@ -848,7 +866,8 @@ Below 700px Today is phone-first. The rules:
 - **PHONE-1 One column at a time.** A bottom bar switches between **To-do** (with a red count badge), **Now** (the
   step and its conversation) and **Activity** (the timeline). The page opens on To-do. Tapping a to-do opens it in
   Now. Task details, and the other timeline panels, open full screen.
-- **HDR-1 Header.** One row, about 40px: the name, the project switcher and **More**. The Today button, the queue
+- **HDR-1 Header.** One row, about 40px: the name, the project switcher and **More**. The switcher takes the
+  room left on the row, cuts its label short to fit, and opens the same checklist as on a computer. The Today button, the queue
   readouts and the pause buttons are left out on Today; the other pages still show them. The usage-limit bar
   still shows when the limit is hit.
 - **HDR-2 Step card.** Compact by default, about 100px: one top row with **‹ To-do**, **Step k of n · project**,
@@ -1086,7 +1105,7 @@ opsd.py send <project> --chat "<message>"     # a project chat there, in its che
 - **It shows like everything else.** A sent task is queued in the other project and goes through its gate as
   usual. A sent chat is a **Read** to-do in the Today view once it has replied. Both say **Sent by** (or
   **Started by**) with a link to the task or chat that sent them, and the lists tag them `sent by …`. A link to a
-  chat opens it as the current topic in Today, and switches the project filter to its project when it is out of
+  chat opens it as the current topic in Today, and adds its project to the project filter when it is out of
   view.
 - **Context comes along.** The message starts with a line naming the sender, its title and where it works (its
   worktree and branch, or the folder a chat runs in), so the other session can read its files. The sender is told
@@ -1310,7 +1329,9 @@ notes = """Project-specific guidance for design chats."""
 - **Settings tab.** Parallel, Promote wait, Usage brake, Taper from, Model, Effort and the model per kind of work, each
   with what it does written next to it, and **Spent**: what Claude has cost, priced at API rates.
 - **Analyze tab.** Run times and costs of the tasks created in the last day, 7 days, 30 days or all time, for
-  the project picked in the header or every project (`GET /api/analyze?period=1|7|30|all&project=<name>`).
+  the projects ticked in the header or every project (`GET /api/analyze?period=1|7|30|all&project=<name>[,<name>…]`,
+  a comma-separated list; empty means every project). The scope line reads `· A, B only`, and the per-project
+  table shows when 2 or more projects are in scope.
   Medians, p90s and totals; spend per day; per project; by kind, model, effort, gate-fix rounds, Claude turns and
   outcome; what the fix rounds fixed; the dearest and slowest tasks; and **How to improve**: plain rules over the
   same data (fix rounds, Opus on releases, turns that started after the 1-hour cache expired, failed and cancelled
@@ -1318,8 +1339,8 @@ notes = """Project-specific guidance for design chats."""
   waited on your answer or review, a pause or the usage limit. The rules' constants come from
   `docs/usage-analysis.md`.
 - **Tasks tab.** New task and the task list are on the left; the task page is on the right. The project
-  picker in the header filters the list. Clicking a task opens it on the right and focuses its project,
-  and new tasks default to that project.
+  switcher in the header filters the list; with two or more ticked, each row shows its project. Clicking a task
+  opens it on the right and focuses its project, and new tasks default to that project (when it is in view).
 - **Projects tab.** Every project, one line each with its counts, at full width. Click one to open it:
   branches, what is waiting to promote, Promote, Play main and dev, Pause, Deploys and Archive; click it
   again to close it. Archived projects are at the bottom. **+ Project** in the header opens this tab with

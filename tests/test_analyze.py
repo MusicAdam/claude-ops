@@ -55,6 +55,16 @@ class Analyze(unittest.TestCase):
         self.assertEqual(opsd.analysis("7", "b")["summary"]["n"], 4)
         self.assertEqual({p["project"] for p in a["per_project"]}, {"a", "b"})
 
+    def test_project_list(self):
+        """project is the header filter's set, comma-separated: only those projects, and per_project only them."""
+        both, a = opsd.analysis("7", "a,b"), opsd.analysis("7", "a")
+        self.assertEqual(both["summary"]["n"], 9)
+        self.assertAlmostEqual(both["summary"]["cost"], 21.6)
+        self.assertEqual({p["project"] for p in both["per_project"]}, {"a", "b"})
+        self.assertEqual(a["summary"]["n"], 5)
+        self.assertEqual([p["project"] for p in a["per_project"]], ["a"])
+        self.assertEqual(opsd.analysis("7", "a, gone")["summary"]["n"], 5)  # an unknown name adds nothing
+
     def test_waiting_is_not_run_time(self):
         a = opsd.analysis("7", "b")
         t = next(r for r in a["slowest"] if r["cost"] == 2.0 and r["kind"] == "task")
