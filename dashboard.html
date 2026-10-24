@@ -2539,7 +2539,7 @@ async function tdOpenChat(id) {
   try {
     const d = await api(`/api/designs/${id}`);
     if (d.project !== convProject()) TD.over = {key: TD.convKey, project: d.project};
-    await convOpen({how: "chat", ref: id});
+    await convOpen({how: "chat", ref: id, ended: d.ended ?? null});  // a link opens it on purpose: an ended one reopens
   } catch (e) { $("#chatmsg").textContent = e.message; }
 }
 async function unqueue(id, index) {  // back in the message box, after anything you were typing
@@ -2992,7 +2992,7 @@ async function tdDo(a) {
   if (a === "stopmain") return run(() => api(`/api/projects/${encodeURIComponent(it.project)}/stop`, {}), "Stopped. The release goes on by itself within a minute.");
   if (a === "promote" || a === "senddev") return run(() => api(`/api/projects/${encodeURIComponent(it.project)}/${a}`, {}));
   if (a === "read") return run(() => api(`/api/designs/${s.id}/seen`, {}));
-  if (a === "endtopic") return run(() => api("/api/conversation/end", {project: it.project, ref: s.id}).then(cv => convSet(cv, convFor())));
+  if (a === "endtopic") return run(() => api("/api/conversation/end", {project: it.project, ref: s.id}).then(cv => { convSet(cv, convFor()); tdDropChat(s.id); }));
   if (a === "done") return run(() => api(`/api/todos/${it.todo}/done`, {}));
   if (a === "report" || a === "markreport") return tdOpenReport(it.project, it.report.path, a === "report");
 }
@@ -3058,9 +3058,21 @@ function convSet(cv, want) {
 async function convOpen(body) {
   const project = convProject(), want = convFor(); if (!project) return;
   tdShowConv();
-  try { if (convSet(await api("/api/conversation", {project, ...body}), want)) $("#chatmsg").textContent = ""; }
-  catch (e) { $("#chatmsg").textContent = e.message; }
+  try {
+    const cv = await api("/api/conversation", {project, ...body});
+    if (cv.still_ended != null) tdDropChat(cv.still_ended);
+    if (convSet(cv, want)) $("#chatmsg").textContent = cv.still_ended != null ? "That topic was ended meanwhile: it is under Ended now." : "";
+  } catch (e) { $("#chatmsg").textContent = e.message; }
   chatKey = ""; await refreshDesign();
+}
+// A chat you ended (or that ended meanwhile) leaves the to-do list now, and an /api/state answer from before the end
+// doesn't bring it back (TD_GONE), so the step moves on and Today never opens it again.
+function tdDropChat(id) {
+  const key = `chat:${id}:read`;
+  TD_GONE.set(key, Date.now() + TD_GONE_MS);
+  if (state && (state.todos || []).some(x => x.key === key)) {
+    state.todos = state.todos.filter(x => x.key !== key); delete $("#tdstep").dataset.html; renderToday();
+  }
 }
 async function loadConv() {
   const it = TD.item, key = TD.convKey, s = (it && it.source) || {}, project = convProject(), want = convFor();
@@ -3074,9 +3086,12 @@ async function loadConv() {
     // A new item picks the topic once: its chat, or its own topic (task:<id>, project:<name>:ship, …), made when
     // you send the first message. After that you choose.
     if (project && TD.applied !== `${key}|${project}`) {
-      const how = s.kind === "chat" ? {how: "chat", ref: s.id} : it && it.subject ? {how: "subject", ref: it.subject} : null;
+      // A chat on the list is open as far as this list knows (ended: null), so one ended since stays ended: it
+      // isn't opened, and its Read step leaves the list (conv_open's compare-and-set, README TODAY-2).
+      const how = s.kind === "chat" ? {how: "chat", ref: s.id, ended: null} : it && it.subject ? {how: "subject", ref: it.subject} : null;
       if (how) cv = await api("/api/conversation", {project, ...how}).catch(() => null);
       TD.applied = `${key}|${project}`;
+      if (cv && cv.still_ended != null) tdDropChat(cv.still_ended);
     }
     if (!cv && project) cv = await api(`/api/conversation?project=${encodeURIComponent(project)}`);
   } catch { cv = null; }
@@ -3132,7 +3147,8 @@ function renderConv() {
     const ref = id => /^\d+$/.test(id) ? +id : id;
     $("#convtop").querySelectorAll("[data-topic]").forEach(el => el.onclick = () => {
       if (!convReady()) return;  // the last item's topics, still listed while this one's loads
-      TD.earlierOpen = false; convOpen({how: "topic", ref: ref(el.dataset.topic)}); });
+      const t = topicOf(ref(el.dataset.topic));  // the ended you see on the row: Ended's rows reopen, a stale row doesn't
+      TD.earlierOpen = false; convOpen({how: "topic", ref: ref(el.dataset.topic), ...(t ? {ended: t.ended ?? null} : {})}); });
     const act = (sel, what, body) => $("#convtop").querySelectorAll(sel).forEach(el => el.onclick = e => {
       e.stopPropagation(); if (convReady()) convAct(what, body(el)); });
     act("[data-end]", "end", el => ({ref: ref(el.dataset.end)}));
@@ -3165,6 +3181,7 @@ async function convAct(what, body) {
   const project = TD.cv && TD.cv.project, want = TD.cvFor; if (!project) return;
   try {
     const cv = await api(`/api/conversation/${what}`, {project, ...body});
+    if (what === "end") tdDropChat(body.ref);
     const n = cv.ended_now;
     if (convSet(cv, want)) $("#chatmsg").textContent = what === "end-read" ? `Ended ${n} topic${n === 1 ? "" : "s"}.` : "";
   } catch (e) { $("#chatmsg").textContent = e.message; }

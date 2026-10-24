@@ -431,7 +431,9 @@ it later (a task's result note) makes it new nowhere.
 
 - **Ending a chat.** Click **End** on its row in Earlier topics, or **End topic** above the message box, to move it
   under **Ended**, folded at the bottom of Earlier topics. Nothing is deleted. To put it back, click **Reopen**
-  there or send it a message. Opening an OpenSpec change reopens its chat as well.
+  there, click the topic under Ended, follow a link to it, or send it a message. Opening an OpenSpec change reopens
+  its chat as well. A view from before you ended it never reopens it: an open reopens only when the `ended` it
+  sends matches the stored one (compare-and-set, see TODAY-2).
 - **Mark read** marks a reply as read. Chats from before this feature start as read.
 - **Queue a message.** While Claude is replying, the **Send** button reads **Queue**. A queued message shows
   faded at the end of the chat, and goes to Claude when the reply ends; several queued messages go together as
@@ -697,6 +699,16 @@ stay on the right of the header.
       replying in, other than the current one, whose last activity is older than that.
     - **Ended (N)**, folded at the bottom of Earlier topics, lists ended topics with **Reopen**. Opening one, or
       sending it a message, reopens it too.
+    - **Opening reopens only what you saw ended (compare-and-set).** Every open of a chat or topic from the
+      dashboard (`POST /api/conversation` with `how: chat|topic`: a Today item whose source is a chat, a click in
+      Earlier topics or Ended, a link to a chat) sends `ended`, the value it last saw for that topic: `null`, or when
+      it ended. An ended topic reopens only when that equals the stored value: you knowingly opened an ended topic.
+      If you saw it open but it has ended since (a Today list or `/api/state` answer from before End topic), it stays
+      ended, doesn't become the current topic, and the answer carries `still_ended: <ref>`; the dashboard drops its
+      Read step and moves to the next item. A Today item always sends `null`, so Today never reopens an ended chat:
+      an owner to-do that came from an ended chat shows the project's current topic instead. End topic also drops the
+      chat's Read step at once, and keeps it off for 20 s against an older `/api/state` answer. A call without
+      `ended` (the CLI, older callers) reopens as before. No time windows.
     - With no current topic kept, the view picks the latest open topic, else starts a new one.
     - API: `POST /api/conversation/end` and `/reopen` with `{project, ref}`, and `/end-read` with `{project, days}`.
       Each answers with the conversation, as `GET /api/conversation` does.

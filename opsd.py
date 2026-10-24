@@ -5459,7 +5459,8 @@ def link_check(project, refs, heads=None):
 
 
 # A chat is "ready for you" when Claude isn't replying, and has a new reply when its last answer (Claude's, or a
-# note from the queue) came after you last looked at it. Ending a chat takes it out of both until you reopen it.
+# note from the queue) came after you last looked at it. Ending a chat takes it out of both until you reopen it, or
+# send it a message: an open reopens it only when the caller saw it ended (conv_open's compare-and-set).
 CHAT_COLS = ("id,project,title,state,updated,cost,kind,spec,spec_draft,seen,ended,subject,(SELECT MAX(ts) FROM design_msgs m "
              "WHERE m.design_id=designs.id AND m.role!='user') AS replied")
 
@@ -5746,9 +5747,15 @@ def conv_pin(project):
         set_setting(f"conv:{project}", json.dumps(conv_state(project, tops)))
 
 
-def conv_open(project, how, ref=None, mode=None):
+UNSEEN = object()  # conv_open's ended when the caller sent none
+
+
+def conv_open(project, how, ref=None, mode=None, ended=UNSEEN):
     """Which topic the next message goes to (README: TODAY-2), kept in conv:<project>:
-    chat/topic: that one (a to-do whose source is a chat, or a click in Earlier topics);
+    chat/topic: that one (a to-do whose source is a chat, or a click in Earlier topics). An ended one reopens only
+    when ended, what the caller last saw of it (null, or when it ended), is what is stored: you knowingly opened an
+    ended topic. Saw it open but it has ended since (a stale Today list): it stays ended and doesn't become the
+    current topic, and the answer names it in still_ended. No ended sent (the CLI, older callers): it reopens;
     subject: the open plan & design topic about ref (a to-do's or a panel's subject, see SUBJECT), else none yet:
     the first message makes it (conv_say); task: the current plan & design topic, else the latest one, else a new
     one (Ask Claude about the research runs); new: a new topic in the current mode, or mode; mode: switch mode, which starts a new
@@ -5762,7 +5769,9 @@ def conv_open(project, how, ref=None, mode=None):
         ref = int(ref) if str(ref).isdigit() else ref
         if ref not in ids:
             raise ValueError(f"no topic {ref} in {project}")
-        if ids[ref]["ended"]:  # opening an ended topic reopens it
+        if ids[ref]["ended"]:  # opening an ended topic reopens it, when you saw it ended (compare-and-set)
+            if ended is not UNSEEN and ended != ids[ref]["ended"]:
+                return {**conv_view(project), "still_ended": ref}
             topic_reopen(project, ref)
         c = {"topic": ref, "mode": ids[ref]["mode"]}
     elif how == "subject":
@@ -7975,7 +7984,8 @@ def todos_list(tasks, projects, last, now=None):
                                  min((u["oldest"] for u in f["uncommitted"] if u["oldest"]), default=0),
                                  "project", name))
     # Every chat you haven't ended waits on you once Claude is done replying: read its new reply, or answer it or
-    # end it. An ended chat is done: a reply that lands in it later doesn't bring it back (topics() agrees).
+    # end it. An ended chat is done: a reply that lands in it later doesn't bring it back (topics() agrees), nor does
+    # a dashboard that still lists it opening it (conv_open reopens only what the caller saw ended).
     for d in q(f"SELECT * FROM (SELECT {CHAT_COLS} FROM designs WHERE ended IS NULL) WHERE state!='thinking'"):
         unread = (d["replied"] or 0) > (d["seen"] or 0)
         out.append(todo_item(f"chat:{d['id']}:read", "Read", d["project"], d["title"] or f"Chat #{d['id']}",
@@ -8372,8 +8382,10 @@ class H(BaseHTTPRequestHandler):
             else:
                 set_setting(f"paused:{p.name}", "1" if act == "pause" else "0")
             return
-        if path == "/api/conversation":  # pick the topic: {project, how: chat|topic|subject|task|new|mode, ref?, mode?}
-            return conv_open(b.get("project") or "", b.get("how"), b.get("ref"), b.get("mode"))
+        # pick the topic: {project, how: chat|topic|subject|task|new|mode, ref?, mode?, ended?}
+        if path == "/api/conversation":
+            return conv_open(b.get("project") or "", b.get("how"), b.get("ref"), b.get("mode"),
+                             b["ended"] if "ended" in b else UNSEEN)
         if path == "/api/conversation/say":
             return conv_say(b.get("project") or "", b.get("text"))
         if path == "/api/conversation/end":  # {project, ref}: you are done with that topic
