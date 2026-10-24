@@ -556,10 +556,12 @@ details.tdparked .tditem { opacity: .8; }
   #tdnav button.on { color: var(--accent); font-weight: 600; }
   #tdnav .badge { position: absolute; top: -6px; left: 14px; min-width: 18px; padding: 0 5px; border-radius: 99px; background: var(--bad);
                   color: #fff; font-size: 11px; font-weight: 600; line-height: 18px; }
-  /* The step: compact, at most what leaves the conversation 60% of the screen */
+  /* The step: compact, at most what leaves the conversation 60% of the screen. The chat takes the rest at a
+     bounded height and never grows to its content, so only #msgs scrolls; a tall step card shrinks and scrolls. */
   #tdstep { flex: 0 1 auto; min-height: 0; max-height: none; overflow: auto; padding-top: 6px; }
-  #tdcentre #chat { flex: 1 0 auto; min-height: 60vh; }
+  #tdcentre #chat { flex: 1 1 0; min-height: 60vh; }
   @supports (height: 100dvh) { #tdcentre #chat { min-height: 60dvh; } }
+  #tdcentre #msgs { min-height: 0; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; }
   #tdsecbar .tdchips { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; margin-bottom: 6px; }
   #tdsecbar .tdchips::-webkit-scrollbar { display: none; }
   #tdsecbar .tdchips button { flex: none; white-space: nowrap; }
