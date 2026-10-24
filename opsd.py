@@ -1968,7 +1968,7 @@ def run_claude(p, tid, prompt):
            "--output-format", "stream-json", "--verbose",
            "--permission-mode", "auto", "--permission-prompts", "none", "--strict-mcp-config",
            "--no-chrome", "--name", f"{p.name} #{tid}", "--add-dir", str(IMAGES),
-           "--settings", guard_settings(t["worktree"])]
+           "--settings", guard_settings(t["worktree"], p)]
     if t["session_id"]:
         cmd += ["--resume", t["session_id"]]
         model = session_model(t, t["kind"])
@@ -6078,7 +6078,7 @@ def design_turn(did, text, fresh_why=None):
                "--output-format", "stream-json", "--verbose",
                "--permission-mode", "auto", "--permission-prompts", "none", "--no-chrome",
                "--mcp-config", mcp, "--strict-mcp-config",  # only chat_mcp: every tool rides on every call
-               "--name", f"{p.name} chat #{did}", "--settings", guard_settings(None),
+               "--name", f"{p.name} chat #{did}", "--settings", guard_settings(None, p, chat=True),
                "--append-system-prompt", system]
     else:
         note, system = ops_note(p, did, extra), design_system_prompt(p, d, cwd)
@@ -6839,7 +6839,7 @@ def task_chat_turn(tid, text):
         mcp, _ = mcp_servers(p)
         cmd = [CLAUDE, "-p", note + with_images(text), "--output-format", "stream-json", "--verbose",
                "--permission-mode", "auto", "--permission-prompts", "none", "--no-chrome",
-               "--mcp-config", mcp, "--strict-mcp-config", "--settings", guard_settings(str(cwd)),
+               "--mcp-config", mcp, "--strict-mcp-config", "--settings", guard_settings(str(cwd), p, chat=True),
                "--append-system-prompt", PROJECT_CHAT_PROMPT]
     else:  # merged: its edits would land nowhere, so it reads, and a change goes to a follow-up task
         note = (f"[ops: the user is asking about this task on the dashboard; its state is {t['state']}. Answer them. "
