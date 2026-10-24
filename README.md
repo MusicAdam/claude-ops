@@ -806,7 +806,10 @@ stay on the right of the header.
   queued the task or its parent. The conversation reads `GET /api/conversation?project=<name>` with each poll,
   and the current topic (`GET /api/designs/<id>`, or `/api/research/threads/<id>`).
 - **Layout.** Desktop, 1100px and wider, has the three columns. Narrower windows stack them. Below 700px the
-  phone layout below takes over.
+  phone layout below takes over. On desktop, drag the border between the centre and right columns to resize the
+  right column: from 240px up to 50% of the view, and never so wide that the centre drops below 420px. This
+  browser keeps the width (`ops-td-right` in localStorage); double-click the border to reset it to 320px. The
+  handle is hidden when the columns stack, and the saved width is ignored there.
 
 
 ### Quick chat
