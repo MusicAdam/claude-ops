@@ -558,7 +558,7 @@ details.tdparked .tditem { opacity: .8; }
                   color: #fff; font-size: 11px; font-weight: 600; line-height: 18px; }
   /* The step: compact, at most what leaves the conversation 60% of the screen. The chat takes the rest at a
      bounded height and never grows to its content, so only #msgs scrolls; a tall step card shrinks and scrolls. */
-  #tdstep { flex: 0 1 auto; min-height: 0; max-height: none; overflow: auto; padding-top: 6px; }
+  #tdstep { flex: 0 1 auto; min-height: 44px; max-height: none; overflow: auto; padding-top: 6px; }
   #tdcentre #chat { flex: 1 1 0; min-height: 60vh; }
   @supports (height: 100dvh) { #tdcentre #chat { min-height: 60dvh; } }
   #tdcentre #msgs { min-height: 0; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; }
@@ -567,7 +567,9 @@ details.tdparked .tditem { opacity: .8; }
   #tdsecbar .tdchips button { flex: none; white-space: nowrap; }
   .stepcard { padding: 6px 10px 8px; margin-bottom: 6px; }
   .stepcard .ph { display: inline-flex; }
-  .stepcard .top { display: flex; align-items: center; gap: 6px; }
+  /* PHONE-2: ‹ To-do stays in view however the card scrolls or the conversation grows */
+  .stepcard .top { display: flex; align-items: center; gap: 6px; position: sticky; top: 0; z-index: 1; background: var(--panel);
+                  box-shadow: 0 -12px 0 var(--panel); }  /* covers the card padding above it */
   .stepcard .top .k { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-transform: none; letter-spacing: 0; }
   .stepcard .top button { flex: none; padding: 1px 8px; font-size: 13px; white-space: nowrap; }
   .stepcard .top .back, .stepcard .top .skip { border-color: transparent; background: none; color: var(--accent); padding: 2px 4px; }
@@ -2586,18 +2588,23 @@ const tdSave = () => { try { localStorage.setItem("ops-todo", TD.key); localStor
 const verbPill = x => `<span class="verb g-${esc(x.group)}">${esc(x.verb)}</span>`;
 const tdDoneToday = () => state.tasks.filter(t => t.state === "done" && t.finished >= midnight() && inView(t.project))
   .sort((a, b) => b.finished - a.finished);
-// Below 700px Today shows one column at a time (README "Today on a phone"). Opening a column, a step or a panel
-// there adds a history entry, so the phone's back gesture closes one level: the panel, then the step.
+// Below 700px Today shows one column at a time (README "Today on a phone"). Leaving To-do adds one history entry
+// {td: "pane"} and opening a panel another {td: "panel"}, so the phone's back gesture closes one level: the panel,
+// then the step. The entry back lands on says what stays open (tdArrive), whatever the hash is.
 const phone = () => matchMedia("(max-width: 699px)").matches;
+if (history.state?.td) history.replaceState(null, "", location.hash);  // a reload starts with nothing open
+const tdDepth = () => { const s = history.state; return s?.td === "pane" ? 1 : s?.td === "panel" ? (s.pane ? 2 : 1) : 0; };
 function tdGo(pane) {
   if (pane === TD.pane) return;
-  if (pane === "todo" && history.state?.td === "pane") return history.back();
+  if (pane === "todo" && tdDepth()) return history.go(-tdDepth());  // tdArrive shows To-do
   if (pane !== "todo" && TD.pane === "todo" && phone()) history.pushState({td: "pane"}, "", location.hash);
   TD.pane = pane; renderToday();
 }
-function tdBackOne() {
-  if (TD.panel) tdClosePanelNow();
-  else if (TD.pane !== "todo") { TD.pane = "todo"; renderToday(); }
+function tdArrive(s) {
+  if (s?.td === "panel") return;
+  if (TD.panel) { tdPanelTask(false); TD.panel = null; }
+  if (s?.td !== "pane") TD.pane = "todo";
+  renderToday();
 }
 document.querySelectorAll("#tdnav [data-pane]").forEach(b => b.onclick = () => tdGo(b.dataset.pane));
 const convBusy = () => !!((chatData && chatData.state === "thinking") || (TD.rs && TD.rs.running));
@@ -3428,8 +3435,16 @@ function tdPanelTask(on) {
   if (on) $("#tdpdet").appendChild($("#detail"));
   else if ($("#detail").parentElement !== $("#detailcol")) { $("#detailcol").appendChild($("#detail")); clearSelection(); }
 }
-function tdPanelPush() { if (!TD.panel && phone()) history.pushState({td: "panel"}, "", location.hash); }
+function tdPanelPush() { if (!TD.panel && phone()) history.pushState({td: "panel", pane: history.state?.td === "pane"}, "", location.hash); }
 function tdClosePanel() { if (history.state?.td === "panel") history.back(); else tdClosePanelNow(); }
+// Close the panel and show Now as one history level: back to the step's entry, or the panel's entry becomes it.
+function tdPanelToNow() {
+  const s = history.state;
+  if (s?.td === "panel" && s.pane) { TD.pane = "now"; return history.back(); }
+  if (s?.td === "panel") history.replaceState({td: "pane"}, "", location.hash);
+  else if (TD.pane === "todo") history.pushState({td: "pane"}, "", location.hash);
+  TD.pane = "now"; tdClosePanelNow();
+}
 function tdClosePanelNow() { tdPanelTask(false); TD.panel = null; renderToday(); }
 function tdLeave() { if (TD.panel) { tdPanelTask(false); TD.panel = null; } TD.mode = null; rdClose(); }
 function stageOf(t) {
@@ -3505,7 +3520,7 @@ async function tdAsk() {
     : p.kind === "schedule" ? `schedule:${p.id}` : null;
   const start = subject ? "" : "About the research runs: ";
   TD.mode = null; tdClearStarter();
-  if (phone()) { tdClosePanel(); TD.pane = "now"; }  // the message box is under the step
+  if (phone()) tdPanelToNow();  // the message box is under the step
   const project = p.kind === "task" ? (t ? t.project : "") : p.kind === "train" ? p.project : sch ? sch.project : "";
   if (project && project !== convProject()) TD.over = {key: TD.convKey, project};
   await convOpen(subject ? {how: "subject", ref: subject} : {how: "task"});
@@ -4431,7 +4446,12 @@ $("#rsrepo").onchange = () => api("/api/settings", {research_repo: $("#rsrepo").
   .catch(e => $("#rsrepomsg").textContent = e.message);
 window.addEventListener("popstate", () => {
   const h = location.hash;
-  if (tab === "today" && h === "#today") return tdBackOne();  // a step or panel opened on a phone
+  const away = /^#research(\/|$)/.test(h) || (TABS.includes(h.slice(1)) && h !== "#today") || h === "#queue";
+  if (tab === "today" && !away) {  // a step or panel opened on a phone, whatever the hash
+    tdArrive(history.state);
+    if (h !== "#today") history.replaceState(history.state, "", "#today");
+    return;
+  }
   if (/^#research(\/|$)/.test(h)) {
     rsApply(h);
     if (tab !== "research") showTab("research"); else rsRender();
