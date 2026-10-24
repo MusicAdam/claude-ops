@@ -1285,6 +1285,12 @@ notes = """Project-specific guidance for design chats."""
 - **Header.** Only what you watch or act on: the tabs, the queue readouts (working, queued, needs you,
   paused), the usage meters, and the pause buttons. Hover a readout or meter for what it counts; the
   dashboard draws that tooltip itself, so it shows at once and survives the 3-second redraw.
+- **Task ids.** Every task title carries its queue id as **#316**, muted, in front of the title: the History
+  list, a project's task list, Today's timeline and Tasks panel, a To-do item about a task (in the list and on its
+  step card), a task's detail page, and the task chips under a chat message. A parked item's "Waiting on #283"
+  names its ids the same way. Click an id to copy `#316` (it says "copied" for a moment); the click stops there,
+  so it never also opens the card or ticks a box. Owner to-dos show no id: their title is the to-do, not a task.
+  `tid()` in `dashboard.html` draws every one, so the format stays the same; `tests/test_task_ids.py` checks it.
 - **Settings tab.** Parallel, Promote wait, Usage brake, Taper from, Model, Effort and the model per kind of work, each
   with what it does written next to it, and **Spent**: what Claude has cost, priced at API rates.
 - **Analyze tab.** Run times and costs of the tasks created in the last day, 7 days, 30 days or all time, for

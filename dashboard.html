@@ -72,6 +72,12 @@ label { color: var(--muted); display: inline-flex; gap: 6px; align-items: center
 .task.sel { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
 .task .top { display: flex; gap: 10px; align-items: baseline; }
 .task .id { color: var(--muted); font-family: var(--mono); font-size: 12px; }
+/* A task's #id (tid()): muted, and a click copies it. "copied" shows briefly after it. */
+.tid { color: var(--muted); font-family: var(--mono); font-size: 12px; font-weight: 400; cursor: copy; }
+.tditem .tid, .stepcard h2 .tid, .chip .tid, #detail h2 .tid { margin-right: 6px; }
+#detail h2 .tid { font-size: inherit; }
+.tid:hover { color: var(--ink); text-decoration: underline dotted; }
+.tid.copied::after { content: " copied"; color: var(--accent); font-family: system-ui, sans-serif; }
 .task .title { flex: 1; font-weight: 550; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .task .sub { color: var(--muted); font-size: 12px; margin-top: 3px; }
 .task .now { font-size: 12px; margin-top: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -1144,7 +1150,7 @@ function mainLogHtml(g) {
 function projTasksHtml(g) {
   const ts = state.tasks.filter(t => t.project === g.name), fin = ["done", "cancelled"];
   const open = ts.filter(t => !fin.includes(t.state)), done = ts.filter(t => fin.includes(t.state)).slice(0, 8);
-  const row = t => `<div class="ptask" data-task="${t.id}" title="Open #${t.id} on the Tasks tab"><span class="id">#${t.id}</span>
+  const row = t => `<div class="ptask" data-task="${t.id}" title="Open #${t.id} on the Tasks tab">${tid(t.id)}
     <span class="title">${esc(t.title)}</span><span class="badge s-${t.state} ${LIVE.includes(t.state) ? "pulse" : ""}">${LABEL[t.state] || t.state}</span></div>`;
   if (!ts.length) return `<div class="ptasks"><h3>Tasks</h3><div class="muted">No tasks yet.</div></div>`;
   return `<div class="ptasks">` + (open.length ? `<h3>Open (${open.length})</h3>${open.map(row).join("")}` : "") +
@@ -1201,6 +1207,8 @@ const sentHtml = g => { const ids = g.senddev_pending || [];
 const day = iso => { const d = new Date(iso), y = d.getFullYear() !== new Date().getFullYear();
   return d.toLocaleDateString("en-GB", {day: "numeric", month: "short", ...(y ? {year: "numeric"} : {})}); };
 const taskLink = id => `<a data-task="${id}">#${id}</a>`;
+// A task's id as the dashboard shows it everywhere: "#316", muted. A click copies "#316" and does nothing else.
+const tid = id => `<span class="id tid" data-copyid="${id}" title="Copy #${id}">#${id}</span>`;
 // What a deploy of d would ship: the commits between its last deploy and what it deploys now.
 const nCommits = n => `${n} commit${n === 1 ? "" : "s"}`;
 function depStatus(d) {
@@ -1308,6 +1316,21 @@ async function confirmDeploy() {
     refresh();
   } catch (e) { $("#dmsg").textContent = e.message; syncDeploy(); }
 }
+// A task's #id (tid()) copies "#<id>" and shows "copied" for a moment. It listens in the capture phase and stops the
+// click there, so the card, row, chip or label around the id never also gets it.
+document.addEventListener("click", e => {
+  const el = e.target.closest && e.target.closest("[data-copyid]");
+  if (!el) return;
+  e.preventDefault(); e.stopPropagation();
+  const text = "#" + el.dataset.copyid;
+  const done = () => { el.classList.add("copied"); clearTimeout(el._copied); el._copied = setTimeout(() => el.classList.remove("copied"), 1200); };
+  const fallback = () => {  // no async clipboard on plain http from another machine
+    const ta = document.createElement("textarea"); ta.value = text; ta.style.position = "fixed"; ta.style.opacity = "0";
+    document.body.append(ta); ta.select();
+    try { if (document.execCommand("copy")) done(); } finally { ta.remove(); }
+  };
+  if (navigator.clipboard && window.isSecureContext) navigator.clipboard.writeText(text).then(done, fallback); else fallback();
+}, true);
 // A task link (a deploy's #id) anywhere on the page opens that task on the Tasks tab; in the dialog it closes the dialog first.
 document.addEventListener("click", e => {
   const a = e.target.closest && e.target.closest("a[data-task], .ptask[data-task]");
@@ -1414,7 +1437,7 @@ function selectTask(id) {
   if (state) renderList();
   // Show the task at once from the list; the full page follows when the daemon answers.
   if (t && $("#detail").dataset.id !== String(id)) {
-    $("#detail").innerHTML = detailHtml = `<h2>#${t.id} · <span class="s-${t.state}">${LABEL[t.state] || t.state}</span></h2>
+    $("#detail").innerHTML = detailHtml = `<h2>${tid(t.id)}· <span class="s-${t.state}">${LABEL[t.state] || t.state}</span></h2>
       <div style="font-weight:600;font-size:15px">${esc(t.title)}</div><div class="muted" style="margin-top:8px">Loading…</div>`;
     delete $("#detail").dataset.id;
   }
@@ -1456,7 +1479,7 @@ function renderList() {
         t.cost ? `$${t.cost.toFixed(2)}` : "",
       ].filter(Boolean).join(" · ");
       return `<div class="task ${sel === t.id ? "sel" : ""}" data-id="${t.id}">
-        <div class="top"><span class="id">#${t.id}</span><span class="title">${esc(t.title)}</span>
+        <div class="top">${tid(t.id)}<span class="title">${esc(t.title)}</span>
         <span class="badge s-${t.state} ${live ? "pulse" : ""}">${LABEL[t.state] || t.state}</span></div>
         ${nowLine(t, now)}<div class="sub">${sub}</div></div>`;
     }).join("") + "</div>";
@@ -1523,7 +1546,7 @@ async function loadDetail(id, fresh) {
     actions += `<label title="Once it merges into dev, promote dev to main, as the Promote button does"><input type="checkbox" data-act="release" ${t.auto_release ? "checked" : ""}> Promote after merge</label>`;
 
   const html = `
-    <h2>#${t.id} · <span class="s-${t.state}">${LABEL[t.state] || t.state}</span>${live && t.phase ? ` · ${esc(t.phase)}` : ""}</h2>
+    <h2>${tid(t.id)}· <span class="s-${t.state}">${LABEL[t.state] || t.state}</span>${live && t.phase ? ` · ${esc(t.phase)}` : ""}</h2>
     <div style="font-weight:600;font-size:15px">${esc(t.title)}</div>
     ${originLine(t.origin, "Sent by")}
     ${timeLine(t, live)}
@@ -2470,7 +2493,7 @@ function msgsHtml(d, links) {
   const thinking = d.state === "thinking";
   return d.msgs.map(m => m.role === "user"
       ? `<div class="msg user">${userMd(m.text.replace(/^\[ops:[^\n]*\]\n\n/, ""), links)}</div>`
-      : `<div class="msg ${m.role === "ops" ? "ops" : ""}">${md(m.text, undefined, links)}${m.tasks.length ? `<div class="chips">${m.tasks.map(t => `<button class="chip" data-task="${t.id}">#${t.id} ${esc(t.title || "")} · ${LABEL[t.state] || t.state}</button>`).join("")}</div>` : ""}</div>`).join("")
+      : `<div class="msg ${m.role === "ops" ? "ops" : ""}">${md(m.text, undefined, links)}${m.tasks.length ? `<div class="chips">${m.tasks.map(t => `<button class="chip" data-task="${t.id}">${tid(t.id)}${esc(t.title || "")} · ${LABEL[t.state] || t.state}</button>`).join("")}</div>` : ""}</div>`).join("")
     + (thinking ? `<div class="live"><span class="pulse s-running">Claude is thinking</span>${d.live.map(l => `<div>  ${esc(l)}</div>`).join("")}</div>` : "")
     + (d.queued || []).map((t, k) => `<div class="msg user queued">${userMd(t, links)}<div class="qbar">Queued: sent ${thinking ? "when this reply ends" : "next"} · <button data-unq="${k}" title="Take it off the queue and put it back in the message box">Edit</button></div></div>`).join("");
 }
@@ -2647,13 +2670,15 @@ function tdChanged(it) {
   renderConv();  // the last item's End topic waits until this one's conversation loads
   refreshDesign();
 }
+// An item about a task carries the task's #id; an owner to-do that came from a task does not, its title is the to-do.
+const tdTid = x => x.source && x.source.kind === "task" && !x.todo ? tid(x.source.id) : "";
 const tdAnswerMode = it => ({a: "answer", id: it.source.id, words: `Your message answers #${it.source.id}'s question.`});
 
 // One row of the list. A note shows under it; a parked row says how long it has been parked.
 const tdRow = x => `<div class="tditem ${x.key === TD.key ? "sel" : ""} ${x.skipped ? "skipped" : ""}" data-key="${esc(x.key)}">
-  ${verbPill(x)}<span class="t" title="${esc(x.title)}">${esc(x.title)}</span>
+  ${verbPill(x)}<span class="t" title="${esc(x.title)}">${tdTid(x)}${esc(x.title)}</span>
   <span class="sub">${[pf ? "" : esc(P(x.project).title), x.parked ? `parked ${ago(x.parked.since, state.now)}` : x.since ? `${ago(x.since, state.now)} ago` : "",
-    x.skipped ? "skipped" : "", x.parked && tdWaiting(x.parked) ? esc(tdWaiting(x.parked)) : ""].filter(Boolean).join(" · ")}</span>
+    x.skipped ? "skipped" : "", x.parked && tdWaiting(x.parked) ? tdWaiting(x.parked) : ""].filter(Boolean).join(" · ")}</span>
   ${x.note ? `<span class="tdn" title="${esc(x.note)}">${esc(x.note)}</span>` : ""}</div>`;
 function tdLeft(all, shown) {
   const parked = tdParked();
@@ -2757,8 +2782,8 @@ function tdStep(it, shown) {
     <div class="k">${it.parked ? `Parked ${ago(it.parked.since, state.now)}` : `Step ${shown.indexOf(it) + 1} of ${shown.length}`} · ${esc(P(it.project).title)}</div>
     ${dets ? `<button class="ph" data-dets aria-expanded="${TD.dets}">Details ${TD.dets ? "▴" : "▾"}</button>` : ""}
     ${unpark("ph skip")}<button class="ph skip" data-skip title="${esc(skipTip)}">Skip →</button></div>
-    <h2>${verbPill(it)}<span>${esc(it.title)}</span></h2>
-    ${it.parked && tdWaiting(it.parked) ? `<div class="tdwaiting">${esc(tdWaiting(it.parked))}<button data-wclear title="Forget the wait and put it back in the list">Clear</button></div>` : ""}
+    <h2>${verbPill(it)}<span>${tdTid(it)}${esc(it.title)}</span></h2>
+    ${it.parked && tdWaiting(it.parked) ? `<div class="tdwaiting">${tdWaiting(it.parked)}<button data-wclear title="Forget the wait and put it back in the list">Clear</button></div>` : ""}
     <div class="dets">${it.why ? `<div class="why">${esc(it.why)}</div>` : ""}
     ${facts ? `<div class="facts">${facts}</div>` : ""}${it.verb === "Commit" ? tdUncommitted() : ""}</div>
     ${it.verb === "Ship" && P(it.project).deploys && P(it.project).deploys.length ? tdShipLog(P(it.project)) : ""}
@@ -2852,8 +2877,8 @@ async function tdUnpark() {
 }
 // Wait for… (README TODO-6): park an item until tasks merge or are released. One chooser serves a step and + Add.
 const TD_WAIT_STATES = ["queued", "running", "gating", "merging", "review"];
-const tdWaiting = w => (w.wake_tasks || []).length
-  ? `Waiting on ${w.wake_tasks.map(n => "#" + n).join(", ")} to ${w.wake_on === "released" ? "release" : "merge"}` : "";
+const tdWaiting = w => (w.wake_tasks || []).length  // HTML: each id is a tid()
+  ? `Waiting on ${w.wake_tasks.map(n => tid(+n)).join(", ")} to ${w.wake_on === "released" ? "release" : "merge"}` : "";
 const tdWaitTasks = project => state.tasks.filter(t => t.project === project && TD_WAIT_STATES.includes(t.state)).sort((a, b) => a.id - b.id);
 const tdWaitIds = w => [...new Set([...w.ids, ...(w.other.match(/\d+/g) || []).map(Number)])];
 // A chooser's state, with the tasks of cur (an item's parked) ticked: the listed ones as boxes, the rest typed
@@ -3257,7 +3282,7 @@ function tdResearchList(sd) {
   const r = sd.rs, now = Date.now() / 1000, dev = esc((r && r.dev) || P(sd.project).dev_branch || "dev");
   if (!r) return `<h3>Reports</h3>` + tdLoading(sd, "rs", "the research");
   const day = ts => ts ? new Date(ts * 1000).toLocaleDateString(undefined, {month: "short", day: "numeric", year: "numeric"}) : "";
-  const run = (r.running || []).map(t => `<div class="tlitem" data-task="${t.id}" title="${esc((t.research && t.research.question) || t.title)}"><div class="t"><span class="id">#${t.id}</span>${esc(t.title)}</div>
+  const run = (r.running || []).map(t => `<div class="tlitem" data-task="${t.id}" title="${esc((t.research && t.research.question) || t.title)}"><div class="t">${tid(t.id)}${esc(t.title)}</div>
     <div class="sub"><span class="${LIVE.includes(t.state) ? "s-running" : ""}">${esc(LABEL[t.state] || t.state)}</span>${t.research ? ` · ${esc(t.research.tier)} · writes ${esc(t.research.path)}` : ""}</div></div>`).join("");
   const reps = (r.reports || []).map(x => `<div class="tlitem" data-report="${esc(x.path)}" title="${esc(x.path)}"><div class="t">${x.unread ? '<span class="dot" title="Not opened yet">●</span>' : ""}${esc(x.title || x.path)}</div>
     <div class="sub">${[day(x.date), esc(x.summary || "")].filter(Boolean).join(" · ")}</div></div>`).join("");
@@ -3305,7 +3330,7 @@ function tdDropGone(s) {
 // Tasks: the History list for this project, newest first.
 function tdTasksList(project) {
   const ts = state.tasks.filter(t => t.project === project).sort((a, b) => b.id - a.id).slice(0, 100), now = state.now;
-  return `<h3>Tasks</h3>` + (ts.map(t => `<div class="tlitem" data-task="${t.id}" title="${esc(t.title)}"><div class="t"><span class="id">#${t.id}</span>${esc(t.title)}</div>
+  return `<h3>Tasks</h3>` + (ts.map(t => `<div class="tlitem" data-task="${t.id}" title="${esc(t.title)}"><div class="t">${tid(t.id)}${esc(t.title)}</div>
     <div class="sub">${[`<span class="s-${esc(t.state)}">${esc(t.phase && LIVE.includes(t.state) ? t.phase : LABEL[t.state] || t.state)}</span>`,
       t.kind !== "task" ? esc(t.kind) : "", t.research ? `research ${esc(t.research.tier)}` : "",
       `${ago(t.finished || t.started || t.created, now)} ago`].filter(Boolean).join(" · ")}</div></div>`).join("")
@@ -3387,7 +3412,7 @@ async function tdStartResearch() {
 function tdTimeline() {
   const ts = state.tasks.filter(t => inView(t.project)), now = state.now;
   const proj = t => pf ? "" : esc(P(t.project).title);
-  const row = (t, sub) => `<div class="tlitem" data-tl="task:${t.id}" title="${esc(t.title)}"><div class="t"><span class="id">#${t.id}</span>${esc(t.title)}</div>
+  const row = (t, sub) => `<div class="tlitem" data-tl="task:${t.id}" title="${esc(t.title)}"><div class="t">${tid(t.id)}${esc(t.title)}</div>
     <div class="sub">${sub.filter(Boolean).join(" · ")}</div></div>`;
   const working = ts.filter(t => LIVE.includes(t.state)), rsn = (state.research && state.research.active) || 0;
   const waiting = ts.filter(t => ["queued", "paused"].includes(t.state)).sort((a, b) => b.priority - a.priority || a.id - b.id);
