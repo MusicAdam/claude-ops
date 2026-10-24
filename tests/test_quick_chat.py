@@ -10,22 +10,28 @@ import unittest
 from pathlib import Path
 
 PAGE = Path(__file__).resolve().parent.parent / "dashboard.html"
-# qcFit and QC_MIN, from "const QC_MIN" to the end of qcFit
-FIT = r"""
+# The window's pure helpers (qcFit, qcRestore, qcAfterClose, qcPill …), from "const QC_MIN" to the marker after them.
+# The cases are [function name, ...arguments]; a qcPill title argument is a {project: title} map.
+RUN = r"""
 const h = require("fs").readFileSync(process.argv[1], "utf8");
-const a = h.indexOf("const QC_MIN"), b = h.indexOf("\n}\n", h.indexOf("function qcFit(")) + 3;
+const a = h.indexOf("const QC_MIN"), b = h.indexOf("// (end of the pure helpers");
 const matchMedia = () => ({matches: false});
-eval(h.slice(a, b).replace("const QC_MIN", "globalThis.QC_MIN"));
-console.log(JSON.stringify(JSON.parse(process.argv[2]).map(([g, vw, vh]) => qcFit(g, vw, vh))));
+const f = new Function(h.slice(a, b) + "; return {qcFit, qcRestore, qcCanAdd, qcAfterClose, qcUnread, qcPill, QC_MAX};")();
+console.log(JSON.stringify(JSON.parse(process.argv[2]).map(([name, ...args]) =>
+  name === "qcPill" ? f.qcPill(args[0], p => args[1][p]) : name === "QC_MAX" ? f.QC_MAX : f[name](...args))));
 """
+
+
+def run(*cases):
+    out = subprocess.run(["node", "-e", RUN, str(PAGE), json.dumps(cases)], capture_output=True, text=True,
+                         check=True).stdout
+    return json.loads(out)
 
 
 @unittest.skipUnless(shutil.which("node"), "needs node")
 class QuickChatWindow(unittest.TestCase):
     def fit(self, *cases):
-        out = subprocess.run(["node", "-e", FIT, str(PAGE), json.dumps(cases)], capture_output=True, text=True,
-                             check=True).stdout
-        return json.loads(out)
+        return run(*(["qcFit", *c] for c in cases))
 
     def test_default_is_bottom_right(self):
         g, = self.fit([None, 1440, 900])
@@ -42,13 +48,68 @@ class QuickChatWindow(unittest.TestCase):
         self.assertEqual(g, {"w": 1000, "h": 700, "x": 0, "y": 0})
 
 
+def topic(*roles, state="idle"):
+    return {"state": state, "msgs": [{"role": r} for r in roles]}
+
+
+@unittest.skipUnless(shutil.which("node"), "needs node")
+class QuickChatTabs(unittest.TestCase):
+    """Several chats in the one window: what ops-qc restores, the tab limit, closing tabs and the minimised pill."""
+
+    def test_old_shape_is_one_tab(self):
+        r, = run(["qcRestore", {"project": "ops", "did": 12, "min": True, "seen": 4}])
+        self.assertEqual(r, {"tabs": [{"project": "ops", "did": 12, "seen": 4}], "active": 0, "min": True})
+
+    def test_tabs_shape_round_trips(self):
+        k = {"tabs": [{"project": "a", "did": None, "seen": 0}, {"project": "b", "did": 7, "seen": 3}],
+             "active": 1, "min": False}
+        r, = run(["qcRestore", k])
+        self.assertEqual(r, k)
+
+    def test_restore_nothing_or_junk(self):
+        self.assertEqual(run(["qcRestore", None], ["qcRestore", {"tabs": []}], ["qcRestore", "x"]), [None, None, None])
+        r, = run(["qcRestore", {"tabs": [{"project": "a"}, {"project": "b"}], "active": 9}])
+        self.assertEqual(r["active"], 1)  # an active index past the end is the last tab
+
+    def test_at_most_six_tabs(self):
+        tabs = lambda n: [{"project": "p", "did": None, "seen": 0}] * n
+        self.assertEqual(run(["QC_MAX"], ["qcCanAdd", tabs(5)], ["qcCanAdd", tabs(6)]), [6, True, False])
+        r, = run(["qcRestore", {"tabs": tabs(8)}])
+        self.assertEqual(len(r["tabs"]), 6)
+
+    def test_closing_tabs(self):
+        self.assertEqual(run(["qcAfterClose", 1, 0, 0]), [-1])  # the last tab closes the window
+        self.assertEqual(run(["qcAfterClose", 3, 1, 1], ["qcAfterClose", 3, 2, 2], ["qcAfterClose", 2, 0, 0]),
+                         [1, 1, 0])  # the active one: its right-hand neighbour, or its left when it was last
+        self.assertEqual(run(["qcAfterClose", 4, 2, 0], ["qcAfterClose", 4, 1, 3]), [1, 1])  # another: same tab
+
+    def test_unread(self):
+        cases = [
+            {"d": topic("user", "assistant"), "seen": 1},              # a reply since: unread
+            {"d": topic("user", "assistant"), "seen": 2},              # seen it
+            {"d": topic("user", "assistant", "user"), "seen": 2},      # your message last
+            {"d": topic("user", "assistant", state="thinking"), "seen": 1},  # still replying
+            {"d": None, "seen": 0},                                    # not loaded or no topic yet
+        ]
+        self.assertEqual(run(*(["qcUnread", c] for c in cases)), [True, False, False, False, False])
+
+    def test_pill(self):
+        titles = {"ops": "Claude Ops", "game": "Disk Game"}
+        read, unread = {"project": "game", "d": topic("user", "assistant"), "seen": 2}, \
+            {"project": "ops", "d": topic("user", "assistant"), "seen": 1}
+        self.assertEqual(run(["qcPill", [read], titles], ["qcPill", [unread], titles],
+                             ["qcPill", [read, read, read], titles], ["qcPill", [read, unread], titles]),
+                         [{"label": "Disk Game", "dot": False}, {"label": "Claude Ops", "dot": True},
+                          {"label": "3 chats", "dot": False}, {"label": "2 chats", "dot": True}])
+
+
 class QuickChatPage(unittest.TestCase):
     """The page has the window and its own elements, so it never draws into or sends from the Today conversation."""
     page = PAGE.read_text()
 
     def test_elements(self):
         for el in ("askbtn", "qc", "qcbar", "qcproj", "qctitle", "qcmin", "qcx", "qcmsgs", "qcsay", "qcsend",
-                   "qcpill"):
+                   "qcpill", "qctabs"):
             self.assertEqual(len(re.findall(f'id="{el}"', self.page)), 1, el)
 
     def test_window_leaves_today_alone(self):

@@ -638,6 +638,17 @@ details.tdparked .tditem { opacity: .8; }
 #qcbar select { max-width: 45%; }
 #qctitle { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
 #qcbar button { padding: 0 8px; line-height: 22px; }
+#qctabs { display: flex; align-items: flex-end; gap: 2px; padding: 4px 6px 0; border-bottom: 1px solid var(--line);
+          overflow-x: auto; scrollbar-width: none; }
+#qctabs::-webkit-scrollbar { display: none; }
+.qctab { display: flex; align-items: center; gap: 4px; flex: 0 1 auto; min-width: 48px; max-width: 150px; padding: 2px 2px 2px 8px;
+         margin-bottom: -1px; border: 1px solid transparent; border-bottom: 0; border-radius: 6px 6px 0 0; cursor: pointer;
+         color: var(--muted); font-size: 12px; white-space: nowrap; }
+.qctab.on { background: var(--bg); border-color: var(--line); color: var(--ink); }
+.qctab .t { overflow: hidden; text-overflow: ellipsis; }
+.qctab .dot { flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--warn); }
+.qctab button, #qcadd { padding: 0 5px; line-height: 18px; border: 0; background: none; color: inherit; }
+#qcadd { margin-bottom: 2px; } #qcadd.dis { opacity: .4; cursor: not-allowed; }
 #qcmsgs { flex: 1; overflow: auto; padding: 10px; }
 #qcmsgs .msg { max-width: none; } #qcmsgs .msg.user { margin-left: 24px; }
 #qcmsgs .muted { padding: 8px 2px; }
@@ -861,8 +872,9 @@ details.tdparked .tditem { opacity: .8; }
 <div id="rpark" class="hidden"><section id="reader"><div id="rhead"><div id="rinfo"></div><div id="rnav"></div></div><div id="rbody"></div></section></div>
 <!-- The quick chat (README: TODAY-6): a floating window over the page, and the pill it shrinks to -->
 <div id="qc" class="hidden" role="dialog" aria-label="Quick chat">
-  <div id="qcbar" title="Drag to move"><select id="qcproj" title="The project this chat talks to. Locked after the first message: close and open a new one to talk to another."></select>
-    <span id="qctitle"></span><button id="qcmin" title="Minimise (Esc)">–</button><button id="qcx" title="Close. The next one starts fresh; this topic stays in the project's Earlier topics.">×</button></div>
+  <div id="qcbar" title="Drag to move"><select id="qcproj" title="The project this tab talks to. Locked after its first message: add a tab with + to talk to another."></select>
+    <span id="qctitle"></span><button id="qcmin" title="Minimise (Esc)">–</button><button id="qcx" title="Close the window and every tab. The next one starts fresh; the topics stay in their projects' Earlier topics.">×</button></div>
+  <div id="qctabs" role="tablist"></div>
   <div id="qcmsgs"></div>
   <div id="qccomp"><textarea id="qcsay" placeholder="Ask anything. Drop or paste screenshots to attach them. (Enter sends, Shift+Enter adds a line)"></textarea>
     <div class="row"><button class="primary" id="qcsend">Send</button><button id="qcclip" title="Attach pictures (or paste or drop them on the message box)">📎</button><input type="file" id="qcfile" accept="image/*" multiple class="hidden"><span id="qcmsg" class="err"></span></div></div>
@@ -3742,9 +3754,11 @@ document.addEventListener("paste", e => {
 // ---------------------------------------------------------------- quick chat (README: TODAY-6)
 // A floating window that talks to any project and leaves the page under it alone: it never touches the header
 // filter, TD or chatSel/chatKey, and its first message asks the daemon (quick: true) to keep the topic Today shows.
-// localStorage keeps ops-qc {project, did, min, seen} while a chat is open or minimised, and ops-qc-geo {x, y, w, h}.
-const QC = {on: false, min: false, project: "", did: null, d: null, key: "", seen: 0, geo: null};
-const QC_MIN = {w: 320, h: 300}, QC_PHONE = matchMedia("(max-width: 699px)");
+// localStorage keeps ops-qc {tabs: [{project, did, seen}], active, min} while the window is open or minimised, and
+// ops-qc-geo {x, y, w, h}. Each tab is its own topic, {project, did, d, seen, draft, msg}; QC.active indexes QC.tabs,
+// and QC.key is what #qcmsgs last drew (it shows the active tab).
+const QC = {on: false, min: false, tabs: [], active: 0, key: "", geo: null, tick: 0};
+const QC_MIN = {w: 320, h: 300}, QC_MAX = 6, QC_PHONE = matchMedia("(max-width: 699px)");
 // The window's place and size, kept inside a vw×vh viewport with at least QC_MIN; null (nothing kept) is the
 // default 420×520 at the bottom right, 16px in.
 function qcFit(g, vw, vh) {
@@ -3752,9 +3766,33 @@ function qcFit(g, vw, vh) {
   const w = Math.round(Math.max(QC_MIN.w, Math.min(g.w, vw))), h = Math.round(Math.max(QC_MIN.h, Math.min(g.h, vh)));
   return {w, h, x: Math.round(Math.max(0, Math.min(g.x, vw - w))), y: Math.round(Math.max(0, Math.min(g.y, vh - h)))};
 }
+// ops-qc as kept, or the older one-chat {project, did, min, seen}, as {tabs, active, min}; null when nothing is open.
+function qcRestore(k) {
+  if (!k || typeof k !== "object") return null;
+  const tabs = (Array.isArray(k.tabs) ? k.tabs : [k]).filter(t => t && typeof t === "object").slice(0, QC_MAX)
+    .map(t => ({project: t.project || "", did: t.did || null, seen: t.seen || 0}));
+  return tabs.length ? {tabs, active: Math.max(0, Math.min(tabs.length - 1, k.active | 0)), min: !!k.min} : null;
+}
+const qcCanAdd = tabs => tabs.length < QC_MAX;
+// The active tab after closing tab i of n: the same one when another closes, else the right-hand neighbour (the
+// left one when it was last); -1 when none are left, which closes the window.
+function qcAfterClose(n, active, i) {
+  if (n <= 1) return -1;
+  return active > i ? active - 1 : active < i ? active : Math.min(i, n - 2);
+}
+// A reply since you last looked at the tab: more messages than then, the last one not yours, and Claude done.
+const qcUnread = t => !!t.d && t.d.state !== "thinking" && t.d.msgs.length > t.seen
+  && t.d.msgs[t.d.msgs.length - 1].role !== "user";
+// The minimised pill: the project's title with one tab, "N chats" with more; a dot when any tab has a reply.
+const qcPill = (tabs, title) => ({label: tabs.length === 1 ? title(tabs[0].project) : `${tabs.length} chats`,
+  dot: tabs.some(qcUnread)});
+// (end of the pure helpers tests/test_quick_chat.py runs)
+const qcTab = () => QC.tabs[QC.active];
+const qcNewTab = (t = {}) => ({project: "", did: null, seen: 0, ...t, d: null, draft: "", msg: ""});
 function qcSave() {
   try {
-    if (QC.on) localStorage.setItem("ops-qc", JSON.stringify({project: QC.project, did: QC.did, min: QC.min, seen: QC.seen}));
+    if (QC.on) localStorage.setItem("ops-qc", JSON.stringify({tabs: QC.tabs.map(t => ({project: t.project, did: t.did,
+      seen: t.seen})), active: QC.active, min: QC.min}));
     else localStorage.removeItem("ops-qc");
     if (QC.geo) localStorage.setItem("ops-qc-geo", JSON.stringify(QC.geo));
   } catch {}
@@ -3764,52 +3802,86 @@ function qcPlace() {
   const el = $("#qc");
   Object.assign(el.style, {left: QC.geo.x + "px", top: QC.geo.y + "px", width: QC.geo.w + "px", height: QC.geo.h + "px"});
 }
-function qcOpen() {
-  if (!QC.on) { QC.on = true; QC.did = null; QC.d = null; QC.key = ""; QC.project = ""; $("#qcsay").value = ""; $("#qcmsg").textContent = ""; }
-  QC.min = false; qcSave(); qcRender();
-  $("#qcsay").focus();
-  if (QC.did) qcLoad();
+// The message box and its error line belong to the active tab: qcStash keeps them in it before another tab shows.
+function qcStash() {
+  const t = qcTab();
+  if (t) { t.draft = $("#qcsay").value; t.msg = $("#qcmsg").textContent; }
+}
+function qcShow() {  // draw the active tab, with its own draft
+  const t = qcTab();
+  $("#qcsay").value = t.draft; $("#qcmsg").textContent = t.msg; QC.key = "";
+  qcSave(); qcRender();
+  if (!QC.min) $("#qcsay").focus();
+  if (t.did) qcLoad();
+}
+function qcOpen(fresh) {  // fresh (⌘⇧K): with a new tab, unless 6 are open
+  qcStash();
+  QC.on = true; QC.min = false;
+  if (!QC.tabs.length || fresh === true && qcCanAdd(QC.tabs)) return qcAddTab();
+  qcShow();
+}
+function qcAddTab() {  // its project is picked by qcRender, as a new chat's
+  if (!qcCanAdd(QC.tabs)) return;
+  qcStash(); QC.tabs.push(qcNewTab()); QC.active = QC.tabs.length - 1; qcShow();
+}
+function qcSelect(i) {
+  if (i === QC.active || !QC.tabs[i]) return;
+  qcStash(); QC.active = i; qcShow();
+}
+function qcCloseTab(i) {  // its topic stays open in its project; only the window forgets it
+  const a = qcAfterClose(QC.tabs.length, QC.active, i);
+  if (a < 0) return qcClose();
+  qcStash(); QC.tabs.splice(i, 1); QC.active = a; qcShow();
 }
 function qcMinimise() {
-  QC.min = true; QC.seen = QC.d ? QC.d.msgs.length : 0; qcSave(); qcRender();
+  QC.min = true; qcSave(); qcRender();
   if (document.activeElement && $("#qc").contains(document.activeElement)) document.activeElement.blur();
 }
-function qcClose() {  // the topic stays open in its project; only the window forgets it
-  QC.on = false; QC.min = false; QC.did = null; QC.d = null; QC.key = ""; QC.project = "";
+function qcClose() {  // every tab; the topics stay open in their projects
+  QC.on = false; QC.min = false; QC.tabs = []; QC.active = 0; QC.key = "";
   $("#qcsay").value = ""; $("#qcmsg").textContent = ""; $("#qcmsgs").innerHTML = "";
   qcSave(); qcRender();
 }
-// A reply since you minimised it: more messages than when you did, the last one not yours, and Claude done.
-const qcReplied = () => !!QC.d && QC.d.state !== "thinking" && QC.d.msgs.length > QC.seen
-  && QC.d.msgs[QC.d.msgs.length - 1].role !== "user";
 function qcRender() {
   $("#qc").classList.toggle("hidden", !QC.on || QC.min);
   $("#qcpill").classList.toggle("hidden", !QC.on || !QC.min);
-  if (!QC.on || !state) return;
-  const ps = state.projects;
-  if (!QC.project || (!QC.did && !ps.some(p => p.name === QC.project)))
-    QC.project = pfPicker(pfs, ps, focus).def;
-  const pick = $("#qcproj"), html = (QC.did && !ps.some(p => p.name === QC.project) ? [P(QC.project)] : []).concat(ps)
+  if (!QC.on || !state || !qcTab()) return;
+  const ps = state.projects, t = qcTab(), title = n => P(n).title;
+  for (const x of QC.tabs)
+    if (!x.project || (!x.did && !ps.some(p => p.name === x.project))) {
+      x.project = pfPicker(pfs, ps, focus).def; qcSave();
+    }
+  const d = t.d && t.d.id === t.did ? t.d : null, thinking = !!d && d.state === "thinking";
+  if (!QC.min && d && t.seen !== d.msgs.length) { t.seen = d.msgs.length; qcSave(); }  // you see it now
+  const pl = qcPill(QC.tabs, title);
+  $("#qcpill").innerHTML = `Ask · ${esc(pl.label)}${QC.min && pl.dot ? '<span class="dot" title="Claude replied"></span>' : ""}`;
+  if (QC.min) return;
+  const pick = $("#qcproj"), html = (t.did && !ps.some(p => p.name === t.project) ? [P(t.project)] : []).concat(ps)
     .map(p => `<option value="${esc(p.name)}">${esc(p.title)}</option>`).join("");
   if (pick.dataset.html !== html) pick.innerHTML = pick.dataset.html = html;
-  pick.value = QC.project; pick.disabled = !!QC.did;
-  const d = QC.d && QC.d.id === QC.did ? QC.d : null, thinking = !!d && d.state === "thinking";
+  pick.value = t.project; pick.disabled = !!t.did;
   $("#qctitle").textContent = d ? d.title || "" : "";
   $("#qctitle").title = $("#qctitle").textContent;
+  const full = !qcCanAdd(QC.tabs), tabs = QC.tabs.map((x, i) => {
+    const tip = title(x.project) + (x.d && x.d.title ? ` · ${x.d.title}` : "");
+    return `<span class="qctab${i === QC.active ? " on" : ""}" role="tab" aria-selected="${i === QC.active}" data-qctab="${i}" title="${esc(tip)}">`
+      + `<span class="t">${esc(title(x.project))}</span>${qcUnread(x) ? '<i class="dot" title="Claude replied"></i>' : ""}`
+      + `<button data-qcclose="${i}" title="Close this tab. Its topic stays in the project's Earlier topics.">×</button></span>`;
+  }).join("") + `<button id="qcadd" class="${full ? "dis" : ""}" aria-disabled="${full}" title="${full
+    ? `At most ${QC_MAX} chats: close a tab to open another` : "New chat tab (⌘⇧K)"}">+</button>`;
+  if ($("#qctabs").dataset.html !== tabs) $("#qctabs").innerHTML = $("#qctabs").dataset.html = tabs;
   $("#qcsend").textContent = thinking ? "Queue" : "Send";
   $("#qcsend").title = thinking ? "Claude is replying: this message goes as soon as the reply ends" : "";
-  $("#qcpill").innerHTML = `Ask · ${esc(P(QC.project).title)}${QC.min && qcReplied() ? '<span class="dot" title="Claude replied"></span>' : ""}`;
-  if (QC.min) return;
   if (!QC_PHONE.matches) qcPlace();
   const box = $("#qcmsgs");
   const key = d ? `${d.id}:${d.title}:${d.msgs.length}:${JSON.stringify(d.queued || [])}:${d.state}:${d.live.length}:${JSON.stringify(d.msgs.map(m => m.tasks.map(t => t.state)))}:${(d.files || []).map(f => f.name + f.mtime).join()}`
-    : QC.did ? "loading" : "new";
+    : t.did ? "loading" : `new:${t.project}`;
   if (key === QC.key) return;
   const stick = box.scrollTop + box.clientHeight >= box.scrollHeight - 40 || !QC.key.startsWith(`${d && d.id}:`);
   QC.key = key;
   if (!d) {
-    box.innerHTML = QC.did ? `<div class="muted">Loading…</div>`
-      : `<div class="muted">A quick chat with ${esc(P(QC.project).title)}. Your first message starts a new plan &amp; design topic there; the page behind this window stays as it is.</div>`;
+    box.innerHTML = t.did ? `<div class="muted">Loading…</div>`
+      : `<div class="muted">A quick chat with ${esc(title(t.project))}. Your first message starts a new plan &amp; design topic there; the page behind this window stays as it is.</div>`;
     return;
   }
   const links = chatCtx(d.project, d.id, (d.files || []).map(f => f.name));
@@ -3823,34 +3895,40 @@ function qcRender() {
   };
   bottom(); chatLinks(box, d.project).then(bottom);
 }
-const qcLoad = single(async () => {
-  const did = QC.did; if (!did) return;
+// Read tab t's topic. A topic that is gone closes its tab.
+async function qcFetch(t) {
+  const did = t.did; if (!did) return;
   try {
     const d = await api(`/api/designs/${did}`);
-    if (QC.did === did) QC.d = d;
+    if (t.did === did) t.d = d;
   } catch (e) {
-    if (/no such|not found/i.test(e.message) && QC.did === did) return qcClose();  // the chat is gone
-    $("#qcmsg").textContent = e.message;
+    const i = QC.tabs.indexOf(t);
+    if (/no such|not found/i.test(e.message) && t.did === did && i >= 0) return qcCloseTab(i);
+    if (t === qcTab()) $("#qcmsg").textContent = e.message; else t.msg = e.message;
   }
   qcRender();
-});
+}
+const qcLoad = single(() => qcTab() && qcFetch(qcTab()));  // the active tab
+function qcPeek(t) {  // a background tab, enough for its unread dot
+  if (t.busy || !t.did) return;
+  t.busy = true; qcFetch(t).finally(() => t.busy = false);
+}
 async function qcSend() {
-  const text = $("#qcsay").value.trim();
+  const t = qcTab(), text = $("#qcsay").value.trim();
   if (!text) return;
-  if (!QC.project) { $("#qcmsg").textContent = "pick a project"; return; }
+  if (!t.project) { $("#qcmsg").textContent = "pick a project"; return; }
   $("#qcsend").disabled = true;
   try {
-    if (QC.did) await api(`/api/designs/${QC.did}/say`, {text});
-    else { QC.did = (await api("/api/designs", {project: QC.project, text, quick: true})).id; qcSave(); }
-    $("#qcsay").value = ""; $("#qcmsg").textContent = ""; QC.key = "";
-    await qcLoad();
-    $("#qcmsgs").scrollTop = $("#qcmsgs").scrollHeight;
-  } catch (e) { $("#qcmsg").textContent = e.message; }
+    if (t.did) await api(`/api/designs/${t.did}/say`, {text});
+    else { t.did = (await api("/api/designs", {project: t.project, text, quick: true})).id; qcSave(); }
+    if (t === qcTab()) { $("#qcsay").value = ""; $("#qcmsg").textContent = ""; QC.key = ""; } else t.draft = t.msg = "";
+    if (t === qcTab()) { await qcLoad(); $("#qcmsgs").scrollTop = $("#qcmsgs").scrollHeight; } else qcPeek(t);
+  } catch (e) { if (t === qcTab()) $("#qcmsg").textContent = e.message; else t.msg = e.message; }
   $("#qcsend").disabled = false;
 }
 async function qcUnqueue(index) {  // back in the window's message box, after anything you were typing
   try {
-    const r = await api(`/api/designs/${QC.did}/unqueue`, {index});
+    const r = await api(`/api/designs/${qcTab().did}/unqueue`, {index});
     $("#qcsay").value = [$("#qcsay").value.trim(), r.text].filter(Boolean).join("\n\n"); $("#qcsay").focus();
   } catch (e) { $("#qcmsg").textContent = e.message; }
   QC.key = ""; qcLoad();
@@ -3873,34 +3951,44 @@ function qcDrag(e, how) {
 $("#qcbar").onpointerdown = e => { if (!e.target.closest("select, button")) qcDrag(e, "move"); };
 document.querySelectorAll("#qc .qcgrip").forEach(g => g.onpointerdown = e => qcDrag(e, g.dataset.grip));
 addEventListener("resize", () => { if (QC.on && !QC.min && !QC_PHONE.matches) { qcPlace(); qcSave(); } });
-$("#askbtn").onclick = qcOpen;
-$("#qcpill").onclick = qcOpen;
+$("#askbtn").onclick = () => qcOpen();
+$("#qcpill").onclick = () => qcOpen();
+$("#qctabs").onclick = e => {
+  const x = e.target.closest("[data-qcclose]"), tab = e.target.closest("[data-qctab]");
+  if (x) qcCloseTab(+x.dataset.qcclose);
+  else if (e.target.closest("#qcadd")) qcAddTab();
+  else if (tab) qcSelect(+tab.dataset.qctab);
+};
 $("#qcmin").onclick = qcMinimise;
 $("#qcx").onclick = qcClose;
 $("#qcsend").onclick = qcSend;
-$("#qcproj").onchange = () => { if (!QC.did) { QC.project = $("#qcproj").value; QC.key = ""; qcSave(); qcRender(); } };
+$("#qcproj").onchange = () => { const t = qcTab(); if (t && !t.did) { t.project = $("#qcproj").value; qcSave(); qcRender(); } };
 $("#qcsay").onkeydown = e => { if (sendKey(e)) { e.preventDefault(); qcSend(); } };
 $("#qcclip").onclick = () => $("#qcfile").click();
 $("#qcfile").onchange = e => { const files = imageFiles(e.target); e.target.value = ""; if (files.length) attachImages($("#qcsay"), files); };
 // Esc in the window minimises it, and goes no further (Today's Esc would close its panel).
 $("#qc").addEventListener("keydown", e => { if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); qcMinimise(); } });
 // ⌘K (Ctrl+K off macOS) opens it from anywhere, even mid-typing in another box: caught before any other handler.
+// ⌘⇧K (Ctrl+Shift+K) opens it with a new tab.
 const QC_MAC = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
 document.addEventListener("keydown", e => {
-  if ((e.key || "").toLowerCase() !== "k" || e.altKey || e.shiftKey || !(QC_MAC ? e.metaKey && !e.ctrlKey : e.ctrlKey && !e.metaKey)) return;
-  e.preventDefault(); e.stopPropagation(); qcOpen();
+  if ((e.key || "").toLowerCase() !== "k" || e.altKey || !(QC_MAC ? e.metaKey && !e.ctrlKey : e.ctrlKey && !e.metaKey)) return;
+  e.preventDefault(); e.stopPropagation(); qcOpen(e.shiftKey);
 }, true);
 try {
   QC.geo = JSON.parse(localStorage.getItem("ops-qc-geo") || "null");
-  const k = JSON.parse(localStorage.getItem("ops-qc") || "null");
-  if (k) Object.assign(QC, {on: true, project: k.project || "", did: k.did || null, min: !!k.min, seen: k.seen || 0});
+  const k = qcRestore(JSON.parse(localStorage.getItem("ops-qc") || "null"));
+  if (k) Object.assign(QC, {on: true, min: k.min, active: k.active, tabs: k.tabs.map(qcNewTab)});
 } catch {}
-setInterval(() => {  // the window's topic: every 1.5s while Claude replies, else every 3s
-  if (document.hidden || !QC.on || !QC.did) return;
-  QC.tick = !QC.tick;
-  if (QC.tick || !QC.d || QC.d.state === "thinking") qcLoad.poll();
+// The active tab's topic every 1.5s while Claude replies, else every 3s; the other tabs' every 6s, for their dots.
+setInterval(() => {
+  if (document.hidden || !QC.on || !qcTab()) return;
+  QC.tick = (QC.tick + 1) % 4;
+  const t = qcTab();
+  if (t.did && (QC.tick % 2 || !t.d || t.d.state === "thinking")) qcLoad.poll();
+  if (!QC.tick) QC.tabs.forEach(x => x !== t && qcPeek(x));
 }, 1500);
-if (QC.did) qcLoad();
+if (QC.on) { qcLoad(); QC.tabs.forEach(x => x !== qcTab() && qcPeek(x)); }
 
 // ---------------------------------------------------------------- research tab
 // The research repo's proposals, projects, reports, to-dos, sources and runs, from /api/research/ (README: ## Research).
