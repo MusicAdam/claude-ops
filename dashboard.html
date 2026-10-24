@@ -40,6 +40,7 @@ header h1 { font-size: 16px; margin: 0; }
   header { gap: 8px; padding: 10px 12px; }
   header > .grow { display: none; }
   #proj { flex: 1 1 0; min-width: 0; }
+  #projbtn { width: 100%; max-width: none; }
   header > .tabs button { flex: none; white-space: nowrap; }
   header > button { white-space: nowrap; }
 }
@@ -410,6 +411,14 @@ a[data-task] { color: var(--accent); cursor: pointer; }
 .menu button { text-align: left; border-radius: 6px; }
 .menu button:hover { background: var(--chip); color: var(--ink); }
 .menu hr { border: 0; border-top: 1px solid var(--line); margin: 4px 2px; width: auto; }
+/* The header's project switcher: All projects, then a tick box per project (README "Today view") */
+#projbtn { display: flex; gap: 4px; align-items: center; max-width: 260px; white-space: nowrap; }
+#projbtn span { overflow: hidden; text-overflow: ellipsis; }
+#projmenu { max-height: 70vh; overflow: auto; max-width: calc(100vw - 20px); }
+#projmenu button { background: transparent; border-color: transparent; }
+#projmenu button.on, #projmenu button:hover { background: var(--chip); color: var(--ink); font-weight: 600; }
+#projmenu label { display: flex; gap: 8px; align-items: center; padding: 6px 10px; border-radius: 6px; cursor: pointer; white-space: nowrap; }
+#projmenu label:hover { background: var(--chip); }
 /* Today: To-do | the step and its conversation | the timeline. Each side column scrolls on its own. */
 #todayview { display: grid; grid-template-columns: 300px minmax(0, 1fr) var(--td-right, 320px); gap: 20px;
              padding: 16px 20px 0; max-width: 1700px; margin: 0 auto; position: relative; }
@@ -544,7 +553,8 @@ details.tdparked .tditem { opacity: .8; }
                    padding-top: max(4px, env(safe-area-inset-top)); }
   body.td header > :is(.grow, #hdr, #usage, #pause, #pauseall, #resumeall), body.td #tab-today { display: none !important; }
   body.td header h1 { font-size: 15px; white-space: nowrap; }
-  body.td #proj { flex: 1 1 0; min-width: 0; padding: 4px 6px; }
+  body.td #proj { flex: 1 1 0; min-width: 0; }
+  body.td #projbtn { width: 100%; max-width: none; padding: 4px 6px; }
   body.td #morebtn { white-space: nowrap; padding: 4px 10px; }
   body.td #limitbar { position: fixed; left: 8px; right: 8px; top: calc(var(--hdr-h, 40px) + 4px); z-index: 4; background: var(--panel);
                       border: 1px solid var(--warn); flex-wrap: wrap; }
@@ -651,7 +661,8 @@ details.tdparked .tditem { opacity: .8; }
 <body>
 <header>
   <h1>Claude Ops</h1>
-  <select id="proj" title="Project"></select>
+  <div class="more" id="proj"><button id="projbtn" aria-haspopup="true" aria-expanded="false" title="The projects to show"><span>All projects</span> ▾</button>
+    <div class="menu hidden" id="projmenu" role="menu"></div></div>
   <nav class="tabs" id="nav"><button id="tab-today" title="What needs you, the step to take, and what is going on">Today</button><div class="more" id="more"><button id="morebtn" aria-haspopup="true" aria-expanded="false" title="The other pages">More ▾</button>
     <div class="menu hidden" id="moremenu" role="menu"><button id="tab-tasks" title="Every task, the New task form, and each task's page">History</button><button id="tab-projects" title="Every project: branches, Promote, Play, Deploys, Archive, and its tasks">Projects</button><button id="tab-research" class="hidden" title="The research repo: proposals, reports, projects, to-dos, sources and runs">Research</button><button id="tab-analyze" title="Where time and money went: run times and costs of tasks, and how to make them cheaper and faster">Analyze</button><button id="tab-settings" title="Parallel, promote wait, usage brake, models, effort, and what Claude has cost">Settings</button><button id="tab-schedules" title="Recurring jobs: schedules that queue a task on a timetable">Schedules</button><hr><button id="addproj" title="Add a git repository, or a folder of git repos, as a project">+ Project</button></div></div><button id="askbtn" title="Quick chat: ask any project without leaving your place (⌘K)">Ask</button></nav>
   <span class="grow" style="flex:1"></span>
@@ -861,11 +872,42 @@ details.tdparked .tditem { opacity: .8; }
 <div id="dlg" class="hidden"></div>
 <script>
 const $ = s => document.querySelector(s);
-let state = null, sel = null, detail = null, detailHtml = "", typing = false, pf = "", focus = "";
-try { pf = localStorage.getItem("ops-proj") || ""; focus = localStorage.getItem("ops-focus") || ""; } catch {}
+// The header's project filter: pfs the ticked project names (empty: every project), pf the name when exactly one is
+// ticked, else "". pf ? … : … asks "one project or several"; inView asks "is it in the filter".
+let state = null, sel = null, detail = null, detailHtml = "", typing = false, pfs = [], pf = "", focus = "";
+try { pfSet(pfRead(localStorage.getItem("ops-proj")), false); focus = localStorage.getItem("ops-focus") || ""; } catch {}
 const P = name => ((state && (state.projects.find(p => p.name === name) || archivedP(name))) || {name, title: name});
 const archivedP = name => state && (state.archived || []).find(p => p.name === name);
-const inView = name => !pf || name === pf;
+const inView = name => pfHas(pfs, name);
+// ---- the project filter's pure helpers (README "Today view"; tests/test_proj_filter.py runs them in node)
+// localStorage "ops-proj" to the set: a JSON array of names. An older plain name is a set of one; empty is all.
+function pfRead(v) {
+  if (!v) return [];
+  try { const a = JSON.parse(v); if (Array.isArray(a)) return [...new Set(a.filter(x => typeof x === "string" && x))]; } catch {}
+  return [String(v)];
+}
+function pfHas(set, name) { return !set.length || set.includes(name); }
+// The switcher's words: All projects, one title, or the first titles that fit (2 at most, about 24 characters) then +N.
+function pfLabel(set, title) {
+  if (!set.length) return "All projects";
+  const ts = set.map(title);
+  const k = ts.length > 1 && `${ts[0]}, ${ts[1]}`.length <= 24 ? 2 : 1;
+  return ts.slice(0, k).join(", ") + (ts.length > k ? ` +${ts.length - k}` : "");
+}
+// A project picker under the filter (new task, conversation, add to-do, schedule, quick chat): whether it shows,
+// the projects it lists, and the one it starts on. None ticked: every project; one: hidden, just that one; more:
+// only the ticked ones. It starts on the focused project if it lists it, else on its first.
+function pfPicker(set, projects, focus) {
+  const list = set.length ? projects.filter(p => set.includes(p.name)) : projects;
+  const def = list.find(p => p.name === focus) || list[0];
+  return {show: set.length !== 1, list, def: def ? def.name : ""};
+}
+// ---- end of the project filter's pure helpers
+function pfSet(names, save = true) {
+  pfs = [...new Set(names)]; pf = pfs.length === 1 ? pfs[0] : "";
+  if (save) try { localStorage.setItem("ops-proj", JSON.stringify(pfs)); } catch {}
+}
+const pfTitles = () => pfs.map(n => P(n).title || n).join(", ");
 const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 const shas = s => String(s || "").split(" ").map(x => x.slice(0, 8)).join(" ");  // one commit per repo in a workspace
 const ago = (t, now) => { if (!t) return ""; const s = Math.max(0, now - t);
@@ -940,7 +982,8 @@ const refresh = single(loadState);
 
 // Draw everything from the state we have. A click that changes the view calls this at once, then refresh.
 function render() {
-  if (pf && !state.projects.some(p => p.name === pf)) pf = "";
+  // Names that are gone or archived drop out of the filter.
+  if (pfs.some(n => !state.projects.some(p => p.name === n))) pfSet(pfs.filter(n => state.projects.some(p => p.name === n)));
   if (focus && !state.projects.some(p => p.name === focus)) focus = "";
   // The header filter hides the selected task's project: drop the selection rather than show it as part of this one.
   const st = sel && state.tasks.find(t => t.id === sel);
@@ -949,22 +992,27 @@ function render() {
   qcRender();
   $("#tab-research").classList.toggle("hidden", !state.research);
   if (tab === "research") { if (state.research) { rsLock(); refreshResearch.poll(); } else rsRender(); }
-  if (tab === "analyze" && (anaKey !== `${anaPeriod}|${pf}` || Date.now() - anaAt > 60000)) refreshAnalyze();
+  if (tab === "analyze" && (anaKey !== `${anaPeriod}|${pfs}` || Date.now() - anaAt > 60000)) refreshAnalyze();
 }
 
 function renderProjects() {
-  const opts = (all) => (all ? `<option value="">All projects</option>` : "") +
-    state.projects.map(p => `<option value="${esc(p.name)}">${esc(p.title)}</option>`).join("");
-  for (const [id, all] of [["#proj", true], ["#tproj", false], ["#cproj", false]]) {
-    const el = $(id), v = el.value, html = opts(all);
+  const pk = pfPicker(pfs, state.projects, focus);
+  const html = pk.list.map(p => `<option value="${esc(p.name)}">${esc(p.title)}</option>`).join("");
+  for (const id of ["#tproj", "#cproj"]) {
+    const el = $(id), v = el.value;
     if (el.dataset.html !== html) { el.innerHTML = html; el.dataset.html = html; el.value = v; }
-    if (!all && !el.value) el.selectedIndex = 0;
+    if (!el.value) el.value = pk.def;
   }
-  $("#proj").value = pf;
-  if (pf) { $("#tproj").value = pf; $("#cproj").value = pf; }
-  // New tasks default to the focused project; you can still pick another until the focus changes.
-  else if (focus && $("#tproj").dataset.f !== focus) { $("#tproj").value = focus; $("#tproj").dataset.f = focus; }
-  $("#tprojwrap").classList.toggle("hidden", !!pf);
+  // New tasks default to the focused project, if the filter shows it; you can still pick another until the focus
+  // or the filter changes.
+  const f = `${pk.def}|${pfs}`;
+  if ($("#tproj").dataset.f !== f) { $("#tproj").value = pk.def; $("#tproj").dataset.f = f; }
+  const title = n => P(n).title || n;
+  put($("#projbtn"), `<span>${esc(pfLabel(pfs, title))}</span> ▾`);
+  $("#projbtn").title = pfs.length > 1 ? `Showing ${pfTitles()}` : "The projects to show";
+  put($("#projmenu"), `<button data-pfall class="${pfs.length ? "" : "on"}" title="Show every project">All projects</button><hr>`
+    + state.projects.map(p => `<label><input type="checkbox" data-pf="${esc(p.name)}" ${pfs.includes(p.name) ? "checked" : ""}> ${esc(p.title)}</label>`).join(""));
+  $("#tprojwrap").classList.toggle("hidden", !pk.show);
   $("#cprojwrap").classList.toggle("hidden", !!pf || !!chatSel);
   syncRelease();
 }
@@ -995,7 +1043,7 @@ function renderHeader() {
       `${plural(state.active, "worker", "workers")} running now, across every project, out of at most ${s.max_parallel} at once (the Parallel setting).`
       + (rsn ? ` Plus ${plural(rsn, "research run", "research runs")}, counted apart: they take no task slot. Click “research” to see them.` : "")),
     chip(n(["queued"]) ? "" : "zero", `<b>${n(["queued"])}</b> queued`,
-      `${plural(n(["queued"]), "task waits", "tasks wait")} for a free worker${pf ? ` in ${P(pf).title || pf}` : ""}.`),
+      `${plural(n(["queued"]), "task waits", "tasks wait")} for a free worker${pfs.length ? ` in ${pfTitles()}` : ""}.`),
     chip(need ? "alert" : "zero", need ? `<span data-need><b>${need}</b> need${need === 1 ? "s" : ""} you</span>` : `<b>0</b> need you`,
       need ? [ask && plural(ask, "question to answer", "questions to answer"), rev && plural(rev, "task to review", "tasks to review"),
               bad && plural(bad, "failed task", "failed tasks")].filter(Boolean).join(", ") + ". They stay put until you act."
@@ -1004,7 +1052,7 @@ function renderHeader() {
     n(["paused"]) ? chip("", `<b>${n(["paused"])}</b> paused`, `${plural(n(["paused"]), "task is", "tasks are")} paused. Resume to put them back in the queue.`) : "",
   ].join(""));
   put($("#spent"), `<div class="big">$${(tcost + dcost).toFixed(2)}</div><div class="muted">Claude usage, priced at API rates. The Analyze tab shows where it went.</div>
-    <table><tr><td>Tasks${pf ? ` in ${esc(P(pf).title || pf)}` : ", every project"}</td><td>$${tcost.toFixed(2)}</td></tr>
+    <table><tr><td>Tasks${pfs.length ? ` in ${esc(pfTitles())}` : ", every project"}</td><td>$${tcost.toFixed(2)}</td></tr>
     <tr><td>Design chats and chats, every project</td><td>$${dcost.toFixed(2)}</td></tr></table>`);
   if (document.activeElement !== $("#par")) $("#par").value = s.max_parallel;
   if (document.activeElement !== $("#relwait")) $("#relwait").value = s.release_wait;
@@ -1431,16 +1479,17 @@ function clearSelection() {
 }
 clearSelection();
 
-function setFilter(name) {
-  pf = name || ""; try { localStorage.setItem("ops-proj", pf); } catch {}
+// Set the header filter to these project names (none: every project).
+function setFilter(names) {
+  pfSet(names);
   chatSel = null; chatData = null; chatKey = "";
 }
 
 function selectTask(id) {
   sel = id;
   const t = state && state.tasks.find(x => x.id === id);
-  // Asked for a task the header filter hides (e.g. from a chat chip): switch the filter to its project.
-  if (t && !inView(t.project)) { setFilter(t.project); renderProjects(); renderHeader(); renderMains(); }
+  // Asked for a task the header filter hides (e.g. from a chat chip): add its project to the filter.
+  if (t && !inView(t.project)) { setFilter([...pfs, t.project]); renderProjects(); renderHeader(); renderMains(); }
   if (t) setFocus(t.project);
   if (state) renderList();
   // Show the task at once from the list; the full page follows when the daemon answers.
@@ -1539,7 +1588,7 @@ async function loadDetail(id, fresh) {
   detail = d;
   if (!inView(detail.project)) {
     if (!fresh) { clearSelection(); return; }
-    setFilter(detail.project); refresh();
+    setFilter([...pfs, detail.project]); refresh();
   }
   if (fresh && detail.project !== focus) setFocus(detail.project);
   const t = detail, live = ["running", "gating", "merging"].includes(t.state), links = chatCtx(t.project);
@@ -1633,9 +1682,9 @@ function openOrigin(o) {
   if (o.ref.startsWith("task:")) return openTask(o.id);
   openTopic(o.project, o.id);
 }
-// A chat as the current topic of its project in Today, switching the project filter to it when it is out of view
+// A chat as the current topic of its project in Today, adding its project to the filter when it is out of view
 function openTopic(project, id) {
-  if (!inView(project)) { setFilter(project); renderProjects(); renderHeader(); renderMains(); }
+  if (!inView(project)) { setFilter([...pfs, project]); renderProjects(); renderHeader(); renderMains(); }
   if (tab !== "today") showTab("today");
   tdShowConv(); tdOpenChat(id);
 }
@@ -1700,11 +1749,25 @@ function modelSelect(el, v, none) {
 }
 // The model a task's session runs on, short: "sonnet" for claude-sonnet-4-5-20250929. Opus is the usual one.
 function modelShort(m) { const k = MODELS.find(a => String(m || "").toLowerCase().includes(a)); return k || m || ""; }
-$("#proj").onchange = () => {
-  setFilter($("#proj").value); if ($("#proj").value) setFocus($("#proj").value);
+// The header's project switcher: a checklist that applies each tick at once. All projects clears the ticks.
+function pfApply(names) {
+  setFilter(names); if (pfs.length === 1) setFocus(pf);
   if (tab === "today") { TD.convKey = null; TD.over = null; }  // the conversation follows the project
   if (state) render(); refresh();
+}
+function closeProj() { $("#projmenu").classList.add("hidden"); $("#projbtn").setAttribute("aria-expanded", "false"); }
+$("#projbtn").onclick = e => {
+  e.stopPropagation();
+  closeMore();
+  const m = $("#projmenu"); m.classList.toggle("hidden");
+  $("#projbtn").setAttribute("aria-expanded", String(!m.classList.contains("hidden")));
 };
+document.addEventListener("click", e => { if (!e.target.closest || !e.target.closest("#proj")) closeProj(); });
+$("#projmenu").addEventListener("change", e => {
+  const c = e.target.closest("[data-pf]");
+  if (c) pfApply(c.checked ? [...pfs, c.dataset.pf] : pfs.filter(n => n !== c.dataset.pf));
+});
+$("#projmenu").addEventListener("click", e => { if (e.target.closest("[data-pfall]")) { closeProj(); pfApply([]); } });
 $("#addproj").onclick = () => { showTab("projects"); $("#addcard").classList.remove("hidden"); $("#ppath").focus(); };
 $("#pcancel").onclick = () => $("#addcard").classList.add("hidden");
 $("#padd").onclick = () => addProject(false);
@@ -1722,7 +1785,7 @@ async function addProject(create) {
     const r = await api("/api/projects", {path, name: $("#pname").value.trim(), create});
     $("#pmsg").innerHTML = `Added <b>${esc(r.name)}</b>. Its config is <span class="mono">${esc(r.config)}</span>. Check the gate and app commands there, then press Reload below if you edit it.<div class="row"><button id="preload">Reload projects</button></div>`;
     $("#preload").onclick = () => api("/api/projects/reload", {}).then(refresh);
-    pf = r.name; try { localStorage.setItem("ops-proj", pf); } catch {}
+    if (!inView(r.name) || !pfs.length) pfSet([...pfs, r.name]);  // show the new project
     refresh();
   } catch (e) { $("#pmsg").innerHTML = `<span class="err">${esc(e.message)}</span>`; }
 }
@@ -1738,13 +1801,13 @@ const dur = s => s == null ? "–" : s < 60 ? `${Math.round(s)}s` : s < 3600 ? `
 const KINDWORD = {task: "Tasks", release: "Releases", deploy: "Deploys", senddev: "Send to dev"};
 
 const refreshAnalyze = single(async () => {
-  const key = `${anaPeriod}|${pf}`;
+  const key = `${anaPeriod}|${pfs}`;
   document.querySelectorAll(".periods button").forEach(b => b.classList.toggle("on", b.dataset.period === anaPeriod));
   let a;
-  try { a = await api(`/api/analyze?period=${anaPeriod}&project=${encodeURIComponent(pf)}`); }
+  try { a = await api(`/api/analyze?period=${anaPeriod}&project=${encodeURIComponent(pfs.join(","))}`); }
   catch (e) { put($("#abody"), `<div class="card err">${esc(e.message)}</div>`); return; }
   anaKey = key; anaAt = Date.now();
-  if (key === `${anaPeriod}|${pf}`) renderAnalyze(a);
+  if (key === `${anaPeriod}|${pfs}`) renderAnalyze(a);
 });
 document.querySelectorAll(".periods button").forEach(b => b.onclick = () => {
   anaPeriod = b.dataset.period; try { localStorage.setItem("ops-ana-period", anaPeriod); } catch {}
@@ -1754,7 +1817,7 @@ document.querySelectorAll(".periods button").forEach(b => b.onclick = () => {
 function renderAnalyze(a) {
   const s = a.summary, tile = (k, v, sub, cls = "", tip = "") =>
     `<div class="tile ${cls}"${tip ? ` data-tip="${esc(tip)}"` : ""}><div class="k">${k}</div><div class="v">${v}</div><div class="s">${sub || "&nbsp;"}</div></div>`;
-  put($("#ascope"), pf ? `· ${esc(P(pf).title || pf)} only (the project menu in the header)` : "· every project");
+  put($("#ascope"), pfs.length ? `· ${esc(pfTitles())} only (the project menu in the header)` : "· every project");
   put($("#atiles"), `<div class="tiles">${[
     tile("Spent on tasks", money(s.cost), `+ ${money(s.chat_cost)} in chats`, "",
       "What Claude cost for the tasks created in this period, priced at API rates. Chats are design and project chats active in it."),
@@ -1780,7 +1843,7 @@ function renderAnalyze(a) {
   const list = (title, rows, what) => `<h3>${title}</h3><table class="atable"><tr><th>Task</th><th>Cost</th><th>Run</th><th>Fix rounds</th><th>Turns</th><th>Model</th></tr>${
     rows.map(t => `<tr><td class="t"><a data-task="${t.id}">#${t.id}</a> ${esc(t.title)} <span class="muted">${pf ? "" : esc(P(t.project).title || t.project) + " · "}${esc(t.kind)} · ${esc(LABEL[t.state] || t.state)}</span></td><td>${money(t.cost)}</td><td>${dur(t.ran)}</td><td>${t.fixes}</td><td>${t.turns}</td><td>${esc(t.model)}</td></tr>`).join("")
     || `<tr><td class="muted">None</td></tr>`}</table>`;
-  const projects = a.per_project.length > 1 && !pf ? `<div class="card"><h2>Per project</h2><table class="atable"><tr><th></th><th>Tasks</th><th>Cost</th><th>Median $</th><th>p90 $</th><th>Median run</th><th>Queued (median)</th><th>Wasted</th><th>Chats</th></tr>${
+  const projects = a.per_project.length > 1 ? `<div class="card"><h2>Per project</h2><table class="atable"><tr><th></th><th>Tasks</th><th>Cost</th><th>Median $</th><th>p90 $</th><th>Median run</th><th>Queued (median)</th><th>Wasted</th><th>Chats</th></tr>${
     a.per_project.map(p => `<tr><td>${esc(p.title)}</td><td>${p.n}</td><td>${money(p.cost)}</td><td>${money(p.cost_med)}</td><td>${money(p.cost_p90)}</td><td>${dur(p.ran_med)}</td><td>${dur(p.queued_med)}</td><td>${money(p.wasted)}</td><td>${money(p.chat_cost)}</td></tr>`).join("")}</table></div>` : "";
   const causes = a.gate_causes.length ? `<h3>What the gate-fix rounds fixed</h3><table class="atable"><tr><th>Cause</th><th>Rounds</th><th>Tasks</th></tr>${
     a.gate_causes.map(c => `<tr><td class="t mono">${esc(c.cause)}</td><td>${c.n}</td><td>${c.tasks.slice(0, 6).map(id => `<a data-task="${id}">#${id}</a>`).join(" ")}${c.tasks.length > 6 ? " …" : ""}</td></tr>`).join("")}</table>` : "";
@@ -1863,9 +1926,10 @@ const when = t => new Date(t * 1000).toLocaleString([], {weekday: "short", month
 function renderSchedules() {
   const all = state.schedules || [], ss = all.filter(s => inView(s.project));
   $("#schedcount").textContent = all.length ? `· ${all.length}` : "";
-  const sel = $("#schedproj"), opts = state.projects.map(p => `<option value="${esc(p.name)}">${esc(p.title)}</option>`).join("");
+  const pk = pfPicker(pfs, state.projects, focus);
+  const sel = $("#schedproj"), opts = pk.list.map(p => `<option value="${esc(p.name)}">${esc(p.title)}</option>`).join("");
   if (sel.dataset.html !== opts) { const v = sel.value; sel.innerHTML = sel.dataset.html = opts; if (v) sel.value = v; }
-  if (pf) sel.value = pf;
+  if (!sel.value) sel.value = pk.def;
   if (tab !== "schedules" || schedEdit !== null) return;
   put($("#schedlist"), ss.length ? ss.map(s => `<div class="sched" data-id="${s.id}">
     <div><b>${esc(s.title)}</b> ${pf ? "" : `<span class="ptag">${esc(P(s.project).title)}</span>`} <code>${esc(s.every)}</code>${s.paused ? ' <span class="badge s-paused">paused</span>' : ""}${s.hold ? ' <span class="ptag">hold</span>' : ""}</div>
@@ -1875,7 +1939,7 @@ function renderSchedules() {
     <div><button data-act="run" title="Queue its task now. The next run stays as it is.">Run now</button>
       <button data-act="${s.paused ? "resume" : "pause"}">${s.paused ? "Resume" : "Pause"}</button>
       <button data-act="edit">Edit</button> <button data-act="delete">Delete</button></div></div>`).join("")
-    : `<div class="muted">No schedules${pf ? " in this project" : ""} yet. Add one below, ask a design chat for something that repeats, or run <code>opsd.py schedule add -p NAME --every 'mon 09:00' "title"</code>.</div>`);
+    : `<div class="muted">No schedules${pf ? " in this project" : pfs.length ? " in these projects" : ""} yet. Add one below, ask a design chat for something that repeats, or run <code>opsd.py schedule add -p NAME --every 'mon 09:00' "title"</code>.</div>`);
 }
 $("#schedlist").onclick = async e => {
   const a = e.target.closest("a[data-task]");
@@ -2968,8 +3032,8 @@ async function tdWaitClear() {
 function tdAddForm() {
   const a = TD.add;
   if (!a) return `<button class="tdaddb" data-add title="Add your own to-do">+ Add</button>`;
-  const projs = state.projects.filter(g => !g.error);
-  if (pf || !projs.some(g => g.name === a.project)) a.project = pf || (projs[0] || {}).name || "";
+  const projs = state.projects.filter(g => !g.error && inView(g.name));
+  if (pf || !projs.some(g => g.name === a.project)) a.project = pf || pfPicker(pfs, projs, focus).def;
   return `<div class="tdaddf">
     <input data-fld="addtitle" data-addf="title" maxlength="200" placeholder="What you need to do" value="${esc(a.title)}">
     <input data-fld="addwhy" data-addf="why" maxlength="400" placeholder="Why (optional)" value="${esc(a.why)}">
@@ -3614,6 +3678,7 @@ async function tdAsk() {
 function closeMore() { $("#moremenu").classList.add("hidden"); $("#morebtn").setAttribute("aria-expanded", "false"); }
 $("#morebtn").onclick = e => {
   e.stopPropagation();
+  closeProj();
   const m = $("#moremenu"); m.classList.toggle("hidden");
   $("#morebtn").setAttribute("aria-expanded", String(!m.classList.contains("hidden")));
 };
@@ -3622,6 +3687,7 @@ $("#moremenu").addEventListener("click", e => { if (e.target.closest("button")) 
 document.addEventListener("keydown", e => {
   if (e.key !== "Escape") return;
   if (!$("#moremenu").classList.contains("hidden")) closeMore();
+  else if (!$("#projmenu").classList.contains("hidden")) closeProj();
   else if (tab === "today" && TD.panel && !dlg) tdClosePanel();
 });
 
@@ -3722,7 +3788,7 @@ function qcRender() {
   if (!QC.on || !state) return;
   const ps = state.projects;
   if (!QC.project || (!QC.did && !ps.some(p => p.name === QC.project)))
-    QC.project = (ps.find(p => p.name === (pf || focus)) || ps[0] || {}).name || "";
+    QC.project = pfPicker(pfs, ps, focus).def;
   const pick = $("#qcproj"), html = (QC.did && !ps.some(p => p.name === QC.project) ? [P(QC.project)] : []).concat(ps)
     .map(p => `<option value="${esc(p.name)}">${esc(p.title)}</option>`).join("");
   if (pick.dataset.html !== html) pick.innerHTML = pick.dataset.html = html;
