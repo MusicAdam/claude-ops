@@ -1338,6 +1338,15 @@ notes = """Project-specific guidance for design chats."""
 - **Header.** Only what you watch or act on: the tabs, the queue readouts (working, queued, needs you,
   paused), the usage meters, and the pause buttons. Hover a readout or meter for what it counts; the
   dashboard draws that tooltip itself, so it shows at once and survives the 3-second redraw.
+- **Usage meters and pace.** The 5h and 7d chips each have a bar filled to the window's percent used. A thin
+  vertical line in the bar marks the pace: where usage would be now if it were spread evenly over the window
+  (pace % = time passed / window length, 5 hours or 7 days, worked out in the browser from the reset time and
+  redrawn at least once a minute). The fill's colour says how usage compares with the pace: **red** when it is
+  ahead, **yellow** when it is up to 10 points below (`PACE_WARN` in `dashboard.html`), **green** when it is
+  further below. The tooltip adds `Pace 50% · 10 points ahead` (or `behind`, or `on pace` within 1 point). A
+  window that has reset shows no line, the default fill and no pace line in the tooltip. The brake and limit
+  colours still show on the chip itself: amber border, background and percent at or above the usage brake, red
+  while the queue waits out the usage limit (see Usage limits); the pace colour drives only the fill.
 - **Task ids.** Every task title carries its queue id as **#316**, muted, in front of the title: the History
   list, a project's task list, Today's timeline and Tasks panel, a To-do item about a task (in the list and on its
   step card), a task's detail page, and the task chips under a chat message. A parked item's "Waiting on #283"
