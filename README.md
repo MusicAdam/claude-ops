@@ -538,7 +538,7 @@ when none); a parked item has `parked: {since, wake_tasks, wake_on, wake_task}` 
     and stored as `merged`: there, merged is released. `tasks: []` clears the wait and unparks the item.
   - `POST /api/todos/skip {key}`: with a non-empty note or an explicit wait it parks the item (`parked` = now);
     otherwise it skips it (`skipped` = now). A skip lasts until local midnight.
-  - `POST /api/todos/unpark {key}` clears `parked` and `skipped`.
+  - `POST /api/todos/unpark {key}` clears `parked` and `skipped`; it is also how a skip is undone (the **Unskip** button).
   - Order: unparked items as TODO-4, then skipped ones in the order you skipped them, then parked ones, which
     carry `parked` for the dashboard to group.
   - **Auto-wake.** On each state build, a parked item with a wait wakes (is unparked and not skipped) when
@@ -639,7 +639,8 @@ stay on the right of the header.
   one-line note field, always shown, with the placeholder `Note to self, e.g. wait for #249`. It saves as you
   type (after about 500 ms, and on blur) through `POST /api/todos/note`. Skip's tooltip says what it will do:
   "Move to the end of the list until midnight" with an empty note, "Park it with this note" with one. A parked
-  item's step has **Unpark** beside Skip. See TODO-6.
+  item's step has **Unpark** beside Skip; a skipped item's step has **Unskip** there, which calls the same
+  endpoint. See TODO-6.
 
   Every step also has **Wait for…** beside Skip. It opens a small chooser under the step. A header line says
   what it does: `Park this item until tasks finish. It comes back when they do.` Under it come the item's
@@ -848,7 +849,7 @@ Below 700px Today is phone-first. The rules:
   readouts and the pause buttons are left out on Today; the other pages still show them. The usage-limit bar
   still shows when the limit is hit.
 - **HDR-2 Step card.** Compact by default, about 100px: one top row with **‹ To-do**, **Step k of n · project**,
-  **Details ▾** and **Skip →** (and **Unpark** for a parked item); then the title; then one row of action buttons
+  **Details ▾** and **Skip →** (and **Unpark** for a parked item, **Unskip** for a skipped one); then the title; then one row of action buttons
   that scrolls sideways, ending in the note field and **Wait for…** (TODO-6). The why and the facts open under **Details ▾**.
 - **Sending a message.** In the Today composer, the Design and Chat tabs' message box, and a task page's ask or
   steer box, **Enter** sends, **Shift+Enter** or **Alt/Option+Enter** adds a line, and **⌘/Ctrl+Enter** also sends.
