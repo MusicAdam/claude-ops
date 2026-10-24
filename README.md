@@ -774,7 +774,7 @@ stay on the right of the header.
       an OpenSpec change's chat doesn't get this. It doesn't commit unless you ask.
 
     An older edit my checkout topic is plain Claude in your checkout, as before, and can queue a task in its own
-    project with `opsd.py send`.
+    project with `opsd.py send` (`--after <task id>` makes it wait until that task merges).
   - **Titles.** A new topic is titled from its first message, as chats are. Claude may retitle it when the
     subject clearly changes, with a fenced block in the language `topic`: `{"title": "..."}`. The design and project
     chat prompts say so (`design_prompt.md`, `PROJECT_CHAT_PROMPT`). The block is taken out of the reply, the
@@ -1112,6 +1112,7 @@ opsd.py send <project> --chat "<message>"     # a project chat there, in its che
         ... --title "..." --hold              # name it; hold a task for your review before it merges
         ... --model sonnet                    # a task's model (see Models); not for chats
         ... --effort high                     # a task's effort (see Effort); not for chats
+        ... --after 333                       # a task waits in that queue until task #333 (any project) merges
 ```
 
 - **It shows like everything else.** A sent task is queued in the other project and goes through its gate as
@@ -1125,6 +1126,11 @@ opsd.py send <project> --chat "<message>"     # a project chat there, in its che
 - **Word comes back.** The sender's task logs "Sent task #71 to diskgame", and later how it ended: done with its
   summary, failed, cancelled, or waiting on you. A sent chat's first reply goes back too. In a chat that sent
   something these show as notes, and Claude reads them with your next message.
+- **Waiting on a task.** `--after <task id>` (`333` or `#333`) gives the new task `depends_on`, the same wait as
+  `after_task` in a queue block, so the scheduler holds it until that task merges. The id may be in any project.
+  It is for tasks only: a chat can't wait on a task, and an unknown id is refused. A chat runs only when you write
+  to it, so it is told never to promise to send something later ("once #333 merges, I'll send…"): it sends now
+  with `--after`, or adds a to-do with a `wait` when the step needs you.
 - **Limits.** A design chat stays read-only: it can send a task or a design chat, not a project chat. Work passed
   on three times (A sends to B, which sends on, and so on) is refused, and so is an eleventh send from one task or
   chat: both stop two projects keeping each other busy. Workers are told to send only what their task needs and
