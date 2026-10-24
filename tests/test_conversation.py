@@ -307,6 +307,76 @@ class Conversation(unittest.TestCase):
         opsd.conv_say("demo", "more")
         self.assertIsNone(opsd.design(a)["ended"])
 
+    # ---- compare-and-set: an open reopens an ended topic only when the client saw it ended (README: TODAY-2)
+    def test_stale_open_does_not_reopen(self):
+        """End topic on a Today chat, then a refresh that still lists it opens it with the ended it saw (none)."""
+        a, b = self.chat("a", ago=10), self.chat("b")
+        opsd.conv_open("demo", "topic", b)
+        opsd.topic_end("demo", a)
+        v = opsd.conv_open("demo", "chat", a, ended=None)
+        self.assertTrue(opsd.design(a)["ended"])
+        self.assertNotIn(f"chat:{a}:read", self.todo_keys())
+        self.assertEqual(v["topic"], b)  # not made the current topic either
+        self.assertEqual(v["still_ended"], a)
+        self.assertEqual(self.view()["topic"], b)
+
+    def test_stale_open_over_http(self):
+        a = self.chat("a")
+        opsd.topic_end("demo", a)
+        v = self.post("/api/conversation", {"project": "demo", "how": "chat", "ref": a, "ended": None})
+        self.assertTrue(opsd.design(a)["ended"])
+        self.assertIsNone(v["topic"])
+
+    def test_open_with_its_ended_reopens(self):
+        a = self.chat("a")
+        ended = opsd.topic_end("demo", a)["topics"][0]["ended"]
+        v = self.post("/api/conversation", {"project": "demo", "how": "topic", "ref": a, "ended": ended})
+        self.assertEqual(v["topic"], a)
+        self.assertNotIn("still_ended", v)
+        self.assertIsNone(opsd.design(a)["ended"])
+
+    def test_open_with_an_older_ended_does_not_reopen(self):
+        a = self.chat("a")
+        opsd.topic_end("demo", a)
+        opsd.conv_open("demo", "chat", a, ended=1.0)
+        self.assertTrue(opsd.design(a)["ended"])
+
+    def test_open_without_ended_reopens_as_before(self):
+        a = self.chat("a")
+        opsd.topic_end("demo", a)
+        self.assertEqual(self.post("/api/conversation", {"project": "demo", "how": "chat", "ref": a})["topic"], a)
+        self.assertIsNone(opsd.design(a)["ended"])
+
+    def test_open_of_an_open_topic_with_ended_none(self):
+        a, b = self.chat("a", ago=10), self.chat("b")
+        self.assertEqual(opsd.conv_open("demo", "chat", a, ended=None)["topic"], a)
+
+    def test_say_into_ended_current_topic_reopens_it(self):
+        a = self.chat("a")
+        opsd.conv_open("demo", "topic", a)
+        opsd.topic_end("demo", a)
+        opsd.conv_open("demo", "topic", a, ended=None)  # the stale open leaves it ended and not current
+        self.assertTrue(opsd.design(a)["ended"])
+        opsd.conv_open("demo", "topic", a, ended=opsd.design(a)["ended"])
+        opsd.q("UPDATE designs SET ended=? WHERE id=?", (time.time(), a))  # ended again elsewhere
+        opsd.conv_say("demo", "more")
+        self.assertIsNone(opsd.design(a)["ended"])
+
+    def test_stale_open_of_ended_research_thread(self):
+        opsd.q("DELETE FROM settings WHERE key='research_ended'")
+        real = opsd.research_topics
+        opsd.research_topics = lambda project: [{"id": "r:t1", "title": "R", "mode": "research", "kind": "research",
+                                                 "created": 1, "last": 1, "unread": False, "state": "idle",
+                                                 "ended": opsd.research_ended().get("t1")}]
+        try:
+            opsd.topic_end("demo", "r:t1")
+            opsd.conv_open("demo", "topic", "r:t1", ended=None)
+            self.assertIn("t1", opsd.research_ended())
+            opsd.conv_open("demo", "topic", "r:t1", ended=opsd.research_ended()["t1"])
+            self.assertEqual(opsd.research_ended(), {})
+        finally:
+            opsd.research_topics = real
+
     def test_reply_after_end_is_not_unread(self):
         """Earlier topics and the to-do list agree: an ended topic's later reply is new in neither."""
         a = self.chat("a")
