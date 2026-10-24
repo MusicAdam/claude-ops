@@ -16,7 +16,7 @@ RUN = r"""
 const h = require("fs").readFileSync(process.argv[1], "utf8");
 const a = h.indexOf("const QC_MIN"), b = h.indexOf("// (end of the pure helpers");
 const matchMedia = () => ({matches: false});
-const f = new Function(h.slice(a, b) + "; return {qcFit, qcRestore, qcCanAdd, qcAfterClose, qcUnread, qcPill, QC_MAX};")();
+const f = new Function(h.slice(a, b) + "; return {qcFit, qcRestore, qcCanAdd, qcAfterClose, qcToEnd, qcUnread, qcPill, QC_MAX};")();
 console.log(JSON.stringify(JSON.parse(process.argv[2]).map(([name, ...args]) =>
   name === "qcPill" ? f.qcPill(args[0], p => args[1][p]) : name === "QC_MAX" ? f.QC_MAX : f[name](...args))));
 """
@@ -82,6 +82,13 @@ class QuickChatTabs(unittest.TestCase):
         self.assertEqual(run(["qcAfterClose", 3, 1, 1], ["qcAfterClose", 3, 2, 2], ["qcAfterClose", 2, 0, 0]),
                          [1, 1, 0])  # the active one: its right-hand neighbour, or its left when it was last
         self.assertEqual(run(["qcAfterClose", 4, 2, 0], ["qcAfterClose", 4, 1, 3]), [1, 1])  # another: same tab
+
+    def test_closing_ends_topics(self):
+        # × on a tab ends its topic; × on the window ends every tab's. A tab with no message sent yet has none.
+        tab = lambda did: {"project": "demo", "did": did, "seen": 0}  # noqa: E731
+        self.assertEqual(run(["qcToEnd", [tab(7)]], ["qcToEnd", [tab(None)]]), [[7], []])
+        self.assertEqual(run(["qcToEnd", [tab(3), tab(None), tab(9), tab(3)]]), [[3, 9]])  # window ×: each once
+        self.assertEqual(run(["qcToEnd", []]), [[]])
 
     def test_unread(self):
         cases = [

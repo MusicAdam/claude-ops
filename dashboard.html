@@ -877,7 +877,7 @@ details.tdparked .tditem { opacity: .8; }
 <!-- The quick chat (README: TODAY-6): a floating window over the page, and the pill it shrinks to -->
 <div id="qc" class="hidden" role="dialog" aria-label="Quick chat">
   <div id="qcbar" title="Drag to move"><select id="qcproj" title="The project this tab talks to. Locked after its first message: add a tab with + to talk to another."></select>
-    <span id="qctitle"></span><button id="qcmin" title="Minimise (Esc)">–</button><button id="qcx" title="Close the window and every tab. The next one starts fresh; the topics stay in their projects' Earlier topics.">×</button></div>
+    <span id="qctitle"></span><button id="qcmin" title="Minimise (Esc)">–</button><button id="qcx" title="Close the window and every tab, and end their topics. Reopen them from Ended.">×</button></div>
   <div id="qctabs" role="tablist"></div>
   <div id="qcmsgs"></div>
   <div id="qccomp"><textarea id="qcsay" placeholder="Ask anything. Drop or paste screenshots to attach them. (Enter sends, Shift+Enter adds a line)"></textarea>
@@ -3278,7 +3278,7 @@ function renderConv() {
   const row = (t, btn) => `<div class="chatitem ${t.unread ? "unread" : ""}" data-topic="${esc(String(t.id))}"><div class="topicrow"><span>${esc(t.title || "Untitled")}</span>${btn}</div>
       <div class="sub">${esc(modeWord(t.mode))}${t.spec ? " · OpenSpec" : ""} · ${t.state === "thinking" ? '<span class="pulse s-running">replying</span>' : t.unread ? '<span class="s-review">new reply</span>' : `${ago(t.ended || t.last, now)} ago`}</div></div>`;
   const top = others.length ? `<details id="earlier" ${TD.earlierOpen ? "open" : ""}><summary>Earlier topics (${older.length})${older.some(t => t.unread) ? ' <span class="s-review">●</span>' : ""}</summary>
-    ${older.map(t => row(t, t.state === "thinking" ? "" : `<button data-end="${esc(String(t.id))}" title="Done with this topic: it moves under Ended and off your to-do list">End</button>`)).join("")}
+    ${older.map(t => row(t, `<button data-end="${esc(String(t.id))}" title="${t.state === "thinking" ? "Stop Claude's reply and end this topic" : "Done with this topic"}: it moves under Ended and off your to-do list">End</button>`)).join("")}
     ${older.length ? `<div class="row endread"><button id="endread" title="Ends every topic here you have read whose last activity is older than that">End read topics older than</button>
       <select id="enddays">${[1, 7, 30, 90].map(n => `<option value="${n}" ${n === days ? "selected" : ""}>${n} day${n === 1 ? "" : "s"}</option>`).join("")}</select></div>` : ""}
     ${ended.length ? `<details id="endedtopics" ${TD.endedOpen ? "open" : ""}><summary>Ended (${ended.length})</summary>
@@ -3304,7 +3304,7 @@ function renderConv() {
   const ready = convReady();
   if (ready && cv.topic === null && (cv.mode !== "design" || cv.from)) { convOpen({how: "new", mode: "design"}); return; }
   const cur = topicOf(cv.topic), busy = cur && cur.state === "thinking";
-  const html = `<div class="row"><span style="flex:1"></span>${cur ? `<button id="endtopic" ${busy || !ready ? "disabled" : ""} title="${!ready ? "Loading this item's conversation…" : busy ? "Claude is replying. Stop the reply, or wait for it, to end this topic" : "Done with this topic: it moves under Ended and off your to-do list"}">End topic</button>` : ""}
+  const html = `<div class="row"><span style="flex:1"></span>${cur ? `<button id="endtopic" ${!ready ? "disabled" : ""} title="${!ready ? "Loading this item's conversation…" : busy ? "Stop Claude's reply and end this topic: it moves under Ended and off your to-do list" : "Done with this topic: it moves under Ended and off your to-do list"}">End topic</button>` : ""}
     <button id="newtopic" title="Your next message starts a new topic" ${cv.topic === null || !ready ? "disabled" : ""}>New topic</button></div>
     ${cv.topic === null && cv.subject ? `<div class="convnote">Your next message starts this item's own topic.</div>`
       : cv.topic === null && cv.topics.length ? `<div class="convnote">Your next message starts a new topic.</div>` : ""}`;
@@ -3798,6 +3798,8 @@ function qcRestore(k) {
   return tabs.length ? {tabs, active: Math.max(0, Math.min(tabs.length - 1, k.active | 0)), min: !!k.min} : null;
 }
 const qcCanAdd = tabs => tabs.length < QC_MAX;
+// The topics closing tabs ends (×): each tab's chat, once; a tab with no message sent yet (did null) has none.
+const qcToEnd = tabs => [...new Set(tabs.filter(t => t && t.did).map(t => t.did))];
 // The active tab after closing tab i of n: the same one when another closes, else the right-hand neighbour (the
 // left one when it was last); -1 when none are left, which closes the window.
 function qcAfterClose(n, active, i) {
@@ -3852,16 +3854,26 @@ function qcSelect(i) {
   if (i === QC.active || !QC.tabs[i]) return;
   qcStash(); QC.active = i; qcShow();
 }
-function qcCloseTab(i) {  // its topic stays open in its project; only the window forgets it
+// Closing ends the closed tabs' topics, as End topic does (a reply in progress stops), unless end is false (a topic
+// that is gone). The tab closes whatever the end's answer: a failure has no tab left to show in.
+function qcEnd(tabs) {
+  const ids = qcToEnd(tabs);
+  if (ids.length) Promise.allSettled(ids.map(did => api(`/api/designs/${did}/end`, {})))
+    .then(() => { refresh(); refreshDesign(); });
+}
+function qcCloseTab(i, end = true) {
+  if (!QC.tabs[i]) return;
+  if (end) qcEnd([QC.tabs[i]]);
   const a = qcAfterClose(QC.tabs.length, QC.active, i);
-  if (a < 0) return qcClose();
+  if (a < 0) return qcClose(false);
   qcStash(); QC.tabs.splice(i, 1); QC.active = a; qcShow();
 }
 function qcMinimise() {
   QC.min = true; qcSave(); qcRender();
   if (document.activeElement && $("#qc").contains(document.activeElement)) document.activeElement.blur();
 }
-function qcClose() {  // every tab; the topics stay open in their projects
+function qcClose(end = true) {  // every tab, ending their topics
+  if (end) qcEnd(QC.tabs);
   QC.on = false; QC.min = false; QC.tabs = []; QC.active = 0; QC.key = "";
   $("#qcsay").value = ""; $("#qcmsg").textContent = ""; $("#qcmsgs").innerHTML = "";
   qcSave(); qcRender();
@@ -3890,7 +3902,7 @@ function qcRender() {
     const tip = title(x.project) + (x.d && x.d.title ? ` · ${x.d.title}` : "");
     return `<span class="qctab${i === QC.active ? " on" : ""}" role="tab" aria-selected="${i === QC.active}" data-qctab="${i}" title="${esc(tip)}">`
       + `<span class="t">${esc(title(x.project))}</span>${qcUnread(x) ? '<i class="dot" title="Claude replied"></i>' : ""}`
-      + `<button data-qcclose="${i}" title="Close this tab. Its topic stays in the project's Earlier topics.">×</button></span>`;
+      + `<button data-qcclose="${i}" title="Close and end this topic. Reopen it from Ended.">×</button></span>`;
   }).join("") + `<button id="qcadd" class="${full ? "dis" : ""}" aria-disabled="${full}" title="${full
     ? `At most ${QC_MAX} chats: close a tab to open another` : "New chat tab (⌘⇧K)"}">+</button>`;
   if ($("#qctabs").dataset.html !== tabs) $("#qctabs").innerHTML = $("#qctabs").dataset.html = tabs;
@@ -3927,7 +3939,7 @@ async function qcFetch(t) {
     if (t.did === did) t.d = d;
   } catch (e) {
     const i = QC.tabs.indexOf(t);
-    if (/no such|not found/i.test(e.message) && t.did === did && i >= 0) return qcCloseTab(i);
+    if (/no such|not found/i.test(e.message) && t.did === did && i >= 0) return qcCloseTab(i, false);
     if (t === qcTab()) $("#qcmsg").textContent = e.message; else t.msg = e.message;
   }
   qcRender();
@@ -3984,7 +3996,7 @@ $("#qctabs").onclick = e => {
   else if (tab) qcSelect(+tab.dataset.qctab);
 };
 $("#qcmin").onclick = qcMinimise;
-$("#qcx").onclick = qcClose;
+$("#qcx").onclick = () => qcClose();
 $("#qcsend").onclick = qcSend;
 $("#qcproj").onchange = () => { const t = qcTab(); if (t && !t.did) { t.project = $("#qcproj").value; qcSave(); qcRender(); } };
 $("#qcsay").onkeydown = e => { if (sendKey(e)) { e.preventDefault(); qcSend(); } };

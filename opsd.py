@@ -5870,19 +5870,25 @@ def topic_ref(project, ref):
 def topic_end(project, ref):
     """POST /api/conversation/end: you are done with this topic. It leaves Earlier topics for the Ended group, and
     leaves the to-do list: its replies count as read, now and later. A chat is ended as End chat ends it, so the
-    Design and Chat tabs agree. Refused while Claude replies, rather than stopping the reply unasked."""
+    Design and Chat tabs agree: its queued messages are dropped, and a reply in progress is stopped. The stopped
+    reply's turn, when it finishes, leaves the topic ended and read (design_turn, send_queued). Nothing is deleted;
+    topic_reopen puts it back."""
     proj(project)
     t = topic_ref(project, ref)
-    if t["state"] == "thinking":
-        raise ValueError(f"Claude is still replying in “{t['title']}”. Stop the reply, or wait for it, then end it.")
     now = time.time()
     if t["mode"] == "research":
         with research.lock:  # research_ended is read and written whole: one writer at a time
             e = research_ended()
             e[t["id"][2:]] = now
             set_setting("research_ended", json.dumps(e))
+            if t["state"] == "thinking":  # stop its running research turns
+                th = research.load_threads().get(t["id"][2:]) or {}
+                for j in research.load_jobs():
+                    if j["id"] in (th.get("turns") or []) and j.get("status") == "running":
+                        research.stop_job(j["id"])
     else:
         q("UPDATE designs SET ended=?, seen=?, queued='[]' WHERE id=?", (now, now, t["id"]))
+        stop(DESIGN_PROCS.get(t["id"]))
     try:
         c = json.loads(setting(f"conv:{project}") or "{}")
     except ValueError:
@@ -6128,7 +6134,8 @@ def design_turn(did, text, fresh_why=None):
                                         (time.time(), ctx, did)))
         if STOPPING.is_set():  # the restart stopped it: the chat stays replying, and resume_chats picks it up
             return
-        if reply.startswith("(no reply;") and LOST_SESSION in reply and d["session_id"] and not fresh_why:
+        if reply.startswith("(no reply;") and LOST_SESSION in reply and d["session_id"] and not fresh_why \
+                and not design(did)["ended"]:  # an ended chat doesn't start a fresh session
             retry = True  # Claude has no file for the session: start a fresh one rather than make you resend
             q("INSERT INTO design_msgs (design_id, role, text, ts) VALUES (?,?,?,?)",
               (did, "ops", "Claude could not find this chat's session, so it starts a fresh one with a copy of the "
