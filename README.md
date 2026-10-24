@@ -877,7 +877,8 @@ settings and `CLAUDE.md`. Each chat keeps one Claude session across messages, un
   only claude.ai can define them. A name with no definition is skipped, and the chat says so.
 
 - Nobody can answer permission prompts on the dashboard, so it runs in auto mode: actions that would
-  prompt are denied, and Claude tells you what it couldn't do.
+  prompt are denied, and Claude tells you what it couldn't do. claude-ops adds its own auto-mode rules for the
+  project, as workers get (see **Auto-mode rules** under **Workers**): the project's checkout is the trusted repo.
 - **Fresh sessions in chats.** Design and project chats track the context of each call. When the last call of a
   chat's session was over 90k tokens, your next message starts a fresh session on the same model, and the chat
   shows "Started a fresh session: this chat's context reached 95k tokens …". The new session gets a handoff
@@ -1434,7 +1435,8 @@ notes = """Project-specific guidance for design chats."""
   sessions**); tasks you paused stay paused, and so do tasks the usage limit paused, until it resets. Nothing about a restart is saved that could hold the
   queue: if the daemon crashes instead, the next one requeues whatever was running.
 - **Questions.** A worker that needs a decision stops with a question. Answer it on the dashboard
-  and the same Claude session resumes, or a fresh one if you answer after the cache expired.
+  and the same Claude session resumes, or a fresh one if you answer after the cache expired. The answer
+  arrives quoted under the question (see **Answers carry the question**).
 - **Fresh sessions.** Before a worker resumes its Claude session (an answer, a gate fix, a
   rebase conflict, a retry, a pause, a restart, a usage-limit wait), the daemon checks the session's last call.
   If it was over 55 minutes ago (the prompt cache lasts an hour, and a cold resume rewrites the whole context at
@@ -1479,7 +1481,26 @@ notes = """Project-specific guidance for design chats."""
   not python3. A grant then covers the daemon, its workers and their builds, and not every Python script.
   The app is rebuilt only when `launcher.c` changes; a rebuild changes its signature, so macOS asks again.
 - **Workers** run `claude -p --permission-mode auto --permission-prompts none --strict-mcp-config`.
-  Anything that would prompt is denied. They never push, and never touch your checkout, dev or main.
+  Anything that would prompt is denied. By default they work only in their worktree: they don't push, and
+  don't touch your checkout, dev or main. A step outside it (your checkout, `~/.claude-ops`, a commit on main)
+  is allowed when the brief asks for it or you approved it in an answer.
+- **Auto-mode rules.** The `--settings` that workers and project chats get (from `guard_settings`) carry an
+  `autoMode` object. Claude Code appends its lists to your own `autoMode` lists in `~/.claude/settings.json`;
+  it replaces nothing and removes no default rule. `claude --settings '<json>' auto-mode config` shows the merge.
+  - `environment`: this session is a claude-ops worker (or chat) for project `<name>`. The trusted repos are
+    your checkout, every repo of its workspace, its worktrees folder, and their origin remotes. `main` and `dev`
+    are ordinary branches there, not protected. `~/.claude-ops` is the queue's own state and config, owned by you.
+  - `allow`: (a) editing, committing and pushing in a trusted repo on any branch, `main` included, when the
+    brief or you ask for it (a plain push, not a force push); (b) editing `claude-ops.toml` in a project repo and
+    `~/.claude-ops/projects/<name>.toml`, which is project config, not Self-Modification; (c) running `opsd.py`
+    subcommands (`export-config`, `adopt-workspace-root`, `add`, `send` …); (d) your answer to a worker's
+    question counts as your explicit approval of the action that question named.
+  - No `soft_deny` entries are added. Hard denials (force-pushing over others' work, leaking secrets) stay.
+- **Answers carry the question.** Your answer reaches the worker under the question it answers: "You asked
+  the owner: > <question> The owner answered: <answer>", then a line saying that if you agreed, that is your
+  approval for the action it asked about, steps outside its worktree included. A bare "Do it" then names its
+  action and target, which the auto-mode classifier needs before it allows a step such as a commit in your
+  checkout.
   None of the daemon's Claude sessions (workers, design, chat) connect to Claude in Chrome (`--no-chrome`).
 - **Reading rules.** Worker, release and chat briefs tell Claude to search before reading, read big files in
   ranges of 150 lines or fewer, not reread what is already in context, and keep command output short. Everything

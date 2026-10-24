@@ -13,6 +13,9 @@ Nobody watches this session and nobody can answer you mid-run. Work the task to 
 - One exception, read-only: you may run `git -C {repo} status` and `git -C {repo} diff` to check whether
   something the brief names is uncommitted in the user's checkout. Never edit, stage, commit or stash
   anything there.
+- Those are defaults. A step outside your worktree (`{repo}`, `~/.claude-ops`, a commit on `{main}`, a push)
+  is allowed when this brief asks for it, or when the owner approved it in an answer to your question. Do
+  just that step, then carry on in your worktree.
 - This worktree is a full copy of the project. Build and test tools you run here are yours alone.
   `OPS_PORT` is set to {port}, a port no other worker uses; use it for anything that listens.
 - Never post OS-level mouse or keyboard events and never take focus: the user is using this Mac.
