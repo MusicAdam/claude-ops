@@ -659,17 +659,14 @@ stay on the right of the header.
     browser (localStorage `ops-proj`, a JSON array of names; an older plain name reads as a set of one).
 
 - **TODAY-1 Left: To-do.** The `todos` list from `/api/state`, nothing else.
-  - The top says **N things need you · ~M min** (the sum of `est_min`), over a progress bar: tasks done today ÷
-    (tasks done today + open items). "Done today" counts tasks that finished as done since local midnight; it is
-    the same list as the timeline's **Done today**.
   - Filter chips, each with its count: **All**, **Review** (Try, Review, Agree, Read), **Unblock** (Answer, Fix),
     **Ship** (Promote, Ship, Commit), **Only me** (Do).
   - Each item shows its verb, title, project (unless one project is ticked in the switcher) and age.
   - The selection is the item's `key`, so it survives polls and reloads. When the selected item leaves the list
     (you acted on it, or its state changed), the item after it is selected.
   - **Skip for now** is one click. With an empty note it moves the item to the end of the list until local
-    midnight. With a note it parks the item: it leaves the list, the chip counts and the **N things need you**
-    total, and goes to a folded **Parked (N)** section at the bottom. Both are kept on the server (TODO-6), so
+    midnight. With a note it parks the item: it leaves the list and the chip counts,
+    and goes to a folded **Parked (N)** section at the bottom. Both are kept on the server (TODO-6), so
     every device agrees. A parked row shows its verb, title, project, the note and `parked 4d` (its age since
     parking). A parked item with a wait says so on its row: `Waiting on #283, #284 to merge` (or `to
     release`). An item with a note shows the note on its row, muted and cut with an ellipsis.
@@ -680,6 +677,16 @@ stay on the right of the header.
     calls `POST /api/todos` (TODO-2); the item is a **Do** you close with **Done**. An error (a duplicate title,
     an unknown task) shows under the form, which keeps what you typed.
   - The next item selected when one leaves the list is never a parked one.
+  - **Projects** sits under the list and above **Parked (N)**: one compact row per project in view (every
+    non-archived project, or only the ticked ones), in the order of `/api/state`'s `projects`. A row shows the
+    title, its count of open (not parked) to-dos when above 0, and a ● when it has an unread chat (a Read to-do
+    from a chat). With one project ticked its one row still shows. Clicking a row opens that project's **home**
+    in the centre (TODAY-2): no to-do is selected. The home is kept in this browser (`ops-td-home`) and its row is
+    highlighted. Clicking a to-do clears the home. Clicking the selected to-do again, or **Esc** on Today with no
+    menu, panel or dialog open and focus outside a text field, goes to the home of that item's project. While a
+    home is open nothing is auto-selected, so a new to-do arriving doesn't move the centre. If the home project
+    leaves view (the switcher changes, or it is archived or removed), the home clears and the auto-select
+    returns.
 - **TODAY-2 Centre: the step.** The selected item as one step: **Step k of n** (k within the filter) · project,
   the title, the why, and key facts. For a task: its number, the gate result, how many files it changed, and how
   long ago it was built. One primary button, a few secondary ones, and **Skip for now →**. Every button calls an
@@ -689,6 +696,15 @@ stay on the right of the header.
   "Move to the end of the list until midnight" with an empty note, "Park it with this note" with one. A parked
   item's step has **Unpark** beside Skip; a skipped item's step has **Unskip** there, which calls the same
   endpoint. See TODO-6.
+
+  The centre shows either a step or a project **home**. The home is a slim card: the project title, one muted
+  status line from `/api/state` (for example `dev 3 ahead of main · 2 running · 4 to-dos`; zero running, nothing
+  ahead, and a straight-to-main project's ahead count are left out), and the project's main buttons with the
+  Projects card's endpoints and rules: **▶ Play dev** / **■ Stop dev** (only with a launch step), **Promote**
+  (dev ahead, not straight to main) and **Deploy** (opens the Deploy dialog). Errors show in the card's message
+  line. The **All clear** card (empty list, no home) is this card for the conversation's project, with a muted
+  line that nothing needs you. The tabs and conversation below are unchanged. A message sent from a home
+  carries no to-do (rule 5).
 
   Every step also has **Wait for…** beside Skip. It opens a small chooser under the step. A header line says
   what it does: `Park this item until tasks finish. It comes back when they do.` Under it come the item's
@@ -725,7 +741,7 @@ stay on the right of the header.
   **Retrying** under the queue's controls); its errors show in the step's message line.
 - **TODAY-2 Centre, below: one conversation per project.** One running conversation for the project in view,
   with one message box. With one project ticked in the switcher it is that project. Otherwise it is the selected
-  item's project, else the last one you used (a **Project** picker shows when there is neither; it lists the
+  item's project, else the open home's project (the conversation follows the home), else the last one you used (a **Project** picker shows when there is neither; it lists the
   projects in view). It replaces the Design chat list, the Chat list and research
   chats on this page.
   - **Topics.** The conversation is made of topics. A topic is an ordinary chat row (`designs`: a design chat, a
@@ -946,7 +962,8 @@ Below 700px Today is phone-first. The rules:
 
 - **PHONE-1 One column at a time.** A bottom bar switches between **To-do** (with a red count badge), **Now** (the
   step and its conversation) and **Activity** (the timeline). The page opens on To-do. Tapping a to-do opens it in
-  Now. Task details, and the other timeline panels, open full screen.
+  Now. The Projects section is in the To-do pane under the list; tapping a project opens Now on its home
+  (compact: a title row with **‹ To-do**, and the buttons in one row that scrolls sideways). Task details, and the other timeline panels, open full screen.
 - **HDR-1 Header.** One row, about 40px: the name, the project switcher and **More**. The switcher takes the
   room left on the row, cuts its label short to fit, and opens the same checklist as on a computer. The Today button, the queue
   readouts and the pause buttons are left out on Today; the other pages still show them. The usage-limit bar
@@ -968,7 +985,7 @@ Below 700px Today is phone-first. The rules:
 - **HDR-4 Room to talk.** While a step is open the conversation gets at least 60% of the screen height; the step
   card scrolls inside what is left. A long conversation never pushes the composer off the screen.
 - **PHONE-2 Back.** **‹ To-do** returns to the list, and so do **To-do** in the bottom bar and the phone's back
-  gesture: opening a step or a details panel adds a history entry, and going back closes one level (the panel, then
+  gesture: opening a step or a project home, or a details panel, adds a history entry, and going back closes one level (the panel, then
   the step). Switching between Now and Activity adds no more entries, so one back from either reaches To-do. This
   works whatever the address's hash was when Today opened (`#today`, `#design`, `#chat` or none), and a reload
   starts on To-do with nothing left to go back through. The step card's top row, with **‹ To-do**, stays in view
