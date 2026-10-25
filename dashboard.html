@@ -315,6 +315,8 @@ a[data-task] { color: var(--accent); cursor: pointer; }
 #dlg .vopt input[type=text] { width: 110px; padding: 2px 6px; }
 #dlg .notebox { display: block; color: var(--ink); margin-top: 12px; }
 #dlg .notebox textarea { min-height: 90px; margin-top: 4px; }
+#dlg .drow { display: flex; gap: 12px; font-size: 12px; margin-top: 2px; }
+#dlg .drow a { margin-left: auto; color: var(--accent); }
 .settings label { display: grid; grid-template-columns: 130px auto 1fr; gap: 4px 12px; align-items: center; padding: 6px 0; }
 .settings label > span:first-child { font-weight: 550; }
 .settings .why { grid-column: 2 / -1; color: var(--muted); font-size: 12px; }
@@ -1381,6 +1383,7 @@ function openDeploy(project, name) {
     : `<div class="vopts">` + v.options.map(o => `<label class="vopt ${o.disabled ? "off" : ""}"><input type="radio" name="dv" value="${o.key}" data-v="${esc(o.version)}" ${o.disabled ? "disabled" : ""} ${o.key === v.default && !o.disabled ? "checked" : ""}>
         ${esc((VLABEL[o.key] || (x => `${o.key} → ${x}`))(o.version))}${o.disabled && o.reason ? `<span class="why">${esc(o.reason)}</span>` : ""}</label>`).join("")
       + `<label class="vopt"><input type="radio" name="dv" value="other"> Other <input type="text" id="dother" placeholder="X.Y.Z" autocomplete="off" spellcheck="false"><span class="err" id="dothererr"></span></label></div>`;
+  const drafts = d.note && (d.log || []).length;  // a note to write and a changelog to draft it from
   const busy = g.deploy_open ? `<div class="callout">Deploy ${taskLink(g.deploy_open)} is open. This one queues behind it.</div>` : "";
   $("#dlg").innerHTML = `<div class="box" role="dialog" aria-modal="true" aria-labelledby="dtitle">
     <h2 id="dtitle">Deploy ${esc(name)}</h2>
@@ -1389,7 +1392,8 @@ function openDeploy(project, name) {
       : d.log_unknown ? `<div class="s-review">What it ships is unknown: the commit it last deployed is gone from git.</div>`
       : !d.last ? `<div class="muted">First deploy: no changelog yet.</div>` : d.behind === 0 ? `<div class="muted">Nothing new since its last deploy.</div>` : ""}</div>
     ${busy}${opts}
-    ${d.note ? `<label class="notebox">${esc(d.note)} <span class="muted">(required)</span><textarea id="dnote"></textarea></label>` : ""}
+    ${d.note ? `<label class="notebox">${esc(d.note)} <span class="muted">(required)</span><textarea id="dnote"></textarea></label>
+      ${drafts ? `<div class="drow"><span id="ddraft" class="muted"></span><a href="#" id="dredraft" title="Draft it again from what it ships">Redraft</a></div>` : ""}` : ""}
     <div class="row"><button class="primary" id="dgo"></button><button id="dcancel">Cancel</button></div>
     <div id="dmsg" class="err" style="margin-top:8px;white-space:pre-wrap"></div></div>`;
   $("#dlg").classList.remove("hidden");
@@ -1398,8 +1402,31 @@ function openDeploy(project, name) {
   $("#dlg").oninput = $("#dlg").onchange = syncDeploy;
   const other = $("#dother");  // clicking or typing in the field picks Other
   if (other) other.onfocus = other.oninput = () => { $("#dlg input[value=other]").checked = true; syncDeploy(); };
+  if (drafts) {
+    $("#dredraft").onclick = e => { e.preventDefault(); draftNote(true); };
+    draftNote(false);
+  }
   syncDeploy();
   ($("#dlg input[name=dv]:checked") || $("#dnote") || $("#dgo")).focus();
+}
+// The note drafted from what the deploy ships, for you to read, edit and approve by clicking Deploy. A draft never
+// replaces what you typed: on open it fills only an empty box, and Redraft asks first if you changed the text.
+async function draftNote(again) {
+  const mine = dlg, box = $("#dnote"), st = $("#ddraft"), before = box.value;
+  if (again && box.value.trim() && box.value !== (mine.drafted || "") && !confirm("Replace your edited note with a new draft?")) return;
+  st.textContent = "Drafting from the changelog…"; $("#dredraft").hidden = true;
+  let r = null;
+  try { r = await api("/api/deploys/draft", {project: mine.project, target: mine.target}); }
+  catch (e) { if (dlg === mine) st.textContent = `Couldn't draft it: ${e.message}`; }
+  if (dlg !== mine) return;  // closed, or another dialog opened meanwhile
+  $("#dredraft").hidden = false;
+  if (!r) return;
+  if (!r.note) { st.textContent = "Nothing to draft it from: write it yourself."; return; }
+  if (box.value !== before) { st.textContent = "A draft is ready, but you typed in the box meanwhile. Redraft to use it."; return; }
+  box.value = mine.drafted = r.note;
+  st.textContent = r.source === "titles" ? "Drafted from the task titles (the model didn't answer). Check it, then Deploy."
+    : "Drafted from the changelog. Check it, edit it if you like, then Deploy.";
+  syncDeploy();
 }
 // The version the picker stands at, as {choice, version} for the API and the button, or {error}.
 function pickedVersion() {
