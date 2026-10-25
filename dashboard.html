@@ -671,6 +671,13 @@ details.tdparked .tditem { opacity: .8; }
 #qcmsgs { flex: 1; overflow: auto; padding: 10px; }
 #qcmsgs .msg { max-width: none; } #qcmsgs .msg.user { margin-left: 24px; }
 #qcmsgs .muted { padding: 8px 2px; }
+#qcrecent h4 { margin: 8px 2px 4px; font-size: 12px; color: var(--muted); font-weight: 600; }
+#qcrecent button { display: flex; gap: 6px; align-items: baseline; width: 100%; padding: 5px 6px; border: 0; border-radius: 6px;
+                   background: none; color: var(--ink); text-align: left; font: inherit; cursor: pointer; }
+#qcrecent button:hover { background: var(--bg); }
+#qcrecent .p { flex: none; color: var(--muted); font-size: 12px; }
+#qcrecent .t { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#qcrecent .w { flex: none; color: var(--muted); font-size: 12px; }
 #qccomp { padding: 8px; border-top: 1px solid var(--line); }
 #qccomp textarea { width: 100%; box-sizing: border-box; min-height: 56px; max-height: 40%; resize: none; }
 #qccomp .row { display: flex; align-items: center; gap: 6px; margin-top: 6px; }
@@ -3861,8 +3868,9 @@ document.addEventListener("paste", e => {
 // filter, TD or chatSel/chatKey, and its first message asks the daemon (quick: true) to keep the topic Today shows.
 // localStorage keeps ops-qc {tabs: [{project, did, seen}], active, min} while the window is open or minimised, and
 // ops-qc-geo {x, y, w, h}. Each tab is its own topic, {project, did, d, seen, draft, msg}; QC.active indexes QC.tabs,
-// and QC.key is what #qcmsgs last drew (it shows the active tab).
-const QC = {on: false, min: false, tabs: [], active: 0, key: "", geo: null, tick: 0};
+// and QC.key is what #qcmsgs last drew (it shows the active tab). QC.recent is the latest GET /api/designs/quick, the
+// Recent list an empty tab shows, fetched each time one is drawn (qcShow).
+const QC = {on: false, min: false, tabs: [], active: 0, key: "", geo: null, tick: 0, recent: []};
 const QC_MIN = {w: 320, h: 300}, QC_MAX = 6, QC_PHONE = matchMedia("(max-width: 699px)");
 // The window's place and size, kept inside a vw×vh viewport with at least QC_MIN; null (nothing kept) is the
 // default 420×520 at the bottom right, 16px in.
@@ -3890,6 +3898,8 @@ function qcAfterClose(n, active, i) {
 // A reply since you last looked at the tab: more messages than then, the last one not yours, and Claude done.
 const qcUnread = t => !!t.d && t.d.state !== "thinking" && t.d.msgs.length > t.seen
   && t.d.msgs[t.d.msgs.length - 1].role !== "user";
+// The Recent list of an empty tab: the quick topics (GET /api/designs/quick, newest first) not open in a tab already.
+const qcRecent = (rows, tabs) => (rows || []).filter(r => !tabs.some(t => t && t.did === r.id));
 // The minimised pill: the project's title with one tab, "N chats" with more; a dot when any tab has a reply.
 const qcPill = (tabs, title) => ({label: tabs.length === 1 ? title(tabs[0].project) : `${tabs.length} chats`,
   dot: tabs.some(qcUnread)});
@@ -3919,7 +3929,25 @@ function qcShow() {  // draw the active tab, with its own draft
   $("#qcsay").value = t.draft; $("#qcmsg").textContent = t.msg; QC.key = "";
   qcSave(); qcRender();
   if (!QC.min) $("#qcsay").focus();
-  if (t.did) qcLoad();
+  if (t.did) qcLoad(); else qcRecentLoad();
+}
+async function qcRecentLoad() {
+  try { QC.recent = await api("/api/designs/quick?limit=10"); } catch { QC.recent = []; }
+  QC.key = ""; qcRender();
+}
+// A Recent row loads its topic into the active (empty) tab, as after a first message. An ended one reopens first,
+// sending the ended it was listed with, so a stale list can't reopen what has ended again since (README: TODAY-6).
+async function qcPick(id) {
+  const t = qcTab(), r = QC.recent.find(x => x.id === id);
+  if (!t || t.did || !r) return;
+  const open = QC.tabs.findIndex(x => x.did === id);
+  if (open >= 0) return qcSelect(open);
+  try {
+    if (r.ended) { await api(`/api/designs/${id}/reopen`, {ended: r.ended}); refresh(); refreshDesign(); }
+  } catch (e) { $("#qcmsg").textContent = e.message; return qcRecentLoad(); }
+  if (t !== qcTab() || t.did) return;
+  Object.assign(t, {did: id, project: r.project, seen: 0, d: null}); $("#qcmsg").textContent = "";
+  qcSave(); QC.key = ""; qcRender(); qcLoad();
 }
 function qcOpen(fresh) {  // fresh (⌘⇧K): with a new tab, unless 6 are open
   qcStash();
@@ -3985,7 +4013,7 @@ function qcRender() {
     const tip = title(x.project) + (x.d && x.d.title ? ` · ${x.d.title}` : "");
     return `<span class="qctab${i === QC.active ? " on" : ""}" role="tab" aria-selected="${i === QC.active}" data-qctab="${i}" title="${esc(tip)}">`
       + `<span class="t">${esc(title(x.project))}</span>${qcUnread(x) ? '<i class="dot" title="Claude replied"></i>' : ""}`
-      + `<button data-qcclose="${i}" title="Close and end this topic. Reopen it from Ended.">×</button></span>`;
+      + `<button data-qcclose="${i}" title="Close and end this topic. Reopen it from Recent in an empty tab.">×</button></span>`;
   }).join("") + `<button id="qcadd" class="${full ? "dis" : ""}" aria-disabled="${full}" title="${full
     ? `At most ${QC_MAX} chats: close a tab to open another` : "New chat tab (⌘⇧K)"}">+</button>`;
   if ($("#qctabs").dataset.html !== tabs) $("#qctabs").innerHTML = $("#qctabs").dataset.html = tabs;
@@ -3994,13 +4022,19 @@ function qcRender() {
   if (!QC_PHONE.matches) qcPlace();
   const box = $("#qcmsgs");
   const key = d ? `${d.id}:${d.title}:${d.msgs.length}:${JSON.stringify(d.queued || [])}:${d.state}:${d.live.length}:${JSON.stringify(d.msgs.map(m => m.tasks.map(t => t.state)))}:${(d.files || []).map(f => f.name + f.mtime).join()}`
-    : t.did ? "loading" : `new:${t.project}`;
+    : t.did ? "loading" : `new:${t.project}:${JSON.stringify(qcRecent(QC.recent, QC.tabs))}`;
   if (key === QC.key) return;
   const stick = box.scrollTop + box.clientHeight >= box.scrollHeight - 40 || !QC.key.startsWith(`${d && d.id}:`);
   QC.key = key;
   if (!d) {
     box.innerHTML = t.did ? `<div class="muted">Loading…</div>`
       : `<div class="muted">A quick chat with ${esc(title(t.project))}. Your first message starts a new plan &amp; design topic there; the page behind this window stays as it is.</div>`;
+    const rows = t.did ? [] : qcRecent(QC.recent, QC.tabs), now = Date.now() / 1000;
+    if (rows.length) box.innerHTML += `<div id="qcrecent"><h4>Recent</h4>${rows.map(r =>
+      `<button data-qcrecent="${r.id}" title="${esc(r.ended ? "Reopen this topic here" : "Open this topic here")}">`
+      + `<span class="p">${esc(title(r.project))}</span><span class="t">${esc(r.title || "untitled")}</span>`
+      + `<span class="w">${ago(r.updated, now)} ago${r.ended ? " · ended" : ""}</span></button>`).join("")}</div>`;
+    box.querySelectorAll("[data-qcrecent]").forEach(b => b.onclick = () => qcPick(+b.dataset.qcrecent));
     return;
   }
   const links = chatCtx(d.project, d.id, (d.files || []).map(f => f.name));
@@ -4107,7 +4141,7 @@ setInterval(() => {
   if (t.did && (QC.tick % 2 || !t.d || t.d.state === "thinking")) qcLoad.poll();
   if (!QC.tick) QC.tabs.forEach(x => x !== t && qcPeek(x));
 }, 1500);
-if (QC.on) { qcLoad(); QC.tabs.forEach(x => x !== qcTab() && qcPeek(x)); }
+if (QC.on) { qcLoad(); QC.tabs.forEach(x => x !== qcTab() && qcPeek(x)); if (qcTab() && !qcTab().did) qcRecentLoad(); }
 
 // ---------------------------------------------------------------- research tab
 // The research repo's proposals, projects, reports, to-dos, sources and runs, from /api/research/ (README: ## Research).

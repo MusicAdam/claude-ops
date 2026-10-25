@@ -880,9 +880,20 @@ stay on the right of the header.
     streams in), and a message box. Enter sends and Shift+Enter adds a line, as in every chat box; while Claude
     replies, **Send** reads **Queue**. Drop or paste screenshots to attach them.
   - **Fresh each time.** The first message starts a new plan & design topic in the picked project
-    (`POST /api/designs` with `quick: true`); later ones go to that topic (`/api/designs/<id>/say`). There is no
-    "continue the current topic". Each tab starts fresh: until its first message, the picker only changes where
-    it will start; after it, that tab's picker is locked. To talk to another project, add a tab with **+**.
+    (`POST /api/designs` with `quick: true`, which also marks it in `designs.quick`, 0 or 1); later ones go to that
+    topic (`/api/designs/<id>/say`). It never continues Today's current topic; to go back to an earlier quick chat,
+    pick it from **Recent**. Each tab starts fresh: until its first message, the picker only changes where it will
+    start; after it, that tab's picker is locked. To talk to another project, add a tab with **+**.
+  - **Recent.** A tab with no topic yet lists, under its "A quick chat with …" line, the latest quick-chat topics
+    (`GET /api/designs/quick?limit=10`: `designs.quick` set, in projects that aren't archived, newest activity first,
+    ended ones too, each `{id, project, title, updated, ended}`). A row shows the project's title, the topic's title,
+    how long ago it was last active ("2.0h ago") and "· ended" when it has ended. Topics open in another tab are left
+    out; with none to list, nothing more shows. The list is fetched each time an empty tab is drawn (opening the
+    window, **+**, ⌘⇧K, switching to it); it isn't polled. Click a row to load that topic into the tab, as after a
+    first message: the tab takes its project, the picker locks, and its messages show. An ended one is reopened
+    first (`/api/designs/<id>/reopen` with the `ended` it was listed with): when that is no longer the stored
+    value, the reopen is refused, the error shows, and the list is fetched again. Only topics started here are
+    listed: other topics are reached from Today.
   - **Minimise.** **–**, or Esc while focus is in the window, shrinks it to a pill at the bottom right with the
     project's name (with one tab) or `N chats` (with more), and a dot once Claude has replied in any tab since you
     last looked at it. Click the pill to get the window back on the same tab. Open or minimised, the chats stay
@@ -892,7 +903,7 @@ stay on the right of the header.
     moves to its right-hand neighbour (or left, when it was last). **×** in the title bar closes the window and
     every tab: the next open starts fresh. Closing ends the topic of every tab it closes, as **End topic** does
     (see "Ending a chat"): it moves under **Ended**, its replies count as read, its queued messages are dropped,
-    and a reply in progress is stopped first. Nothing is deleted; **Reopen** there puts it back. A tab with no
+    and a reply in progress is stopped first. Nothing is deleted; **Recent** in an empty tab, or **Reopen** under Ended, puts it back. A tab with no
     topic yet (no message sent) just closes. The tab closes even when ending fails (no network, the topic is
     gone), and the error shows nowhere. Minimise and Esc never end anything. A tab whose topic was deleted
     elsewhere closes without ending.
@@ -900,7 +911,9 @@ stay on the right of the header.
     to-do and its step, and every project's shown topic alone. A project whose `conv:<project>` keeps no topic
     shows its latest open topic, which a new quick chat would become. So before it creates the topic, the daemon
     pins the topic Today shows now (or "a new topic" when there is none) in `conv:<project>` when nothing is kept
-    there yet. (Pinning was simpler than leaving quick-chat topics out of that fallback: it needs no new column.)
+    there yet. A message to a quick topic (`designs.quick`) and its reopen pin the same way first, so reopening
+    one from **Recent** doesn't make it the shown topic either. (Pinning was simpler than leaving quick-chat topics
+    out of that fallback.)
 
 ### Today on a phone
 
@@ -943,7 +956,7 @@ Below 700px Today is phone-first. The rules:
 - **PHONE-4 Quick chat.** The quick chat (TODAY-6) opens full screen, with no drag or resize. Minimise and
   close work as on a desktop, except where a minimised one waits: on Today the pill would cover the **↑** send
   button, so the header's **Ask** turns blue instead (with an orange dot when Claude replied), and tapping it
-  brings the chat back. The other pages keep the pill.
+  brings the chat back. The other pages keep the pill. An empty tab's **Recent** list is the same, full width.
 - **PHONE-5 Earlier topics and Ended.** They sit where they do on a computer, at the top of the conversation in
   the **Now** pane, for the project of the conversation shown. To reach another project's, or any when the list is
   empty, use **Earlier topics and Ended** at the bottom of the **To-do** pane: one chip per project the header

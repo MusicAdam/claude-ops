@@ -16,7 +16,7 @@ RUN = r"""
 const h = require("fs").readFileSync(process.argv[1], "utf8");
 const a = h.indexOf("const QC_MIN"), b = h.indexOf("// (end of the pure helpers");
 const matchMedia = () => ({matches: false});
-const f = new Function(h.slice(a, b) + "; return {qcFit, qcRestore, qcCanAdd, qcAfterClose, qcToEnd, qcUnread, qcPill, QC_MAX};")();
+const f = new Function(h.slice(a, b) + "; return {qcFit, qcRestore, qcCanAdd, qcAfterClose, qcToEnd, qcRecent, qcUnread, qcPill, QC_MAX};")();
 console.log(JSON.stringify(JSON.parse(process.argv[2]).map(([name, ...args]) =>
   name === "qcPill" ? f.qcPill(args[0], p => args[1][p]) : name === "QC_MAX" ? f.QC_MAX : f[name](...args))));
 """
@@ -89,6 +89,14 @@ class QuickChatTabs(unittest.TestCase):
         self.assertEqual(run(["qcToEnd", [tab(7)]], ["qcToEnd", [tab(None)]]), [[7], []])
         self.assertEqual(run(["qcToEnd", [tab(3), tab(None), tab(9), tab(3)]]), [[3, 9]])  # window ×: each once
         self.assertEqual(run(["qcToEnd", []]), [[]])
+
+    def test_recent_skips_open_tabs(self):
+        # an empty tab's Recent list: every quick topic, newest first as listed, but not one open in another tab
+        rows = [{"id": 5, "project": "ops"}, {"id": 4, "project": "game", "ended": 9.5}, {"id": 2, "project": "ops"}]
+        tab = lambda did: {"project": "ops", "did": did, "seen": 0}  # noqa: E731
+        self.assertEqual(run(["qcRecent", rows, [tab(None), tab(4)]]), [[rows[0], rows[2]]])
+        self.assertEqual(run(["qcRecent", rows, [tab(None)]], ["qcRecent", [], [tab(1)]], ["qcRecent", None, []]),
+                         [rows, [], []])
 
     def test_unread(self):
         cases = [
