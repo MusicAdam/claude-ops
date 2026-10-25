@@ -1497,6 +1497,32 @@ run = "bin/release test"           # in <worktrees>/deploy (or its repo folder);
 notes = """Project-specific guidance for design chats."""
 ```
 
+## Worktree cleanup
+
+Each task works in `<worktrees>/t<id>`. When does it go?
+
+- **Done:** removed when the task merges.
+- **Failed or cancelled:** kept for 7 days (`SPENT_KEEP_DAYS`), because **Retry** resumes the worker in the same
+  worktree, uncommitted work and all. The task's log says `worktree kept 7 days for a retry, then removed`. The
+  branch stays after removal, so a later retry makes a fresh worktree from it.
+- **Removal is checked.** `remove_worktree` runs `git worktree remove --force` in each repo, then deletes whatever
+  is left (read-only and locked files too), then prunes. If the folder is still there, the task's log says
+  `couldn't remove worktree …` and the janitor tries again.
+
+**The janitor** (`sweep_worktrees`) runs at startup and every 10 minutes, in the background. In each project it
+removes any folder under `<worktrees>/` that nothing needs. It keeps:
+
+- `dev`, `main`, `deploy` and `deploy-peek`
+- the worktree of every task that is not done and not failed or cancelled more than 7 days ago, and of any task
+  whose pipeline or chat is running
+- `spec-<id>` of each spec chat
+- an `openspec-*` or `*.root-tmp` folder less than an hour old
+
+It skips a folder that holds uncommitted changes (an untracked `.ops-result.json` doesn't count), or whose
+`.ops-result.json` has status `needs_input`. It logs each skip once, in the daemon log and on the task. It logs
+each removal the same way (`janitor removed worktree …`). A half-removed folder (no `.git`, files still there)
+has nothing to keep, so it goes.
+
 ## Other details
 
 - **Tabs.** The header has **Today** and **More ▾** (see [Today view](#today-view)). More holds History (the
