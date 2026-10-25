@@ -85,6 +85,7 @@ label { color: var(--muted); display: inline-flex; gap: 6px; align-items: center
 .tid.copied::after { content: " copied"; color: var(--accent); font-family: system-ui, sans-serif; }
 .task .title { flex: 1; font-weight: 550; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .task .sub { color: var(--muted); font-size: 12px; margin-top: 3px; }
+.task .sub .startnow { font-size: 11px; padding: 0 6px; margin-left: 4px; }
 .task .now { font-size: 12px; margin-top: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .task .now.step { display: flex; align-items: flex-start; white-space: normal; }
 .task .now.step .what { min-width: 0; overflow: hidden; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
@@ -890,6 +891,7 @@ details.tdparked .tditem { opacity: .8; }
         <label>After # <input id="after" style="width:60px" placeholder="—"></label>
         <label title="The model its worker starts on. Default: the Tasks model setting (per kind, on the Settings tab)">Model <select id="tmodel"><option value="">Default</option><option value="opus">Opus</option><option value="sonnet">Sonnet</option><option value="haiku">Haiku</option></select></label>
         <label title="How hard its worker thinks (--effort). Default: the Effort setting on the Settings tab">Effort <select id="teffort"><option value="">Default</option><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option><option value="xhigh">Extra high</option><option value="max">Max</option></select></label>
+        <label title="When it may start. It waits in the queue until then, and others can queue after it. After next reset: a minute after the usage window resets (README: Start later)">Start <select id="tstart"><option value="">now</option><option value="at">at…</option><option value="reset">after next reset</option></select> <input type="datetime-local" id="tstartat" class="hidden"></label>
         <label title="Build it and wait for you to play and approve before merging. Only for projects with an app to launch; elsewhere it merges after the gate"><input type="checkbox" id="hold"> Hold for my review</label>
         <label title="Once it merges into dev, promote dev to main, as the Promote button does. Tasks it splits into are promoted together, after the last one merges. Starts as the project's default, set on its card."><input type="checkbox" id="autorel"> Promote after merge</label>
       </div>
@@ -1631,6 +1633,7 @@ function renderList() {
       const sub = [
         pf ? "" : `<span class="ptag">${esc(P(t.project).title)}${archivedP(t.project) ? " (archived)" : ""}</span>`,
         t.depends_on ? `after #${t.depends_on}` : "",
+        t.start_words ? `${esc(t.start_words)}<button class="startnow" data-start="${t.id}" title="Start it as soon as the queue can, in its normal place">Start now</button>` : "",
         t.kind === "release" || t.kind === "deploy" ? `<span class="ktag">${t.kind}</span>` : t.kind === "senddev" ? `<span class="ktag">send to dev</span>` : "",
         modelTag(t),
         t.parent ? `from #${t.parent}` : "",
@@ -1651,6 +1654,8 @@ function renderList() {
   }).join("") || `<div class="muted">No tasks yet.</div>`;
   if (!put($("#list"), html)) return;
   document.querySelectorAll(".task").forEach(el => el.onclick = () => selectTask(+el.dataset.id));
+  document.querySelectorAll(".task [data-start]").forEach(b => b.onclick = e => {
+    e.stopPropagation(); api(`/api/tasks/${b.dataset.start}/start-now`, {}).then(refresh, err => alert(err.message)); });
 }
 
 // A small tag when the task runs, or will run, on something other than Opus: so a trial of Sonnet tasks stands out.
@@ -1703,6 +1708,7 @@ async function loadDetail(id, fresh) {
   const btn = (act, label, cls = "") => `<button class="${cls}" data-act="${act}">${label}</button>`;
   let actions = "";
   if (t.state === "review") actions = (t.can_play ? btn("play", "▶ Try this build", "primary") : "") + btn("approve", "Approve & merge");
+  if (t.start_words) actions += btn("start-now", "▶ Start now", "primary");
   if (["queued", "running", "gating"].includes(t.state)) actions += btn("pause", "❚❚ Pause");
   if (t.state === "paused") actions += btn("resume", "▶ Resume", "primary");
   if (["failed", "cancelled"].includes(t.state)) actions += btn("retry", "Retry") + btn("retryafter", "Retry after…");
@@ -1716,6 +1722,7 @@ async function loadDetail(id, fresh) {
     <div style="font-weight:600;font-size:15px">${esc(t.title)}</div>
     ${originLine(t.origin, "Sent by")}
     ${timeLine(t, live)}
+    ${t.start_words ? `<div class="muted" style="margin:4px 0">${esc(t.start_words)}</div>` : ""}
     <div class="muted mono" style="margin:4px 0">${esc(P(t.project).title)} · ${esc(t.branch || "")}${t.merged ? ` → ${esc(t.kind === "release" || P(t.project).direct_main ? P(t.project).main_branch || "main" : P(t.project).dev_branch || "dev")} ${esc(t.merged_show || shas(t.merged))}` : ""}${t.kind === "release" && t.base && !t.merged ? `checking ${esc(t.base_show || shas(t.base))}` : ""}${t.kind === "deploy" && t.base ? `deploying ${esc(t.base_show || shas(t.base))}` : ""}${t.rounds ? ` · fix rounds: ${t.rounds}` : ""}${t.session_model ? ` · model: ${esc(t.session_model)}` : t.model ? ` · model: ${esc(t.model)} (not started)` : ""}${t.effort ? ` · effort: ${esc(t.effort)}` : ""}</div>
     ${t.question ? `<div class="callout"><b>Question:</b> ${esc(t.question)}</div>
       <textarea id="answer" placeholder="Your answer (drop or paste screenshots to attach them)" style="min-height:70px"></textarea>
@@ -1840,11 +1847,14 @@ async function submit() {
   try {
     const project = pf || $("#tproj").value;
     if (!project) throw new Error("pick a project");
-    const r = await api("/api/tasks", {project, body, priority: +$("#prio").value, hold: $("#hold").checked ? 1 : 0, release: $("#autorel").checked ? 1 : 0, depends_on: $("#after").value.trim(), model: $("#tmodel").value, effort: $("#teffort").value});
-    $("#body").value = ""; $("#after").value = ""; $("#tmodel").value = ""; $("#teffort").value = ""; $("#formmsg").textContent = ""; delete $("#autorel").dataset.k; sel = r.id; setFocus(project); refresh();
+    const start = $("#tstart").value, not_before = start === "at" ? $("#tstartat").value : start;
+    if (start === "at" && !not_before) throw new Error("pick when it starts");
+    const r = await api("/api/tasks", {project, body, priority: +$("#prio").value, hold: $("#hold").checked ? 1 : 0, release: $("#autorel").checked ? 1 : 0, depends_on: $("#after").value.trim(), model: $("#tmodel").value, effort: $("#teffort").value, ...(not_before ? {not_before} : {})});
+    $("#body").value = ""; $("#after").value = ""; $("#tmodel").value = ""; $("#teffort").value = ""; $("#tstart").value = ""; $("#tstartat").value = ""; $("#tstartat").classList.add("hidden"); $("#formmsg").textContent = ""; delete $("#autorel").dataset.k; sel = r.id; setFocus(project); refresh();
   } catch (e) { $("#formmsg").textContent = e.message; }
 }
 $("#submit").onclick = submit;
+$("#tstart").onchange = () => $("#tstartat").classList.toggle("hidden", $("#tstart").value !== "at");
 $("#body").onkeydown = e => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) submit(); };
 $("#pause").onclick = () => api("/api/settings", {paused: state.settings.paused === "1" ? "0" : "1"}).then(refresh);
 $("#pauseall").onclick = () => api("/api/pause-all", {}).then(refresh);

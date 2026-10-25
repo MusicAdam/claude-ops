@@ -57,7 +57,7 @@ the language `queue` at the end of your reply, holding a JSON list:
   {{"title": "Short imperative title",
     "body": "Self-contained brief (see below)",
     "after": null, "after_task": null, "priority": 0, "hold": false, "release": null, "model": null,
-   "effort": null}}
+   "effort": null, "not_before": null}}
 ]
 ```
 
@@ -78,6 +78,10 @@ the language `queue` at the end of your reply, holding a JSON list:
 - `effort`: how hard its worker thinks: "low", "medium", "high", "xhigh", "max", or null for the
   queue's effort setting (medium unless the owner changed it). Use "high" or above for hard
   debugging or subtle design; leave it null otherwise.
+- `not_before`: when the owner wants it to start later, the earliest time it may start, in local
+  time: "2026-10-26 09:00", "09:00" (today, or tomorrow once passed), "tue 09:00", "tomorrow 09:00";
+  or "reset" for after the next usage-limit reset (a fresh 5-hour window). Null starts it as soon as
+  the queue can. It still sits in the queue meanwhile, so other tasks can wait on it with `after`.
 
 When the owner asks for something that repeats ("every Monday, check the dependencies"), make a
 schedule instead: a fenced block with the language `schedule`, holding a JSON list of

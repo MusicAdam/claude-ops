@@ -1031,7 +1031,9 @@ def init_db():
                       ("effort", "TEXT"),  # and before effort per task: null takes the setting effort (see effort_for)
                       ("last_call", "REAL"), ("ctx_tokens", "INTEGER"),  # its session's last call (see stale_session)
                       ("research", "TEXT"),  # a research run: {question, tier, slug, path, read} as JSON (RES-1)
-                      ("reports", "TEXT")):  # reports its done result listed: [{path, read}] as JSON (RES-10)
+                      ("reports", "TEXT"),  # reports its done result listed: [{path, read}] as JSON (RES-10)
+                      ("not_before", "REAL"),  # it starts no earlier than this epoch (README: Start later)
+                      ("not_before_why", "TEXT")):  # the window when not_before is "after the next reset", e.g. 5-hour
         if col not in cols:
             q(f"ALTER TABLE tasks ADD COLUMN {col} {decl}")
     q("CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY, task_id INTEGER, ts REAL, text TEXT)")
@@ -1216,16 +1218,18 @@ def ev(tid, text):
 
 
 def add_task(project, body, title="", priority=0, hold=0, depends_on=None, parent=None, kind="task", auto_release=None,
-             deploy=None, origin=None, senddev=None, model=None, effort=None, research=None):
+             deploy=None, origin=None, senddev=None, model=None, effort=None, research=None, not_before=None):
     """auto_release None takes the project's default ("Promote after merge" on the project).
     A deploy (kind "deploy") is made only by queue_deploy: you clicked Deploy, or ran `opsd.py deploy`.
     origin: the session in another project that sent it (see send_peer).
     senddev: the snapshot a Send to dev task (kind "senddev", made by queue_senddev) lands on dev.
     model: the model its worker starts on; None takes model:<kind> when it starts (see model_for).
     effort: its --effort; None takes the setting effort on each turn (see effort_for).
-    research: a research run's {question, tier, slug, path} (see queue_research)."""
+    research: a research run's {question, tier, slug, path} (see queue_research).
+    not_before: when it may start, as start_time takes it (a time, "reset" or an epoch); None starts it when it can."""
     p = proj(project)
     model, effort = model_name(model), effort_name(effort)
+    nb, why = start_time(not_before) if not_before not in (None, "") else (None, None)
     if auto_release is None:
         auto_release = release_default(p)
     body = body.strip()
@@ -1240,6 +1244,10 @@ def add_task(project, body, title="", priority=0, hold=0, depends_on=None, paren
              json.dumps(research) if research else None))
     ev(tid, "queued" + (f" after #{depends_on}" if depends_on else "") + (f" on {model}" if model else "")
        + (f" at {effort} effort" if effort else ""))
+    if nb:
+        q("UPDATE tasks SET not_before=?, not_before_why=? WHERE id=?", (nb, why, tid))
+        ev(tid, f"waits for the {why} reset: starts after {start_clock(nb)}" if why
+           else f"waits until {start_clock(nb)}")
     return tid
 
 
@@ -3247,6 +3255,8 @@ def schedule_once():
             continue
         if restart_holds(t):  # a Promote's restart waits for running deploys: a new one would hold it longer
             continue
+        if t["not_before"] and time.time() < t["not_before"]:  # Start later: once due, it takes its normal place
+            continue
         if braked and starts_claude(t):
             continue
         if taper and starts_claude(t) and claude >= taper["cap"]:
@@ -3342,6 +3352,106 @@ def next_slot(every, after):
         if at > after:
             return at
     raise ValueError(f"no slot for {every!r}")  # unreachable: every form has a day within a week
+
+
+# ---------------------------------------------------------------- start later (README: ## Start later)
+# A queued task with not_before in the future waits for it; then it is an ordinary queued task in its normal place.
+
+START_FORMS = ("'YYYY-MM-DD HH:MM' (or YYYY-MM-DDTHH:MM), 'HH:MM' (today, or tomorrow once passed), "
+               "'<day> HH:MM' (mon..sun, today or tomorrow), or 'reset' (after the next usage-limit reset), in local "
+               "time")
+START_RE = re.compile(r"(?:([a-z]+) )?(\d{1,2}):(\d{2})")
+
+
+def start_at_text(text, now=None):
+    """The epoch a local time names, for Start later: an ISO date-time, HH:MM or '<day> HH:MM' (see START_FORMS).
+    ValueError, naming the forms, for anything it can't read or that is not in the future."""
+    now = time.time() if now is None else now
+    t = " ".join(str(text or "").strip().lower().split())
+    bad = ValueError(f"start {text!r} is not a time: use {START_FORMS}")
+    at = None
+    m = START_RE.fullmatch(t)
+    if m:
+        day, h, mi = m.group(1), int(m.group(2)), int(m.group(3))
+        if h > 23 or mi > 59:
+            raise bad
+        if day is None or day in DAYS:  # the next such slot: next_slot's day and weekday parsing
+            at = next_slot(f"{day or 'day'} {h:02d}:{mi:02d}", now)
+        elif day in ("today", "tomorrow"):
+            lt = time.localtime(now)
+            d = datetime.date(lt.tm_year, lt.tm_mon, lt.tm_mday) + datetime.timedelta(days=day == "tomorrow")
+            at = time.mktime((d.year, d.month, d.day, h, mi, 0, 0, 0, -1))
+        else:
+            raise bad
+    else:
+        try:
+            dt = datetime.datetime.fromisoformat(t.upper() if "t" in t else t)
+        except ValueError:
+            raise bad from None
+        at = dt.timestamp()  # a naive one is local time, as mktime takes it
+    if at <= now:
+        raise ValueError(f"start {text!r} is {start_clock(at, now)}, in the past: give a time still ahead "
+                         f"({START_FORMS})")
+    return at
+
+
+def reset_start(s=None, now=None):
+    """(epoch, window) for "after the next reset": the window's resetsAt plus LIMIT_GRACE. The window is the limit
+    the queue is waiting out, else the one holding the brake, else the live 5-hour reading. ValueError without one."""
+    s = settings_now() if s is None else s
+    now = time.time() if now is None else now
+    lim = limit_info(s)
+    if lim and lim["until"] + LIMIT_GRACE > now:
+        return lim["until"] + LIMIT_GRACE, LIMIT_KINDS.get(lim["kind"]) or "usage-limit"
+    u = usage_info(s, now)
+    w = u["braked"] or next((w for w in u["windows"] if w["key"] == "five_hour" and w["resetsAt"] > now), None)
+    if not w:
+        raise ValueError("no usage reading yet: give a time instead")
+    return w["resetsAt"] + LIMIT_GRACE, w["label"]
+
+
+def start_time(v, now=None, s=None):
+    """(epoch, window) for a not_before value: "reset" (window is its label, as reset_start), a time string as
+    start_at_text, or an epoch number (window None). ValueError for anything else or a time in the past."""
+    now = time.time() if now is None else now
+    if isinstance(v, bool):
+        raise ValueError(f"start {v!r} is not a time: use {START_FORMS}")
+    if isinstance(v, (int, float)):
+        if v <= now:
+            raise ValueError(f"start {v} is in the past: give a time still ahead ({START_FORMS})")
+        return float(v), None
+    if str(v).strip().lower() == "reset":
+        return reset_start(s, now)
+    return start_at_text(v, now), None
+
+
+def start_clock(ts, now=None):
+    """15:01 today, else Tue 09:00 within the coming week, else 2026-11-03 09:00."""
+    now = time.time() if now is None else now
+    lt, today = time.localtime(ts), time.localtime(now)
+    if lt[:3] == today[:3]:
+        return time.strftime("%H:%M", lt)
+    days = (datetime.date(*lt[:3]) - datetime.date(*today[:3])).days
+    return time.strftime("%a %H:%M" if 0 < days < 7 else "%Y-%m-%d %H:%M", lt)
+
+
+def start_now(tid):
+    """Start now: clear the task's not_before, so it starts as soon as the queue can."""
+    t = task(tid)
+    if not t or not t["not_before"]:
+        raise ValueError("this task does not wait for a start time")
+    q("UPDATE tasks SET not_before=NULL, not_before_why=NULL WHERE id=?", (tid,))
+    ev(tid, "Start now: no longer waits for its start time")
+
+
+def start_words(t, now=None):
+    """'waits until Tue 09:00', or 'waits for the 5-hour reset · 15:01', while t's not_before is ahead; else None."""
+    now = time.time() if now is None else now
+    nb = t.get("not_before")
+    if not nb or nb <= now:
+        return None
+    why = t.get("not_before_why")
+    return f"waits for the {why} reset · {start_clock(nb, now)}" if why else f"waits until {start_clock(nb, now)}"
 
 
 def schedule(sid):
@@ -6538,10 +6648,17 @@ def queue_from_reply(p, reply, did):
             except ValueError as e:  # queue it anyway, at the effort setting
                 effort = None
                 notes.append(f"{e}; that task runs at the effort setting")
+            nb = it.get("not_before")
+            if nb not in (None, ""):
+                try:
+                    start_time(nb)
+                except ValueError as e:  # queue it anyway, to start as soon as it can
+                    nb = None
+                    notes.append(f"{e}; that task starts as soon as the queue can")
             tid = add_task(p.name, it.get("body") or it.get("title", ""), it.get("title", ""),
                            priority=int(it.get("priority") or 0), hold=bool(it.get("hold")), depends_on=dep,
                            auto_release=None if it.get("release") is None else bool(it.get("release")),
-                           model=model, effort=effort)
+                           model=model, effort=effort, not_before=nb)
             ev(tid, f"queued from design chat #{did}")
             local.append(tid)
         ids += local
@@ -7304,10 +7421,11 @@ def retry_after(tid, after):
     return a
 
 
-def send_peer(ref, project, kind, text, title="", hold=False, model=None, effort=None, after=None):
+def send_peer(ref, project, kind, text, title="", hold=False, model=None, effort=None, after=None, not_before=None):
     """Start a task or chat in project for the session ref names. Returns {kind, id, project, said}.
     model, effort: the task's, as add_task takes them; a chat starts on its kind's model, at the effort setting.
-    after: a task id (12 or "#12"), in any project, the new task waits on until it merges (its depends_on)."""
+    after: a task id (12 or "#12"), in any project, the new task waits on until it merges (its depends_on).
+    not_before: when the task may start, as add_task takes it (--at, --after-reset)."""
     p, text = proj(project), (text or "").strip()
     if kind not in PEER_KINDS:
         raise ValueError(f"kind is one of {', '.join(PEER_KINDS)}")
@@ -7324,6 +7442,10 @@ def send_peer(ref, project, kind, text, title="", hold=False, model=None, effort
         if not a.isdigit() or not task(int(a)):
             raise ValueError(f"no task #{a}")
         after = int(a)
+    if not_before not in (None, ""):
+        if kind != "task":
+            raise ValueError("--at and --after-reset are for tasks; a chat starts at once")
+        start_time(not_before)  # refused here, before anything is made
     if not text:
         raise ValueError("say what the other project should do")
     o = origin_of(ref)
@@ -7344,7 +7466,7 @@ def send_peer(ref, project, kind, text, title="", hold=False, model=None, effort
                 f"{place + '. ' if place else ''}You may read its files; change only your own worktree. "
                 "When this task ends, the queue tells the sender how it went.]")
         tid = add_task(p.name, f"{head}\n\n{text}", title, hold=hold, depends_on=after, origin=o, model=model,
-                       effort=effort)
+                       effort=effort, not_before=not_before)
         ev(tid, f"sent by {who}" + (f", after #{after}" if after else ""))
         if o:
             tell_origin(o, f"Sent task #{tid} to {p.title}: {task(tid)['title']}", [tid])
@@ -7531,6 +7653,8 @@ def wait_reasons(tasks, s=None):
                   f" not cloned: clone {'it' if len(p.missing) == 1 else 'them'} into {p.repo}"
         elif restart_holds(t):
             why = "waiting for claude-ops to restart"
+        elif t.get("not_before") and time.time() < t["not_before"]:
+            why = start_words(t)
         elif braked and starts_claude(t):
             why = braked["words"]
         elif dep and dep["state"] != "done":
@@ -8346,7 +8470,7 @@ def todos_list(tasks, projects, last, now=None):
 def state_payload():
     tasks = q("SELECT id,project,title,state,phase,priority,hold,depends_on,parent,created,started,"
               "finished,cost,rounds,summary,question,error,merged,branch,kind,auto_release,origin,paused_by,start_at,"
-              "model,session_model,effort,research,reports FROM tasks "
+              "model,session_model,effort,research,reports,not_before,not_before_why FROM tasks "
               "ORDER BY id DESC LIMIT 500")
     # What each task is doing right now, for the status line under it in the list.
     # Per listed task, one index lookup (events_task): a GROUP BY over every event scanned the whole table.
@@ -8365,6 +8489,7 @@ def state_payload():
         t["phase_since"] = PHASE_SINCE.get(t["id"]) if t["state"] in ACTIVE else None
         t["step"] = last_step(t["id"]) if t["state"] == "running" and t["phase"] == "claude working" else None
         t["wait"] = waits.get(t["id"])
+        t["start_words"] = start_words(t) if t["state"] == "queued" else None
         t["origin"] = origin_view(t["origin"])
         t["research"] = research_of(t)
         t["reports"] = reports_of(t) or None
@@ -8497,6 +8622,7 @@ class H(BaseHTTPRequestHandler):
                 t["merged_show"] = p.label(t["merged"])
                 t["base_show"] = p.label(t["base"])
             t["can_play"] = bool(p and p.launch and t["state"] == "review")
+            t["start_words"] = start_words(t) if t["state"] == "queued" else None
             t["chat_from"] = chat_from(t)
             t["chat"] = q("SELECT role,text,ts,delivered FROM task_msgs WHERE task_id=? ORDER BY id", (tid,))
             t["chat_live"] = TASK_CHAT_LIVE.get(tid)
@@ -8636,7 +8762,7 @@ class H(BaseHTTPRequestHandler):
             dep = int(str(b["depends_on"]).lstrip("#")) if str(b.get("depends_on") or "").strip() else None
             tid = add_task(b["project"], b["body"], b.get("title", ""), b.get("priority", 0),
                            b.get("hold", 0), dep, auto_release=b.get("release"), model=b.get("model"),
-                           effort=b.get("effort"))
+                           effort=b.get("effort"), not_before=b.get("not_before"))
             p = PROJECTS.get(b["project"])
             return {"id": tid, **({"warning": w} if p and (w := uncommitted_warning(p)) else {})}
         if path == "/api/schedules":
@@ -8667,7 +8793,8 @@ class H(BaseHTTPRequestHandler):
             return openspec_run(proj(b["project"]), b.get("sub") or "", path.rsplit("/", 1)[1])
         if path == "/api/send":  # opsd.py send, from a session the queue started
             return send_peer(b.get("from"), b["project"], b.get("kind") or "task", b.get("text"), b.get("title") or "",
-                             bool(b.get("hold")), b.get("model"), b.get("effort"), b.get("after"))
+                             bool(b.get("hold")), b.get("model"), b.get("effort"), b.get("after"),
+                             b.get("not_before"))
         if path == "/api/settings":
             if "usage_brake" in b:
                 b["usage_brake"] = min(100, max(0, int(float(b["usage_brake"] or 0))))
@@ -8793,7 +8920,7 @@ class H(BaseHTTPRequestHandler):
             else:
                 q("UPDATE designs SET title=? WHERE id=?", (b["title"][:80], did))
             return
-        m = re.fullmatch(r"/api/tasks/(\d+)/(\w+)", path)
+        m = re.fullmatch(r"/api/tasks/(\d+)/([\w-]+)", path)
         if not m:
             raise ValueError("unknown endpoint")
         tid, action = int(m.group(1)), m.group(2)
@@ -8825,6 +8952,8 @@ class H(BaseHTTPRequestHandler):
                 raise ValueError(f"task is {st}" if st in ENDED else "a release releases itself")
             upd(tid, auto_release=int(bool(b.get("on"))))
             ev(tid, "will be promoted after it merges" if b.get("on") else "will not be promoted after it merges")
+        elif action == "start-now":  # Start later's Start now: it takes its normal place in the queue
+            start_now(tid)
         elif action == "pause":
             pause_task(tid)
         elif action == "resume":
@@ -8929,8 +9058,8 @@ def post(path, body):
 
 
 def send_cli(argv):
-    """opsd.py send PROJECT [--design|--chat] [--title T] [--hold] [--model M] [--effort E] [--after TASK] [TEXT...]; TEXT from
-    stdin when not given. --after takes 12 or #12."""
+    """opsd.py send PROJECT [--design|--chat] [--title T] [--hold] [--model M] [--effort E] [--after TASK]
+    [--at TIME | --after-reset] [TEXT...]; TEXT from stdin when not given. --after takes 12 or #12."""
     body, words, it = {"project": argv[0], "kind": "task", "from": os.environ.get("OPS_FROM", "")}, [], iter(argv[1:])
     for a in it:
         if a in ("--task", "--design", "--chat"):
@@ -8944,6 +9073,10 @@ def send_cli(argv):
         elif a == "--after":
             v = next(it, "").strip().lstrip("#")
             body["after"] = int(v) if v.isdigit() else v
+        elif a == "--at":
+            body["not_before"] = next(it, "")
+        elif a == "--after-reset":
+            body["not_before"] = "reset"
         else:
             words.append(a)
     body["text"] = " ".join(words) if words else sys.stdin.read()
@@ -8959,12 +9092,16 @@ def send_cli(argv):
 
 
 def add_request(project, words):
-    """opsd.py add -p PROJECT [--model M] [--effort E] [--research T0|T1|T2] TEXT: (path, body) to post. With
-    --research it queues a one-off research run whose question is TEXT (RES-2), else a task. TEXT from stdin when not
-    given."""
+    """opsd.py add -p PROJECT [--model M] [--effort E] [--research T0|T1|T2] [--at TIME | --after-reset] TEXT: (path,
+    body) to post. With --research it queues a one-off research run whose question is TEXT (RES-2), else a task.
+    --at and --after-reset set its not_before (README: Start later). TEXT from stdin when not given."""
     opts, words = {}, list(words)
-    while words[:1] in (["--model"], ["--effort"], ["--research"]) and len(words) >= 2:
-        opts[words[0][2:]], words = words[1], words[2:]
+    while (words[:1] in (["--model"], ["--effort"], ["--research"], ["--at"]) and len(words) >= 2) or \
+            words[:1] == ["--after-reset"]:
+        if words[0] == "--after-reset":
+            opts["not_before"], words = "reset", words[1:]
+        else:
+            opts["not_before" if words[0] == "--at" else words[0][2:]], words = words[1], words[2:]
     text = " ".join(words) or sys.stdin.read()
     if "research" in opts:
         return (f"/api/projects/{quote(project, safe='')}/research",
