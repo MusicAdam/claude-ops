@@ -6800,7 +6800,8 @@ PROJECT_CHAT_PROMPT = ("You are talking with the owner through the claude-ops da
                        'or stops. A step that a command or code change can do is '
                        "never a to-do, even setup that must wait for a task to merge: do it, or queue it as a task. "
                        'Close an '
-                       'item that is settled with {"close": <id>} in a `todo` block; the dashboard tells you the ids. '
+                       'item that is settled with {"close": "todo:<id>"} in a `todo` block. #N means a task and '
+                       'todo:N means a to-do; the ids the dashboard reports, and the owner pastes, come as todo:N. '
                        "When the owner asks for work that repeats (\"every Monday, check the dependencies\"), add a "
                        "fenced block with the language `schedule` holding a JSON list of {project, title, body, every, "
                        "hold?, model?, effort?}; every is local time: 'day HH:MM', 'weekday HH:MM', 'mon HH:MM' (any of "
@@ -7648,15 +7649,14 @@ def todo_add(project, items, kind, sid, queued=None):
         if not isinstance(it, dict):
             bad.append("an item that is not an object")
         elif "close" in it:
-            try:
-                tid = int(str(it["close"]).lstrip("#"))
-            except ValueError:
-                bad.append(f"close {it['close']!r} is not an id")
+            tid = todo_id(it["close"])
+            if tid is None:
+                bad.append(f"close {it['close']!r} is not a to-do id (12 or \"todo:12\")")
                 continue
             if todo_done(tid, project):
                 closed.append(tid)
             else:
-                bad.append(f"no open to-do #{tid} in {project}")
+                bad.append(f"no open to-do todo:{tid} in {project}")
         elif it.get("verb") not in ("Do", "Agree") or not str(it.get("title") or "").strip():
             bad.append(f"an item needs verb Do or Agree and a title, not {json.dumps(it)[:120]}")
         else:
@@ -7673,10 +7673,19 @@ def todo_add(project, items, kind, sid, queued=None):
             added.append(tid)
             if wait and wait[0]:
                 todo_wait_set(f"todo:{tid}", *wait)
-    notes = ([f"added to-do {', '.join(f'#{i}' for i in added)}"] if added else []) + \
-            ([f"closed to-do {', '.join(f'#{i}' for i in closed)}"] if closed else []) + \
+    notes = ([f"added to-do {', '.join(f'todo:{i}' for i in added)}"] if added else []) + \
+            ([f"closed to-do {', '.join(f'todo:{i}' for i in closed)}"] if closed else []) + \
             [f"a to-do was skipped: {b}" if not b.startswith("the wait") else b for b in bad]
     return "; ".join(notes)
+
+
+def todo_id(v):
+    """A stored to-do's id as Claude writes it in {"close": ...}: the integer 12 or the string "todo:12" (a "#12"
+    is a task). None for anything else."""
+    if isinstance(v, int) and not isinstance(v, bool):
+        return v
+    m = isinstance(v, str) and re.fullmatch(r"todo:(\d+)", v.strip())
+    return int(m.group(1)) if m else None
 
 
 def todo_wait_from(wait, queued=None):
@@ -7707,7 +7716,7 @@ def todo_own(b):
     if not title:
         raise ValueError("a to-do needs a title")
     if r := q("SELECT id FROM todos WHERE project=? AND title=? AND closed IS NULL", (project, title), one=True):
-        raise ValueError(f"to-do #{r['id']} in {project} already has that title")
+        raise ValueError(f"to-do todo:{r['id']} in {project} already has that title")
     wait = todo_wait_from(b.get("wait"))  # before the insert: a bad task id adds nothing
     tid = q("INSERT INTO todos (project, verb, title, why, source_kind, source_id, created) VALUES (?,?,?,?,?,?,?)",
             (project, "Do", title, str(b.get("why") or "").strip(), "owner", None, time.time()))

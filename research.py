@@ -1090,8 +1090,8 @@ def todo_rule(kind: str, tid: str) -> str:
             '  [{"verb": "Do", "title": "Short imperative title", "why": "one line on why it is needed"}]\n'
             "  ```\n"
             '  `verb` is "Do" for what only he can do, "Agree" for a proposal awaiting a yes. When an item is\n'
-            '  settled, close it with {"close": <id>} in a `todo` block; the next message tells you the ids it\n'
-            "  added. The block is taken out of the reply he sees. The research repo's own list (bin/todo,\n"
+            '  settled, close it with {"close": "todo:<id>"} in a `todo` block; the next message tells you the\n'
+            "  ids it added. #N means a task and todo:N a to-do. The block is taken out of the reply he sees. The research repo's own list (bin/todo,\n"
             "  the todo skill) is retired: don't use it. Don't add to-dos he didn't ask for unless they matter.")
 
 

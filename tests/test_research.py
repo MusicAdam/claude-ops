@@ -678,7 +678,7 @@ class Research(unittest.TestCase):
         self.assertEqual([(r["project"], r["verb"], r["title"], r["source_kind"], r["source_id"]) for r in rows],
                          [("plugins", "Do", "Grant the plugin a key", "research", f"r:{thread}")])
         self.assertNotIn("```todo", turn["result"])
-        self.assertIn(f"added to-do #{rows[0]['id']}", turn["result"])
+        self.assertIn(f"added to-do todo:{rows[0]['id']}", turn["result"])
         saved = next(j for j in self.file("logs/dashboard/jobs.json") if j["id"] == turn["id"])
         self.assertIs(saved["todosTaken"], True)
         # Today shows it as a Do item of the linked project, pointing at the research topic.
@@ -694,7 +694,7 @@ class Research(unittest.TestCase):
         # The next turn is told what its blocks did.
         self.reply_with("ok")
         self.chat_turn("Thanks", thread)
-        self.assertIn(f"(Dashboard: added to-do #{rows[0]['id']}.)", (SCRATCH / "args").read_text())
+        self.assertIn(f"(Dashboard: added to-do todo:{rows[0]['id']}.)", (SCRATCH / "args").read_text())
 
     def test_a_chat_todo_with_no_claude_ops_project_is_not_stored(self):
         self.fake_projects()  # neither links nor has the research repo as its checkout

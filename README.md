@@ -499,7 +499,8 @@ the uncommitted-files banner, Deploy. `/api/state` gathers them into one list, `
   Every item but your own links to its source. An open item with the same project and title is not added
   twice: Claude's is skipped quietly, yours is a 400.
 - **TODO-3 Closing.** Derived items close by themselves. A stored item closes with
-  `POST /api/todos/<id>/done` (your Done button), or when Claude writes `{"close": <id>}` in a `todo` block. A stored Agree also closes when you send a message
+  `POST /api/todos/<id>/done` (your Done button), or when Claude writes `{"close": <id>}` in a `todo` block. The
+  id is the integer `12` or the string `"todo:12"`; anything else is noted back as not an id and closes nothing. A stored Agree also closes when you send a message
   in the chat (or research topic) that added it, even if the message waits in the chat's queue; a Do stays open.
   Closed items stay in the table.
 - **TODO-4 Order and groups.** Each item has a group: `unblock` (Answer, Fix), `ship` (Promote, Ship, Commit),
@@ -521,7 +522,11 @@ across polls (`task:231:review`, `chat:42:read`, `project:diskgame:commit`, `tod
 oldest commit not yet promoted or deployed. `est_min` is a guess at minutes: Answer 2, Fix 5, Try 5, Review 3,
 Agree 2, Read 3, Promote 1, Ship 2, Commit 2, Do 5. `source.kind` is `task`, `chat`, `project` or `owner`: a
 stored item points at the chat or task that added it, and has `todo`, its id for the Done button; one you added
-yourself has kind `owner` and id `null`, and no source link. Every item also has `note` (your note to self, `""`
+yourself has kind `owner` and id `null`, and no source link. The database id is an integer, but everywhere a
+person or a model reads it, a stored to-do's id is written `todo:12`, so it can't be mistaken for task `#12`:
+the dashboard (see Task ids), the notes after a `todo` block (`added to-do todo:12`, `closed to-do todo:12`,
+`no open to-do todo:12 in <project>`, `to-do todo:12 in <project> already has that title`), and the design,
+project and research chat prompts, which say `#N` is a task and `todo:N` a to-do. Every item also has `note` (your note to self, `""`
 when none); a parked item has `parked: {since, wake_tasks, wake_on, wake_task}` (`wake_task` is the first of
 `wake_tasks`, or null, kept for one release for older dashboards) and a skipped one
 `skipped: <ts>` (TODO-6).
@@ -1047,7 +1052,7 @@ and `chat`. `file` serves only `.md` files inside the research repo.
   shows in Today. It happens once per turn: new chat jobs carry `todosTaken: false` in `jobs.json`, set to true
   when taken (on the next read of the chat or watchdog pass, and only when claude-ops may write), so a restart
   adds nothing twice and turns from before this are never read. The blocks are hidden from the reply you see;
-  in their place a line says what happened (`added to-do #12`, or that nothing was added because no claude-ops
+  in their place a line says what happened (`added to-do todo:12`, or that nothing was added because no claude-ops
   project fits). That note (`todoNote`) is also put before your next message in that chat, so Claude learns the
   ids. `CONTEXT_VERSION` 5 tells older threads the new rule once.
 - **Single writer.** The old server guards its files with an in-process lock, so two writers would lose
@@ -1377,8 +1382,11 @@ notes = """Project-specific guidance for design chats."""
   list, a project's task list, Today's timeline and Tasks panel, a To-do item about a task (in the list and on its
   step card), a task's detail page, and the task chips under a chat message. A parked item's "Waiting on #283"
   names its ids the same way. Click an id to copy `#316` (it says "copied" for a moment); the click stops there,
-  so it never also opens the card or ticks a box. Owner to-dos show no id: their title is the to-do, not a task.
-  `tid()` in `dashboard.html` draws every one, so the format stays the same; `tests/test_task_ids.py` checks it.
+  so it never also opens the card or ticks a box. A stored to-do (one with `todo`, key `todo:12`) shows its own id
+  instead, **todo:12**, the same way in its list row and its step card's title, on a phone too; a click copies
+  `todo:12`, to paste into a chat. Items with no stored to-do (Promote, Ship, Commit, Read) show no id.
+  `tid()` in `dashboard.html` draws every one, so the format stays the same; `data-copyid` holds the exact text a
+  click copies. `tests/test_task_ids.py` checks it.
 - **Settings tab.** Parallel, Promote wait, Usage brake, Taper from, Model, Effort and the model per kind of work, each
   with what it does written next to it, and **Spent**: what Claude has cost, priced at API rates.
 - **Analyze tab.** Run times and costs of the tasks created in the last day, 7 days, 30 days or all time, for
