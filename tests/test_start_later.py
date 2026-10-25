@@ -219,6 +219,28 @@ class Queue(unittest.TestCase):
                 opsd.add_task(self.name, "x", not_before=v)
         self.assertEqual(len(opsd.q("SELECT id FROM tasks WHERE project=?", (self.name,))), n)
 
+    def test_new_research_passes_not_before(self):
+        reset = time.time() + 1800
+        opsd.set_setting("usage:five_hour", reading(20, reset))
+        t = opsd.task(opsd.new_research(self.name, {"question": "q", "tier": "T1", "not_before": "reset"})["id"])
+        self.assertEqual((t["not_before"], t["not_before_why"]), (reset + 60, "5-hour"))
+        out = opsd.new_research(self.name, {"question": "q2", "tier": "T1", "not_before": "tomorrow 09:00"})
+        lt = time.localtime(time.time() + 86400)
+        self.assertEqual(opsd.task(out["id"])["not_before"], local(lt.tm_year, lt.tm_mon, lt.tm_mday, 9, 0))
+
+    def test_new_research_refuses_bad_time_before_queueing(self):
+        n = len(opsd.q("SELECT id FROM tasks WHERE project=?", (self.name,)))
+        with self.assertRaises(ValueError):
+            opsd.new_research(self.name, {"question": "q", "tier": "T1", "not_before": "whenever"})
+        self.assertEqual(len(opsd.q("SELECT id FROM tasks WHERE project=?", (self.name,))), n)
+
+    def test_add_request_research_end_to_end(self):
+        reset = time.time() + 1800
+        opsd.set_setting("usage:five_hour", reading(20, reset))
+        path, body = opsd.add_request(self.name, ["--research", "T1", "--after-reset", "q"])
+        self.assertTrue(path.endswith("/research"))
+        self.assertEqual(opsd.task(opsd.new_research(self.name, body)["id"])["not_before"], reset + 60)
+
     def test_queue_from_reply(self):
         p = opsd.proj(self.name)
         reply = ('ok\n```queue\n[{"title": "a", "body": "a", "not_before": "tomorrow 09:00"},'
