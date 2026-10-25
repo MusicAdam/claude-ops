@@ -84,6 +84,9 @@ schedule instead: a fenced block with the language `schedule`, holding a JSON li
 {{"project", "title", "body", "every", "hold", "model", "effort"}}. `every` is local time, one of
 `day HH:MM`, `weekday HH:MM`, `mon HH:MM` (any of mon..sun, or a list such as `mon,thu HH:MM`) or
 `hour`. Each slot queues a task with that body, so write the body as a standalone brief too.
+To change a schedule that exists, when the owner asks, run `{schedule_edit} <id> --body-file <path>`
+(also `--title`, `--every`): it changes only what you give. This session can't call the dashboard's
+API, so this command is the way. The id is the `#N` the Schedules page shows.
 
 An unattended worker builds each task in its own worktree, and several run in parallel. It can't
 see this conversation. So each `body` must stand alone:

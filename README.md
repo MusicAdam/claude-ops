@@ -1167,6 +1167,7 @@ gets a worktree, the gate and a merge like one you queued by hand, and says **Se
 
 ```bash
 ./opsd.py schedule add -p myrepo --every 'mon 09:00' "Check dependencies"   # also --body, --hold, --model, --effort
+./opsd.py schedule edit 3 --body-file brief.md   # change #3: only what you give (--title, --every, --body, ...)
 ```
 
 - **`every`** takes one of these, in local time:
@@ -1194,6 +1195,10 @@ gets a worktree, the gate and a merge like one you queued by hand, and says **Se
   `schedule` block holding a JSON list of `{project, title, body, every, hold?, model?, effort?}`. The daemon
   creates them and strips the block from the reply, as it does a `queue` block; the next message tells Claude
   what it made, or why one was refused.
+- **Editing from a session.** The guard keeps every session the queue starts off the dashboard's API (it pauses
+  and cancels tasks), so a chat or worker changes a schedule with `opsd.py schedule edit ID`, never `curl`.
+  `--body-file PATH` (or `-` for stdin) takes a long body; fields you leave out keep their values, and `next_at`
+  moves only when `--every` changes. The design brief names the command, and the guard's refusal points to it.
 
 API: `/api/state` has `schedules` (each with `next_at`, `paused`, `last_task` and `last_state`).
 `POST /api/schedules` creates one; `POST /api/schedules/<id>` edits it (any of project, title, body, every,

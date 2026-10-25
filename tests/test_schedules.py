@@ -213,5 +213,37 @@ class ReplyBlock(Fixture):
         self.assertEqual(opsd.q("SELECT * FROM schedules"), [])
 
 
+class Cli(Fixture):
+    """opsd.py schedule add/edit: how a session the guard keeps off the API changes a schedule (chat #94)."""
+    def test_add_takes_the_title_from_its_words(self):
+        self.assertEqual(opsd.schedule_request(["add", "-p", "sched", "--every", "mon 09:00", "--hold", "Check", "deps"]),
+                         ("/api/schedules", {"project": "sched", "every": "mon 09:00", "hold": True, "title": "Check deps"}))
+
+    def test_edit_sends_only_what_it_is_given(self):
+        self.assertEqual(opsd.schedule_request(["edit", "#7", "--every", "day 03:00", "--no-hold"]),
+                         ("/api/schedules/7", {"every": "day 03:00", "hold": False}))
+
+    def test_bad_command_lines(self):
+        for args in (["edit"], ["edit", "x"], ["edit", "3"], ["edit", "3", "stray"], ["add", "sched", "t"]):
+            with self.assertRaises(ValueError, msg=args):
+                opsd.schedule_request(args)
+
+    def test_body_file_edit_keeps_the_rest(self):
+        h = opsd.H.__new__(opsd.H)
+        sid = h.route("/api/schedules", {"project": "sched", "title": "Nightly", "body": "old", "every": "day 02:00"})["id"]
+        before = opsd.schedule(sid)
+        f = Path(tempfile.mkdtemp(dir=DATA)) / "brief.md"
+        f.write_text("Pass 1: scout.\n\nPass 2: check.\n")
+        h.route(*opsd.schedule_request(["edit", str(sid), "--body-file", str(f)]))
+        s = opsd.schedule(sid)
+        self.assertEqual(s["body"], "Pass 1: scout.\n\nPass 2: check.")
+        self.assertEqual((s["title"], s["every"], s["next_at"]), (before["title"], before["every"], before["next_at"]))
+
+    def test_guard_lets_the_command_through_and_names_it(self):
+        self.assertIsNone(opsd.guard_check(f"{opsd.OPSD_CMD} schedule edit 1 --body-file bin/brief.md", port=8788))
+        why = opsd.guard_check("curl -X POST http://127.0.0.1:8788/api/schedules/1 -d @b.json", port=8788)
+        self.assertIn("schedule edit ID --body-file", why)
+
+
 if __name__ == "__main__":
     unittest.main()

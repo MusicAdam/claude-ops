@@ -12,6 +12,8 @@
   opsd.py schedule add -p NAME --every 'mon 09:00' [--body TEXT] [--hold] [--model M] [--effort E] "title..."
                                        a recurring job: queue that task on that timetable (README: Recurring jobs);
                                        --research T0|T1|T2 makes it a research job whose question is the text
+  opsd.py schedule edit ID [--title T] [--every E] [--body TEXT | --body-file PATH|-] [--hold|--no-hold] ...
+                                       change schedule ID: only the fields given, the rest stay as they are
   opsd.py deploy -p NAME TARGET [--version same|patch|minor|major|X.Y.Z] [--note TEXT]   deploy a [[deploy]] target
   opsd.py send NAME [--design|--chat] [--title T] [--hold] [--model M] [--effort E] "text..."
                                        from a session the queue started: a task (or chat) in another project
@@ -1742,7 +1744,9 @@ def guard_check(cmd, root=None, daemon=0, port=PORT):
         if name == "opsctl" and args[:1] and args[0] in ("start", "stop", "restart", "pause", "resume"):
             return f"`opsctl {args[0]}` acts on the live claude-ops service and every task it runs."
         if any(re.search(rf"(127\.0\.0\.1|localhost|\[::1\]):{port}\b", a) for a in args):
-            return f"port {port} is the live claude-ops dashboard; its API pauses and cancels tasks."
+            return (f"port {port} is the live claude-ops dashboard; its API pauses and cancels tasks. Use the "
+                    f"opsd.py commands instead: `{OPSD_CMD} schedule edit ID --body-file PATH` changes a schedule "
+                    f"(also --title, --every), and `add` and `send` queue work.")
         if name != "kill":
             continue
         if args[:1] in (["-l"], ["-L"], ["-0"]) or args[:2] in (["-s", "0"], ["-n", "0"]):
@@ -5548,6 +5552,7 @@ def design_system_prompt(p, d=None, cwd=None):
     out = (CODE / "design_prompt.md").read_text().format(project=p.title, dev_wt=cwd or p.dev_wt, dev=p.dev,
                                                          files=CHAT_FILES / str(did), did=did, checkout=p.repo,
                                                          research=f"{OPSD_CMD} add -p {shlex.quote(p.name)} --research",
+                                                         schedule_edit=f"{OPSD_CMD} schedule edit",
                                                          notes=notes + peer_brief(p, "design"))
     if d and d["spec"]:
         out += "\n" + (CODE / "spec_prompt.md").read_text().format(change=d["spec"], path=SPEC_DIR / d["spec"],
@@ -8641,6 +8646,45 @@ def add_request(project, words):
     return "/api/tasks", {"project": project, "body": text, **opts}
 
 
+SCHEDULE_OPTS = ("--title", "--every", "--body", "--body-file", "--model", "--effort", "--priority", "--research")
+
+
+def schedule_request(args):
+    """opsd.py schedule add -p PROJECT [opts] TITLE, or schedule edit ID [opts]: (path, body) to post. An edit sends
+    only the fields given, so the rest of the schedule stays as it was. --body-file reads the body from a file (- for
+    stdin), for a body too long to quote. The guard keeps a session the queue started off the dashboard's API, which
+    also pauses and cancels tasks, so this is how a session changes a schedule. ValueError for a bad command line."""
+    verb, rest = args[0], list(args[1:])
+    if verb == "add":
+        if rest[:1] != ["-p"] or len(rest) < 2:
+            raise ValueError("usage: opsd.py schedule add -p NAME --every 'mon 09:00' [options] \"title...\"")
+        path, opts, rest = "/api/schedules", {"project": rest[1]}, rest[2:]
+    else:
+        sid = rest.pop(0).lstrip("#") if rest else ""
+        if not sid.isdigit():
+            raise ValueError("usage: opsd.py schedule edit ID [--title T] [--every E] [--body TEXT | --body-file PATH]")
+        path, opts = f"/api/schedules/{sid}", {}
+    words = []
+    while rest:
+        a = rest.pop(0)
+        if a in SCHEDULE_OPTS and rest:
+            opts[a[2:]] = rest.pop(0)
+        elif a in ("--hold", "--no-hold"):
+            opts["hold"] = a == "--hold"
+        else:
+            words.append(a)
+    if "body-file" in opts:
+        f = opts.pop("body-file")
+        opts["body"] = sys.stdin.read() if f == "-" else Path(f).expanduser().read_text()
+    if verb == "add":
+        opts["title"] = " ".join(words) or opts.get("title", "")
+    elif words:
+        raise ValueError(f"schedule edit takes options only, not {' '.join(words)!r}: --title sets the title")
+    elif not opts:
+        raise ValueError("schedule edit: nothing to change; give --title, --every, --body or another option")
+    return path, opts
+
+
 if __name__ == "__main__":
     args = sys.argv[1:]
     cmd = args.pop(0) if args else "serve"
@@ -8680,23 +8724,15 @@ if __name__ == "__main__":
             sys.exit(json.loads(e.read() or b"{}").get("error") or str(e))
         if w := (json.loads(out or "{}") or {}).get("warning"):
             print(w, file=sys.stderr)
-    elif cmd == "schedule" and len(args) >= 3 and args[:2] == ["add", "-p"]:
-        words, opts, rest = [], {"project": args[2]}, args[3:]
-        while rest:
-            a = rest.pop(0)
-            if a in ("--every", "--body", "--model", "--effort", "--priority", "--research") and rest:
-                opts[a[2:]] = rest.pop(0)
-            elif a == "--hold":
-                opts["hold"] = True
-            else:
-                words.append(a)
-        opts["title"] = " ".join(words)
+    elif cmd == "schedule" and args[:1] in (["add"], ["edit"]):
         try:
-            post("/api/schedules", opts)
+            post(*schedule_request(args))
         except HTTPError as e:
             sys.exit(json.loads(e.read() or b"{}").get("error") or str(e))
         except URLError as e:
             sys.exit(f"the claude-ops daemon on port {PORT} did not answer ({e.reason})")
+        except (ValueError, OSError) as e:  # a bad command line, or a --body-file it can't read
+            sys.exit(str(e))
     elif cmd in ("archive-project", "unarchive-project") and len(args) == 1:
         try:
             post(f"/api/projects/{quote(args[0], safe='')}/{cmd.split('-')[0]}", {})
