@@ -1061,7 +1061,8 @@ def init_db():
                       ("session_model", "TEXT"),  # and before models per kind: the model its session started on
                       ("last_call", "REAL"), ("ctx_tokens", "INTEGER"),  # its session's last call (see chat_stale)
                       ("queued", "TEXT DEFAULT '[]'"),  # and before queued messages: sent while Claude replies
-                      ("subject", "TEXT")):  # and before a topic per to-do: what it is about (see conv_open)
+                      ("subject", "TEXT"),  # and before a topic per to-do: what it is about (see conv_open)
+                      ("quick", "INTEGER DEFAULT 0")):  # 1: the quick chat started it (its Recent list, TODAY-6)
         if col not in dcols:
             q(f"ALTER TABLE designs ADD COLUMN {col} {decl}")
             if col == "seen":  # chats from before count as read, so they don't all show a new reply at once
@@ -5755,6 +5756,13 @@ def conv_pin(project):
         set_setting(f"conv:{project}", json.dumps(conv_state(project, tops)))
 
 
+def quick_topics(limit=10):
+    """GET /api/designs/quick: the topics the quick chat started (designs.quick), in every project that isn't
+    archived, latest activity first, ended ones too: its Recent list (README: TODAY-6)."""
+    rows = q("SELECT id,project,title,updated,ended FROM designs WHERE quick=1 ORDER BY updated DESC, id DESC")
+    return [r for r in rows if r["project"] in PROJECTS][:max(0, min(limit, 50))]
+
+
 UNSEEN = object()  # conv_open's ended when the caller sent none
 
 
@@ -8281,6 +8289,9 @@ class H(BaseHTTPRequestHandler):
             for c in chats:
                 c["origin"] = origin_view(c["origin"])
             return self.send(200, chats)
+        if path == "/api/designs/quick":  # the quick chat's Recent list (README: TODAY-6)
+            limit = parse_qs(urlparse(self.path).query).get("limit", ["10"])[0]
+            return self.send(200, quick_topics(int(limit) if limit.isdigit() else 10))
         if path == "/api/openspec":  # open changes, the repos that use OpenSpec and those that don't, and drafts
             out = {"changes": [], "repos": [], "bare": [], "cli": bool(shutil.which("openspec")),
                    "drafts": q("SELECT id,project,title,spec_sub AS sub,state FROM designs WHERE spec_draft=1 "
@@ -8482,15 +8493,18 @@ class H(BaseHTTPRequestHandler):
             if b.get("quick"):  # the quick chat: leave the topic Today shows alone (README: TODAY-6)
                 conv_pin(b["project"])
             kind = "project" if b.get("kind") == "project" else "design"
-            did = q("INSERT INTO designs (project, title, created, updated, kind) VALUES (?,?,?,?,?)",
-                    (b["project"], title_of(text)[:80], time.time(), time.time(), kind))
+            did = q("INSERT INTO designs (project, title, created, updated, kind, quick) VALUES (?,?,?,?,?,?)",
+                    (b["project"], title_of(text)[:80], time.time(), time.time(), kind, int(bool(b.get("quick")))))
             design_say(did, text)
             return {"id": did}
         m = re.fullmatch(r"/api/designs/(\d+)/(say|unqueue|stop|rename|queue|seen|end|reopen)", path)
         if m:
             did = int(m.group(1))
-            if not design(did):
+            d = design(did)
+            if not d:
                 raise ValueError("no such chat")
+            if d["quick"] and m.group(2) in ("say", "reopen"):  # it never becomes the topic Today shows (TODAY-6)
+                conv_pin(d["project"])
             if m.group(2) == "say":
                 todos_agree_close(did)
                 return {"queued": design_say(did, b["text"].strip())}
@@ -8511,7 +8525,9 @@ class H(BaseHTTPRequestHandler):
             elif m.group(2) == "end":  # off the list of chats waiting for you; a reply in progress stops
                 q("UPDATE designs SET ended=?, seen=?, queued='[]' WHERE id=?", (time.time(), time.time(), did))
                 stop(DESIGN_PROCS.get(did))
-            elif m.group(2) == "reopen":
+            elif m.group(2) == "reopen":  # with ended, only what you saw ended (compare-and-set, as conv_open)
+                if "ended" in b and d["ended"] and b["ended"] != d["ended"]:
+                    raise ValueError("it ended again after this list was drawn: pick it again")
                 q("UPDATE designs SET ended=NULL WHERE id=?", (did,))
             else:
                 q("UPDATE designs SET title=? WHERE id=?", (b["title"][:80], did))

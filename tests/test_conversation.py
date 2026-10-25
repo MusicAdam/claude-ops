@@ -9,6 +9,7 @@ import tempfile
 import threading
 import time
 import unittest
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -489,6 +490,45 @@ class Conversation(unittest.TestCase):
         shown = self.chat("shown", ago=100)
         opsd.set_setting("conv:demo", json.dumps({"topic": 999, "mode": "design"}))
         self.post("/api/designs", {"project": "demo", "text": "hi", "quick": True})
+        self.assertEqual(self.view()["topic"], shown)
+
+    def get(self, path):
+        with urllib.request.urlopen(f"http://127.0.0.1:{self.srv.server_port}{path}") as r:
+            return json.loads(r.read())
+
+    def test_quick_flag_and_recent_list(self):
+        plain = self.post("/api/designs", {"project": "demo", "text": "not quick"})["id"]
+        a = self.post("/api/designs", {"project": "demo", "text": "first quick", "quick": True})["id"]
+        b = self.post("/api/designs", {"project": "other", "text": "second quick", "quick": True})["id"]
+        self.assertEqual((opsd.design(plain)["quick"], opsd.design(a)["quick"]), (0, 1))
+        opsd.q("UPDATE designs SET updated=?, ended=? WHERE id=?", (time.time() - 50, 123.5, b))
+        rows = self.get("/api/designs/quick")
+        self.assertEqual([r["id"] for r in rows], [a, b])  # quick ones only, newest first, ended ones too
+        self.assertEqual(set(rows[0]), {"id", "project", "title", "updated", "ended"})
+        self.assertEqual((rows[1]["project"], rows[1]["ended"]), ("other", 123.5))
+        self.assertEqual([r["id"] for r in self.get("/api/designs/quick?limit=1")], [a])
+        gone = opsd.PROJECTS.pop("other")  # archived: load_projects no longer has it
+        try:
+            self.assertEqual([r["id"] for r in self.get("/api/designs/quick")], [a])
+        finally:
+            opsd.PROJECTS["other"] = gone
+
+    def test_reopen_quick_chat_keeps_shown_topic(self):
+        shown = self.chat("what Today shows", ago=100)
+        did = self.post("/api/designs", {"project": "demo", "text": "quick", "quick": True})["id"]
+        opsd.q("UPDATE designs SET ended=123.5 WHERE id=?", (did,))
+        opsd.set_setting("conv:demo", "")  # nothing kept: reopening must pin again
+        with self.assertRaises(urllib.error.HTTPError):  # a stale list: it ended again since
+            self.post(f"/api/designs/{did}/reopen", {"ended": 99.0})
+        self.assertEqual(opsd.design(did)["ended"], 123.5)
+        self.post(f"/api/designs/{did}/reopen", {"ended": 123.5})
+        self.assertIsNone(opsd.design(did)["ended"])
+        opsd.q("UPDATE designs SET updated=? WHERE id=?", (time.time(), did))
+        self.assertEqual(self.view()["topic"], shown)
+        opsd.q("UPDATE designs SET updated=? WHERE id=?", (time.time() - 200, did))
+        opsd.set_setting("conv:demo", "")  # nothing kept again: a message pins before it makes this the latest
+        self.post(f"/api/designs/{did}/say", {"text": "again"})
+        opsd.q("UPDATE designs SET updated=? WHERE id=?", (time.time(), did))
         self.assertEqual(self.view()["topic"], shown)
 
     def test_plain_new_chat_pins_nothing(self):
