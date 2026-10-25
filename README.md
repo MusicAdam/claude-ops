@@ -696,7 +696,7 @@ stay on the right of the header.
   | Try | ▶ Play this build (the task's play) | Approve & merge, Send back… |
   | Review | Approve & merge | Open diff (the task's details, files changed), Send back… |
   | Answer | Answer (focuses the message box; sending answers the task) | Details |
-  | Fix | Retry | Retry with a note… |
+  | Fix | Retry | Retry with a note…, Retry after… |
   | Promote | Promote dev → main; for a release waiting on you, Stop main when the app is running, else Reply… | Details; for a project with a launch step, ▶ Play dev (■ Stop dev while it runs) |
   | Ship | Deploy (the Deploy dialog), one per target, each with its own count: `Deploy <target> (N)`, `(up to date)`, `(first deploy)`, or `(?)` when its last deployed commit is gone | For a project with a launch step, ▶ Play main (■ Stop main while it runs; off until it is built or while a play is under way) |
   | Commit | Commit these: **Send to dev**, unchanged underneath. Its tooltip says it lands the files on `main` through the gate, then clears them from your checkout; `dev` in a project with Promote after merge off (and not straight to main). While one is open: Sending… #id | |
@@ -712,7 +712,8 @@ stay on the right of the header.
   message line.
 
   **Send back…**, **Retry with a note…** and **Answer** use the message box below: a line above it says where the
-  message goes, with **Cancel**.
+  message goes, with **Cancel**. **Retry after…** opens a chooser in the step instead, as **Wait for…** does (see
+  **Retrying** under the queue's controls); its errors show in the step's message line.
 - **TODAY-2 Centre, below: one conversation per project.** One running conversation for the project in view,
   with one message box. With one project ticked in the switcher it is that project. Otherwise it is the selected
   item's project, else the last one you used (a **Project** picker shows when there is neither; it lists the
@@ -1519,6 +1520,19 @@ notes = """Project-specific guidance for design chats."""
   to queue them again. **Resume all** shows whenever a task is paused, even while others run. **Pause queue** is
   different: it holds tasks that haven't started and lets running ones finish. A task records who paused it
   (`paused_by`): empty for you, `restart` for a restart, `limit` for the Claude usage limit (see Usage limits).
+- **Retrying.** **Retry** on a failed or cancelled task (its page, or Today's Fix step) queues it again
+  (`POST /api/tasks/<id>/retry`); a worker with a session is told why its last attempt stopped and to finish.
+  **Retry with a note…** adds `note`, which the worker reads and the log shows (`retried: <note>`).
+  **Retry after…** retries it so it waits for another task to merge first, say one building the fix it needs. Its
+  chooser lists the open tasks (queued, working, checking, merging, review, needs you) of every project, newest
+  first, each with its id, project and title, then a box for any other task id (`333` or `#333`) and the same
+  optional note. It sends `after` (an int, or a string with or without `#`), which sets the task's `depends_on`,
+  the same wait as the New task form's **After** and `opsd.py send --after`: the card shows `after #N` and the log
+  `retried after #N` (then `: <note>`). The new `after` replaces any earlier one; a retry without `after` leaves
+  `depends_on` as it was. It is refused, and the task left as it was, for an unknown task (`no task #N`), the task
+  itself (`a task can't wait on itself`), or a task whose own `depends_on` chain leads back to it
+  (`#N already waits on this task`). A task already done holds nothing: the retry starts as usual. One that later
+  fails or is cancelled keeps the retried task waiting, as any `depends_on` does.
 - **Usage limits.** When Claude's usage limit hits, work waits for the reset instead of failing.
   - **The worker that hits it is paused, not failed** (`paused_by` `limit`). When it resumes, its Claude session is
     told the limit stopped it mid-turn and to check `git status` and `git log`, finish, and write its result. This
