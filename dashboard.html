@@ -1076,11 +1076,13 @@ function syncRelease() {
 $("#tproj").addEventListener("change", syncRelease);
 
 // ---- the working chip's pure helper
-// The chip's denominator and tooltip tail: the taper cap while tapering (state.usage.taper is set only then), else Parallel.
+// The chip's denominator and tooltip tail: the taper cap while tapering (state.usage.taper is set only then, its cap the
+// lower of the taper and pace caps; ahead > 0 when the pace cap binds), else Parallel.
 function workSlots(state, s) {
   const tp = state.usage && state.usage.taper;
   if (!tp) return {slots: s.max_parallel, slotTip: `out of at most ${s.max_parallel} at once (the Parallel setting).`};
-  return {slots: tp.cap, slotTip: `out of at most ${tp.cap} at once: the usage taper (5-hour window at ${tp.pct}%, Taper from ${s.usage_taper}) lowers the Parallel setting of ${tp.max}. Deploys and releases can still start up to ${tp.max}.`};
+  const why = tp.ahead ? `5-hour window at ${tp.pct}%, ${tp.ahead} points ahead of pace` : `5-hour window at ${tp.pct}%, Taper from ${s.usage_taper}`;
+  return {slots: tp.cap, slotTip: `out of at most ${tp.cap} at once: the usage taper (${why}) lowers the Parallel setting of ${tp.max}. Deploys and releases can still start up to ${tp.max}.`};
 }
 // ---- end of the working chip's pure helper
 function renderHeader() {
@@ -1173,7 +1175,7 @@ function renderUsage() {
   if (document.activeElement !== $("#brake")) $("#brake").value = state.settings.usage_brake;
   if (document.activeElement !== $("#taper")) $("#taper").value = state.settings.usage_taper;
   const tail = (u.braked ? `\n${u.braked.words}` : "") +
-    (u.taper ? `\nTapering: ${u.taper.cap} of ${u.taper.max} workers` : "") +
+    (u.taper ? `\nTapering: ${u.taper.cap} of ${u.taper.max} workers${u.taper.ahead ? " (ahead of pace)" : ""}` : "") +
     (u.brake ? `\nBrake at ${u.brake}%: no new tasks start at or above it.` : "\nBrake off.");
   put(el, u.windows.map(w => {
     const cls = state.limit ? "danger" : u.brake && w.pct >= u.brake ? "alert" : "";

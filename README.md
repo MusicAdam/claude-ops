@@ -1611,6 +1611,18 @@ notes = """Project-specific guidance for design chats."""
       `Usage at 63% of the 5-hour window · 4 of 6 workers`, and while the cap is below `max_parallel` the header
       meter's hover adds `Tapering: 4 of 6 workers`. While tapering the header's working chip also shows the cap as
       its denominator (`3/4 working`), and its hover names the Parallel setting it lowers.
+    - **Pace slowdown.** While the taper is on, the queue also slows whenever 5-hour usage runs ahead of the header
+      meter's pace line. With a live reading, elapsed = the share of the 5-hour window that has passed (0 to 1),
+      pace = elapsed × end (end = `usage_brake`, or 100 with the brake off, the same pace the meter shows) and
+      lead = pct − pace. When lead > 0 the pace cap is `max(1, max_parallel - ceil(lead / 5))`: one worker fewer
+      per 5 points ahead (`PACE_STEP` in opsd.py). On or behind pace, or with no live reading, there is no pace cap
+      and the taper alone applies. The lower of the taper cap and the pace cap applies, to the same new starts as the
+      taper, and the brake still wins. It is off when the taper is off, and it follows the **5-hour window only**.
+      Example: `max_parallel` 6, brake 85, taper 50, one hour into the window: pace = 0.2 × 85 = 17. At 30% usage
+      the lead is 13, so the pace cap is 6 − 3 = 3; there is no taper cap at 30%, so 3 workers run. At 10% usage
+      the queue is behind pace, so all 6 run. When the pace cap is the lower one, a held task says
+      `Usage at 30% of the 5-hour window, 13 points ahead of pace · 3 of 6 workers`, the meter's hover says
+      `Tapering: 3 of 6 workers (ahead of pace)`, and the working chip's hover names the pace.
   - **The header meter** shows both windows, `5h 62% · 7d 14%`, with their reset times on hover. It turns amber at
     or above the brake, and red while the queue waits out the usage limit itself. Its pace line (see **Usage meters
     and pace**) runs up to the brake for the 5-hour window, so it says whether usage is on track to reach the brake,
