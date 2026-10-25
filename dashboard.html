@@ -1075,6 +1075,14 @@ function syncRelease() {
 }
 $("#tproj").addEventListener("change", syncRelease);
 
+// ---- the working chip's pure helper
+// The chip's denominator and tooltip tail: the taper cap while tapering (state.usage.taper is set only then), else Parallel.
+function workSlots(state, s) {
+  const tp = state.usage && state.usage.taper;
+  if (!tp) return {slots: s.max_parallel, slotTip: `out of at most ${s.max_parallel} at once (the Parallel setting).`};
+  return {slots: tp.cap, slotTip: `out of at most ${tp.cap} at once: the usage taper (5-hour window at ${tp.pct}%, Taper from ${s.usage_taper}) lowers the Parallel setting of ${tp.max}. Deploys and releases can still start up to ${tp.max}.`};
+}
+// ---- end of the working chip's pure helper
 function renderHeader() {
   const s = state.settings, ts = state.tasks.filter(t => inView(t.project));
   const n = st => ts.filter(t => st.includes(t.state)).length;
@@ -1084,9 +1092,10 @@ function renderHeader() {
   const rsn = (state.research && state.research.active) || 0;  // research runs and chat turns: no task slot
   // One chip per number: a word next to it, a tooltip saying what it counts, and colour only when it wants you.
   const chip = (cls, html, tip) => `<span class="st ${cls}" data-tip="${esc(tip)}">${html}</span>`;
+  const {slots, slotTip} = workSlots(state, s);
   put($("#hdr"), [
-    chip(state.active ? "live" : "zero", `<b>${state.active}/${s.max_parallel}</b> working` + (rsn ? ` <span class="rsn" data-rs>· <b>${rsn}</b> research</span>` : ""),
-      `${plural(state.active, "worker", "workers")} running now, across every project, out of at most ${s.max_parallel} at once (the Parallel setting).`
+    chip(state.active ? "live" : "zero", `<b>${state.active}/${slots}</b> working` + (rsn ? ` <span class="rsn" data-rs>· <b>${rsn}</b> research</span>` : ""),
+      `${plural(state.active, "worker", "workers")} running now, across every project, ${slotTip}`
       + (rsn ? ` Plus ${plural(rsn, "research run", "research runs")}, counted apart: they take no task slot. Click “research” to see them.` : "")),
     chip(n(["queued"]) ? "" : "zero", `<b>${n(["queued"])}</b> queued`,
       `${plural(n(["queued"]), "task waits", "tasks wait")} for a free worker${pfs.length ? ` in ${pfTitles()}` : ""}.`),
