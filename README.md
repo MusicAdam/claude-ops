@@ -771,6 +771,18 @@ stay on the right of the header.
     3. **New topic** starts a fresh plan & design topic (`how: "new"`, `mode: "design"`): your next message opens
        it. The line under the button says so.
     4. Otherwise a message continues the current topic.
+    5. **A message sent from a to-do step always carries that to-do.** The send itself (`POST
+       /api/conversation/say` with `todo: {key, verb, title, why, subject?, pick?}`) says which to-do step was
+       shown, so it doesn't depend on the conversation state set when the step opened. With a subject (`task:<id>`
+       for a task-sourced to-do), a message that would start a new topic goes to the item's own topic instead: its
+       open topic, else a new one with that subject and its note, as in rule 2. That covers ending the item's
+       topic and sending again from the same step, a step seen before in this page session, a reload, and a
+       project filter change. `pick` is set when the page never got the item's topic picked (the open failed or is
+       still on its way); then the message goes to the item's topic over any current topic. Clicking **New topic**
+       is kept: that message starts a plain new topic. Whatever topic the message lands in gets a line **Sent from
+       to-do todo:20: …** once, with the to-do's title and why as a note for Claude, so even a to-do with no
+       subject is never sent with no context. A chat's to-do (it opens its chat), a step of another project than
+       the conversation's, and a message sent with no step shown carry nothing, as before.
 
     Picking a topic in Earlier topics, **New topic**, or another item replaces a subject still waiting for its first
     message. The subject is stored in `designs.subject` and kept in `conv:<project>` while pending. API:
