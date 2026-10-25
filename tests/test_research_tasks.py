@@ -282,6 +282,65 @@ class ResearchTasks(unittest.TestCase):
             time.sleep(0.02)
         self.assertIsNone(opsd.STATE_CACHE["data"])  # so the next poll builds afresh instead of showing the old list
 
+    # ---- reports any task lists (RES-10)
+    def events(self, tid):
+        return [e["text"] for e in opsd.q("SELECT text FROM events WHERE task_id=? ORDER BY id", (tid,))]
+
+    def test_listed_reports_are_read_todos(self):
+        tid = opsd.add_task("web", "body", "Nightly bug bash")
+        commit(self.root, "bugbash/a.md", "# A\n", 1_700_000_100)
+        commit(self.root, "bugbash/b.md", "# B\n", 1_700_000_200)
+        self.assertEqual(opsd.set_reports(tid, ["bugbash/a.md", "./bugbash/b.md"]), "reports: bugbash/a.md, bugbash/b.md")
+        self.assertEqual(self.todos(), [])  # not done yet
+        opsd.upd(tid, state="done", merged=None)
+        self.assertEqual(self.todos(), [])  # done, not merged
+        opsd.upd(tid, state="failed", merged="abc123", error="x")
+        self.assertEqual([x["key"] for x in self.todos()], [f"task:{tid}:fix"])  # failed: a Fix, no Read
+        opsd.upd(tid, state="done")
+        got = self.todos()
+        self.assertEqual([x["key"] for x in got], [f"task:{tid}:report:bugbash/a.md", f"task:{tid}:report:bugbash/b.md"])
+        self.assertEqual((got[0]["verb"], got[0]["title"], got[0]["why"], got[0]["report"]),
+                         ("Read", "Nightly bug bash", "Report bugbash/a.md merged into dev", {"path": "bugbash/a.md"}))
+        url = self.serve() + "/api/files?project=web&path="
+        self.assertEqual(self.call(url + quote("bugbash/a.md")), (200, b"# A\n"))  # opening one reads only that one
+        self.assertEqual([x["key"] for x in self.todos()], [f"task:{tid}:report:bugbash/b.md"])
+        h = opsd.H.__new__(opsd.H)
+        self.assertEqual(h.route("/api/projects/web/research/read", {"path": "bugbash/b.md"}),
+                         {"ok": True, "path": "bugbash/b.md", "marked": [tid], "already": []})
+        self.assertEqual(self.todos(), [])
+        self.assertEqual(h.route("/api/projects/web/research/read", {"path": "bugbash/b.md"})["already"], [tid])
+        self.assertEqual([x["read"] is not None for x in opsd.reports_of(opsd.task(tid))], [True, True])
+
+    def test_invalid_reports_are_dropped(self):
+        tid = opsd.add_task("web", "body", "Scout")
+        said = opsd.set_reports(tid, ["/etc/passwd", "../x.md", "a/../../y.md", 7, "", "  ", None,
+                                      "r1.md", "r2.md", "r3.md", "r4.md", "r5.md", "r6.md"])
+        self.assertEqual([x["path"] for x in opsd.reports_of(opsd.task(tid))], ["r1.md", "r2.md", "r3.md", "r4.md", "r5.md"])
+        self.assertTrue(said.startswith("reports: r1.md"))
+        for bad in ("'/etc/passwd'", "'../x.md'", "'a/../../y.md'", "7", "None", "r6.md (more than 5)"):
+            self.assertIn(bad, said)
+        self.assertEqual(opsd.set_reports(tid, ["r2.md"]), "reports: r2.md")  # a later done replaces the list
+        self.assertEqual([x["path"] for x in opsd.reports_of(opsd.task(tid))], ["r2.md"])
+        self.assertEqual(opsd.set_reports(tid, "nope/../.."), "dropped reports: 'nope/../..'")
+        self.assertIsNone(opsd.task(tid)["reports"])
+
+    def test_research_task_listing_its_own_report_shows_once(self):
+        r = opsd.queue_research("web", "Is Rust worth it?")
+        opsd.set_reports(r["id"], [r["path"], "notes/extra.md"])
+        opsd.upd(r["id"], state="done", merged="abc123")
+        self.assertEqual([x["key"] for x in self.todos()], [f"task:{r['id']}:report", f"task:{r['id']}:report:notes/extra.md"])
+        self.assertEqual(opsd.report_read("web", r["path"]), [r["id"]])
+        self.assertEqual([x["key"] for x in self.todos()], [f"task:{r['id']}:report:notes/extra.md"])
+
+    def test_state_shows_reports(self):
+        tid = opsd.add_task("web", "body", "Scout")
+        opsd.set_reports(tid, ["a.md"])
+        plain = opsd.add_task("web", "body", "plain")
+        opsd.PROJECTS.clear()  # no projects: state_payload reads the tasks alone
+        got = {t["id"]: t for t in opsd.state_payload()["tasks"]}
+        self.assertEqual(got[tid]["reports"], [{"path": "a.md", "read": None}])
+        self.assertIsNone(got[plain]["reports"])
+
     def test_unread_in_listing(self):
         r = opsd.queue_research("web", "Is Rust worth it?")
         commit(self.root, r["path"], "# Rust\n\nYes.\n", 1_700_000_100)

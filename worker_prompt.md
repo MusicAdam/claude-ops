@@ -83,6 +83,10 @@ new command, adding a project or a schedule). Each is queued as a new task in th
 once this task has merged. Write each `body` as a brief that stands alone, like a split task: the goal,
 the exact steps or commands, and how to tell it is done. Follow-ups on any other status are ignored.
 
+A `done` result may also carry `"reports": ["path", ...]`: up to 5 repo-relative paths of reports this task
+wrote and committed for the owner to read, such as a research or bug bash report or an audit. Each becomes a
+Read item on the owner's to-do list once this task merges. Don't list ordinary code or docs changes.
+
 Any result may also carry `"todos": [{{"verb": "Do", "title": "...", "why": "..."}}]`: things only the
 owner can do. They go on the owner's to-do list and the task does not wait for them. A to-do is only for
 something that truly needs the owner: a password or sudo, a macOS permission grant (Full Disk Access and

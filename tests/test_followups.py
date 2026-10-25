@@ -71,6 +71,16 @@ class Followups(unittest.TestCase):
         self.assertIn(f"follow-ups: #{kids[0]['id']}, #{kids[1]['id']}", self.events(tid))
         self.assertEqual(self.ended, ["finish"])
 
+    def test_done_stores_reports_and_logs_dropped_ones(self):  # RES-10
+        tid = self.run_worker({"status": "done", "summary": "x", "reports": ["docs/bash.md", "/abs.md", "../up.md"]})
+        self.assertEqual([x["path"] for x in opsd.reports_of(opsd.task(tid))], ["docs/bash.md"])
+        self.assertIn("reports: docs/bash.md; dropped reports: '/abs.md', '../up.md'", self.events(tid))
+
+    def test_reports_on_another_status_are_ignored(self):
+        tid = self.run_worker({"status": "failed", "summary": "no", "reports": ["docs/bash.md"]})
+        self.assertIsNone(opsd.task(tid)["reports"])
+        self.assertEqual(self.ended, ["fail"])
+
     def test_release_takes_the_project_default(self):
         opsd.set_setting("auto_release:web", "1")
         tid = self.run_worker({"status": "done", "summary": "x", "followups": [{"title": "T", "body": "B"}]})

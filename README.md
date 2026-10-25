@@ -494,8 +494,8 @@ the uncommitted-files banner, Deploy. `/api/state` gathers them into one list, `
     `GET /api/projects/<name>/uncommitted`, read only (git status and diff without an index lock, file reads):
     `{repos: [{repo, files: [{path, status, added, removed, binary, mtime}], more}], diff, diff_lines, cut}`.
   - **Read**: a design or project chat with a reply you haven't opened, as ● in Earlier topics marks it.
-  - **Read** (a report): a research task merged into `dev` whose report you haven't opened (see
-    [Research](#research), RES-5).
+  - **Read** (a report): a research task merged into `dev` whose report you haven't opened, or a report any merged
+    task listed in its result (see [Research](#research), RES-5 and RES-10).
 - **TODO-2 Two kinds Claude adds, and your own.** **Do**: something that truly needs you: a password or sudo, a macOS
   permission grant (Full Disk Access and the like), an API key or account you must create. **Agree**: a
   decision; Claude proposed something and waits for your yes. A step that a command or code change can do is
@@ -1055,13 +1055,15 @@ Research is ordinary queue work in the project it is about. A report lives in th
   stopped at its tier's limit and the task fails with `stopped at the T1 time limit (15 min)`, so Retry is one click.
   Its size cap is `--max-budget-usd` 1, 3 or 10 (API-equivalent dollars, as the old runs used).
 - **RES-5 Read when it merges.** A research task that is done and merged, and whose report you haven't opened, is a
-  **Read** to-do (`task:<id>:report`, with `report: {path}`). The report counts as read when any dashboard view opens
+  **Read** to-do (`task:<id>:report`, with `report: {path}`); so is each unread report a task listed (RES-10). The
+  report counts as read when any dashboard view opens
   it: the step's **Open report**, the Research section, or a link to the file in Details or a chat. Serving the file
-  (`GET /api/files`) marks every done, merged research task of the project that wrote that path; it stores `read` in
-  the task's `research`. A Read step also has **Mark read**, which marks it without opening it. Open report and Mark
+  (`GET /api/files`) marks every done, merged task of the project that wrote that path, as its research report or
+  in its `reports`; it stores `read` in the task's `research`, or on that entry of `reports`. A Read step also has **Mark read**, which marks it without opening it. Open report and Mark
   read take the step off your list at once, before the server answers, and an `/api/state` answer from before the
   mark can't bring it back. Both post `POST /api/projects/<name>/research/read` with `{path}` (trimmed); it answers
-  `marked` (the ids it marked) and `already` (ids read before). When both are empty no research task wrote that path:
+  `marked` (the ids it marked) and `already` (ids read before), counting research tasks and tasks that listed the
+  path in `reports` alike. When both are empty no task of the project wrote that path:
   the step comes back with "Found no research report at <path> to mark read", as does any error. Research tasks
   from before this have no flag, so nothing old shows up.
 - **RES-6 Recurring research.** A schedule whose `research` column holds a tier is a recurring research job. Each run
@@ -1083,6 +1085,17 @@ Research is ordinary queue work in the project it is about. A report lives in th
   the research repo's list, and research turns on without it. Don't reuse the id.
 - **RES-9 The Research tab is legacy.** It stays under More, read-only in spirit: for the history of the research
   repo's proposals, reports and runs. Old reports are not moved. New research goes through the queue.
+- **RES-10 Any task can list reports.** Scheduled jobs with their own briefs (a daily scout, a nightly bug bash)
+  write reports outside `docs/research/` and are not research-flagged, so RES-5 alone would merge them quietly. A
+  `done` worker result may carry `"reports": ["path", ...]`: repo-relative paths of files the task committed for you
+  to read. The queue keeps entries that are non-empty strings, relative after `os.path.normpath`, with no `..`
+  segment, at most 5, and logs an event naming what it dropped. A result of any other status ignores `reports`; a
+  later round's `done` replaces the list. They are stored in the task's `reports` column as JSON `[{path, read}]` and
+  shown as `reports` on each task in `/api/state` (null when none). A research task's own report path is skipped
+  there, so the file never shows twice. Once the task is done and merged, each unread entry is a **Read** to-do
+  (`task:<id>:report:<path>`, title the task's, why `Report <path> merged into <dev>`, `report: {path}`), with the
+  same Open report and Mark read as RES-5, which mark it read the same ways. Paths in a workspace are relative to the
+  task's worktree, as RES-5's are.
 
 ### Legacy: research runs in the research repo
 
