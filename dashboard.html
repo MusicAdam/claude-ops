@@ -77,7 +77,7 @@ label { color: var(--muted); display: inline-flex; gap: 6px; align-items: center
 .task.sel { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
 .task .top { display: flex; gap: 10px; align-items: baseline; }
 .task .id { color: var(--muted); font-family: var(--mono); font-size: 12px; }
-/* A task's #id (tid()): muted, and a click copies it. "copied" shows briefly after it. */
+/* A task's #id or a to-do's todo:N (tid()): muted, and a click copies it. "copied" shows briefly after it. */
 .tid { color: var(--muted); font-family: var(--mono); font-size: 12px; font-weight: 400; cursor: copy; }
 .tditem .tid, .stepcard h2 .tid, .chip .tid, #detail h2 .tid { margin-right: 6px; }
 #detail h2 .tid { font-size: inherit; }
@@ -1312,7 +1312,8 @@ const day = iso => { const d = new Date(iso), y = d.getFullYear() !== new Date()
   return d.toLocaleDateString("en-GB", {day: "numeric", month: "short", ...(y ? {year: "numeric"} : {})}); };
 const taskLink = id => `<a data-task="${id}">#${id}</a>`;
 // A task's id as the dashboard shows it everywhere: "#316", muted. A click copies "#316" and does nothing else.
-const tid = id => `<span class="id tid" data-copyid="${id}" title="Copy #${id}">#${id}</span>`;
+// A stored to-do's id is tid(12, "todo:"): "todo:12", so a chat can't take it for task #12.
+const tid = (id, pre = "#") => `<span class="id tid" data-copyid="${pre}${id}" title="Copy ${pre}${id}">${pre}${id}</span>`;
 // What a deploy of d would ship: the commits between its last deploy and what it deploys now.
 const nCommits = n => `${n} commit${n === 1 ? "" : "s"}`;
 function depStatus(d) {
@@ -1420,13 +1421,13 @@ async function confirmDeploy() {
     refresh();
   } catch (e) { $("#dmsg").textContent = e.message; syncDeploy(); }
 }
-// A task's #id (tid()) copies "#<id>" and shows "copied" for a moment. It listens in the capture phase and stops the
+// An id (tid()) copies its data-copyid, "#316" or "todo:12", and shows "copied" for a moment. It listens in the capture phase and stops the
 // click there, so the card, row, chip or label around the id never also gets it.
 document.addEventListener("click", e => {
   const el = e.target.closest && e.target.closest("[data-copyid]");
   if (!el) return;
   e.preventDefault(); e.stopPropagation();
-  const text = "#" + el.dataset.copyid;
+  const text = el.dataset.copyid;
   const done = () => { el.classList.add("copied"); clearTimeout(el._copied); el._copied = setTimeout(() => el.classList.remove("copied"), 1200); };
   const fallback = () => {  // no async clipboard on plain http from another machine
     const ta = document.createElement("textarea"); ta.value = text; ta.style.position = "fixed"; ta.style.opacity = "0";
@@ -2822,8 +2823,8 @@ function tdChanged(it) {
   renderConv();  // the last item's End topic waits until this one's conversation loads
   refreshDesign();
 }
-// An item about a task carries the task's #id; an owner to-do that came from a task does not, its title is the to-do.
-const tdTid = x => x.source && x.source.kind === "task" && !x.todo ? tid(x.source.id) : "";
+// A stored to-do carries its own todo:N (even one a task added); any other item about a task carries the task's #id.
+const tdTid = x => x.todo ? tid(x.todo, "todo:") : x.source && x.source.kind === "task" ? tid(x.source.id) : "";
 const tdAnswerMode = it => ({a: "answer", id: it.source.id, words: `Your message answers #${it.source.id}'s question.`});
 
 // One row of the list. A note shows under it; a parked row says how long it has been parked.

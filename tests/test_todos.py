@@ -156,7 +156,7 @@ class Todos(unittest.TestCase):
         block = '```todo\n[{"verb": "Do", "title": "Add the API key", "why": "only you have it"}]\n```'
         text, note = opsd.todos_from_reply(p, f"Here is the plan.\n\n{block}", 7)
         self.assertEqual(text, "Here is the plan.")
-        self.assertIn("added to-do #", note)
+        self.assertRegex(note, r"added to-do todo:\d+")
         opsd.todos_from_reply(p, f"Again.\n\n{block}", 7)  # same title while open: not added twice
         rows = opsd.q("SELECT * FROM todos")
         self.assertEqual(len(rows), 1)
@@ -173,11 +173,39 @@ class Todos(unittest.TestCase):
         a, b = [r["id"] for r in opsd.q("SELECT id FROM todos ORDER BY id")]
         text, note = opsd.todos_from_reply(p, f'Done.\n```todo\n[{{"close": {a}}}]\n```', 1)
         self.assertEqual(text, "Done.")
-        self.assertIn(f"closed to-do #{a}", note)
+        self.assertIn(f"closed to-do todo:{a}", note)
         self.assertTrue(opsd.todo_done(b))  # what POST /api/todos/<id>/done calls
         self.assertFalse(opsd.todo_done(b))  # already closed
         self.assertEqual(self.todos(), [])
         self.assertEqual(len(opsd.q("SELECT id FROM todos WHERE closed IS NOT NULL")), 2)  # closed items stay
+
+    def test_close_takes_todo_ids(self):
+        """{"close": ...} takes 12 or "todo:12"; "#12" is a task and "todo:x" no id: noted, nothing closed."""
+        p = FakeProject("web")
+        opsd.todos_from_reply(p, '```todo\n[{"verb": "Do", "title": "A"}, {"verb": "Do", "title": "B"}]\n```', 1)
+        a, b = [r["id"] for r in opsd.q("SELECT id FROM todos ORDER BY id")]
+        for bad in ('"todo:x"', f'"#{a}"', "true", "null"):
+            _, note = opsd.todos_from_reply(p, f'```todo\n[{{"close": {bad}}}]\n```', 1)
+            self.assertIn("is not a to-do id", note)
+        self.assertEqual(len(opsd.q("SELECT id FROM todos WHERE closed IS NULL")), 2)
+        _, note = opsd.todos_from_reply(p, f'```todo\n[{{"close": "todo:{a}"}}, {{"close": {b}}}]\n```', 1)
+        self.assertIn(f"closed to-do todo:{a}, todo:{b}", note)
+        _, note = opsd.todos_from_reply(p, f'```todo\n[{{"close": "todo:{a}"}}]\n```', 1)
+        self.assertIn(f"no open to-do todo:{a} in web", note)
+        opsd.todos_from_reply(p, '```todo\n[{"verb": "Do", "title": "C"}]\n```', 1)
+        c = opsd.q("SELECT MAX(id) AS id FROM todos", one=True)["id"]
+        opsd.PROJECTS["web"] = p
+        try:
+            with self.assertRaisesRegex(ValueError, f"to-do todo:{c} in web already has that title"):
+                opsd.todo_own({"project": "web", "title": "C"})
+        finally:
+            del opsd.PROJECTS["web"]
+
+    def test_prompts_say_todo_ids(self):
+        """The design, project and research chat prompts tell Claude #N is a task and todo:N a to-do."""
+        self.assertIn("#N means a task and todo:N means a to-do", opsd.PROJECT_CHAT_PROMPT)
+        self.assertIn("`#N` means a task and\n`todo:N` means a to-do", (opsd.CODE / "design_prompt.md").read_text())
+        self.assertIn("#N means a task and todo:N a to-do", (opsd.CODE / "research.py").read_text())
 
     def test_worker_result_todos(self):
         tid = self.task("web", "running")
