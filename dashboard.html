@@ -1332,7 +1332,8 @@ const taskLink = id => `<a data-task="${id}">#${id}</a>`;
 // A task's id as the dashboard shows it everywhere: "#316", muted. A click copies "#316" and does nothing else.
 // A stored to-do's id is tid(12, "todo:"): "todo:12", so a chat can't take it for task #12.
 const tid = (id, pre = "#") => `<span class="id tid" data-copyid="${pre}${id}" title="Copy ${pre}${id}">${pre}${id}</span>`;
-// What a deploy of d would ship: the commits between its last deploy and what it deploys now.
+// What a deploy of d would ship: the commits between the previous release tag (d.since) or its last deploy and what
+// it deploys now.
 const nCommits = n => `${n} commit${n === 1 ? "" : "s"}`;
 function depStatus(d) {
   const from = d.from ? ` from ${esc(d.from)}` : "";
@@ -1340,6 +1341,7 @@ function depStatus(d) {
   if (d.blocked) return `<span class="s-review">${esc(d.blocked)}</span>`;
   if (d.log_unknown) return `<span class="s-review" title="The commit it last deployed is gone from git (a rewritten history)">changes not deployed${from}: unknown</span>`;
   if (d.behind == null) return "";
+  if (d.since) return `<span class="${d.behind ? "s-review " : ""}nw">${nCommits(d.behind)} since ${esc(d.since)}</span>`;
   return d.behind ? `<span class="s-review nw">${nCommits(d.behind)} not deployed${from}</span>` : `<span class="nw">up to date</span>`;
 }
 const depLog = d => (d.log || []).length ? logRows(d.log) : "";
@@ -1388,8 +1390,9 @@ function openDeploy(project, name) {
   $("#dlg").innerHTML = `<div class="box" role="dialog" aria-modal="true" aria-labelledby="dtitle">
     <h2 id="dtitle">Deploy ${esc(name)}</h2>
     <div><span class="mono">${esc(d.commit ? d.commit.show : "")}</span> ${esc(d.commit ? d.commit.subject : "")}</div>${fromLine}
-    <div class="dlog">${depLog(d) ? `<div>What it ships: ${nTasks(d.log)} since its last deploy</div>${depLog(d)}`
+    <div class="dlog">${depLog(d) ? `<div>What it ships: ${nTasks(d.log)} since ${d.since ? esc(d.since) : "its last deploy"}</div>${depLog(d)}`
       : d.log_unknown ? `<div class="s-review">What it ships is unknown: the commit it last deployed is gone from git.</div>`
+      : d.since ? `<div class="muted">Nothing new since ${esc(d.since)}.</div>`
       : !d.last ? `<div class="muted">First deploy: no changelog yet.</div>` : d.behind === 0 ? `<div class="muted">Nothing new since its last deploy.</div>` : ""}</div>
     ${busy}${opts}
     ${d.note ? `<label class="notebox">${esc(d.note)} <span class="muted">(required)</span><textarea id="dnote"></textarea></label>
@@ -2968,7 +2971,7 @@ function tdActions(it) {
   return [];
 }
 // What one Deploy button ships: its own count of commits, as the Projects card's Deploys section says it.
-const tdBehind = d => d.log_unknown ? " (?)" : !d.last && !d.from ? " (first deploy)" : d.behind == null ? "" : d.behind ? ` (${d.behind})` : " (up to date)";
+const tdBehind = d => d.log_unknown ? " (?)" : !d.last && !d.from && !d.since ? " (first deploy)" : d.behind == null ? "" : d.behind ? ` (${d.behind})` : " (up to date)";
 // Play or Stop the project's app from main or dev, as the Projects card's buttons do. None if it can't launch.
 function tdPlay(g, where) {
   if (!g.can_launch) return [];

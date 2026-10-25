@@ -226,12 +226,21 @@ run = "bin/swish release"
   worker or a design chat, and nothing that queues follow-ups can make one. Drafting the note queues nothing.
 - **The note is drafted for you.** For a target with `note`, the Deploy dialog fills the note box with a draft as it
   opens, and says "Drafting from the changelog…" while it waits. You read it, edit it if you like, and clicking
-  **Deploy** approves it. The draft comes from what the deploy ships, the rows under "What it ships" (for a `from`
-  target, what its source deployed since this target's last deploy): each task's title and its summary, and the
-  subject of each commit no task made. One short Claude turn (`claude -p`, Sonnet, no tools, at most 60 seconds)
+  **Deploy** approves it. The draft comes from what the deploy ships, the rows under "What it ships": each task's
+  title and its summary, and the subject of each commit no task made. One short Claude turn (`claude -p`, Sonnet, no tools, at most 60 seconds)
   turns them into 3 to 8 plain bullets for the app's users, user-visible changes only, at most 1000 characters.
+  - **What it ships spans the previous release.** A target's release tags are its own `release_tag`, or for a `from`
+    target its source's (followed up the `from` chain). When it has them, what it ships, in its own repo, is the
+    commits from the newest release tag (by version) that the commit it deploys descends from, up to that commit.
+    A tag on that commit itself doesn't count; the one before it does. This holds on every deploy, with or without
+    an earlier one: store release notes describe the change since the last store release. The list, its count (the
+    Deploy button's `(N)`) and the draft all use this span, and the dialog says so: "What it ships: 12 tasks since
+    v3.5.2".
+  - With no matching tag, or no release tags at all, what it ships is everything since the target's last deploy (for
+    a `from` target, what its source deployed since then).
   - If Claude fails, takes too long or says nothing, the draft is one `- title` line per row, cut to 1000 characters.
-  - With no changelog (a first deploy, or the last deployed commit gone) nothing is drafted: you type it, as before.
+  - With no changelog (a first deploy with no release tag, or the last deployed commit gone) nothing is drafted: you
+    type it, as before.
   - A draft never replaces what you typed: if you type before it arrives, it stays out of the box. **Redraft**, by
     the box, asks for a new draft, and asks before replacing text you changed.
   - The note is still required: `POST /api/deploys` refuses an empty one, and Deploy stays off until the box has
@@ -698,7 +707,7 @@ stay on the right of the header.
   | Answer | Answer (focuses the message box; sending answers the task) | Details |
   | Fix | Retry | Retry with a note…, Retry after… |
   | Promote | Promote dev → main; for a release waiting on you, Stop main when the app is running, else Reply… | Details; for a project with a launch step, ▶ Play dev (■ Stop dev while it runs) |
-  | Ship | Deploy (the Deploy dialog), one per target, each with its own count: `Deploy <target> (N)`, `(up to date)`, `(first deploy)`, or `(?)` when its last deployed commit is gone | For a project with a launch step, ▶ Play main (■ Stop main while it runs; off until it is built or while a play is under way) |
+  | Ship | Deploy (the Deploy dialog), one per target, each with its own count: `Deploy <target> (N)`, `(up to date)`, `(first deploy)`, or `(?)` when its last deployed commit is gone. N counts from the previous release tag when the target has release tags (see "The note is drafted for you"), else from its last deploy; a target with a previous release tag is never `(first deploy)` | For a project with a launch step, ▶ Play main (■ Stop main while it runs; off until it is built or while a play is under way) |
   | Commit | Commit these: **Send to dev**, unchanged underneath. Its tooltip says it lands the files on `main` through the gate, then clears them from your checkout; `dev` in a project with Promote after merge off (and not straight to main). While one is open: Sending… #id | |
   | Read | A chat: Mark read when it is new, else End topic. A report: Open report (RES-5) | A chat: End topic, or Reply. A report: Mark read, Details |
   | Agree | Reply (focuses the message box; sending closes it) | Done |

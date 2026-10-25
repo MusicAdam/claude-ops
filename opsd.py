@@ -5000,9 +5000,9 @@ def pick_version(choice, cur, released):
     return v
 
 
-def tags(p, t, pattern, merged=None):
+def tags(p, t, pattern, merged=None, with_repo=False):
     """Tags matching pattern (a glob) in the target's repos, newest first by creatordate: [{name, commit, date}].
-    merged: a revs string; only tags reachable from it count."""
+    merged: a revs string; only tags reachable from it count. with_repo: each also has repo (its sub) and ts."""
     out = []
     for r, sha in zip(p.parts, merged.split() if merged else [None] * len(p.parts)):
         if r not in t.parts(p):
@@ -5014,8 +5014,9 @@ def tags(p, t, pattern, merged=None):
         for l in lines:
             name, commit, ts, date = l.split("\t")
             if fnmatch.fnmatchcase(name, pattern):  # for-each-ref also takes a plain name as a prefix of a path
-                out.append({"name": name, "commit": commit, "date": date, "ts": int(ts or 0)})
-    return [{k: v for k, v in x.items() if k != "ts"} for x in sorted(out, key=lambda x: -x["ts"])]
+                out.append({"name": name, "commit": commit, "date": date, "ts": int(ts or 0), "repo": r.sub})
+    return [{k: v for k, v in x.items() if k not in ("ts", "repo")} for x in sorted(out, key=lambda x: -x["ts"])] \
+        if not with_repo else sorted(out, key=lambda x: -x["ts"])
 
 
 def peek_version(p, t, revs):
@@ -5094,7 +5095,7 @@ def target_facts(p, t, main, s):
     rec = deploy_record(p, t.name, s)
     out = {"name": t.name, "repo": t.repo or None, "from": t.from_ or None, "note": t.note or None, "run": t.run,
            "has_version": bool(t.version), "error": t.error, "blocked": None, "commit": None, "behind": None,
-           "log": None, "log_unknown": False, "version": None,
+           "log": None, "log_unknown": False, "since": None, "version": None,
            "last": rec and {"commit": rec.get("commit"), "show": target_show(p, t, rec.get("commit") or ""),
                             "time": rec.get("time"), "task": rec.get("task"), "version": rec.get("version")}}
     if t.error:
@@ -5109,9 +5110,9 @@ def target_facts(p, t, main, s):
                          for r, sha in pairs)
     commit = target_commit(p, t, revs)
     out["commit"] = {"sha": commit, "show": target_show(p, t, commit), "subject": subject}
-    if rec and rec.get("revs"):
-        try:  # what a deploy now would ship: its repos' commits since the last deploy, newest first
-            mine = target_span(p, t, revs, rec)
+    mine, out["since"] = target_span(p, t, revs, rec)
+    if mine is not None:
+        try:  # what a deploy now would ship: its repos' commits since the previous release or last deploy, newest first
             out["behind"] = sum(int(r.git("rev-list", "--count", f"{old}..{sha}")) for r, old, sha in mine)
             out["log"] = target_log(mine)
         except RuntimeError:  # the recorded commit is gone (a rewritten history): what it would ship is unknown
@@ -5121,9 +5122,54 @@ def target_facts(p, t, main, s):
     return out
 
 
+def release_pattern(p, t):
+    """Target t's release tags as a glob ("v*"): its own release_tag, else its `from` chain's. None if it has none."""
+    seen = set()
+    while t and t.name not in seen:
+        if t.release_tag:
+            return t.release_tag.replace("{version}", "*")
+        seen.add(t.name)
+        t = next((o for o in p.deploys if o.name == t.from_), None) if t.from_ else None
+    return None
+
+
+def tag_version(pattern, name):
+    """The version in a tag name matching pattern ("v*", "v3.5.2" -> (3, 5, 2)), or () when it has none."""
+    m = re.fullmatch(re.escape(pattern).replace(r"\*", "(.*)"), name)
+    try:
+        return parse_version(m.group(1)) if m else ()
+    except ValueError:
+        return ()
+
+
+def previous_releases(p, t, revs):
+    """{repo sub: tag} per repo of target t: the newest release tag by version that revs descends from, but not one
+    at revs itself (that is the release being made again). Empty when t has no release tags or none is found."""
+    pattern = release_pattern(p, t)
+    if not pattern:
+        return {}
+    at = {r.sub: sha for r, sha in p.pairs(revs)}
+    found = [x for x in tags(p, t, pattern, revs, with_repo=True) if not at[x["repo"]].startswith(x["commit"])
+             and not x["commit"].startswith(at[x["repo"]])]
+    out = {}
+    for x in sorted(found, key=lambda x: (tag_version(pattern, x["name"]), x["ts"]), reverse=True):
+        out.setdefault(x["repo"], x)
+    return out
+
+
 def target_span(p, t, revs, rec):
-    """[(repo, sha it last deployed, sha it would deploy)] for target t's repos."""
-    return [(r, old, sha) for (r, sha), old in zip(p.pairs(revs), rec["revs"].split()) if r in t.parts(p)]
+    """What a deploy of t at revs ships: ([(repo, sha it starts from, sha it would deploy)] for t's repos, the
+    release tag it starts from or None). A repo starts at the previous release tag when t has release tags, else at
+    the sha t last deployed. (None, None) when there is nothing to start from: a first deploy with no tag."""
+    tagged = previous_releases(p, t, revs)
+    old = (rec or {}).get("revs", "").split()
+    old = old if len(old) == len(p.parts) else []
+    mine = [(r, tagged[r.sub]["commit"] if r.sub in tagged else old[k] if old else None, sha)
+            for k, (r, sha) in enumerate(p.pairs(revs)) if r in t.parts(p)]
+    mine = [x for x in mine if x[1]]
+    if not mine:
+        return None, None
+    return mine, ", ".join(x["name"] for x in tagged.values()) or None
 
 
 def target_log(mine):
@@ -5195,15 +5241,16 @@ What ships:
 
 
 def draft_rows(p, t):
-    """What a deploy of t would ship, as the dialog's "What it ships" lists it: [(title, summary or "")], newest
-    first. One row per task (its summary from the tasks table) and one per commit no task made. [] when there is
-    no changelog: a first deploy, a `from` target whose source never deployed, or a recorded commit gone."""
-    rec = deploy_record(p, t.name)
-    if t.error or not rec or not rec.get("revs"):
+    """What a deploy of t would ship, as the dialog's "What it ships" lists it (target_span: since the previous
+    release tag, else the last deploy): [(title, summary or "")], newest first. One row per task (its summary from
+    the tasks table) and one per commit no task made. [] when there is no changelog: a first deploy with no release
+    tag, a `from` target whose source never deployed, or a recorded commit gone."""
+    if t.error:
         return []
     try:
         revs = deploy_input(p, t)
-        rows = titled(p, target_log(target_span(p, t, revs, rec)))
+        mine = target_span(p, t, revs, deploy_record(p, t.name))[0]
+        rows = titled(p, target_log(mine)) if mine else []
     except (ValueError, RuntimeError):
         return []
     ids = [r["task"] for r in rows if r["task"]]
