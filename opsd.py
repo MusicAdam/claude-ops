@@ -5111,15 +5111,25 @@ def target_facts(p, t, main, s):
     out["commit"] = {"sha": commit, "show": target_show(p, t, commit), "subject": subject}
     if rec and rec.get("revs"):
         try:  # what a deploy now would ship: its repos' commits since the last deploy, newest first
-            mine = [(r, old, sha) for (r, sha), old in zip(p.pairs(revs), rec["revs"].split()) if r in t.parts(p)]
+            mine = target_span(p, t, revs, rec)
             out["behind"] = sum(int(r.git("rev-list", "--count", f"{old}..{sha}")) for r, old, sha in mine)
-            out["log"] = sorted(([r.sub, *c] for r, old, sha in mine for c in first_parent_log(r, old, sha)),
-                                key=lambda c: -c[2])
+            out["log"] = target_log(mine)
         except RuntimeError:  # the recorded commit is gone (a rewritten history): what it would ship is unknown
             out["behind"], out["log"], out["log_unknown"] = None, None, True
     if t.version:
         out["version"] = version_facts(p, t, revs)
     return out
+
+
+def target_span(p, t, revs, rec):
+    """[(repo, sha it last deployed, sha it would deploy)] for target t's repos."""
+    return [(r, old, sha) for (r, sha), old in zip(p.pairs(revs), rec["revs"].split()) if r in t.parts(p)]
+
+
+def target_log(mine):
+    """The changelog of a target_span, as changelog() gives it: [[repo or "", short sha, time, subject]], newest
+    first. Raises RuntimeError when a recorded commit is gone."""
+    return sorted(([r.sub, *c] for r, old, sha in mine for c in first_parent_log(r, old, sha)), key=lambda c: -c[2])
 
 
 def deploy_facts(p, main):
@@ -5156,6 +5166,89 @@ def queue_deploy(p, name, version=None, note=None):
             + (f", version {choice}" if choice else "") + "." + (f"\n\n{t.note or 'Note'}:\n{note}" if note else ""))
     return add_task(p.name, body, title, priority=100, kind="deploy",
                     deploy={"target": name, "version": choice, "note": note})
+
+
+# ---------------------------------------------------------------- drafting a deploy's note
+# A target with `note` needs one on every deploy ("What's new"). The Deploy dialog asks for a draft as it opens: one
+# short Claude turn turns what the deploy ships into release notes for the app's users, and you read, edit and click
+# Deploy. Drafting only reads: it never queues anything, so a deploy still starts only on your click.
+
+DRAFT_MAX = 1000  # characters a drafted note may have
+DRAFT_TIMEOUT = 60  # seconds the drafting turn may take before the titles stand in
+DRAFT_MODEL = "sonnet"
+DRAFT_PROMPT = """Write release notes for the end users of an app. They go under the heading "{label}".
+
+Below is what this release ships: one item per change, a title and maybe a summary written by the developer.
+
+Rules:
+- 3 to 8 short bullets in plain language, each starting with "- ".
+- Only changes a user of the app can see or feel. Merge related items into one bullet.
+- Skip internal, plumbing, test, refactor, build and CI items.
+- No task ids, commit shas, file names or internal names.
+- At most {limit} characters in all.
+- Output only the notes: no heading, no preamble, no closing line.
+
+What ships:
+
+{items}
+"""
+
+
+def draft_rows(p, t):
+    """What a deploy of t would ship, as the dialog's "What it ships" lists it: [(title, summary or "")], newest
+    first. One row per task (its summary from the tasks table) and one per commit no task made. [] when there is
+    no changelog: a first deploy, a `from` target whose source never deployed, or a recorded commit gone."""
+    rec = deploy_record(p, t.name)
+    if t.error or not rec or not rec.get("revs"):
+        return []
+    try:
+        revs = deploy_input(p, t)
+        rows = titled(p, target_log(target_span(p, t, revs, rec)))
+    except (ValueError, RuntimeError):
+        return []
+    ids = [r["task"] for r in rows if r["task"]]
+    sums = {x["id"]: x["summary"] for x in q(f"SELECT id,summary FROM tasks WHERE id IN ({','.join('?' * len(ids))})",
+                                              ids)} if ids else {}
+    return [(r["title"], (sums.get(r["task"]) or "").strip()) for r in rows]
+
+
+def claude_text(prompt, model=None, timeout=None):
+    """One headless Claude turn with no tools and no saved session: its text answer, or "" if it failed or ran out
+    of time. For short one-shot jobs; a task's work goes through run_claude."""
+    if limited():
+        return ""
+    cmd = [CLAUDE, "-p", "--output-format", "text", "--tools", "", "--strict-mcp-config", "--no-session-persistence",
+           "--disable-slash-commands", *model_args(model_name(model))]
+    try:
+        r = subprocess.run(cmd, input=prompt, capture_output=True, text=True,
+                           timeout=timeout or DRAFT_TIMEOUT, cwd=str(DATA))
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    return r.stdout.strip() if r.returncode == 0 else ""
+
+
+def cap_note(text):
+    """text cut to DRAFT_MAX characters at a line end where it can be."""
+    if len(text) <= DRAFT_MAX:
+        return text
+    cut = text[:DRAFT_MAX]
+    return cut[:cut.rfind("\n")] if "\n" in cut else cut
+
+
+def draft_note(p, name):
+    """A draft of target name's note from what it ships: {"note", "source": "model" | "titles" | None}. The model's
+    release notes, else a bullet per title when the model fails, times out or says nothing; an empty note when
+    there is no changelog, and the owner writes it."""
+    t = p.target(name)
+    rows = draft_rows(p, t)
+    if not rows:
+        return {"note": "", "source": None}
+    items = "\n".join(f"- {title}" + (f"\n  {' '.join(summary.split())[:600]}" if summary else "")
+                      for title, summary in rows)
+    text = claude_text(DRAFT_PROMPT.format(label=t.note or "What's new", limit=DRAFT_MAX, items=items), DRAFT_MODEL)
+    if text:
+        return {"note": cap_note(text), "source": "model"}
+    return {"note": cap_note("\n".join(f"- {title}" for title, _ in rows)), "source": "titles"}
 
 
 def dlog(tid, text):
@@ -8437,6 +8530,8 @@ class H(BaseHTTPRequestHandler):
             tid = queue_deploy(p, b["target"], b.get("version"), b.get("note"))
             stale_facts(p.name)
             return {"id": tid}
+        if path == "/api/deploys/draft":  # the Deploy dialog's note, drafted from the changelog: queues nothing
+            return draft_note(proj(b["project"]), b["target"])
         if path == "/api/pause-all":
             return pause_all()
         if path == "/api/resume-all":

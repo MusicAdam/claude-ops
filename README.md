@@ -208,7 +208,8 @@ daemon runs it for you.
 name = "swish test"                 # required, unique in the project
 repo = "ballup-swish"               # workspace only: the repo it deploys; it runs in that folder
 run = "bin/swish build && bin/swish upload"   # required; non-zero exit fails the deploy
-note = "What's new"                 # optional: then a note is required, passed as OPS_NOTE and OPS_NOTE_FILE
+note = "What's new"                 # optional: then a note is required, passed as OPS_NOTE and OPS_NOTE_FILE;
+                                    # the Deploy dialog drafts it from the changelog for you to approve
 version = "node -p \"require('./package.json').version\""   # optional: prints the current version, X.Y[.Z]
 release_tag = "v{version}"          # optional, needs version: the tag that marks a version as released
 build_tags = "build/*/{version}+*"  # optional, needs version: the tags its builds leave
@@ -222,7 +223,21 @@ run = "bin/swish release"
 
 - **Only on your click.** A deploy starts only from the dashboard, `POST /api/deploys`, or
   `./opsd.py deploy -p <project> <target> [--version …] [--note …]`. Never from a release, Promote after merge, a
-  worker or a design chat, and nothing that queues follow-ups can make one.
+  worker or a design chat, and nothing that queues follow-ups can make one. Drafting the note queues nothing.
+- **The note is drafted for you.** For a target with `note`, the Deploy dialog fills the note box with a draft as it
+  opens, and says "Drafting from the changelog…" while it waits. You read it, edit it if you like, and clicking
+  **Deploy** approves it. The draft comes from what the deploy ships, the rows under "What it ships" (for a `from`
+  target, what its source deployed since this target's last deploy): each task's title and its summary, and the
+  subject of each commit no task made. One short Claude turn (`claude -p`, Sonnet, no tools, at most 60 seconds)
+  turns them into 3 to 8 plain bullets for the app's users, user-visible changes only, at most 1000 characters.
+  - If Claude fails, takes too long or says nothing, the draft is one `- title` line per row, cut to 1000 characters.
+  - With no changelog (a first deploy, or the last deployed commit gone) nothing is drafted: you type it, as before.
+  - A draft never replaces what you typed: if you type before it arrives, it stays out of the box. **Redraft**, by
+    the box, asks for a new draft, and asks before replacing text you changed.
+  - The note is still required: `POST /api/deploys` refuses an empty one, and Deploy stays off until the box has
+    text. `opsd.py deploy` drafts nothing and still needs `--note`.
+  - `POST /api/deploys/draft {project, target}` answers `{note, source}`: `source` is `"model"`, `"titles"`, or
+    `null` with an empty note when there is no changelog.
 - **Like a release, it goes ahead of other work.** Its title reads `Deploy swish test → 3.5.0`. The task page shows
   its step, its events and `deploy.log`. You get notified when it needs you, fails or succeeds.
 - **One at a time.** A project runs one deploy at a time; a later click queues behind it. A release and a deploy of the
@@ -273,7 +288,7 @@ run = "bin/swish release"
   shows what the target last shipped (commit, when, its task), how far behind main (or its `from` target) it is, and
   for a target with `version` the current version, whether it is released and the newest build tag. **Deploy** opens
   a dialog with the commit it will ship, a version picker (new build, patch, minor, major, or another X.Y.Z), and the
-  note when the target asks for one. While a deploy of the project is open, each button reads `Deploying… #N` and
+  note, drafted for you, when the target asks for one. Today's **Ship** step opens the same dialog. While a deploy of the project is open, each button reads `Deploying… #N` and
   links to it; **Queue deploy** next to it queues another behind it. Deploy tasks are marked `deploy` in the task list,
   and a deploy's task page shows its log in place of the worker activity.
 - **In `/api/state`.** Each project's `deploys` lists every target: its config and any config error, the last
