@@ -1153,11 +1153,13 @@ const USAGE_LEN = {five_hour: 18000, seven_day: 604800};
 const PACE_WARN = 10;  // points below an even pace that still show yellow
 // Where usage would be at an even pace (pace %, from how much of the window has passed), how far ahead of it usage
 // is (lead, in points), and its tone: "ahead" (red), "near" (yellow, within PACE_WARN below) or "ok" (green).
+// The 5-hour window's even pace runs up to the usage brake when it is on (brake > 0), every other one up to 100.
 // null with no live window: it has reset, or its reset or length is unknown.
-function usagePace(w, nowMs) {
+function usagePace(w, nowMs, brake) {
   const len = USAGE_LEN[w.key];
   if (!len || !w.resetsAt || w.resetsAt * 1000 <= nowMs) return null;
-  const pace = Math.min(100, Math.max(0, (len - (w.resetsAt - nowMs / 1000)) / len * 100));
+  const end = w.key === "five_hour" && brake > 0 ? brake : 100;
+  const pace = Math.min(end, Math.max(0, (len - (w.resetsAt - nowMs / 1000)) / len * end));
   const lead = (w.exact ?? w.pct) - pace;
   return {pace, lead, tone: lead > 0 ? "ahead" : lead >= -PACE_WARN ? "near" : "ok"};
 }
@@ -1175,7 +1177,7 @@ function renderUsage() {
     (u.brake ? `\nBrake at ${u.brake}%: no new tasks start at or above it.` : "\nBrake off.");
   put(el, u.windows.map(w => {
     const cls = state.limit ? "danger" : u.brake && w.pct >= u.brake ? "alert" : "";
-    const p = w.resets ? usagePace(w, Date.now()) : null;
+    const p = w.resets ? usagePace(w, Date.now(), u.brake) : null;
     const tip = `Claude usage, ${w.label} window: ${w.pct}% used` + (w.resets ? `, resets ${w.resets}.` : " (reset since).") +
       (p ? `\n${paceWords(p)}` : "") + tail;
     return `<span class="st ${cls}" data-tip="${esc(tip)}">${esc(w.short)} <span class="bar"><i${p ? ` class="p-${p.tone}"` : ""} style="width:${Math.min(100, Math.max(0, w.pct))}%"></i>` +

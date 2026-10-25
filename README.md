@@ -1432,7 +1432,7 @@ notes = """Project-specific guidance for design chats."""
 - **Usage meters and pace.** The 5h and 7d chips each have a bar filled to the window's percent used. A thin
   vertical line in the bar marks the pace: where usage would be now if it were spread evenly over the window
   (pace % = time passed / window length, 5 hours or 7 days, worked out in the browser from the reset time and
-  redrawn at least once a minute). The fill's colour says how usage compares with the pace: **red** when it is
+  redrawn at least once a minute; for the 5-hour window with the usage brake on, times the brake instead of 100). The fill's colour says how usage compares with the pace: **red** when it is
   ahead, **yellow** when it is up to 10 points below (`PACE_WARN` in `dashboard.html`), **green** when it is
   further below. The tooltip adds `Pace 50% · 10 points ahead` (or `behind`, or `on pace` within 1 point). A
   window that has reset shows no line, the default fill and no pace line in the tooltip. The brake and limit
@@ -1579,20 +1579,26 @@ notes = """Project-specific guidance for design chats."""
   - **Usage taper.** Below the brake, the queue starts fewer workers as the 5-hour window fills, so it reaches
     the brake more slowly. The setting `usage_taper` is a percent: default 50, 0 turns the taper off. Set it as
     **Taper from** on the Settings tab (`POST /api/settings {"usage_taper": 50}`, clamped to 0..100). Let pct be the
-    5-hour window's exact percent. When the taper is on and pct is above it, the taper cap is
-    `max(1, max_parallel - ceil((pct - usage_taper) / 10))`; otherwise there is no taper cap. With
-    `max_parallel` 6, taper 50 and brake 85:
+    5-hour window's exact percent, and let end be `usage_brake` (or 100 with the brake off). When the taper is on,
+    pct is above it and end is above it, the taper cap is
+    `max(1, max_parallel - ceil((pct - usage_taper) * (max_parallel - 1) / (end - usage_taper)))`, so the cap
+    steps evenly from `max_parallel` at Taper from down to 1 just under the brake. Otherwise there is no taper cap:
+    with the taper off, at or below Taper from, or with the brake at or below Taper from (the taper has no room).
+    With `max_parallel` 6, taper 50 and brake 85 (steps of 7 points):
 
     | 5-hour usage | workers that start Claude |
     |---|---|
     | 0–50% | 6 |
-    | 50.x–60% | 5 |
-    | 60.x–70% | 4 |
-    | 70.x–80% | 3 |
-    | 80.x–84.x% | 2 |
+    | 50.x–57% | 5 |
+    | 57.x–64% | 4 |
+    | 64.x–71% | 3 |
+    | 71.x–78% | 2 |
+    | 78.x–84.x% | 1 |
     | 85%+ | 0 (the brake) |
 
-    With `max_parallel` 3: 51–60% → 2, 61% and up → 1. The rules:
+    With `max_parallel` 3, taper 50 and brake 85: 50.x–67.5% → 2, above 67.5% → 1. With the brake off and
+    `max_parallel` 6, the steps are 10 points each, ending at 100. With `max_parallel` 1 the cap is always 1, so
+    nothing changes. The rules:
     - It follows the **5-hour window only**; the 7-day window keeps only the brake. A stale reading counts as 0.
     - It limits only **new starts of tasks that start a Claude session** (the same ones the brake holds). The
       running Claude workers are the running tasks that are not a deploy or release; a Claude-starting task starts
@@ -1600,13 +1606,16 @@ notes = """Project-specific guidance for design chats."""
       `claude` start as before, up to `max_parallel`. Running work is never stopped, chats are never held, and a
       project's own `max_parallel` still applies.
     - The brake wins: at or above `usage_brake` nothing that starts Claude starts. With the brake off (0) the
-      taper still works on its own, never below 1.
+      taper still works on its own, spread up to 100%, never below 1.
     - No notification: only the brake notifies. A task held only by the taper says
       `Usage at 63% of the 5-hour window · 4 of 6 workers`, and while the cap is below `max_parallel` the header
       meter's hover adds `Tapering: 4 of 6 workers`. While tapering the header's working chip also shows the cap as
       its denominator (`3/4 working`), and its hover names the Parallel setting it lowers.
   - **The header meter** shows both windows, `5h 62% · 7d 14%`, with their reset times on hover. It turns amber at
-    or above the brake, and red while the queue waits out the usage limit itself.
+    or above the brake, and red while the queue waits out the usage limit itself. Its pace line (see **Usage meters
+    and pace**) runs up to the brake for the 5-hour window, so it says whether usage is on track to reach the brake,
+    not 100%, when the window resets: at brake 85, halfway through the window the pace is 42.5%. With the brake off
+    the 5-hour line runs up to 100%, and the 7-day line always does.
 - **Restarts.** Whenever the daemon stops (`./opsctl restart` or `stop`, a promote of claude-ops, launchd, a
   `kill`), it pauses every running task the same way, lets a merge finish, and exits. The next daemon resumes
   those tasks on its own, each in the same Claude session (or a fresh one after a long wait: see **Fresh

@@ -49,23 +49,47 @@ class Base(unittest.TestCase):
 
 class Taper(Base):
     def test_cap_steps_with_six_workers(self):
-        for pct, want in ((50, None), (50.5, 5), (60, 5), (61, 4), (84, 2)):
+        # most 6, taper 50, brake 85: steps of 7 points, exact boundaries on the lower step
+        for pct, want in ((50, None), (50.5, 5), (57, 5), (57.1, 4), (64, 4), (64.1, 3), (71, 3), (71.1, 2), (78, 2),
+                          (78.1, 1), (84.9, 1)):
             self.five(pct)
             self.assertEqual(self.cap(), want, pct)
         self.five(85)
         info = opsd.usage_info()
         self.assertTrue(info["braked"])  # the brake takes over at 85
-        self.assertEqual(opsd.usage_taper_cap(63, 50, 6), 4)
+        self.assertEqual(opsd.usage_taper_cap(63, 50, 6, 85), 4)
+
+    def test_pure_boundaries(self):
+        cap = opsd.usage_taper_cap
+        for pct in range(51, 85):  # every whole-percent boundary of the table above
+            self.assertEqual(cap(pct, 50, 6, 85), 6 - -(-(pct - 50) // 7), pct)
+        self.assertEqual([cap(p, 50, 3, 85) for p in (50, 50.1, 67.5, 67.6, 84)], [None, 2, 2, 1, 1])
+        self.assertEqual([cap(p, 50, 6, 0) for p in (60, 60.1, 90, 90.1, 99)], [5, 4, 2, 1, 1])  # brake off: to 100
+        self.assertEqual([cap(p, 50, 6, 100) for p in (60, 60.1)], [5, 4])
+        self.assertIsNone(cap(70, 50, 6, 50))  # brake at Taper from: no room
+        self.assertIsNone(cap(70, 50, 6, 40))  # brake below it
+        self.assertIsNone(cap(70, 0, 6, 85))  # taper off
+        self.assertEqual([cap(p, 50, 1, 85) for p in (51, 70, 84)], [1, 1, 1])  # most 1: always 1
 
     def test_floor_is_one(self):
         opsd.set_setting("max_parallel", "3")
-        for pct, want in ((51, 2), (60, 2), (61, 1), (84, 1)):
+        for pct, want in ((51, 2), (67.5, 2), (67.6, 1), (84, 1)):
             self.five(pct)
             self.assertEqual(self.cap(), want, pct)
-        opsd.set_setting("usage_brake", "0")  # the taper alone, never below 1
-        self.five(99)
-        self.assertEqual(self.cap(), 1)
+        opsd.set_setting("usage_brake", "0")  # the taper alone, spread to 100, never below 1
+        for pct, want in ((75, 2), (75.1, 1), (99, 1)):
+            self.five(pct)
+            self.assertEqual(self.cap(), want, pct)
         self.assertFalse(opsd.usage_info()["braked"])
+
+    def test_no_room_and_most_one(self):
+        opsd.set_setting("usage_brake", "50")
+        self.five(49)
+        self.assertIsNone(opsd.usage_info()["taper"])  # brake at Taper from: no taper
+        opsd.set_setting("usage_brake", "85")
+        opsd.set_setting("max_parallel", "1")
+        self.five(80)
+        self.assertIsNone(opsd.usage_info()["taper"])  # cap 1 of 1 is no change
 
     def test_off_seven_day_and_stale(self):
         opsd.set_setting("usage_taper", "0")
@@ -141,8 +165,8 @@ class Schedule(Base):
         self.assertEqual([opsd.task(i)["state"] for i in queued[2:]], ["queued", "queued"])
 
     def test_deploys_and_resumes_start_while_tapered(self):
-        self.five(75)  # cap 3 of 6
-        for _ in range(3):
+        self.five(75)  # cap 2 of 6
+        for _ in range(2):
             self.add(state="running")
         held = self.add()
         dep = self.add("deploy")
