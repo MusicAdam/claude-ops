@@ -1284,6 +1284,53 @@ hold, priority, model, effort); `POST /api/schedules/<id>/run`, `/pause`, `/resu
 
 A recurring research job is a schedule with `research` set: see RES-6. The research repo's old daily job becomes one once the research repo is a project (RES-7).
 
+For one task that should start later, not a timetable, see [Start later](#start-later).
+
+## Start later
+
+A task can wait in the queue until a time you choose: "start this tomorrow at 09:00", or "start this after the next
+usage-limit reset", so a big task gets a fresh 5-hour window. The task's `not_before` (epoch seconds) holds the time.
+
+```bash
+./opsd.py add -p myrepo --at "tomorrow 09:00" "Upgrade the build"
+./opsd.py add -p myrepo --after-reset "Rewrite the parser"
+./opsd.py send myrepo --at "fri 18:00" "Run the long benchmark"   # tasks only
+```
+
+- **At a time.** Local wall-clock time, in one of these forms:
+  - `2026-10-26 09:00` or `2026-10-26T09:00`: that date and time.
+  - `HH:MM`: today, or tomorrow when that time has passed.
+  - `<day> HH:MM`, with day `mon` … `sun`, `today` or `tomorrow`: the next such day. Today's slot counts only
+    while it is still ahead (`today 09:00` at 10:00 is refused).
+
+  A time in the past, or one it can't read, is refused with a 400 that lists the forms. A past time is refused so
+  that a typo can't start the task at once.
+- **After the next reset** (`reset`, or `--after-reset`). The time is fixed **when you queue the task**: the
+  window's `resetsAt` plus `LIMIT_GRACE` (60 s), the same minute the queue waits after a limit. The window, in this
+  order:
+  1. the limit the queue is waiting out (`limit_info()`), if there is one;
+  2. else the window holding the usage brake (`usage_info()["braked"]`), if braked;
+  3. else the live 5-hour reading.
+
+  With no live reading at all it is refused: "no usage reading yet: give a time instead". The task's log says what
+  it waits for, such as `waits for the 5-hour reset: starts after 15:01`.
+- **Once due, it is an ordinary queued task.** The scheduler skips a queued task while now is before `not_before`.
+  After that it takes its normal place in the queue (priority, then id): it never jumps ahead of tasks that were
+  waiting before it. The brake, taper, pace cap, `after`, the project's `max_parallel` and a project pause all apply
+  as usual.
+- **Where to see it.** The queue row and the task page say "waits until Tue 09:00" (or "waits for the 5-hour
+  reset · 15:01") with a **Start now** button. Start now (`POST /api/tasks/<id>/start-now`) clears `not_before`,
+  and logs it, so the task starts in its normal place.
+- **From the dashboard.** The New task form's **Start** control: now, at… (a date and time), or after next reset.
+- **From a chat.** A `queue` block item may carry `"not_before"`: a time as above, `"reset"`, or an epoch number. A
+  value the daemon can't use is reported back in the next message, and that task queues to start now.
+- **Why not a one-off schedule?** A schedule makes no task until its time comes. A task that starts later is in the
+  queue from the moment you add it: you can see it, queue other tasks `after` it, and start it early.
+- You can't change the time once it is queued, apart from Start now.
+
+API: `POST /api/tasks` takes `not_before`: a time string as above, `"reset"`, or a number (epoch seconds).
+`/api/state` task rows carry `not_before`.
+
 ## Workspaces
 
 A workspace is a folder of separate git repos that work together, such as `~/dev/ballup-monorepo` with a
