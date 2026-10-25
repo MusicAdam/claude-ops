@@ -1030,7 +1030,8 @@ def init_db():
                       ("session_model", "TEXT"),  # the model its session started on; every resume keeps it
                       ("effort", "TEXT"),  # and before effort per task: null takes the setting effort (see effort_for)
                       ("last_call", "REAL"), ("ctx_tokens", "INTEGER"),  # its session's last call (see stale_session)
-                      ("research", "TEXT")):  # a research run: {question, tier, slug, path, read} as JSON (RES-1)
+                      ("research", "TEXT"),  # a research run: {question, tier, slug, path, read} as JSON (RES-1)
+                      ("reports", "TEXT")):  # reports its done result listed: [{path, read}] as JSON (RES-10)
         if col not in cols:
             q(f"ALTER TABLE tasks ADD COLUMN {col} {decl}")
     q("CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY, task_id INTEGER, ts REAL, text TEXT)")
@@ -2338,6 +2339,9 @@ def _pipeline(p, tid):
             if pending_steers(tid):  # sent as the worker finished
                 prompt = steered_prompt("as you finished")
                 continue
+            if "reports" in res:  # files it wrote for you to read: Read to-dos once it merges (RES-10)
+                if said := set_reports(tid, res["reports"]):
+                    ev(tid, said)
             if res.get("followups"):  # steps for after this merges, queued behind it; only a done result has them
                 if ids := add_followups(p, tid, res["followups"]):
                     ev(tid, "follow-ups: " + ", ".join(f"#{i}" for i in ids))
@@ -3492,6 +3496,43 @@ def research_of(t):
     return r if isinstance(r, dict) else None
 
 
+REPORTS_MAX = 5
+
+
+def reports_of(t):
+    """The reports a task's done result listed (RES-10), as [{path, read}], or [] for none."""
+    r = t.get("reports") if t else None
+    if isinstance(r, str):
+        try:
+            r = json.loads(r)
+        except ValueError:
+            return []
+    return [x for x in r if isinstance(x, dict) and x.get("path")] if isinstance(r, list) else []
+
+
+def set_reports(tid, given):
+    """Store a done result's "reports" on the task, replacing an earlier round's (RES-10): non-empty relative paths
+    with no .., normalised, at most REPORTS_MAX, and not the research report it has already. Returns the event to log,
+    or "" when there is nothing to say."""
+    t = task(tid)
+    own = (research_of(t) or {}).get("path")
+    keep, dropped = [], []
+    for x in given if isinstance(given, list) else [given]:
+        rel = os.path.normpath(x.strip()) if isinstance(x, str) and x.strip() else None
+        if not rel or os.path.isabs(rel) or ".." in Path(rel).parts or rel == ".":
+            dropped.append(repr(x)[:80])
+        elif len(keep) >= REPORTS_MAX:
+            dropped.append(f"{rel} (more than {REPORTS_MAX})")
+        elif rel != own and rel not in keep:
+            keep.append(rel)
+    old = {x["path"]: x.get("read") for x in reports_of(t)}  # a report read already stays read
+    upd(tid, reports=json.dumps([{"path": r, "read": old.get(r)} for r in keep]) if keep else None)
+    said = ("reports: " + ", ".join(keep)) if keep else ""
+    if dropped:
+        said += ("; " if said else "") + "dropped reports: " + ", ".join(dropped)
+    return said
+
+
 def report_rel(p, slug):
     """Where a report goes, relative to a task worktree: docs/research/<slug>.md, in the first repo of a workspace."""
     return f"{p.parts[0].prefix}{RESEARCH_DIR}/{slug}.md"
@@ -3661,10 +3702,23 @@ def report_read(project, path, merged_only=False):
     proj(project)
     path = os.path.normpath(path.strip()) if path and path.strip() else ""
     only = " AND state='done' AND merged IS NOT NULL AND merged!=''" if merged_only else ""
-    return [r["id"] for r in q("UPDATE tasks SET research=json_set(research, '$.read', ?) WHERE project=? AND "
-                               "research IS NOT NULL AND json_extract(research, '$.path')=? AND "
-                               f"json_extract(research, '$.read') IS NULL{only} RETURNING id",
-                               (time.time(), project, path))]
+    now = time.time()
+    ids = [r["id"] for r in q("UPDATE tasks SET research=json_set(research, '$.read', ?) WHERE project=? AND "
+                              "research IS NOT NULL AND json_extract(research, '$.path')=? AND "
+                              f"json_extract(research, '$.read') IS NULL{only} RETURNING id", (now, project, path))]
+    for t in reports_with(project, path, only):  # and a report any task listed (RES-10)
+        rs = reports_of(t)
+        if any(x["path"] == path and not x.get("read") for x in rs):
+            upd(t["id"], reports=json.dumps([{**x, "read": now} if x["path"] == path and not x.get("read") else x
+                                             for x in rs]))
+            ids.append(t["id"])
+    return ids
+
+
+def reports_with(project, path, only=""):
+    """The tasks of project whose listed reports (RES-10) include path."""
+    return q("SELECT id,reports FROM tasks WHERE project=? AND reports IS NOT NULL AND EXISTS (SELECT 1 FROM "
+             f"json_each(reports) WHERE json_extract(value, '$.path')=?){only}", (project, path))
 
 
 def report_mark(project, path):
@@ -3675,6 +3729,8 @@ def report_mark(project, path):
     already = [r["id"] for r in q("SELECT id FROM tasks WHERE project=? AND research IS NOT NULL AND "
                                   "json_extract(research, '$.path')=? AND json_extract(research, '$.read') IS NOT "
                                   "NULL", (project, path)) if r["id"] not in marked]
+    already += [t["id"] for t in reports_with(project, path) if t["id"] not in marked and t["id"] not in already
+                and any(x["path"] == path and x.get("read") for x in reports_of(t))]
     return {"ok": True, "path": path, "marked": marked, "already": already}
 
 
@@ -8242,6 +8298,10 @@ def todos_list(tasks, projects, last, now=None):
                 out.append(item(f"task:{t['id']}:try", "Try", why="Play it, then approve or send it back"))
             else:
                 out.append(item(f"task:{t['id']}:review", "Review", why="Read the diff and summary, then approve"))
+        if st == "done" and t["merged"]:  # the reports it listed (RES-10), next to RES-5's own
+            dev = getattr(PROJECTS.get(t["project"]), "dev", "dev")
+            out += [{**item(f"task:{t['id']}:report:{x['path']}", "Read", why=f"Report {x['path']} merged into {dev}"),
+                     "report": {"path": x["path"]}} for x in reports_of(t) if not x.get("read")]
     for f in projects:
         if f.get("error"):
             continue
@@ -8286,7 +8346,7 @@ def todos_list(tasks, projects, last, now=None):
 def state_payload():
     tasks = q("SELECT id,project,title,state,phase,priority,hold,depends_on,parent,created,started,"
               "finished,cost,rounds,summary,question,error,merged,branch,kind,auto_release,origin,paused_by,start_at,"
-              "model,session_model,effort,research FROM tasks "
+              "model,session_model,effort,research,reports FROM tasks "
               "ORDER BY id DESC LIMIT 500")
     # What each task is doing right now, for the status line under it in the list.
     # Per listed task, one index lookup (events_task): a GROUP BY over every event scanned the whole table.
@@ -8307,6 +8367,7 @@ def state_payload():
         t["wait"] = waits.get(t["id"])
         t["origin"] = origin_view(t["origin"])
         t["research"] = research_of(t)
+        t["reports"] = reports_of(t) or None
     projects = []
     for p in PROJECTS.values():
         try:

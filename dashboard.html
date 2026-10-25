@@ -3643,9 +3643,10 @@ function tdResearchList(sd) {
     + `<h3>Reports</h3>${reps || `<div class="muted">No reports yet on ${dev}. New research writes one to docs/research/.</div>`}`
     + `<h3>Recurring research</h3>${sch || `<div class="muted">None. Pick a repeat in New research to add one.</div>`}`;
 }
-// Open report and Mark read (RES-5): the report's Read step leaves the list at once, before the mark returns, and
-// comes back with the reason, where the other to-do actions show theirs, only if the mark fails or finds no report
-// to mark. The server also marks it read when it serves the file.
+// Open report and Mark read (RES-5, RES-10): the report's Read step leaves the list at once, before the mark returns,
+// and comes back with the reason, where the other to-do actions show theirs, only if the mark fails or finds no
+// report to mark. Steps match by path, so a research report and a listed one (task:<id>:report:<path>) both go.
+// The server also marks it read when it serves the file.
 async function tdOpenReport(project, path, open = true) {
   const mine = x => x.report && x.report.path === path && x.project === project;
   const gone = (state.todos || []).filter(mine), was = TD.key;
