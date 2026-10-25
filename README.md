@@ -904,13 +904,17 @@ Below 700px Today is phone-first. The rules:
 - **HDR-2 Step card.** Compact by default, about 100px: one top row with **‹ To-do**, **Step k of n · project**,
   **Details ▾** and **Skip →** (and **Unpark** for a parked item, **Unskip** for a skipped one); then the title; then one row of action buttons
   that scrolls sideways, ending in the note field and **Wait for…** (TODO-6). The why and the facts open under **Details ▾**.
+  The title is cut at two lines; **Details ▾** shows it whole, and a title over about 50 characters brings **Details ▾**
+  even when there is no why or facts.
 - **Sending a message.** In the Today composer, the Design and Chat tabs' message box, and a task page's ask or
   steer box, **Enter** sends, **Shift+Enter** or **Alt/Option+Enter** adds a line, and **⌘/Ctrl+Enter** also sends.
   Enter never sends while an input method (IME) is composing. On a touch screen **Enter** adds a line and you send
   with the **↑** or **Send** button. With the `/` list open, Enter picks the command. The new-task brief, the
   research question and the deploy confirm still send on **⌘/Ctrl+Enter**.
 - **HDR-3 Composer.** One row: attach (📎), the message box (it grows to at most 4 lines) and an **↑** send
-  button. **New topic**, the line that says where a message goes, and the project picker sit above it.
+  button. **New topic**, the line that says where a message goes, and the project picker sit above it. The lines
+  over the messages (where a chat runs and its resume command, **Started by**, **Read the change**, a design's
+  **Documents**) wrap rather than being cut off; past three lines they scroll.
 - **HDR-4 Room to talk.** While a step is open the conversation gets at least 60% of the screen height; the step
   card scrolls inside what is left. A long conversation never pushes the composer off the screen.
 - **PHONE-2 Back.** **‹ To-do** returns to the list, and so do **To-do** in the bottom bar and the phone's back
@@ -925,7 +929,9 @@ Below 700px Today is phone-first. The rules:
   doesn't drag the page or set off pull-to-refresh. Nothing scrolls sideways except the step's action row; tab rows that could overflow hide
   their scrollbar and still scroll sideways.
 - **PHONE-4 Quick chat.** The quick chat (TODAY-6) opens full screen, with no drag or resize. Minimise and
-  close work as on a desktop.
+  close work as on a desktop, except where a minimised one waits: on Today the pill would cover the **↑** send
+  button, so the header's **Ask** turns blue instead (with an orange dot when Claude replied), and tapping it
+  brings the chat back. The other pages keep the pill.
 - **PHONE-5 Earlier topics and Ended.** They sit where they do on a computer, at the top of the conversation in
   the **Now** pane, for the project of the conversation shown. To reach another project's, or any when the list is
   empty, use **Earlier topics and Ended** at the bottom of the **To-do** pane: one chip per project the header
@@ -933,6 +939,10 @@ Below 700px Today is phone-first. The rules:
   and tap **Reopen**, or tap the topic to open it. With a to-do open, the step stays and only the conversation
   moves (as Ask Claude about this moves it); tapping that to-do in the list brings back its own conversation. The
   chips are phone-only: a computer shows the conversation beside the list.
+- **PHONE-6 Parity.** A phone's Today can do everything a computer's can, except what HDR-1 leaves out on purpose
+  (the queue readouts and pause buttons). Anything new on Today must say how it works below 700px: where it sits,
+  and that nothing hides it (a `display: none`, a one-line cut-off, or the bottom bar, the message box or the
+  keyboard over it). Sideways scrolling is only for the step's action row and the chip rows.
 
 ## Chat mode
 

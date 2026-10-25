@@ -607,12 +607,13 @@ details.tdparked .tditem { opacity: .8; }
   .stepcard .ph { display: inline-flex; }
   /* PHONE-2: ‹ To-do stays in view however the card scrolls or the conversation grows */
   .stepcard .top { display: flex; align-items: center; gap: 6px; position: sticky; top: 0; z-index: 1; background: var(--panel);
-                  box-shadow: 0 -12px 0 var(--panel); }  /* covers the card padding above it */
+                  box-shadow: 0 -6px 0 var(--panel); }  /* covers the card's 6px padding above it, not its border */
   .stepcard .top .k { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-transform: none; letter-spacing: 0; }
   .stepcard .top button { flex: none; padding: 1px 8px; font-size: 13px; white-space: nowrap; }
   .stepcard .top .back, .stepcard .top .skip { border-color: transparent; background: none; color: var(--accent); padding: 2px 4px; }
   .stepcard .top .skip { margin: 0; color: var(--muted); }
   .stepcard h2 { font-size: 15px; line-height: 1.3; margin: 2px 0 0; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+  .stepcard.open h2 { display: block; overflow: visible; }  /* Details ▾ shows the whole title */
   .stepcard h2 .verb { margin-right: 6px; }
   .stepcard .dets { display: none; }
   .stepcard.open .dets { display: block; }
@@ -624,7 +625,10 @@ details.tdparked .tditem { opacity: .8; }
   .stepcard .row > .tdnote { flex: 1 0 150px; }
   .stepcard .tdwaitbox { margin-top: 6px; } .tdwaitbox .wlist { max-height: 6.5em; }
   /* The conversation: messages may wrap anywhere, never widen the page */
-  #tdcentre #chathead { margin: 0 0 6px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* Where a chat runs and its resume command, Sent by, Read the change, a design's Documents: wrapped, never cut off;
+     past three lines it scrolls */
+  #tdcentre #chathead { flex: none; margin: 0 0 6px; max-height: calc(3 * 1.45em); line-height: 1.45; overflow: auto;
+                        overflow-wrap: anywhere; overscroll-behavior: contain; }
   #tdcentre #msgs { overflow-x: hidden; }
   #tdcentre .msg { overflow-wrap: anywhere; padding: 8px 10px; }
   #tdcentre .msg table { display: block; overflow-x: auto; }
@@ -681,6 +685,11 @@ details.tdparked .tditem { opacity: .8; }
         padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); }
   #qcbar { cursor: default; } .qcgrip { display: none; }
   #qcpill { bottom: calc(64px + env(safe-area-inset-bottom)); }
+  /* On Today the pill would cover the ↑ send button: minimised, the quick chat waits behind the header's Ask */
+  body.td #qcpill { display: none; }
+  body.td #askbtn.qcmin { color: var(--accent); border-color: var(--accent); }
+  body.td #askbtn.qcdot::after { content: ""; display: inline-block; width: 7px; height: 7px; margin-left: 5px; border-radius: 50%;
+                                 background: var(--warn); vertical-align: middle; }
 }
 </style>
 </head>
@@ -2943,7 +2952,8 @@ function tdStep(it, shown) {
   const playErr = acts.some(b => /^(play|stop):/.test(b.a)) && pl && pl.error && !pl.phase
     ? `${pl.stop ? "Stop" : "Play"} ${pl.where === "dev" ? g.dev_branch : g.main_branch} failed: ${pl.error}` : "";
   // On a phone the top row also has ‹ To-do, Details ▾ (the why and the facts, closed at first) and Skip →
-  const dets = !!(it.why || facts), note = tdNoteVal(it);
+  // A title past about 50 characters is cut at two lines there: Details ▾ also shows it whole
+  const dets = !!(it.why || facts || it.title.length > 50), note = tdNoteVal(it);
   const skipTip = note.trim() ? "Park it with this note: it moves to Parked until you unpark it, or the task it names ends"
     : "Move it to the end of the list until midnight. With a note, it parks instead";
   const noteIn = `<input class="tdnote" data-tdnote data-fld="note" maxlength="300" placeholder="Note to self, e.g. wait for #249" value="${esc(note)}" title="Saves as you type">`;
@@ -3937,7 +3947,8 @@ function qcClose(end = true) {  // every tab, ending their topics
 function qcRender() {
   $("#qc").classList.toggle("hidden", !QC.on || QC.min);
   $("#qcpill").classList.toggle("hidden", !QC.on || !QC.min);
-  if (!QC.on || !state || !qcTab()) return;
+  $("#askbtn").classList.toggle("qcmin", QC.on && QC.min);  // a phone's Today shows it there, not as the pill
+  if (!QC.on || !state || !qcTab()) return $("#askbtn").classList.remove("qcdot");
   const ps = state.projects, t = qcTab(), title = n => P(n).title;
   for (const x of QC.tabs)
     if (!x.project || (!x.did && !ps.some(p => p.name === x.project))) {
@@ -3946,6 +3957,7 @@ function qcRender() {
   const d = t.d && t.d.id === t.did ? t.d : null, thinking = !!d && d.state === "thinking";
   if (!QC.min && d && t.seen !== d.msgs.length) { t.seen = d.msgs.length; qcSave(); }  // you see it now
   const pl = qcPill(QC.tabs, title);
+  $("#askbtn").classList.toggle("qcdot", QC.min && pl.dot);
   $("#qcpill").innerHTML = `Ask · ${esc(pl.label)}${QC.min && pl.dot ? '<span class="dot" title="Claude replied"></span>' : ""}`;
   if (QC.min) return;
   const pick = $("#qcproj"), html = (t.did && !ps.some(p => p.name === t.project) ? [P(t.project)] : []).concat(ps)
