@@ -1497,6 +1497,38 @@ run = "bin/release test"           # in <worktrees>/deploy (or its repo folder);
 notes = """Project-specific guidance for design chats."""
 ```
 
+## Worktree cleanup
+
+Each task works in `<worktrees>/t<id>`. When does it go?
+
+- **Done:** removed when the task merges.
+- **Failed or cancelled:** kept for 7 days (`SPENT_KEEP_DAYS`), because **Retry** resumes the worker in the same
+  worktree, uncommitted work and all. The task's log says `worktree kept 7 days for a retry, then removed`. The
+  branch stays after removal, so a later retry makes a fresh worktree from it.
+- **Removal is checked.** `remove_worktree` runs `git worktree remove --force` in each repo, then deletes whatever
+  is left (read-only and locked files too), then prunes. If the folder is still there, the task's log says
+  `couldn't remove worktree …` and the janitor tries again.
+
+**The janitor** (`sweep_worktrees`) runs at startup and every 10 minutes, in the background. In each project it
+removes any folder under `<worktrees>/` that nothing needs. It keeps:
+
+- `dev`, `main`, `deploy` and `deploy-peek`
+- the worktree of every task that is not done and not failed or cancelled more than 7 days ago, and of any task
+  whose pipeline or chat is running
+- `spec-<id>` of each spec chat
+- an `openspec-*` or `*.root-tmp` folder less than an hour old
+
+It skips a folder that holds uncommitted changes (an untracked `.ops-result.json` doesn't count), or whose
+`.ops-result.json` has status `needs_input`. It logs each skip once, in the daemon log and on the task. It logs
+each removal the same way (`janitor removed worktree …`). A half-removed folder (no `.git`, files still there)
+has nothing to keep, so it goes.
+
+The janitor also removes Xcode's build cache of a worktree that is gone (`sweep_derived_data`). Xcode keeps one
+`~/Library/Developer/Xcode/DerivedData/<name>-<hash>` per workspace path, about 3.5 GB for ballup's iOS app, and
+nothing uses it once that worktree is removed. It only removes an entry whose `info.plist` `WorkspacePath` is in a
+folder under a project's `<worktrees>/` that no longer exists. For what a worktree really costs on disk, see
+[docs/worktree-disk-cost.md](docs/worktree-disk-cost.md).
+
 ## Other details
 
 - **Tabs.** The header has **Today** and **More ▾** (see [Today view](#today-view)). More holds History (the

@@ -36,7 +36,7 @@ and every repo has its own main, dev and task branches. With "." in repos the wo
 path above is then a worktree of it, with the other repos' worktrees in folders it gitignores, and nothing is copied.
 """
 from contextlib import nullcontext
-import base64, ctypes, datetime, fnmatch, json, math, os, re, secrets, shlex, shutil, signal, sqlite3, subprocess, sys, threading, time, tomllib
+import base64, ctypes, datetime, fnmatch, json, math, os, plistlib, re, secrets, shlex, shutil, signal, sqlite3, subprocess, sys, threading, time, tomllib
 import xml.etree.ElementTree as ET
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
@@ -2540,6 +2540,7 @@ def bump_round(p, tid, why):
 def fail(p, tid, why):
     upd(tid, state="failed", phase="", error=why, finished=time.time())
     ev(tid, "failed: " + why.splitlines()[0][:200])
+    kept_for_retry(tid)
     notify(f"{p.title}: task failed", f"#{tid}: {why[:120]}")
     tell_sender(tid, "failed: " + why)
 
@@ -2550,7 +2551,7 @@ def finish(p, tid, merged, note):
     ev(tid, note)
     if t["worktree"] and Path(t["worktree"]).exists():
         kill_app(p, t["worktree"])
-        remove_worktree(p, t["worktree"])
+        removal_failed(tid, t["worktree"], remove_worktree(p, t["worktree"]))
     notify(f"{p.title}: task done", f"#{tid}: {t['title']}")
     tell_sender(tid, f"is done ({note}): " + (task(tid)["summary"] or "no summary"))
     if merged:  # a task marked "Promote after merge", or a release that ends with more of them in dev
@@ -2558,12 +2559,211 @@ def finish(p, tid, merged, note):
 
 
 def remove_worktree(p, path):
-    for r in reversed(p.root_first()):  # a root repo last: the others' worktrees are inside its worktree
-        r.git("worktree", "remove", "--force", str(r.at(path)), check=False)
-    if p.repos:  # the workspace's own files
-        shutil.rmtree(path, ignore_errors=True)
-        for r in p.parts:
-            r.git("worktree", "prune", check=False)
+    """Remove a project worktree: each repo's git worktree (a root repo last: the others' worktrees are inside its
+    worktree), then whatever is left of the folder, then prune. None once the folder is gone, else why it is not:
+    the janitor (sweep_worktrees) tries again, so a failed removal never leaves a half-removed folder for good."""
+    path = Path(path)
+    errs = []
+    for r in reversed(p.root_first()):
+        if r.present(path):
+            try:
+                r.git("worktree", "remove", "--force", str(r.at(path)))
+            except RuntimeError as e:
+                errs.append(str(e).splitlines()[-1][:200])
+    if os.path.lexists(path):  # a workspace's own files, or what a failed git worktree remove left
+        rmtree(path, errs)
+    for r in p.parts:
+        r.git("worktree", "prune", check=False)
+    if os.path.lexists(path):
+        return "; ".join(errs[:3]) or "the folder is still there"
+    return None
+
+
+def rmtree(path, errs):
+    """shutil.rmtree that makes a read-only (on macOS also a locked) file or folder writable and tries it once more;
+    what still fails goes onto errs."""
+    def again(fn, f, _exc):
+        try:
+            for x in {os.path.dirname(f), f}:
+                if hasattr(os, "lchflags"):
+                    os.lchflags(x, 0)
+                if not os.path.islink(x):
+                    os.chmod(x, 0o700)
+            fn(f)
+        except OSError as e:
+            errs.append(f"{f}: {e.strerror or e}")
+    shutil.rmtree(path, **{"onexc" if sys.version_info >= (3, 12) else "onerror": again})
+
+
+SPENT_KEEP_DAYS = 7  # a failed or cancelled task's worktree stays this long: Retry resumes the worker in it
+SWEEP_EVERY = 10 * 60  # seconds between janitor passes (see sweep_worktrees)
+SWEEP_FRESH = 60 * 60  # seconds an openspec-* or *.root-tmp folder is left alone: a running command may use it
+SWEEP_LOCK = threading.Lock()  # one janitor pass at a time
+SWEEP_SAID = {}  # folder -> the last skip or failure logged for it, so each pass doesn't log it again
+
+
+def kept_for_retry(tid):
+    """Note on a failed or cancelled task that its worktree stays for a retry, and for how long."""
+    t = task(tid)
+    if t["worktree"] and Path(t["worktree"]).exists():
+        ev(tid, f"worktree kept {SPENT_KEEP_DAYS} days for a retry, then removed")
+
+
+def removal_failed(tid, path, err):
+    """Log a failed worktree removal on the task, once per distinct error; err None (removed) clears it."""
+    key = str(path)
+    if not err:
+        SWEEP_SAID.pop(key, None)
+        return
+    if SWEEP_SAID.get(key) != err:
+        SWEEP_SAID[key] = err
+        ev(tid, f"couldn't remove worktree {path}: {err}. The janitor tries again in {SWEEP_EVERY // 60} minutes")
+
+
+def worktree_spent(t, now):
+    """Whether a task is through with its worktree: done (finish removes it; this catches a removal that failed),
+    or failed or cancelled more than SPENT_KEEP_DAYS ago. Until then Retry resumes the worker in its worktree,
+    uncommitted work and all, and a chat about the task works there."""
+    if t["state"] == "done":
+        return True
+    return t["state"] in ("failed", "cancelled") and now - (t["finished"] or 0) > SPENT_KEEP_DAYS * 86400
+
+
+def worktree_holds_work(p, path):
+    """Why the janitor must not remove folder path, or None: a repo there with uncommitted changes, or a
+    .ops-result.json asking you something. A repo whose .git is gone, or points at metadata git pruned, is the rest
+    of a half-done removal: nothing there to keep."""
+    try:
+        res = json.loads((path / RESULT_FILE).read_text())
+        if isinstance(res, dict) and res.get("status") == "needs_input":
+            return f"its {RESULT_FILE} asks you something"
+    except (OSError, ValueError):
+        pass
+    for r in p.parts:
+        at = r.at(path)
+        dotgit = at / ".git"
+        if not dotgit.exists():
+            continue
+        if dotgit.is_file():
+            m = re.match(r"gitdir:\s*(.+)", dotgit.read_text(errors="replace").strip())
+            if m and not Path(m.group(1)).exists():
+                continue
+        res = subprocess.run(["git", "status", "--porcelain"], cwd=at, capture_output=True, text=True)
+        if res.returncode:
+            return f"git status failed{' in ' + r.name if r.name else ''}: {res.stderr.strip()[:200]}"
+        dirty = [l[3:] for l in res.stdout.splitlines() if l[3:] != RESULT_FILE]
+        if dirty:
+            return f"uncommitted changes{' in ' + r.name if r.name else ''}: {', '.join(dirty[:5])}"
+    return None
+
+
+def sweep_worktrees(p, now=None):
+    """The janitor: remove each folder under p.wt that nothing needs. It keeps dev, main, deploy (its build output
+    carries over between deploys) and deploy-peek; t<id> and the recorded worktree of each task that isn't
+    worktree_spent, or whose pipeline or chat is running; spec-<id> of each spec chat; and an openspec-* or
+    *.root-tmp folder younger than SWEEP_FRESH. It skips, and logs, a folder worktree_holds_work finds work in.
+    A failed removal is logged on its task (else in the daemon's log) and tried again on the next pass.
+    Returns {"removed": [names], "skipped": {name: why}, "failed": {name: why}}."""
+    now = now or time.time()
+    out = {"removed": [], "skipped": {}, "failed": {}}
+    if not p.wt.is_dir():
+        return out
+    keep = {p.dev_wt.name, p.main_wt.name, p.deploy_wt.name, "deploy-peek"}
+    owner = {}  # folder name -> the spent task it was the worktree of, for its log
+    for t in q("SELECT id, state, finished, worktree FROM tasks WHERE project=?", (p.name,)):
+        names = {f"t{t['id']}"} | ({Path(t["worktree"]).name} if t["worktree"] and
+                                   Path(t["worktree"]).parent == p.wt else set())
+        busy = t["id"] in THREADS or t["id"] in TASK_CHAT_LIVE or t["id"] in TASK_CHAT_PROCS
+        if busy or not worktree_spent(t, now):
+            keep |= names
+        else:
+            owner.update(dict.fromkeys(names, t["id"]))
+    keep |= {f"spec-{d['id']}" for d in q("SELECT id FROM designs WHERE project=?", (p.name,))}
+    for f in sorted(p.wt.iterdir()):
+        if f.name in keep or f.is_symlink() or not f.is_dir():
+            continue
+        if (f.name.startswith("openspec-") or f.name.endswith(".root-tmp")) and now - f.stat().st_mtime < SWEEP_FRESH:
+            continue
+        tid = owner.get(f.name)
+        why = worktree_holds_work(p, f)
+        if why:
+            out["skipped"][f.name] = why
+            if SWEEP_SAID.get(str(f)) != why:
+                SWEEP_SAID[str(f)] = why
+                print(f"janitor: kept {f}: {why}", flush=True)
+                if tid:
+                    ev(tid, f"janitor kept worktree {f}: {why}")
+            continue
+        t = task(tid) if tid else None
+        if t and (tid in THREADS or not worktree_spent(t, now)):  # retried since the list above
+            continue
+        kill_app(p, f)
+        err = remove_worktree(p, f)
+        if err:
+            out["failed"][f.name] = err
+            if tid:
+                removal_failed(tid, f, err)
+            elif SWEEP_SAID.get(str(f)) != err:
+                SWEEP_SAID[str(f)] = err
+                print(f"janitor: couldn't remove {f}: {err}", flush=True)
+            continue
+        SWEEP_SAID.pop(str(f), None)
+        out["removed"].append(f.name)
+        print(f"janitor: removed {f}" + (f" (task #{tid})" if tid else ""), flush=True)
+        if tid:
+            ev(tid, f"janitor removed worktree {f}")
+    return out
+
+
+def sweep_all():
+    """One janitor pass over every project, in the background: removing a worktree can take a while."""
+    if not SWEEP_LOCK.acquire(blocking=False):
+        return
+    try:
+        for p in list(PROJECTS.values()):
+            if STOPPING.is_set():
+                break
+            if getattr(p, "missing", None):
+                continue
+            try:
+                sweep_worktrees(p)
+            except Exception as e:  # one project's trouble doesn't stop the others
+                print(f"janitor error in {p.name}: {e}", flush=True)
+        try:
+            sweep_derived_data([p.wt for p in PROJECTS.values()])
+        except Exception as e:
+            print(f"janitor error in {DERIVED_DATA}: {e}", flush=True)
+    finally:
+        SWEEP_LOCK.release()
+
+
+DERIVED_DATA = HOME / "Library/Developer/Xcode/DerivedData"
+
+
+def sweep_derived_data(roots):
+    """Remove Xcode's build cache of a worktree that is gone. Xcode keeps one DerivedData/<name>-<hash> per
+    workspace path, about 3.5 GB for an iOS app, and no build uses it once that path's worktree is removed.
+    roots: the projects' worktree folders; an entry whose WorkspacePath is in a folder under one of them that no
+    longer exists goes. Returns the entries removed."""
+    out = []
+    if not DERIVED_DATA.is_dir():
+        return out
+    for d in sorted(DERIVED_DATA.iterdir()):
+        try:
+            ws = Path(plistlib.loads((d / "info.plist").read_bytes()).get("WorkspacePath") or "")
+        except (OSError, ValueError, AttributeError):
+            continue
+        root = next((r for r in roots if r in ws.parents), None)
+        if not root or (root / ws.relative_to(root).parts[0]).exists():
+            continue
+        errs = []
+        rmtree(d, errs)
+        if errs:
+            print(f"janitor: couldn't remove {d}: {errs[0]}", flush=True)
+        else:
+            out.append(d.name)
+            print(f"janitor: removed {d}, Xcode's build cache of {ws}", flush=True)
+    return out
 
 
 def add_subtasks(p, tid, items, priority=0, hold=0, auto_release=None, model=None, effort=None):
@@ -3230,6 +3430,8 @@ def scheduler():
                 load_projects()
             if n % 30 == 0 and not STOPPING.is_set():  # every minute: promote trains whose time is up
                 release_trains()
+            if n % (SWEEP_EVERY // 2) == 0 and not STOPPING.is_set():  # the worktree janitor, off this thread
+                threading.Thread(target=sweep_all, daemon=True).start()
         except Exception as e:
             print("scheduler error:", e, flush=True)
         n += 1
@@ -5684,7 +5886,7 @@ def deploy_land(p, tid, tg):
 def deploy_done(p, tid, note):
     t = task(tid)
     if t["worktree"] and Path(t["worktree"]) != p.deploy_wt:  # the worktree that carried your changes over
-        remove_worktree(p, t["worktree"])
+        removal_failed(tid, t["worktree"], remove_worktree(p, t["worktree"]))
     upd(tid, state="done", phase="", start_at="claude", worktree=str(p.deploy_wt), finished=time.time())
     ev(tid, note)
     notify(f"{p.title}: deployed", f"#{tid}: {t['title']}")
@@ -8944,6 +9146,7 @@ class H(BaseHTTPRequestHandler):
             upd(tid, state="cancelled", phase="", finished=time.time())
             stop(PROCS.get(tid))
             ev(tid, "cancelled")
+            kept_for_retry(tid)
             tell_sender(tid, "was cancelled by the owner")
             if p and t["kind"] in MERGES and t["auto_release"]:  # its split's other tasks may be waiting for it
                 auto_release(p)
