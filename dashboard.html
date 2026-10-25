@@ -1689,7 +1689,8 @@ async function loadDetail(id, fresh) {
   if (t.state === "review") actions = (t.can_play ? btn("play", "▶ Try this build", "primary") : "") + btn("approve", "Approve & merge");
   if (["queued", "running", "gating"].includes(t.state)) actions += btn("pause", "❚❚ Pause");
   if (t.state === "paused") actions += btn("resume", "▶ Resume", "primary");
-  if (["failed", "cancelled"].includes(t.state)) actions += btn("retry", "Retry");
+  if (["failed", "cancelled"].includes(t.state)) actions += btn("retry", "Retry") + btn("retryafter", "Retry after…");
+  const ra = RA && RA.where === "detail" && RA.id === t.id && ["failed", "cancelled"].includes(t.state);
   if (!["done", "cancelled"].includes(t.state)) actions += btn("cancel", "Cancel", "danger");
   if ((t.kind === "task" || t.kind === "senddev") && !P(t.project).direct_main && !["done", "failed", "cancelled"].includes(t.state))
     actions += `<label title="Once it merges into dev, promote dev to main, as the Promote button does"><input type="checkbox" data-act="release" ${t.auto_release ? "checked" : ""}> Promote after merge</label>`;
@@ -1708,6 +1709,7 @@ async function loadDetail(id, fresh) {
     ${t.summary ? `<div class="callout ok">${esc(t.summary)}</div>` : ""}
     ${t.error ? `<div class="callout bad"><pre class="mono">${esc(t.error)}</pre></div>` : ""}
     <div class="row">${actions}</div>
+    ${ra ? raBox(RA) : ""}
     ${t.can_steer || t.can_chat || t.chat.length ? `<details data-k="chat" open><summary>${t.can_steer || t.chat_full ? "Talk to the worker" : "Ask the worker"}</summary>
       <div class="tchat">${t.chat.map(m => m.role === "assistant" ? `<div class="msg">${md(m.text, undefined, links)}</div>`
           : `<div class="msg user">${userMd(m.text, links)}${m.role === "steer" ? `<div class="note">${steerNote(t, m)}</div>` : ""}</div>`).join("")}
@@ -1747,6 +1749,10 @@ async function loadDetail(id, fresh) {
   document.querySelectorAll("#detail [data-act]").forEach(b => b.onclick = () => act(t.id, b.dataset.act));
   box.querySelectorAll("a.origin").forEach(a => a.onclick = () => openOrigin(t.origin));
   document.querySelectorAll("#detail textarea").forEach(el => { el.onfocus = () => typing = true; el.onblur = () => typing = !!el.value; });
+  if (ra) {
+    box.querySelectorAll(".rabox input[data-fld]").forEach(el => { el.onfocus = () => typing = true; el.onblur = () => typing = !!el.value; });
+    raWire(box.querySelector(".rabox"), RA, () => detailRaGo(t.id), () => { RA = null; typing = false; loadDetail(t.id); });
+  }
   const ask = $("#ask"); if (ask) ask.onkeydown = e => { if (sendKey(e)) { e.preventDefault(); act(t.id, t.can_steer && !(t.state === "paused" && t.can_chat) ? "steer" : "ask"); } };
 }
 
@@ -1792,7 +1798,14 @@ function steerNote(t, m) {
   return "waiting · the worker gets it on its next turn (Send answer, Send back or Retry)";
 }
 
+async function detailRaGo(id) {
+  const r = RA; if (!r || r.busy) return;
+  r.busy = true;
+  try { await raSend(r); RA = null; typing = false; refresh(); }
+  catch (e) { r.busy = false; $("#actmsg").textContent = e.message; }
+}
 async function act(id, a) {
+  if (a === "retryafter") { RA = RA && RA.where === "detail" && RA.id === id ? null : raNew(id, "detail"); typing = false; return loadDetail(id); }
   const body = {};
   if (a === "answer") { body.answer = $("#answer").value.trim(); if (!body.answer) return; }
   if (a === "reject") { body.feedback = $("#feedback").value.trim(); if (!body.feedback) return; }
@@ -2934,7 +2947,7 @@ function tdActions(it) {
     case "Try": return [A("play", "▶ Play this build", {primary: 1, title: "Run the task's build from its worktree"}), A("approve", "Approve & merge"), A("sendback", "Send back…")];
     case "Review": return [A("approve", "Approve & merge", {primary: 1}), A("diff", "Open diff", {title: "The files it changed, in the task's details"}), A("sendback", "Send back…")];
     case "Answer": return [A("answer", "Answer", {primary: 1, title: "Type your answer in the message box below"}), A("details", "Details")];
-    case "Fix": return [A("retry", "Retry", {primary: 1}), A("retrynote", "Retry with a note…"), A("details", "Details")];
+    case "Fix": return [A("retry", "Retry", {primary: 1}), A("retrynote", "Retry with a note…"), A("retryafter", "Retry after…", {title: "Retry it once another task merges"}), A("details", "Details")];
     case "Promote":
       if (s.kind === "task") return [g.running ? A("stopmain", `■ Stop ${g.main_branch}`, {primary: 1, title: `Quit ${g.title} running from ${g.main_branch}, so the release can move it`})
         : A("answer", "Reply…", {primary: 1, title: "Answer the release in the message box below"}), A("details", "Details")];
@@ -2996,6 +3009,7 @@ function tdStep(it, shown) {
     return;
   }
   const busy = TD.busy === it.key, acts = tdActions(it), facts = tdFacts(it), g = P(it.project), pl = g.play;
+  const raHere = !!RA && RA.where === "today" && RA.id === (it.source || {}).id && acts.some(b => b.a === "retryafter");
   // A Play or Stop from this step that failed says so in the step's message line, as on the Projects card
   const playErr = acts.some(b => /^(play|stop):/.test(b.a)) && pl && pl.error && !pl.phase
     ? `${pl.stop ? "Stop" : "Play"} ${pl.where === "dev" ? g.dev_branch : g.main_branch} failed: ${pl.error}` : "";
@@ -3018,6 +3032,7 @@ function tdStep(it, shown) {
     <div class="row">${acts.map(b => `<button data-ta="${esc(b.a)}" class="${b.primary ? "primary" : ""}" ${busy || b.disabled ? "disabled" : ""} title="${esc(b.title || "")}">${esc(b.label)}</button>`).join("")}
       ${noteIn}<button class="tdwaitb" data-waitfor title="Park it until tasks you pick merge or are released">Wait for…</button>${unpark("tdunpark")}<button class="skip" data-skip title="${esc(skipTip)}">Skip for now →</button></div>
     ${TD.wait && TD.wait.key === it.key ? tdWaitBox(it.project, TD.wait, `<button class="primary" data-wgo>Wait</button><button data-wx>Cancel</button>`) : ""}
+    ${raHere ? raBox(RA) : ""}
     ${TD.msg || playErr ? `<div class="err" style="margin-top:8px;white-space:pre-wrap">${esc(TD.msg || playErr)}</div>` : TD.note ? `<div class="muted" style="margin-top:8px">${esc(TD.note)}</div>` : ""}</div>`;
   // A poll that rewrites the card while you type in the note (or the chooser) keeps your caret where it was
   if (!putKeep($("#tdstep"), html, $("#tdstep").dataset.key === it.key)) return;
@@ -3035,6 +3050,7 @@ function tdStep(it, shown) {
   if ($("#tdstep [data-wgo]")) $("#tdstep [data-wgo]").onclick = tdWaitGo;
   if ($("#tdstep [data-wx]")) $("#tdstep [data-wx]").onclick = () => { TD.wait = null; renderToday(); };
   if ($("#tdstep [data-wclear]")) $("#tdstep [data-wclear]").onclick = tdWaitClear;
+  if (raHere) raWire($("#tdstep .rabox"), RA, tdRaGo, () => { RA = null; renderToday(); });
   $("#tdstep").querySelectorAll("[data-ta]").forEach(b => b.onclick = () => tdDo(b.dataset.ta));
   $("#tdstep").querySelectorAll("[data-files]").forEach(a => a.onclick = () => tdOpenTask(+a.dataset.files, true));
   $("#tdstep").querySelectorAll("[data-skip]").forEach(b => b.onclick = tdSkip);
@@ -3133,6 +3149,47 @@ function tdWaitWire(box, w) {
   box.querySelectorAll("[data-wother]").forEach(i => i.oninput = () => { w.other = i.value; });
   box.querySelectorAll("[data-wuntil]").forEach(b => b.onclick = () => { w.until = b.dataset.wuntil; renderToday(); });
 }
+// Retry after… (README TODAY-1): retry a failed or cancelled task so it waits (its depends_on) until another task
+// merges. One chooser at a time, on Today's Fix step or on the task's page: RA = {id, where, pick, other, note, busy}.
+let RA = null;
+const RA_STATES = ["queued", "running", "gating", "merging", "review", "needs_input"];  // open tasks; gating and merging run
+const raTasks = id => state.tasks.filter(t => t.id !== id && RA_STATES.includes(t.state)).sort((a, b) => b.id - a.id);
+const raNew = (id, where) => ({id, where, pick: null, other: "", note: "", busy: false});
+function raBox(r) {
+  const ts = raTasks(r.id);
+  return `<div class="tdwaitbox rabox">
+    <div class="whead">Retry #${r.id} now, to start once the task you pick merges.</div>
+    ${ts.length ? `<div class="wlist">${ts.map(t => `<label title="${esc(t.title)}"><input type="radio" name="ra${r.id}" data-rat="${t.id}" ${r.pick === t.id ? "checked" : ""}>
+      <span class="mono">#${t.id}</span><span class="muted">${esc(P(t.project).title || t.project)}</span><span class="wt">${esc(t.title)}</span><span class="muted">${esc(LABEL[t.state] || t.state)}</span></label>`).join("")}</div>
+      <div class="muted">Or type another task's id:</div>` : `<div class="muted">No open tasks. Type a task id:</div>`}
+    <input data-raother data-fld="raother" placeholder="e.g. 333 or #333" value="${esc(r.other)}">
+    <input data-ranote data-fld="ranote" maxlength="2000" placeholder="Note for its worker (optional)" value="${esc(r.note)}">
+    <div class="wrow"><button class="primary" data-rago ${r.busy ? "disabled" : ""}>Retry after</button><button data-rax>Cancel</button></div></div>`;
+}
+// A typed id wins over a picked row: typing clears the pick, and picking clears what you typed.
+function raWire(box, r, go, close) {
+  if (!box) return;
+  const other = box.querySelector("[data-raother]"), note = box.querySelector("[data-ranote]");
+  box.querySelectorAll("[data-rat]").forEach(c => c.onchange = () => { r.pick = +c.dataset.rat; r.other = other.value = ""; });
+  other.oninput = () => { r.other = other.value; if (r.other.trim()) { r.pick = null; box.querySelectorAll("[data-rat]").forEach(c => c.checked = false); } };
+  note.oninput = () => { r.note = note.value; };
+  [other, note].forEach(i => i.onkeydown = e => {
+    if (e.key === "Enter" && !e.isComposing) { e.preventDefault(); go(); } else if (e.key === "Escape") close(); });
+  box.querySelector("[data-rago]").onclick = go;
+  box.querySelector("[data-rax]").onclick = close;
+}
+async function raSend(r) {
+  const after = r.other.trim() || r.pick;
+  if (!after) throw new Error("Pick a task, or type its id.");
+  await api(`/api/tasks/${r.id}/retry`, {after, ...(r.note.trim() ? {note: r.note.trim()} : {})});
+}
+async function tdRaGo() {
+  const r = RA; if (!r || r.busy) return;
+  r.busy = true; TD.msg = ""; TD.note = ""; renderToday();
+  try { await raSend(r); RA = null; TD.note = `Retried #${r.id}: it starts once #${String(r.other.trim() || r.pick).replace(/^#/, "")} merges.`; }
+  catch (e) { TD.msg = e.message; r.busy = false; }
+  delete $("#tdstep").dataset.html; renderToday(); refresh();
+}
 async function tdWaitGo() {
   const it = TD.item, w = TD.wait; if (!it || !w || w.key !== it.key) return;
   const ids = tdWaitIds(w);
@@ -3207,6 +3264,11 @@ async function tdDo(a) {
   };
   if (a === "sendback") return tdMode({a: "reject", id: s.id, words: `Sends #${s.id} back to its worker: say what to change.`});
   if (a === "retrynote") return tdMode({a: "retry", id: s.id, words: `Retries #${s.id} with this note to its worker.`});
+  if (a === "retryafter") {
+    RA = RA && RA.where === "today" && RA.id === s.id ? null : raNew(s.id, "today"); TD.msg = ""; renderToday();
+    if (RA) $("#tdstep .rabox").scrollIntoView({block: "nearest"});
+    return;
+  }
   if (a === "answer") return tdMode(tdAnswerMode(it));
   if (a === "reply") { tdShowConv(); TD.mode = null; renderSayMode(); $("#say").focus(); return; }
   if (a === "diff" || a === "details") return tdOpenTask(s.id, a === "diff");

@@ -7143,6 +7143,26 @@ def tell_sender(tid, how):
                                              f"which you sent, {gist(how, 1500)}", [tid])
 
 
+def retry_after(tid, after):
+    """The task id (12, "12" or "#12") retrying task tid waits on until it merges, checked; None when after is blank.
+    It must exist, not be tid, and not wait on tid itself through its own depends_on chain."""
+    if after is None or not str(after).strip():
+        return None
+    a = str(after).strip().lstrip("#").strip()
+    if not a.isdigit() or not task(int(a)):
+        raise ValueError(f"no task #{a}")
+    a = int(a)
+    if a == tid:
+        raise ValueError("a task can't wait on itself")
+    seen, cur = set(), task(a)["depends_on"]
+    while cur and cur not in seen:
+        if cur == tid:
+            raise ValueError(f"#{a} already waits on this task")
+        seen.add(cur)
+        cur = (task(cur) or {}).get("depends_on")
+    return a
+
+
 def send_peer(ref, project, kind, text, title="", hold=False, model=None, effort=None, after=None):
     """Start a task or chat in project for the session ref names. Returns {kind, id, project, said}.
     model, effort: the task's, as add_task takes them; a chat starts on its kind's model, at the effort setting.
@@ -8667,11 +8687,12 @@ class H(BaseHTTPRequestHandler):
             if st not in ("failed", "cancelled"):
                 raise ValueError(f"task is {st}")
             note = b.get("note") or ""
-            upd(tid, state="queued", rounds=0, error=None, finished=None,
+            after = retry_after(tid, b.get("after"))  # replaces any earlier depends_on; without it, that stays
+            upd(tid, state="queued", rounds=0, error=None, finished=None, **({"depends_on": after} if after else {}),
                 next_prompt=(f"Your previous attempt stopped: {t['error'] or st}. {note} "
                              "Check the worktree state and finish the task; write $OPS_RESULT.")
                 if t["session_id"] else None)
-            ev(tid, "retried" + (f": {note}" if note else "")
+            ev(tid, "retried" + (f" after #{after}" if after else "") + (f": {note}" if note else "")
                + ("; moving main again (the deploy itself succeeded)" if t["kind"] == "deploy" and
                   t["start_at"] == "promote" else "; the deploy starts over" if t["kind"] == "deploy" else ""))
         elif action == "answer":
