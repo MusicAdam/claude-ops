@@ -33,8 +33,8 @@ class UsagePace(unittest.TestCase):
                              text=True, check=True).stdout
         return json.loads(out)
 
-    def pace(self, w, now=NOW):
-        return self.run_js(["usagePace", [w, now * 1000]])[0]
+    def pace(self, w, now=NOW, brake=None):
+        return self.run_js(["usagePace", [w, now * 1000] + ([brake] if brake is not None else [])])[0]
 
     def test_five_hour_ahead(self):
         p = self.pace(win("five_hour", 60, FIVE / 2))
@@ -51,6 +51,26 @@ class UsagePace(unittest.TestCase):
     def test_margin_edge_is_near(self):
         self.assertEqual(self.pace(win("seven_day", 40, SEVEN / 2))["tone"], "near")
         self.assertEqual(self.pace(win("seven_day", 39.9, SEVEN / 2))["tone"], "ok")
+
+    def test_five_hour_runs_to_the_brake(self):
+        p = self.pace(win("five_hour", 50, FIVE / 2), brake=85)
+        self.assertEqual((round(p["pace"], 6), round(p["lead"], 6), p["tone"]), (42.5, 7.5, "ahead"))
+        p = self.pace(win("five_hour", 35, FIVE / 2), brake=85)
+        self.assertEqual((round(p["lead"], 6), p["tone"]), (-7.5, "near"))  # it would be "ok" against 50
+        self.assertEqual(round(self.pace(win("five_hour", 10, FIVE + 60), brake=85)["pace"], 6), 0)
+        self.assertAlmostEqual(self.pace(win("five_hour", 10, 1), brake=85)["pace"], 85, places=2)
+
+    def test_brake_off_and_seven_day_unchanged(self):
+        self.assertEqual(round(self.pace(win("five_hour", 50, FIVE / 2), brake=0)["pace"], 6), 50)
+        p = self.pace(win("seven_day", 45, SEVEN / 2), brake=85)
+        self.assertEqual((round(p["pace"], 6), round(p["lead"], 6), p["tone"]), (50, -5, "near"))
+
+    def test_words_use_the_scaled_pace(self):
+        p = self.pace(win("five_hour", 60, FIVE / 2), brake=85)
+        self.assertEqual(self.run_js(["paceWords", [p]])[0], "Pace 43% · 18 points ahead")
+
+    def test_render_passes_the_brake(self):
+        self.assertIn("usagePace(w, Date.now(), u.brake)", PAGE.read_text())
 
     def test_one_second_before_reset(self):
         p = self.pace(win("five_hour", 10, 1))

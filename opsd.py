@@ -3042,7 +3042,9 @@ def limit_pause(tid, prompt=None):
 # settings usage:<window>, and at usage_brake percent (default 85, 0 = off) of either window the scheduler starts no
 # new task until that window resets, which leaves the rest of it for your design chats, chats and answers. Running
 # work carries on, and chats are never held. Below the brake, the usage taper (usage_taper, default 50, 0 = off)
-# starts fewer Claude workers as the 5-hour window fills: see usage_taper_cap.
+# starts fewer Claude workers as the 5-hour window fills, stepping evenly from max_parallel at the taper down to 1
+# just under the brake (or 100 with the brake off): see usage_taper_cap. The dashboard's 5-hour pace line likewise
+# runs up to the brake.
 
 USAGE_WINDOWS = {"five_hour": ("5-hour", "5h"), "seven_day": ("7-day", "7d")}
 USAGE_LOCK = threading.Lock()
@@ -3094,12 +3096,16 @@ def usage_taper_pct(s):
         return 0
 
 
-def usage_taper_cap(pct, taper, most):
-    """How many Claude workers may run at pct percent of the 5-hour window: max(1, most - ceil((pct - taper) / 10))
-    above the taper, None (no cap) at or below it or with the taper off."""
-    if not taper or pct <= taper:
+def usage_taper_cap(pct, taper, most, brake=0):
+    """How many Claude workers may run at pct percent of the 5-hour window. With end = brake (100 with the brake off):
+    max(1, most - ceil((pct - taper) * (most - 1) / (end - taper))) above the taper, so the cap steps evenly from most
+    at the taper to 1 just under the brake. None (no cap) at or below the taper, with the taper off, or when end is at
+    or below the taper (no room to taper)."""
+    end = brake if brake > 0 else 100
+    if not taper or pct <= taper or end <= taper:
         return None
-    return max(1, most - math.ceil((pct - taper) / 10))
+    # rounded before ceil, so an exact step boundary (57 at most 6, taper 50, brake 85) stays on the lower step
+    return max(1, most - math.ceil(round((pct - taper) * (most - 1) / (end - taper), 9)))
 
 
 def claude_running(find=None):
@@ -3133,7 +3139,7 @@ def usage_info(s=None):
     except ValueError:
         most = 1
     five = next((w for w in wins if w["key"] == "five_hour"), None)
-    cap = usage_taper_cap(five["exact"], usage_taper_pct(s), most) if five else None
+    cap = usage_taper_cap(five["exact"], usage_taper_pct(s), most, brake) if five else None
     taper = None
     if cap is not None and cap < most:
         taper = {"pct": five["pct"], "cap": cap, "max": most,
