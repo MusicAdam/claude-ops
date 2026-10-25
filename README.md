@@ -1294,6 +1294,7 @@ usage-limit reset", so a big task gets a fresh 5-hour window. The task's `not_be
 ```bash
 ./opsd.py add -p myrepo --at "tomorrow 09:00" "Upgrade the build"
 ./opsd.py add -p myrepo --after-reset "Rewrite the parser"
+./opsd.py add -p myrepo --research T1 --after-reset "Compare the options"   # a research run too
 ./opsd.py send myrepo --at "fri 18:00" "Run the long benchmark"   # tasks only
 ```
 

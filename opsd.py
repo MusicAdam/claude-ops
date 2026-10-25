@@ -3693,7 +3693,7 @@ commit the report well before that. Don't run the project's build or app; the ga
 
 
 def queue_research(project, question, tier="T1", hold=False, priority=0, model=None, effort=None, origin=None,
-                   dated=False):
+                   dated=False, not_before=None):
     """Queue a research task in project (RES-2). Returns {id, slug, path}."""
     p = proj(project)
     question = (question or "").strip()
@@ -3704,7 +3704,7 @@ def queue_research(project, question, tier="T1", hold=False, priority=0, model=N
     path = report_rel(p, slug)
     tid = add_task(project, research_brief(question, tier, path), f"Research: {title_of(question)}"[:120], priority,
                    hold, model=model, effort=effort, origin=origin,
-                   research={"question": question, "tier": tier, "slug": slug, "path": path})
+                   not_before=not_before, research={"question": question, "tier": tier, "slug": slug, "path": path})
     ev(tid, f"research at {tier}: writes {path}")
     return {"id": tid, "slug": slug, "path": path}
 
@@ -3716,7 +3716,7 @@ def new_research(project, b):
         every_text(every)  # refused before anything is queued
     question = (b.get("question") or "").strip()
     out = queue_research(project, question, tier, bool(b.get("hold")), model=b.get("model") or None,
-                         effort=b.get("effort") or None)
+                         effort=b.get("effort") or None, not_before=b.get("not_before") or None)
     out["schedule"] = None
     if every:
         out["schedule"] = add_schedule({"project": project, "title": f"Research: {title_of(question)}"[:120],
