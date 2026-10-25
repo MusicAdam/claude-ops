@@ -3044,7 +3044,9 @@ def limit_pause(tid, prompt=None):
 # work carries on, and chats are never held. Below the brake, the usage taper (usage_taper, default 50, 0 = off)
 # starts fewer Claude workers as the 5-hour window fills, stepping evenly from max_parallel at the taper down to 1
 # just under the brake (or 100 with the brake off): see usage_taper_cap. The dashboard's 5-hour pace line likewise
-# runs up to the brake.
+# runs up to the brake. With the taper on, the pace slowdown also starts fewer workers while 5-hour usage runs ahead
+# of that pace line: one fewer per PACE_STEP points ahead, never below 1 (see usage_pace_cap). The lower of the two
+# caps applies, to the same new starts. The 7-day window has neither: only the brake.
 
 USAGE_WINDOWS = {"five_hour": ("5-hour", "5h"), "seven_day": ("7-day", "7d")}
 USAGE_LOCK = threading.Lock()
@@ -3108,19 +3110,42 @@ def usage_taper_cap(pct, taper, most, brake=0):
     return max(1, most - math.ceil(round((pct - taper) * (most - 1) / (end - taper), 9)))
 
 
+PACE_STEP = 5  # points ahead of pace per worker dropped
+FIVE_HOUR = 18000  # the 5-hour window's length in seconds, as the dashboard's USAGE_LEN.five_hour
+
+
+def usage_lead(pct, resets_at, now, brake=0):
+    """How many points the 5-hour window's usage (pct, exact) is ahead of an even pace, the dashboard's usagePace:
+    pace = elapsed share of the window * end, end = brake (100 with the brake off). None with no live reading."""
+    if not resets_at or resets_at <= now:
+        return None
+    end = brake if brake > 0 else 100
+    elapsed = min(FIVE_HOUR, max(0, FIVE_HOUR - (resets_at - now))) / FIVE_HOUR
+    return pct - elapsed * end
+
+
+def usage_pace_cap(lead, taper, most):
+    """How many Claude workers may run while usage is lead points ahead of pace: max(1, most - ceil(lead /
+    PACE_STEP)). None (no cap) on or behind pace, with no live reading (lead None), or with the taper off."""
+    if not taper or lead is None or lead <= 0:
+        return None
+    return max(1, most - math.ceil(round(lead / PACE_STEP, 9)))
+
+
 def claude_running(find=None):
     """The running Claude workers, for the taper: running tasks that are not a deploy or release."""
     find = find or task
     return sum(1 for i in list(THREADS) if (t := find(i)) and t["kind"] not in ("deploy", "release"))
 
 
-def usage_info(s=None):
+def usage_info(s=None, now=None):
     """The usage windows and the brake, for the scheduler and the dashboard: {brake, windows: [{key, label, short,
     pct, resetsAt, resets, ts}], braked, taper}. A reading whose reset has passed is stale and counts as 0. braked is the
-    window that holds the queue (the one that resets last, when both do), or None. taper is {pct, cap, max, words}
-    while the 5-hour window's taper cap is below max_parallel, else None."""
+    window that holds the queue (the one that resets last, when both do), or None. taper is {pct, cap, max, ahead,
+    words} while the 5-hour window's effective cap (the lower of the taper cap and the pace cap) is below
+    max_parallel, else None; ahead is the points ahead of pace when the pace cap binds, else 0."""
     s = settings_now() if s is None else s
-    brake, now, wins = usage_brake_pct(s), time.time(), []
+    brake, now, wins = usage_brake_pct(s), time.time() if now is None else now, []
     for k, (label, short) in USAGE_WINDOWS.items():
         r = usage_reading(s.get(f"usage:{k}"))
         if not r:
@@ -3139,11 +3164,18 @@ def usage_info(s=None):
     except ValueError:
         most = 1
     five = next((w for w in wins if w["key"] == "five_hour"), None)
-    cap = usage_taper_cap(five["exact"], usage_taper_pct(s), most, brake) if five else None
+    tp = usage_taper_pct(s)
+    cap = usage_taper_cap(five["exact"], tp, most, brake) if five else None
+    lead = usage_lead(five["exact"], five["resetsAt"], now, brake) if five else None
+    pace = usage_pace_cap(lead, tp, most)
+    ahead = 0
+    if pace is not None and (cap is None or pace <= cap):  # the pace cap binds
+        cap, ahead = pace, max(1, round(lead))
     taper = None
     if cap is not None and cap < most:
-        taper = {"pct": five["pct"], "cap": cap, "max": most,
-                 "words": f"Usage at {five['pct']}% of the 5-hour window · {cap} of {most} workers"}
+        why = f", {ahead} points ahead of pace" if ahead else ""
+        taper = {"pct": five["pct"], "cap": cap, "max": most, "ahead": ahead,
+                 "words": f"Usage at {five['pct']}% of the 5-hour window{why} · {cap} of {most} workers"}
     return {"brake": brake, "windows": wins, "braked": braked, "taper": taper}
 
 
