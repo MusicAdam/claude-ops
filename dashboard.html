@@ -466,6 +466,15 @@ a[data-task] { color: var(--accent); cursor: pointer; }
 details.tdparked { margin-top: 10px; }
 details.tdparked > summary { cursor: pointer; color: var(--muted); font-size: 13px; margin-bottom: 6px; }
 details.tdparked .tditem { opacity: .8; }
+/* PHONE-5: under the list, a way to each project's Earlier topics and Ended; a desktop has them beside the list */
+.tdtopics { display: none; margin-top: 14px; }
+.tdtopics .k { color: var(--muted); font-size: 13px; margin-bottom: 6px; }
+/* Undo after an end (README "Ending topics"): a few seconds at the bottom of the screen */
+#tdundo { position: fixed; left: 50%; transform: translateX(-50%); bottom: 16px; z-index: 7; display: flex; gap: 10px; align-items: center;
+          max-width: calc(100vw - 24px); background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px;
+          box-shadow: 0 4px 16px rgba(0, 0, 0, .35); font-size: 13px; }
+#tdundo span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#tdundo button { padding: 2px 10px; font-size: 13px; }
 .tditem .t { font-weight: 550; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tditem .sub { grid-column: 2; color: var(--muted); font-size: 12px; }
 .verb { font-size: 11px; font-weight: 600; padding: 1px 8px; border-radius: 99px; white-space: nowrap; border: 1px solid; }
@@ -574,6 +583,8 @@ details.tdparked .tditem { opacity: .8; }
   #tdpanel { position: fixed; inset: 0; z-index: 6; padding: max(10px, env(safe-area-inset-top)) max(12px, env(safe-area-inset-right))
              max(12px, env(safe-area-inset-bottom)) max(12px, env(safe-area-inset-left)); overscroll-behavior: contain; }
   #tdpanel .stages { font-size: 10px; }
+  .tdtopics { display: block; }
+  #tdundo { bottom: auto; top: calc(var(--hdr-h, 40px) + 8px); }  /* clear of the message box */
   #tdnav { display: flex; position: fixed; left: 0; right: 0; bottom: 0; z-index: 5; height: calc(56px + env(safe-area-inset-bottom));
            padding: 0 env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
            background: var(--panel); border-top: 1px solid var(--line); }
@@ -713,6 +724,7 @@ details.tdparked .tditem { opacity: .8; }
     <div id="tdpanel" class="hidden"><div id="tdphead"></div><div id="tdpother"></div><div id="tdpdet"></div></div></aside>
   <div id="tdgrip" title="Drag to resize · double-click for 320px"></div>
 </div>
+<div id="tdundo" class="hidden"></div>
 <nav id="tdnav" class="hidden"><button data-pane="todo"><i>☰<span class="badge hidden"></span></i>To-do</button><button data-pane="now"><i>▶</i>Now</button><button data-pane="activity"><i>◷</i>Activity</button></nav>
 <main id="settingsview" class="hidden">
   <section>
@@ -2832,12 +2844,29 @@ function tdLeft(all, shown) {
     + tdAddForm()
     + (shown.map(tdRow).join("")
       || `<div class="muted">${all.length ? "Nothing under this filter." : "Nothing needs you right now."}</div>`)
-    + (parked.length ? `<details class="tdparked" ${TD.parkOpen ? "open" : ""}><summary>Parked (${parked.length})</summary>${parked.map(tdRow).join("")}</details>` : "");
+    + (parked.length ? `<details class="tdparked" ${TD.parkOpen ? "open" : ""}><summary>Parked (${parked.length})</summary>${parked.map(tdRow).join("")}</details>` : "")
+    + tdTopicsRow();
   if (!putKeep($("#tdleft"), html)) return;
   if ($("#tdleft .tdparked")) $("#tdleft .tdparked").ontoggle = e => { TD.parkOpen = e.target.open; };
   tdAddWire($("#tdleft"));
   $("#tdleft").querySelectorAll("[data-f]").forEach(b => b.onclick = () => { TD.filter = b.dataset.f; tdSave(); renderToday(); });
-  $("#tdleft").querySelectorAll("[data-key]").forEach(el => el.onclick = () => { TD.key = el.dataset.key; tdSave(); if (TD.pane === "todo") tdGo("now"); else renderToday(); });
+  $("#tdleft").querySelectorAll("[data-key]").forEach(el => el.onclick = () => {
+    if (phone() && el.dataset.key === TD.convKey) TD.over = null;  // back to its own conversation after Topics moved it
+    TD.key = el.dataset.key; tdSave(); if (TD.pane === "todo") tdGo("now"); else renderToday(); });
+  $("#tdleft").querySelectorAll("[data-topics]").forEach(b => b.onclick = () => tdTopics(b.dataset.topics));
+}
+// PHONE-5: on a phone the conversation, with Earlier topics and Ended, is in the Now pane and shows one project's.
+// Under the list, a chip per project in view opens Now on that project's conversation with Earlier topics unfolded,
+// whatever item is open or none. CSS hides the row on wider screens.
+function tdTopicsRow() {
+  const projs = state.projects.filter(g => !g.error && inView(g.name));
+  return projs.length ? `<div class="tdtopics"><div class="k">Earlier topics and Ended</div><div class="tdchips">${
+    projs.map(g => `<button data-topics="${esc(g.name)}" title="Open ${esc(g.title)}'s earlier and ended topics">${esc(g.title)} ›</button>`).join("")}</div></div>` : "";
+}
+function tdTopics(project) {
+  tdGo("now");  // first: a new item (after a filter change) resets TD.over
+  if (project !== convProject()) TD.over = {key: TD.convKey, project};
+  TD.earlierOpen = true; tdShowConv(); renderToday(); chatKey = ""; refreshDesign();
 }
 
 // What the step can do: one primary action, then the others. Each calls an endpoint the older pages use.
@@ -3132,7 +3161,11 @@ async function tdDo(a) {
   if (a === "stopmain") return run(() => api(`/api/projects/${encodeURIComponent(it.project)}/stop`, {}), "Stopped. The release goes on by itself within a minute.");
   if (a === "promote" || a === "senddev") return run(() => api(`/api/projects/${encodeURIComponent(it.project)}/${a}`, {}));
   if (a === "read") return run(() => api(`/api/designs/${s.id}/seen`, {}));
-  if (a === "endtopic") return run(() => api("/api/conversation/end", {project: it.project, ref: s.id}).then(cv => { convSet(cv, convFor()); tdDropChat(s.id); }));
+  if (a === "endtopic") {
+    const cur = !!TD.cv && TD.cv.project === it.project && TD.cv.topic === s.id;
+    return run(() => api("/api/conversation/end", {project: it.project, ref: s.id}).then(cv => {
+      convSet(cv, convFor()); tdDropChat(s.id); tdUndoOffer(it.project, s.id, it.title, cur); }));
+  }
   if (a === "done") return run(() => api(`/api/todos/${it.todo}/done`, {}));
   if (a === "report" || a === "markreport") return tdOpenReport(it.project, it.report.path, a === "report");
 }
@@ -3225,7 +3258,7 @@ async function loadConv() {
   try {
     // A new item picks the topic once: its chat, or its own topic (task:<id>, project:<name>:ship, …), made when
     // you send the first message. After that you choose.
-    if (project && TD.applied !== `${key}|${project}`) {
+    if (project && (!it || it.project === project) && TD.applied !== `${key}|${project}`) {
       // A chat on the list is open as far as this list knows (ended: null), so one ended since stays ended: it
       // isn't opened, and its Read step leaves the list (conv_open's compare-and-set, README TODAY-2).
       const how = s.kind === "chat" ? {how: "chat", ref: s.id, ended: null} : it && it.subject ? {how: "subject", ref: it.subject} : null;
@@ -3277,7 +3310,7 @@ function renderConv() {
   const older = others.filter(t => !t.ended), ended = others.filter(t => t.ended), days = TD.endDays || 7;
   const row = (t, btn) => `<div class="chatitem ${t.unread ? "unread" : ""}" data-topic="${esc(String(t.id))}"><div class="topicrow"><span>${esc(t.title || "Untitled")}</span>${btn}</div>
       <div class="sub">${esc(modeWord(t.mode))}${t.spec ? " · OpenSpec" : ""} · ${t.state === "thinking" ? '<span class="pulse s-running">replying</span>' : t.unread ? '<span class="s-review">new reply</span>' : `${ago(t.ended || t.last, now)} ago`}</div></div>`;
-  const top = others.length ? `<details id="earlier" ${TD.earlierOpen ? "open" : ""}><summary>Earlier topics (${older.length})${older.some(t => t.unread) ? ' <span class="s-review">●</span>' : ""}</summary>
+  const top = others.length ? `<details id="earlier" ${TD.earlierOpen ? "open" : ""}><summary>Earlier topics (${older.length})${ended.length ? ` · ${ended.length} ended` : ""}${older.some(t => t.unread) ? ' <span class="s-review">●</span>' : ""}</summary>
     ${older.map(t => row(t, `<button data-end="${esc(String(t.id))}" title="${t.state === "thinking" ? "Stop Claude's reply and end this topic" : "Done with this topic"}: it moves under Ended and off your to-do list">End</button>`)).join("")}
     ${older.length ? `<div class="row endread"><button id="endread" title="Ends every topic here you have read whose last activity is older than that">End read topics older than</button>
       <select id="enddays">${[1, 7, 30, 90].map(n => `<option value="${n}" ${n === days ? "selected" : ""}>${n} day${n === 1 ? "" : "s"}</option>`).join("")}</select></div>` : ""}
@@ -3319,14 +3352,36 @@ function renderConv() {
 // reloads either way, so the view is right without leaving it.
 async function convAct(what, body) {
   const project = TD.cv && TD.cv.project, want = TD.cvFor; if (!project) return;
+  const t = what === "end" && topicOf(body.ref), cur = TD.cv.topic === body.ref;
   try {
     const cv = await api(`/api/conversation/${what}`, {project, ...body});
-    if (what === "end") tdDropChat(body.ref);
+    if (what === "end") { tdDropChat(body.ref); tdUndoOffer(project, body.ref, t ? t.title : "", cur); }
     const n = cv.ended_now;
     if (convSet(cv, want)) $("#chatmsg").textContent = what === "end-read" ? `Ended ${n} topic${n === 1 ? "" : "s"}.` : "";
   } catch (e) { $("#chatmsg").textContent = e.message; }
   chatKey = ""; refresh(); await refreshDesign();
 }
+// Undo, for a few seconds after an end from Today (End topic, End on a row, the step's End topic): reopens the topic,
+// and makes it the current one again when it was and the conversation shown is still that project's new topic (the
+// next to-do may have opened its own). A newer end replaces the offer.
+let tdUndoT = 0;
+function tdUndoOffer(project, ref, title, cur) {
+  const el = $("#tdundo");
+  clearTimeout(tdUndoT);
+  el.innerHTML = `<span>Ended “${esc(title || "Untitled")}”</span><button id="tdundob">Undo</button>`;
+  el.classList.remove("hidden");
+  $("#tdundob").onclick = async () => {
+    clearTimeout(tdUndoT); el.classList.add("hidden");
+    try {
+      await api("/api/conversation/reopen", {project, ref});
+      if (cur && TD.cv && TD.cv.project === project && TD.cv.topic === null) await api("/api/conversation", {project, how: "topic", ref, ended: null});
+      TD_GONE.delete(`chat:${ref}:read`);
+    } catch (e) { $("#chatmsg").textContent = e.message; }
+    chatKey = ""; refresh(); await refreshDesign();
+  };
+  tdUndoT = setTimeout(() => el.classList.add("hidden"), TD_UNDO_MS);
+}
+const TD_UNDO_MS = 8000;
 // A research topic: its thread's turns, drawn as the Research page draws them.
 async function loadResearchConv(ref) {
   let th = null;

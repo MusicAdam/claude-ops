@@ -719,7 +719,14 @@ stay on the right of the header.
     - **End read topics older than N days** (1, 7, 30 or 90) ends every open topic you have read, that Claude isn't
       replying in, other than the current one, whose last activity is older than that.
     - **Ended (N)**, folded at the bottom of Earlier topics, lists ended topics with **Reopen**. Opening one, or
-      sending it a message, reopens it too.
+      sending it a message, reopens it too. While Earlier topics is folded, its label says how many have ended:
+      **Earlier topics (2) · 1 ended**. On a phone, see PHONE-5 for how to reach them.
+    - **Undo.** For 8 seconds after an end from Today (**End topic** above the message box or on the step, **End**
+      on a row), a box says **Ended "<title>"** with **Undo**: at the bottom of the screen, or under the header on a
+      phone. Undo reopens the topic (`/reopen`), and makes it the current topic again when it was and the
+      conversation shown is still that project's new topic; if the next to-do has opened its own topic, the ended one
+      just goes back under Earlier topics. The end's other effects stay: its queued messages are gone, a stopped
+      reply stays stopped, and its replies count as read. A newer end replaces the box. The quick chat's × has no Undo.
     - **Opening reopens only what you saw ended (compare-and-set).** Every open of a chat or topic from the
       dashboard (`POST /api/conversation` with `how: chat|topic`: a Today item whose source is a chat, a click in
       Earlier topics or Ended, a link to a chat) sends `ended`, the value it last saw for that topic: `null`, or when
@@ -914,6 +921,13 @@ Below 700px Today is phone-first. The rules:
   their scrollbar and still scroll sideways.
 - **PHONE-4 Quick chat.** The quick chat (TODAY-6) opens full screen, with no drag or resize. Minimise and
   close work as on a desktop.
+- **PHONE-5 Earlier topics and Ended.** They sit where they do on a computer, at the top of the conversation in
+  the **Now** pane, for the project of the conversation shown. To reach another project's, or any when the list is
+  empty, use **Earlier topics and Ended** at the bottom of the **To-do** pane: one chip per project the header
+  filter shows. A chip opens Now on that project's conversation with Earlier topics unfolded; open **Ended** there
+  and tap **Reopen**, or tap the topic to open it. With a to-do open, the step stays and only the conversation
+  moves (as Ask Claude about this moves it); tapping that to-do in the list brings back its own conversation. The
+  chips are phone-only: a computer shows the conversation beside the list.
 
 ## Chat mode
 
