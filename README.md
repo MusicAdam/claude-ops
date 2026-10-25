@@ -1603,7 +1603,8 @@ notes = """Project-specific guidance for design chats."""
       taper still works on its own, never below 1.
     - No notification: only the brake notifies. A task held only by the taper says
       `Usage at 63% of the 5-hour window · 4 of 6 workers`, and while the cap is below `max_parallel` the header
-      meter's hover adds `Tapering: 4 of 6 workers`.
+      meter's hover adds `Tapering: 4 of 6 workers`. While tapering the header's working chip also shows the cap as
+      its denominator (`3/4 working`), and its hover names the Parallel setting it lowers.
   - **The header meter** shows both windows, `5h 62% · 7d 14%`, with their reset times on hover. It turns amber at
     or above the brake, and red while the queue waits out the usage limit itself.
 - **Restarts.** Whenever the daemon stops (`./opsctl restart` or `stop`, a promote of claude-ops, launchd, a
