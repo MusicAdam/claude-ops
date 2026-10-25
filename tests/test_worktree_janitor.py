@@ -195,6 +195,22 @@ class Janitor(unittest.TestCase):
         self.assertEqual(opsd.sweep_worktrees(self.p)["removed"], [])
         self.assertTrue(path.exists())
 
+    def test_derived_data_of_a_removed_worktree_goes(self):
+        dd = Path(tempfile.mkdtemp(dir=DATA))
+
+        def entry(name, ws):
+            (dd / name / "Build").mkdir(parents=True)
+            (dd / name / "info.plist").write_bytes(opsd.plistlib.dumps({"WorkspacePath": str(ws)}))
+        _, live = self.task()
+        entry("app-live", live / "ios/app.xcworkspace")
+        entry("app-gone", self.p.wt / "t77777/ios/app.xcworkspace")
+        entry("app-dev", self.p.dev_wt / "ios/app.xcworkspace")
+        entry("other", self.repo / "ios/app.xcworkspace")  # your checkout: not a worktree
+        (dd / "ModuleCache.noindex").mkdir()  # shared, no info.plist
+        with mock.patch.object(opsd, "DERIVED_DATA", dd):
+            self.assertEqual(opsd.sweep_derived_data([self.p.wt]), ["app-gone"])
+        self.assertEqual(sorted(f.name for f in dd.iterdir()), ["ModuleCache.noindex", "app-dev", "app-live", "other"])
+
 
 if __name__ == "__main__":
     unittest.main()

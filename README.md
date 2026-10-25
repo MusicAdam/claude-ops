@@ -1523,6 +1523,12 @@ It skips a folder that holds uncommitted changes (an untracked `.ops-result.json
 each removal the same way (`janitor removed worktree …`). A half-removed folder (no `.git`, files still there)
 has nothing to keep, so it goes.
 
+The janitor also removes Xcode's build cache of a worktree that is gone (`sweep_derived_data`). Xcode keeps one
+`~/Library/Developer/Xcode/DerivedData/<name>-<hash>` per workspace path, about 3.5 GB for ballup's iOS app, and
+nothing uses it once that worktree is removed. It only removes an entry whose `info.plist` `WorkspacePath` is in a
+folder under a project's `<worktrees>/` that no longer exists. For what a worktree really costs on disk, see
+[docs/worktree-disk-cost.md](docs/worktree-disk-cost.md).
+
 ## Other details
 
 - **Tabs.** The header has **Today** and **More ▾** (see [Today view](#today-view)). More holds History (the

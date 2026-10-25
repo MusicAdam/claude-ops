@@ -36,7 +36,7 @@ and every repo has its own main, dev and task branches. With "." in repos the wo
 path above is then a worktree of it, with the other repos' worktrees in folders it gitignores, and nothing is copied.
 """
 from contextlib import nullcontext
-import base64, ctypes, datetime, fnmatch, json, math, os, re, secrets, shlex, shutil, signal, sqlite3, subprocess, sys, threading, time, tomllib
+import base64, ctypes, datetime, fnmatch, json, math, os, plistlib, re, secrets, shlex, shutil, signal, sqlite3, subprocess, sys, threading, time, tomllib
 import xml.etree.ElementTree as ET
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
@@ -2729,8 +2729,41 @@ def sweep_all():
                 sweep_worktrees(p)
             except Exception as e:  # one project's trouble doesn't stop the others
                 print(f"janitor error in {p.name}: {e}", flush=True)
+        try:
+            sweep_derived_data([p.wt for p in PROJECTS.values()])
+        except Exception as e:
+            print(f"janitor error in {DERIVED_DATA}: {e}", flush=True)
     finally:
         SWEEP_LOCK.release()
+
+
+DERIVED_DATA = HOME / "Library/Developer/Xcode/DerivedData"
+
+
+def sweep_derived_data(roots):
+    """Remove Xcode's build cache of a worktree that is gone. Xcode keeps one DerivedData/<name>-<hash> per
+    workspace path, about 3.5 GB for an iOS app, and no build uses it once that path's worktree is removed.
+    roots: the projects' worktree folders; an entry whose WorkspacePath is in a folder under one of them that no
+    longer exists goes. Returns the entries removed."""
+    out = []
+    if not DERIVED_DATA.is_dir():
+        return out
+    for d in sorted(DERIVED_DATA.iterdir()):
+        try:
+            ws = Path(plistlib.loads((d / "info.plist").read_bytes()).get("WorkspacePath") or "")
+        except (OSError, ValueError, AttributeError):
+            continue
+        root = next((r for r in roots if r in ws.parents), None)
+        if not root or (root / ws.relative_to(root).parts[0]).exists():
+            continue
+        errs = []
+        rmtree(d, errs)
+        if errs:
+            print(f"janitor: couldn't remove {d}: {errs[0]}", flush=True)
+        else:
+            out.append(d.name)
+            print(f"janitor: removed {d}, Xcode's build cache of {ws}", flush=True)
+    return out
 
 
 def add_subtasks(p, tid, items, priority=0, hold=0, auto_release=None, model=None, effort=None):
