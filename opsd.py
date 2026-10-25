@@ -5723,6 +5723,8 @@ def conv_state(project, tops):
         c.pop("from", None)
     if c["topic"] is not None or not isinstance(c.get("subject"), str) or not SUBJECT.fullmatch(c["subject"]):
         c.pop("subject", None)
+    if c["topic"] is not None or c.get("new") is not True:  # New topic was clicked: the next message starts a fresh one
+        c.pop("new", None)
     return c
 
 
@@ -5732,7 +5734,8 @@ def conv_view(project):
     tops = topics(project)
     c = conv_state(project, tops)
     links = research_links(project)
-    return {"project": project, "topic": c["topic"], "mode": c["mode"], "subject": c.get("subject"), "modes": MODES,
+    return {"project": project, "topic": c["topic"], "mode": c["mode"], "subject": c.get("subject"),
+            "new": bool(c.get("new")), "modes": MODES,
             "topics": tops,
             "from": next((t for t in tops if t["id"] == c.get("from")), None),
             "research": {"on": bool(research.current()), "name": links[0]["name"] if links else None}}
@@ -5764,7 +5767,9 @@ def conv_open(project, how, ref=None, mode=None, ended=UNSEEN):
     subject: the open plan & design topic about ref (a to-do's or a panel's subject, see SUBJECT), else none yet:
     the first message makes it (conv_say); task: the current plan & design topic, else the latest one, else a new
     one (Ask Claude about the research runs); new: a new topic in the current mode, or mode; mode: switch mode, which starts a new
-    topic of that kind carrying a handoff of the one that was open (switching back before you send returns to it)."""
+    topic of that kind carrying a handoff of the one that was open (switching back before you send returns to it).
+    A message sent from a to-do step carries that to-do's subject itself (conv_say's todo), so it reaches the item's
+    topic even when this state was set before, or has changed since."""
     proj(project)
     tops = topics(project)
     ids = {t["id"]: t for t in tops}
@@ -5788,8 +5793,8 @@ def conv_open(project, how, ref=None, mode=None, ended=UNSEEN):
         if (cur["mode"] if cur else c["mode"]) != "design":
             latest = next((t for t in tops if t["mode"] == "design"), None)
             c = {"topic": latest["id"] if latest else None, "mode": "design"}
-    elif how == "new":
-        c = {"topic": None, "mode": mode if mode in MODES else c["mode"]}
+    elif how == "new":  # marked, so a message sent from a to-do step doesn't turn it into the to-do's topic (conv_say)
+        c = {"topic": None, "mode": mode if mode in MODES else c["mode"], "new": True}
     elif how == "mode":
         if mode not in MODES:
             raise ValueError(f"no mode {mode!r}")
@@ -5952,29 +5957,60 @@ def topic_handoff(t, mode):
                       SWITCH_CHARS)
 
 
-def conv_say(project, text):
+def todo_line(todo):
+    """The line, and the note for Claude, that a message sent from a to-do step carries into a topic (conv_say):
+    which to-do the owner had open. None for no to-do."""
+    if not isinstance(todo, dict) or not str(todo.get("title") or "").strip():
+        return None
+    key = clip(" ".join(str(todo.get("key") or "").split()), 40)
+    title, why = clip(" ".join(str(todo["title"]).split()), 300), clip(str(todo.get("why") or "").strip(), 1000)
+    verb = clip(" ".join(str(todo.get("verb") or "").split()), 20)
+    line = f"Sent from to-do {key}: {verb + ' ' if verb else ''}{title}".strip()
+    note = (f"The owner sent the next message with this to-do open on Today, so it is about it unless it says "
+            f"otherwise: {key or 'to-do'} ({verb or 'to-do'}) “{title}”." + (f" Why: {why}" if why else ""))
+    return line, note
+
+
+def conv_say(project, text, todo=None):
     """POST /api/conversation/say: send text into the current topic, or start one in the current mode. A topic a
-    mode switch started carries the handoff of the one before it to Claude, and a line saying so in the chat."""
+    mode switch started carries the handoff of the one before it to Claude, and a line saying so in the chat.
+    todo: the to-do step shown when you sent it, {key, verb, title, why, subject?, pick?} (README: TODAY-2), so the
+    send itself says what it is about, whatever conv:<project> holds by now. With a subject, a message that would
+    start a new topic goes to that item's own topic instead (conv_open how=subject), unless New topic was clicked;
+    pick (the page never got the item's topic picked: the open failed or is still on its way) does that over any
+    current topic. The topic gets a line naming the to-do, with its title and why as a note for Claude, once."""
     text = (text or "").strip()
     if not text:
         raise ValueError("say something first")
     proj(project)
     tops = topics(project)
-    ids = {t["id"]: t for t in tops}
     c = conv_state(project, tops)
+    todo = todo if isinstance(todo, dict) else None
+    subject = todo.get("subject") if todo else None
+    if (isinstance(subject, str) and SUBJECT.fullmatch(subject)
+            and ((c["topic"] is None and not c.get("new")) or todo.get("pick") is True)):
+        conv_open(project, "subject", subject)
+        tops = topics(project)
+        c = conv_state(project, tops)
+    ids = {t["id"]: t for t in tops}
     cur, left = ids.get(c["topic"]), ids.get(c.get("from"))
+    told = todo_line(todo)
     if cur and cur["ended"]:  # a message into an ended topic reopens it, as it does an ended chat
         topic_reopen(project, cur["id"])
     if cur:
         todos_agree_close(cur["id"])
     if cur and cur["mode"] != "research":
+        if told and not q("SELECT 1 FROM design_msgs WHERE design_id=? AND role='ops' AND text=?",
+                          (cur["id"], told[0]), one=True):
+            q("INSERT INTO design_msgs (design_id, role, text, ts, note) VALUES (?,?,?,?,?)",
+              (cur["id"], "ops", told[0], time.time(), told[1]))
         return {"topic": cur["id"], "queued": design_say(cur["id"], text)}
     handoff = topic_handoff(left, c["mode"]) if left and not cur else ""
     if c["mode"] == "research":
         links = research_links(project)
         if not links:
             raise ValueError(f"research is off, or no research project is linked to {project}")
-        body = {"message": text + (f"\n\n{handoff}" if handoff else "")}
+        body = {"message": text + "".join(f"\n\n{x}" for x in (handoff, told and told[1]) if x)}
         body.update({"thread": cur["id"][2:], "target": cur["target"]} if cur else {"target": f"project:{links[0]['id']}"})
         code, r = research.post("/chat", body)
         if code != 200:
@@ -5989,6 +6025,9 @@ def conv_say(project, text):
         if about:  # the same mechanism as a handoff: the note goes to Claude with the first message
             q("INSERT INTO design_msgs (design_id, role, text, ts, note) VALUES (?,?,?,?,?)",
               (new, "ops", about["line"], now, about["note"]))
+        if told:
+            q("INSERT INTO design_msgs (design_id, role, text, ts, note) VALUES (?,?,?,?,?)",
+              (new, "ops", told[0], now, told[1]))
         if handoff:  # the note goes to Claude with the first message (news); the line is what you see
             q("INSERT INTO design_msgs (design_id, role, text, ts, note) VALUES (?,?,?,?,?)",
               (new, "ops", f"Switched from {MODES[left['mode']]} to {MODES[c['mode']]}: this topic starts with a "
@@ -8423,7 +8462,7 @@ class H(BaseHTTPRequestHandler):
             return conv_open(b.get("project") or "", b.get("how"), b.get("ref"), b.get("mode"),
                              b["ended"] if "ended" in b else UNSEEN)
         if path == "/api/conversation/say":
-            return conv_say(b.get("project") or "", b.get("text"))
+            return conv_say(b.get("project") or "", b.get("text"), b.get("todo"))
         if path == "/api/conversation/end":  # {project, ref}: you are done with that topic
             return topic_end(b.get("project") or "", b.get("ref"))
         if path == "/api/conversation/reopen":  # {project, ref}: put an ended topic back

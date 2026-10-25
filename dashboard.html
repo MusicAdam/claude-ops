@@ -2654,12 +2654,26 @@ async function sendChat() {
 }
 $("#send").onclick = sendChat;
 $("#cproj").onchange = () => { if (tab === "today") { TD.applied = ""; chatKey = ""; refreshDesign(); } };
-// Today: the message goes to the project's current topic, or starts one in the current mode (conv_say)
+// ---- the to-do a message is sent from
+// The to-do step shown when you send (README TODAY-2 rule 5), for conv_say: its key, title and why, and its subject
+// (task:<id>, …), so the message lands in its topic and Claude knows what it is about, whatever the conversation state
+// was set to before. pick: the page never got the item's topic picked for this item and project (the open failed or
+// is on its way). None for a chat's item (it opens its chat), or an item of another project than the conversation's.
+function convTodo(it, project, applied) {
+  if (!it || !project || it.project !== project || (it.source && it.source.kind === "chat")) return null;
+  const t = {key: it.key, verb: it.verb, title: it.title, why: it.why || ""};
+  if (it.subject) { t.subject = it.subject; if (applied !== `${it.key}|${project}`) t.pick = true; }
+  return t;
+}
+// ---- end of the to-do a message is sent from
+// Today: the message goes to the project's current topic, or starts one in the current mode (conv_say); sent from a
+// to-do step, it carries that to-do.
 async function convSay(text) {
   const project = convProject();
   if (!project) { $("#chatmsg").textContent = "pick a project"; return; }
+  const todo = convTodo(TD.item, project, TD.applied);
   try {
-    await api("/api/conversation/say", {project, text});
+    await api("/api/conversation/say", {project, text, ...(todo ? {todo} : {})});
     $("#say").value = ""; $("#chatmsg").textContent = ""; TD.starter = ""; chatKey = ""; renderSlash();
     await refreshDesign(); toBottom($("#msgs"));
   } catch (e) { $("#chatmsg").textContent = e.message; }
@@ -3274,7 +3288,8 @@ async function loadConv() {
       // isn't opened, and its Read step leaves the list (conv_open's compare-and-set, README TODAY-2).
       const how = s.kind === "chat" ? {how: "chat", ref: s.id, ended: null} : it && it.subject ? {how: "subject", ref: it.subject} : null;
       if (how) cv = await api("/api/conversation", {project, ...how}).catch(() => null);
-      TD.applied = `${key}|${project}`;
+      // Only once it took: a failed open is tried again on the next load, and the send says pick meanwhile.
+      if (!how || cv) TD.applied = `${key}|${project}`;
       if (cv && cv.still_ended != null) tdDropChat(cv.still_ended);
     }
     if (!cv && project) cv = await api(`/api/conversation?project=${encodeURIComponent(project)}`);
@@ -3350,7 +3365,7 @@ function renderConv() {
   const cur = topicOf(cv.topic), busy = cur && cur.state === "thinking";
   const html = `<div class="row"><span style="flex:1"></span>${cur ? `<button id="endtopic" ${!ready ? "disabled" : ""} title="${!ready ? "Loading this item's conversation…" : busy ? "Stop Claude's reply and end this topic: it moves under Ended and off your to-do list" : "Done with this topic: it moves under Ended and off your to-do list"}">End topic</button>` : ""}
     <button id="newtopic" title="Your next message starts a new topic" ${cv.topic === null || !ready ? "disabled" : ""}>New topic</button></div>
-    ${cv.topic === null && cv.subject ? `<div class="convnote">Your next message starts this item's own topic.</div>`
+    ${cv.topic === null && (cv.subject || (!cv.new && convTodo(TD.item, cv.project, TD.applied)?.subject)) ? `<div class="convnote">Your next message starts this item's own topic.</div>`
       : cv.topic === null && cv.topics.length ? `<div class="convnote">Your next message starts a new topic.</div>` : ""}`;
   if (put($("#convmodes"), html)) {
     $("#newtopic").onclick = () => { convOpen({how: "new", mode: "design"}); $("#say").focus(); };

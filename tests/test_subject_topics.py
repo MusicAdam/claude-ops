@@ -144,5 +144,89 @@ class SubjectTopics(unittest.TestCase):
         self.assertEqual([i["subject"] for i in items if i["key"].startswith("task:")], [f"task:{tid}"])
 
 
+    # A message sent from a to-do step carries the to-do (README: TODAY-2 rule 5), so the topic doesn't hang on the
+    # conv:<project> the page set earlier. Row 96 in the owner's database: to-do 20 (source task #313) was open, its
+    # topic was ended (topic_end keeps no subject), the page had already picked the topic for that item (TD.applied)
+    # and didn't post the subject again, so the next message made a topic with subject NULL and no note.
+    def todo(self, tid, **kw):
+        return {"key": "todo:20", "verb": "Do", "title": "Paste the schedule", "why": "The stored body is a copy.",
+                "subject": f"task:{tid}", **kw}
+
+    def note_of(self, did, text):
+        return opsd.q("SELECT note FROM design_msgs WHERE design_id=? AND role='ops' AND text=?", (did, text),
+                      one=True)
+
+    def test_end_then_send_from_the_same_step_starts_its_topic(self):
+        tid = self.task("Keep the doc")
+        opsd.conv_open("demo", "subject", f"task:{tid}")  # the first visit
+        first = opsd.conv_say("demo", "Do this to-do", self.todo(tid))["topic"]
+        opsd.topic_end("demo", first)
+        self.assertIsNone(opsd.conv_view("demo")["subject"])  # what the page saw: no subject pending
+        r = opsd.conv_say("demo", "I believe this was completed double check", self.todo(tid))  # no new open
+        self.assertNotEqual(r["topic"], first)
+        d = opsd.design(r["topic"])
+        self.assertEqual(d["subject"], f"task:{tid}")
+        self.assertIn("Keep the doc", self.note_of(r["topic"], f"About task #{tid}")["note"])
+        note = self.note_of(r["topic"], "Sent from to-do todo:20: Do Paste the schedule")["note"]
+        self.assertIn("Paste the schedule", note)
+        self.assertIn("The stored body is a copy.", note)
+
+    def test_seen_before_step_reuses_its_open_topic(self):
+        tid, other = self.task("A"), self.task("B")
+        opsd.conv_open("demo", "subject", f"task:{tid}")
+        mine = opsd.conv_say("demo", "one", self.todo(tid))["topic"]
+        opsd.conv_open("demo", "subject", f"task:{other}")  # another step, then back: the page skips the open
+        r = opsd.conv_say("demo", "two", self.todo(tid))
+        self.assertEqual(r["topic"], mine)
+        self.assertEqual(len([x for x in self.rows() if x["subject"] == f"task:{tid}"]), 1)
+
+    def test_first_send_with_no_open_at_all(self):
+        tid = self.task("A")
+        r = opsd.conv_say("demo", "hi", self.todo(tid))  # the open failed: nothing kept, no topics yet
+        self.assertEqual(opsd.design(r["topic"])["subject"], f"task:{tid}")
+
+    def test_pick_routes_over_a_stale_current_topic(self):
+        tid = self.task("A")
+        opsd.conv_open("demo", "new", mode="design")
+        other = opsd.conv_say("demo", "unrelated")["topic"]
+        r = opsd.conv_say("demo", "hi", self.todo(tid))  # the owner's (or a stale) current topic: kept
+        self.assertEqual(r["topic"], other)
+        self.assertTrue(self.note_of(other, "Sent from to-do todo:20: Do Paste the schedule"))
+        r = opsd.conv_say("demo", "hi", self.todo(tid, pick=True))  # the page never got the item's topic picked
+        self.assertEqual(opsd.design(r["topic"])["subject"], f"task:{tid}")
+
+    def test_new_topic_click_is_kept(self):
+        tid = self.task("A")
+        opsd.conv_open("demo", "subject", f"task:{tid}")
+        opsd.conv_open("demo", "new", mode="design")
+        self.assertTrue(opsd.conv_view("demo")["new"])
+        d = opsd.design(opsd.conv_say("demo", "Something else", self.todo(tid))["topic"])
+        self.assertIsNone(d["subject"])
+        self.assertTrue(self.note_of(d["id"], "Sent from to-do todo:20: Do Paste the schedule"))
+        self.assertFalse(opsd.conv_view("demo")["new"])
+
+    def test_todo_without_subject_still_tells_claude(self):
+        r = opsd.conv_say("demo", "done?", {"key": "todo:7", "verb": "Do", "title": "Grant Full Disk Access",
+                                             "why": "Workers hang on the prompt."})
+        d = opsd.design(r["topic"])
+        self.assertIsNone(d["subject"])
+        note = self.note_of(d["id"], "Sent from to-do todo:7: Do Grant Full Disk Access")["note"]
+        self.assertIn("Workers hang on the prompt.", note)
+        opsd.conv_say("demo", "again", {"key": "todo:7", "verb": "Do", "title": "Grant Full Disk Access"})
+        self.assertEqual(len(opsd.q("SELECT 1 FROM design_msgs WHERE design_id=? AND role='ops'", (d["id"],))), 1)
+
+    def test_no_todo_is_unchanged(self):
+        tid = self.task("A")
+        opsd.conv_open("demo", "subject", f"task:{tid}")
+        first = opsd.conv_say("demo", "one")["topic"]
+        opsd.topic_end("demo", first)
+        d = opsd.design(opsd.conv_say("demo", "two")["topic"])
+        self.assertIsNone(d["subject"])
+        self.assertEqual(opsd.q("SELECT 1 FROM design_msgs WHERE design_id=? AND role='ops'", (d["id"],)), [])
+
+    def test_say_endpoint_passes_the_todo(self):
+        src = Path(opsd.__file__).read_text()
+        self.assertIn('conv_say(b.get("project") or "", b.get("text"), b.get("todo"))', src)
+
 if __name__ == "__main__":
     unittest.main()
