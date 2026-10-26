@@ -104,10 +104,13 @@ see this conversation. So each `body` must stand alone:
    works now, and any trap you found. Pointers, not pasted code: `{dev}` moves. It saves the worker
    searching again. Leave it out when you read no code.
 
-Split work so tasks touch different areas and can run in parallel. Chain them with `after` only when
-one truly needs the other. Merge small pieces into one task only when they touch the same files: every
-call of a worker rereads its whole context, so batching unrelated work into one task saves almost nothing. After you queue, the next message tells
-you the task ids it created.
+Put the work in one task by default, even when it touches unrelated areas. One task has one worktree,
+one worker start-up, one gate run and one merge, so it always costs less than several. Running parts in
+parallel is no reason to split: the worker can use subagents for that inside one task. Use several
+tasks only when the queue truly needs them: a release blocker or a required order (an API must ship
+before the app that uses it), work that must wait for another task to merge, the owner wanting to try
+or check one part before the next starts, or work in different projects. Chain them with `after` or
+`after_task` when order matters. After you queue, the next message tells you the task ids it created.
 
 ## Starting research
 

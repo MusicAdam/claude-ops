@@ -359,8 +359,9 @@ the dashboard's API). Workers can't see that folder, so a brief that builds on a
 agree on the work, ask it to queue: it writes self-contained task briefs, and they appear as chips
 under its reply. Each message it gets starts with that project's current queue, so it avoids duplicates.
 When it has read the code a task touches, the brief ends with **Where to look**: about 20 lines of
-`file:line` pointers and facts it found, so the worker skips the search. It merges small pieces into one
-task only when they touch the same files. A worker that splits its task writes the same section.
+`file:line` pointers and facts it found, so the worker skips the search. It puts the work in one task by
+default and uses several only when order or release truly needs them (see Parallelism). A worker that splits
+its task writes the same section.
 
 ### OpenSpec changes
 
@@ -473,10 +474,10 @@ folder, even when it has no open changes.
   send (plain-text commands such as Validate insert their text too), and **Esc** closes the list. Other chats
   show no list for now.
 - **How big a task is.** One task per change is the default and the recommendation. A checklist item is far too
-  small: every task costs a worktree, a worker start-up and a full gate run, and the worker can still split a
-  big change itself. One task per phase is recommended only for a change with 25 or more open items in three
-  or more phases. A phase with fewer than four open items (often "Tests" or "Docs") is folded into its
-  neighbour. There is never one task per item.
+  small: every task costs a worktree, a worker start-up and a full gate run. Size is no reason to split: the
+  worker uses subagents for parallel parts. Queue one task per phase only when you want to check a phase before
+  the next starts, or a phase must release first. A phase with fewer than four open items (often "Tests" or
+  "Docs") is then folded into its neighbour. There is never one task per item.
 - **Archive it in the chat.** When the work is merged, send `/opsx:archive <name>` (or ask the chat to run
   `openspec archive <name> --yes`). It touches only `openspec/`, so the edits are saved to `dev` like any
   other. The chat's header then says the change was archived and where it went
@@ -1689,7 +1690,9 @@ folder under a project's `<worktrees>/` that no longer exists. For what a worktr
   queued task says why it hasn't started: a free slot, the task it runs after, a paused project or
   queue. Tasks that need you show the question or error; finished ones show the summary.
 - **Parallelism.** "Parallel" on the Settings tab is the global limit (default 3; setting `max_parallel`). Workers
-  also split big tasks into subtasks (with "after" ordering) and use subagents inside a task. "Usage brake" next to it
+  use subagents for parallel parts inside a task. One larger task beats several: it has one worktree, one
+  start-up, one gate run and one merge. A worker splits its task (with "after" ordering) only when parts must
+  merge or release separately, or belong to different projects, never just to run in parallel. "Usage brake" next to it
   is the usage brake (setting `usage_brake`, default 85; see Usage limits), and "Taper from" the usage taper that
   starts fewer workers as the 5-hour window fills (setting `usage_taper`, default 50). "Promote wait" is the promote train's
   longest wait in minutes (setting `release_wait`, default 180; see [Promote after merge](#main-is-the-golden-version)).

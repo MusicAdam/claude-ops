@@ -2597,9 +2597,7 @@ function readerHead(d) {
   const btn = (plan, label, title) => `<button class="${s.advice === plan ? "primary" : ""}" data-plan="${plan}" title="${esc(title)}">${label}</button>`;
   const phases = s.groups.length >= 2 ? btn("phases", `Queue ${s.groups.length} tasks, one per phase`,
     s.groups.map((g, k) => `${k + 1}. ${g.title} (${g.open} open)`).join("\n")) : "";
-  const advice = s.advice === "phases"
-    ? `Recommended: one task per phase. ${s.open} open items in ${s.groups.length} phases is a lot for one worker, and each phase is checked and merged before the next starts.`
-    : `Recommended: one task. Each task costs a worktree, a worker start-up and a full merge check, so a checklist item is far too small for one. The worker can still split a big change itself.`;
+  const advice = `Recommended: one task. Each task costs a worktree, a worker start-up and a full merge check, and the worker runs parallel parts with subagents. Queue one per phase only to check or release a phase before the next starts.`;
   return `<div><b style="font-size:15px">${esc(s.title)}</b> · <span class="rpath">${esc((s.sub ? s.sub + "/" : "") + s.path)}</span>`
     + `${s.has_tasks ? ` · <span class="prog">${bar(s.done, total)} ${s.done}/${total} done</span>` : ""}</div>
     ${s.why ? `<div class="why">${esc(s.why)}</div>` : ""}

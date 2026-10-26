@@ -7079,7 +7079,6 @@ def queue_from_reply(p, reply, did):
 
 SPEC_DIR = Path("openspec") / "changes"
 SPEC_SMALL = 4  # a tasks.md phase with fewer open items is folded into its neighbour
-SPEC_BIG = (25, 3)  # open items and phases from which one task per phase is the advice
 CHECKBOX = re.compile(r"\s*[-*]\s+\[([ xX])\]\s+(.*)")
 
 # A change's chat may run any openspec command but those that write outside openspec/ (init, update: a chat can't
@@ -7208,7 +7207,7 @@ def spec_info(folder):
             "open": n, "done": sum(ph["done"] for ph in phases), "has_tasks": bool(text("tasks.md")),
             "groups": [{"title": " + ".join(t for t in g["titles"] if t) or "tasks", "open": len(g["open"])}
                        for g in groups],
-            "advice": "phases" if n >= SPEC_BIG[0] and len(groups) >= SPEC_BIG[1] else "whole"}
+            "advice": "whole"}  # one task, whatever the size: split only to check or release a phase first
 
 
 def spec_changes(p):
