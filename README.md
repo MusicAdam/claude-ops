@@ -489,13 +489,14 @@ folder, even when it has no open changes.
 ### Which chats need you
 
 The Today view shows which chats need you (see [TODAY-2](#today-view)). Every chat you haven't ended is a
-**Read** to-do once Claude is done replying (marked new until you read it), and an unread one is ● in **Earlier
-topics**. The to-do list and Earlier topics follow the project filter. An ended chat is done: a reply that lands in
+**Read** to-do once Claude is done replying (marked new until you read it), and an unread one is ● on its tab in
+the Today conversation's strip. The to-do list and the strip follow the project filter. An ended chat is done: a reply that lands in
 it later (a task's result note) makes it new nowhere.
 
-- **Ending a chat.** Click **End** on its row in Earlier topics, or **End topic** above the message box, to move it
-  under **Ended**, folded at the bottom of Earlier topics. Its replies count as read and its queued messages are
-  dropped. Ending never waits for Claude: if Claude is replying, End stops the reply and ends the chat at once, and
+- **Ending a chat.** Click **×** on its tab, or **End topic** on its Read step, to move it
+  under **Ended**, in the strip's **▾** menu. Its replies count as read and its queued messages are
+  dropped. A tab's **×** is refused while Claude is replying (stop the reply first); **End topic**, the API and the
+  quick chat never wait for Claude: if Claude is replying, they stop the reply and end the chat at once, and
   the stopped reply, when it finishes, leaves the chat ended and read (it never reopens it, sends the queue, or puts
   it back on the to-do list). Research topics stop their running research turns. Nothing is deleted. To put it back, click **Reopen**
   there, click the topic under Ended, follow a link to it, or send it a message. Opening an OpenSpec change reopens
@@ -537,7 +538,7 @@ the uncommitted-files banner, Deploy. `/api/state` gathers them into one list, `
     with a note when it is cut, an untracked file shown as a diff against nothing. The card reads these from
     `GET /api/projects/<name>/uncommitted`, read only (git status and diff without an index lock, file reads):
     `{repos: [{repo, files: [{path, status, added, removed, binary, mtime}], more}], diff, diff_lines, cut}`.
-  - **Read**: a design or project chat with a reply you haven't opened, as ● in Earlier topics marks it.
+  - **Read**: a design or project chat with a reply you haven't opened, as ● on its tab marks it.
   - **Read** (a report): a research task merged into `dev` whose report you haven't marked read, or a report any
     merged task listed in its result (see [Research](#research), RES-5 and RES-10). Opening the report leaves it on
     the list: a report you looked at may still need a decision. Only **Mark read** closes it.
@@ -743,14 +744,29 @@ stay on the right of the header.
     from a chat). With one project ticked its one row still shows. Clicking a row opens that project's **home**
     in the centre (TODAY-2): no to-do is selected. The home is kept in this browser (`ops-td-home`) and its row is
     highlighted. Clicking a to-do clears the home. Clicking the selected to-do again, or **Esc** on Today with no
-    menu, panel or dialog open and focus outside a text field, goes to the home of that item's project. While a
+    menu, panel or dialog open and focus outside a text field, goes to the home of that item's project; except that
+    clicking it again while it has a topic and another tab is shown jumps back to its tab, as **Back to its tab →**
+    does (TODAY-2). While a
     home is open nothing is auto-selected, so a new to-do arriving doesn't move the centre. If the home project
     leaves view (the switcher changes, or it is archived or removed), the home clears and the auto-select
     returns.
-- **TODAY-2 Centre: the step.** The selected item as one step: **Step k of n** (k within the filter) · project,
+- **TODAY-2 Centre: always a chat, with the step as a dock.** The centre column is always the conversation (see
+  *one conversation per project* below): a strip of tabs on top, one per open topic, then the thread, then the
+  message box. Selecting a to-do never moves you to another tab by itself unless the to-do already has a topic
+  (see *A to-do's topic* below), and never puts anything into the chat by itself.
+
+  **The dock.** The selected item's step sits in a dock between the thread and the message box: a `--panel` card
+  with rounded top corners, resting on the composer's top border. With no to-do selected there is no dock. A **▾**
+  at its top right folds it to one line (the verb and the title) and **▸** unfolds it; this browser keeps the choice
+  (`ops-td-dock` in localStorage, `1` folded), for every item. The dock scrolls inside itself when it is taller than
+  about half the column, so the thread always keeps room.
+
+  The step: **Step k of n** (k within the filter) · project,
   the title, the why, and key facts. For a task: its number, the gate result, how many files it changed, and how
   long ago it was built. One primary button, a few secondary ones, and **Skip for now →**. Every button calls an
-  endpoint the older pages already use. Beside **Skip for now →**, on the desktop and phone layouts alike, is a
+  endpoint the older pages already use. After them come the dock's chat buttons (see *A to-do's topic*):
+  **＋ Add to this chat** and **New tab ↗** for a to-do with no topic, `This tab is its topic` when its topic is the
+  tab shown, or **Back to its tab →** when it has a topic and another tab is shown. Beside **Skip for now →**, on the desktop and phone layouts alike, is a
   one-line note field, always shown, with the placeholder `Note to self, e.g. wait for #249`. It saves as you
   type (after about 500 ms, and on blur) through `POST /api/todos/note`. Skip's tooltip says what it will do:
   "Move to the end of the list until midnight" with an empty note, "Park it with this note" with one. A parked
@@ -764,7 +780,8 @@ stay on the right of the header.
   is fetched fresh. A poll's redraw keeps it playing. A held task's details page (the review state) shows the
   same video above the feedback box, and there too Approve is primary when a video exists.
 
-  The centre shows either a step or a project **home**. The home is a slim card: the project title, one muted
+  The centre shows either a step (in the dock) or a project **home**. The home is a slim card above the thread,
+  under the tab strip: the project title, one muted
   status line from `/api/state` (for example `2 running · 4 to-dos`; zero running is left out), and the project's
   **pipeline**, with the Projects card's endpoints and rules:
   - The top line: **▶ Play dev** / **■ Stop dev** (only with a launch step), then a **dev → main** stage (left out
@@ -787,8 +804,8 @@ stay on the right of the header.
     lanes stack, and a lane's chips wrap after an arrow.
 
   Errors show in the card's message line. The **All clear** card (empty list, no home) is this card for the conversation's project, with a muted
-  line that nothing needs you. The tabs and conversation below are unchanged. A message sent from a home
-  carries no to-do (rule 5).
+  line that nothing needs you. The tabs and the conversation under it are unchanged. A message sent from a home
+  or the All clear card carries no to-do: there is nothing to attach.
 
   Every step also has **Wait for…** beside Skip. It opens a small chooser under the step. A header line says
   what it does: `Park this item until tasks finish. It comes back when they do.` Under it come the item's
@@ -821,9 +838,11 @@ stay on the right of the header.
   message line.
 
   **Send back…**, **Retry with a note…** and **Answer** use the message box below: a line above it says where the
-  message goes, with **Cancel**. **Retry after…** opens a chooser in the step instead, as **Wait for…** does (see
+  message goes, with **Cancel**. They, and **Reply**, also attach the to-do (the 📎 chip, see *Attaching a to-do*)
+  and focus the box. Their message still goes to the task's worker, as before; the chip clears with it, and no
+  bond is stored (nothing was said in a chat). **Retry after…** opens a chooser in the step instead, as **Wait for…** does (see
   **Retrying** under the queue's controls); its errors show in the step's message line.
-- **TODAY-2 Centre, below: one conversation per project.** One running conversation for the project in view,
+- **TODAY-2 Centre: one conversation per project, in tabs.** One running conversation for the project in view,
   with one message box. With one project ticked in the switcher it is that project. Otherwise it is the selected
   item's project, else the open home's project (the conversation follows the home), else the last one you used (a **Project** picker shows when there is neither; it lists the
   projects in view). It replaces the Design chat list, the Chat list and research
@@ -833,86 +852,126 @@ stay on the right of the header.
     handoff and files, stored as before. Old chats are topics as they are; nothing is migrated. The project's
     current topic is kept by the daemon (setting `conv:<project>`), so every browser shows the same one. With
     none kept, it is the project's topic with the latest activity.
-  - **The timeline.** One scrolling timeline: the current topic's messages, under a divider line
-    `<date> · <topic title> · <mode>`. Above it, **Earlier topics (N)** is folded. Open it for every other open topic
-    of the project, newest first: title, mode, last activity, and ● when it has a reply you haven't read. Click one to
-    make it the current topic. Sending a message into an older topic resumes it, as sending to an ended chat does.
-  - **Ending topics.** You end a topic when you are done with it. It leaves Earlier topics and the to-do list, and
+  - **The tab strip.** The top of the centre column is a strip of folder tabs (a 1px `--line` border; the selected
+    tab merges into the thread's background). There is one tab per open topic of the conversation's project, plus
+    the current topic. The order is stable: oldest first (by when the topic started), so a new tab appears on the
+    right. The topic tabs scroll sideways when they don't fit; the rest of the strip stays put.
+    - A tab shows the topic's title, cut with an ellipsis (the full title, its mode and last activity on hover),
+      **●** when it has a reply you haven't read, and a pulsing mark while Claude replies.
+    - Clicking a tab makes it the current topic (`POST /api/conversation` with `how: topic` and the `ended` it
+      saw). The selected tab is the current topic.
+    - **×** on a tab ends that topic (see *Ending topics*).
+    - **+** after the topic tabs is **New topic**: a pending tab titled `New topic` is selected, and your first
+      message creates the topic (`how: "new"`, `mode: "design"`), titled from that message. While a plain pending
+      tab is shown, **+** is disabled.
+    - A pending tab that a to-do or a panel opened (**New tab ↗**, **Ask Claude about this**) is titled from its
+      subject: `#<id> <task title>`, or the item's title, cut to 80 characters. The title is kept with the pending
+      state in `conv:<project>` (`title`), and `GET /api/conversation` returns it (`title`, only while the topic is
+      still pending).
+    - **Pinned tabs.** At the right of the same strip are **Specs & designs**, **Research** and **Tasks** (TODAY-4),
+      styled quieter than topic tabs. Picking one shows that section in place of the thread and the message box; the
+      dock stays. Picking a topic tab goes back to the thread. The tab you pick is kept in this browser
+      (`ops-td-sec`). There is no separate Conversation tab: any topic tab is the conversation.
+    - **▾** at the right end of the strip opens a small menu: **Ended (N)**, the ended topics newest first, each
+      with **Reopen** (clicking its title reopens it too and selects it), and **End read topics older than N days**.
+  - **The thread.** The current topic's messages, under a divider line `<date> · <topic title> · <mode>`. A project
+    home's card shows between the strip and the thread when a home is open (TODAY-2 home). Sending a message into an
+    ended topic resumes it, as sending to an ended chat does.
+  - **Ending topics.** You end a topic when you are done with it. It leaves the tab strip and the to-do list, and
     its replies count as read, now and later. A chat's end is stored in `designs.ended`; a research
     thread is listed in the setting `research_ended`. Both survive a restart.
-    - **End** on a row of Earlier topics, or **End topic** above the message box for the current one (your next
-      message then starts a new topic). Both are refused while Claude is replying: stop the reply or wait.
+    - **×** on its tab, or **End topic** on a Read step. A tab's **×** is refused (disabled, with a tooltip saying
+      why) while Claude is replying in that topic: stop the reply or wait. **End topic** on a step stops the reply and
+      ends it, as in [Which chats need you](#which-chats-need-you). Ending the current topic selects a plain pending
+      tab: your next message starts a new topic.
     - They act on the topic shown, in the project of the conversation shown (the `project` that
       `GET /api/conversation` returns), never in whatever project the view moved to since. After you click another
-      to-do, End topic and New topic are disabled, and the rows of Earlier topics do nothing, until its conversation has
-      loaded. If an end is refused anyway, the view shows why and reloads the conversation.
-    - **End read topics older than N days** (1, 7, 30 or 90) ends every open topic you have read, that Claude isn't
-      replying in, other than the current one, whose last activity is older than that.
-    - **Ended (N)**, folded at the bottom of Earlier topics, lists ended topics with **Reopen**. Opening one, or
-      sending it a message, reopens it too. While Earlier topics is folded, its label says how many have ended:
-      **Earlier topics (2) · 1 ended**. On a phone, see PHONE-5 for how to reach them.
-    - **Undo.** For 8 seconds after an end from Today (**End topic** above the message box or on the step, **End**
-      on a row), a box says **Ended "<title>"** with **Undo**: at the bottom of the screen, or under the header on a
+      to-do, the tabs' **×**, **+** and clicks do nothing until its conversation has loaded. If an end is refused
+      anyway, the view shows why and reloads the conversation.
+    - **End read topics older than N days** (1, 7, 30 or 90), in the ▾ menu, ends every open topic you have read,
+      that Claude isn't replying in, other than the current one, whose last activity is older than that.
+    - **Ended (N)**, in the ▾ menu, lists ended topics with **Reopen**. Opening one, or sending it a message,
+      reopens it too. The ▾ shows the count when there are any: **▾ 2**. On a phone, see PHONE-5.
+    - **Undo.** For 8 seconds after an end from Today (a tab's **×**, or **End topic** on the step), a box says
+      **Ended "<title>"** with **Undo**: at the bottom of the screen, or under the header on a
       phone. Undo reopens the topic (`/reopen`), and makes it the current topic again when it was and the
-      conversation shown is still that project's new topic; if the next to-do has opened its own topic, the ended one
-      just goes back under Earlier topics. The end's other effects stay: its queued messages are gone, a stopped
+      conversation shown is still that project's new topic; if something else has been picked since, the ended one
+      just goes back into the strip. The end's other effects stay: its queued messages are gone, a stopped
       reply stays stopped, and its replies count as read. A newer end replaces the box. The quick chat's × has no Undo.
     - **Opening reopens only what you saw ended (compare-and-set).** Every open of a chat or topic from the
-      dashboard (`POST /api/conversation` with `how: chat|topic`: a Today item whose source is a chat, a click in
-      Earlier topics or Ended, a link to a chat) sends `ended`, the value it last saw for that topic: `null`, or when
-      it ended. An ended topic reopens only when that equals the stored value: you knowingly opened an ended topic.
-      If you saw it open but it has ended since (a Today list or `/api/state` answer from before End topic), it stays
-      ended, doesn't become the current topic, and the answer carries `still_ended: <ref>`; the dashboard drops its
-      Read step and moves to the next item. A Today item always sends `null`, so Today never reopens an ended chat:
-      an owner to-do that came from an ended chat shows the project's current topic instead. End topic also drops the
+      dashboard (`POST /api/conversation` with `how: chat|topic`: a tab, a row under Ended, a to-do's topic, a link
+      to a chat) sends `ended`, the value it last saw for that topic: `null`, or when it ended. An ended topic
+      reopens only when that equals the stored value: you knowingly opened an ended topic. Selecting a to-do whose
+      topic has ended sends the `topic_ended` that `/api/state` gave the item, so it reopens (see *A to-do's
+      topic*). If you saw it open but it has ended since (a tab or `/api/state` answer from before the end), it stays
+      ended, doesn't become the current topic, and the answer carries `still_ended: <ref>`; for a chat's Read step the
+      dashboard drops the step and moves to the next item, for any other to-do the tab stays and the dock offers
+      **Back to its tab →**, which reopens it once the next poll has the new value. End topic also drops the
       chat's Read step at once, and keeps it off for 20 s against an older `/api/state` answer. A call without
       `ended` (the CLI, older callers) reopens as before. No time windows.
     - With no current topic kept, the view picks the latest open topic, else starts a new one.
     - API: `POST /api/conversation/end` and `/reopen` with `{project, ref}`, and `/end-read` with `{project, days}`.
       Each answers with the conversation, as `GET /api/conversation` does.
-  - **One kind of topic.** Above the message box there is only **New topic**, and a line under it when your next
-    message starts one. Every new topic is plan & design: a design chat. You don't pick a mode first; you ask Claude.
-    It queues tasks, starts research (it queues a research task, see RES-2) and, when you ask for a change made
-    directly in your checkout, edits it there. See *What a topic may run* below.
+  - **One kind of topic.** Every new topic is plan & design: a design chat. You don't pick a mode first; you ask
+    Claude. It queues tasks, starts research (it queues a research task, see RES-2) and, when you ask for a change
+    made directly in your checkout, edits it there. See *What a topic may run* below.
 
     Older topics keep their kind. An **edit my checkout** (project chat) or **research** topic from before still
-    opens and continues as that kind, and the divider and **Earlier topics** still show its mode word. A topic never
+    opens and continues as that kind, and the divider and its tab's tooltip still show its mode word. A topic never
     changes kind. If the kept state names a new topic of another kind (a mode switch from before), the view resets it
     to plan & design.
 
     The backend modes stay (`MODES`, `conv_open()` with `how: "mode"`, the topic handoff a switch carries); the
     Today composer no longer offers a switch.
-  - **Which topic a message goes to** (`conv_open()` in opsd.py):
-    1. Opening a to-do whose source is a chat (Read, Agree, …) makes that chat the current topic.
-    2. Opening a to-do whose source is a task (Try, Review, Fix, Answer, Promote for a release, a report's Read) or
-       a project item (Promote, Ship, Commit) opens that thing's own plan & design topic. Its subject is
-       `task:<id>`, or `project:<name>:promote|ship|commit`. If an open topic has that subject, the latest one
-       becomes current. Otherwise nothing is made yet: your first message creates the topic, titled `#<id> <task
-       title>` or the item's title (`Promote <project>`), cut to 80 characters. Its first turn carries the item's
-       context to Claude as a note (for a task: state, gate result, question or error, files changed, brief; for a
-       project item: its why, and for Ship the changes on main), with a line `About task #231` in the chat. An
-       ended topic is not reused: the next message starts a new one. No starter text goes in the message box.
-       The **Answer** step still sends the message box to the waiting worker, as before.
-    3. **New topic** starts a fresh plan & design topic (`how: "new"`, `mode: "design"`): your next message opens
-       it. The line under the button says so.
-    4. Otherwise a message continues the current topic.
-    5. **A message sent from a to-do step always carries that to-do.** The send itself (`POST
-       /api/conversation/say` with `todo: {key, verb, title, why, subject?, pick?}`) says which to-do step was
-       shown, so it doesn't depend on the conversation state set when the step opened. With a subject (`task:<id>`
-       for a task-sourced to-do), a message that would start a new topic goes to the item's own topic instead: its
-       open topic, else a new one with that subject and its note, as in rule 2. That covers ending the item's
-       topic and sending again from the same step, a step seen before in this page session, a reload, and a
-       project filter change. `pick` is set when the page never got the item's topic picked (the open failed or is
-       still on its way); then the message goes to the item's topic over any current topic. Clicking **New topic**
-       is kept: that message starts a plain new topic. Whatever topic the message lands in gets a line **Sent from
-       to-do todo:20: …** once, with the to-do's title and why as a note for Claude, so even a to-do with no
-       subject is never sent with no context. A chat's to-do (it opens its chat), a step of another project than
-       the conversation's, and a message sent with no step shown carry nothing, as before.
+  - **A to-do's topic (the bond).** A to-do has a topic when one of these holds, in this order:
+    1. **A stored bond**: a message was sent with the to-do attached (*Attaching a to-do* below). The bond is the
+       to-do's topic at that first send: the topic it already had by (2) or (3), else the topic the message went to.
+       It is stored in `todo_notes.topic` (the topic ref as text: `12`, or `r:<thread>`), so every device agrees, and
+       it never changes after that. The cleanup that drops empty `todo_notes` rows keeps a row that holds a bond; a
+       row goes when its to-do leaves the list, as before.
+    2. **Its chat**: the to-do came from a chat (Read, Agree and the like, `source.kind` `chat`): that chat.
+    3. **Its subject**: the to-do has a subject (`task:<id>` for a task's to-dos, `project:<name>:promote|ship|commit`
+       for a project's) and a topic with that subject exists, open or ended: the latest one.
 
-    Picking a topic in Earlier topics, **New topic**, or another item replaces a subject still waiting for its first
-    message. The subject is stored in `designs.subject` and kept in `conv:<project>` while pending. API:
-    `POST /api/conversation` with `{project, how, ref?, mode?}`, `how` one of `chat`, `topic`, `subject` (`ref` is
-    the subject key), `task` (the current plan & design topic, for the research runs panel), `new`, `mode`.
+    A bond whose topic was deleted counts as none. `/api/state`'s to-do items carry the result: `topic` (the ref, or
+    `null`) and `topic_ended` (when that topic ended, or `null`). `todo_topic()` and `todo_bond()` in opsd.py.
+  - **Selecting a to-do.**
+    - **With a topic** (of the conversation's project): the view jumps to its tab (`how: topic`, with
+      `ended: topic_ended`). If that topic has ended, this reopens it and selects it. The dock says
+      `This tab is its topic` instead of the attach buttons. It jumps once, when you select it: after that you choose.
+    - **Without a topic**: the current tab doesn't change. The dock shows **＋ Add to this chat** and **New tab ↗**.
+    - When you switch to another tab while a to-do with a topic is selected, the dock shows **Back to its tab →** in
+      place of the attach buttons; it selects that tab again. A to-do of another project than the conversation shown
+      (after **Ask Claude about this** moved it) shows **Back to its project →**, which goes back to its project's
+      conversation.
+  - **Attaching a to-do.** Only an attached to-do reaches a chat.
+    - **＋ Add to this chat** puts a chip `📎 <verb>: <title>` above the message box (a `--warn` border), with **✕** to
+      take it off. Your next send to the conversation carries the to-do, once (`POST /api/conversation/say` with
+      `todo: {key, verb, title, why}`); then the chip clears. The topic the message lands in gets a line **Sent from
+      to-do todo:20: …** once, with the to-do's title and why as a note for Claude, so even a to-do with no subject is
+      never sent with no context.
+    - **New tab ↗** opens a pending new topic titled from the to-do (`#<id> <task title>`, or the item's title, cut
+      to 80) with the chip attached. For a to-do with a subject, the pending topic carries that subject
+      (`how: "subject"`), so the topic your first message creates gets it, and its first turn carries the item's
+      context to Claude as a note (for a task: state, gate result, question or error, files changed, brief; for a
+      project item: its why, and for Ship the changes on main), with a line `About task #231` in the chat. Without a
+      subject it is a plain new topic with that title (`how: "new"`, `title`).
+    - Attaching doesn't make the bond; the send does (the server stores it, `todo_bond()`).
+    - **Reply** (Agree and a chat's Read), **Send back…**, **Retry with a note…** and **Answer** attach the to-do on
+      their own and focus the message box. **Answer**, **Send back…** and **Retry with a note…** still send to the
+      task's worker, as before.
+    - The chip belongs to the selected to-do: selecting another item, or a home, takes it off. It is never sent
+      to another project's conversation.
+  - **Which topic a message goes to** (`conv_say()` in opsd.py): always the tab you see. A message continues the
+    current topic, or creates the pending one (a plain new topic, a to-do's **New tab ↗**, or a panel's subject).
+    A message without an attached chip carries no to-do, whatever step the dock shows. Nothing routes a message to
+    a to-do's topic behind your back: to talk in a to-do's topic, select it (it jumps there) or use **Back to its tab →**.
+
+    Picking another tab, **+**, or **New tab ↗** for another item replaces a pending topic still waiting for its
+    first message. The subject is stored in `designs.subject` and kept in `conv:<project>` while pending. API:
+    `POST /api/conversation` with `{project, how, ref?, mode?, ended?, title?}`, `how` one of `chat`, `topic`,
+    `subject` (`ref` is the subject key), `task` (the current plan & design topic, for the research runs panel),
+    `new`, `mode`; `title` names a pending `subject` or `new` topic.
 
     To queue a task, ask Claude. The Tasks page's own **Queue task** form still queues one without Claude.
   - **What a topic may run.** Plan & design and edit my checkout both run any shell command you could at the CLI,
@@ -947,15 +1006,18 @@ stay on the right of the header.
   output, log). The train shows the tasks it carries and **Promote now**. A schedule shows its last runs (its tasks in
   `/api/state`), with **Run now**, **Pause** or **Resume**, and **Edit**, which opens it on the Schedules page.
   Research runs in the research repo (legacy) link to the Research page; research tasks are tasks.
-  Every panel has **Ask Claude about this**. A task, the promote train and a schedule open their own topic, as their
-  to-dos do (TODAY-2 rule 2; subjects `task:<id>`, `project:<name>:promote`, `schedule:<id>`). The research runs
+  Every panel has **Ask Claude about this**. A task, the promote train and a schedule open their own topic, which
+  becomes a tab (subjects `task:<id>`, `project:<name>:promote`, `schedule:<id>`): the open topic with that subject,
+  else a pending tab titled from it, which your first message creates with the subject's note, as **New tab ↗** does
+  (TODAY-2). An ended topic is not reused there: the next message starts a new one. The research runs
   panel puts `About the research runs: ` in the message box of the current plan & design topic.
-- **TODAY-4 Centre: a project's sections.** Over the conversation, the project in view has four tabs:
-  **Conversation · Specs & designs · Research · Tasks**. Conversation is TODAY-2. The tab you pick is kept in this
-  browser.
+- **TODAY-4 Centre: a project's sections.** The project in view has three pinned tabs at the right of the
+  conversation's tab strip (TODAY-2): **Specs & designs · Research · Tasks**, styled quieter than the topic tabs.
+  Picking one shows that section in place of the thread and the message box; any topic tab is the conversation.
+  The tab you pick is kept in this browser.
   - **Specs & designs.** The project's open OpenSpec changes, with done/total, and its drafts (see
     [OpenSpec changes](#openspec-changes)); a repo without `openspec/` shows its **Set up** line.
-    Click a change to open its chat as the current topic; **Read the change** in the conversation head opens its
+    Click a change to open its chat as the current topic (its tab); **Read the change** in the conversation head opens its
     reader in the side drawer. Below them, the documents its plan & design topics wrote:
     the files in `~/.claude-ops/designs/<topic id>/` of the project's design rows, newest first, each opening from
     `/api/designs/<id>/files/<name>` in a new tab (`GET /api/projects/<name>/documents`). Three buttons:
@@ -1045,16 +1107,17 @@ stay on the right of the header.
 Below 700px Today is phone-first. The rules:
 
 - **PHONE-1 One column at a time.** A bottom bar switches between **To-do** (with a red count badge), **Now** (the
-  step and its conversation) and **Activity** (the timeline). The page opens on To-do. Tapping a to-do opens it in
+  conversation, with the step in its dock) and **Activity** (the timeline). The page opens on To-do. Tapping a to-do opens it in
   Now. The Projects section is at the top of the To-do pane, above the list, and folds as on a computer; tapping a project opens Now on its home
   (compact: a title row with **‹ To-do**, and the buttons in one row that scrolls sideways). Task details, and the other timeline panels, open full screen.
 - **HDR-1 Header.** One row, about 40px: the name, the project switcher and **More**. The switcher takes the
   room left on the row, cuts its label short to fit, and opens the same checklist as on a computer. The Today button, the queue
   readouts and the pause buttons are left out on Today; the other pages still show them. The usage-limit bar
   still shows when the limit is hit.
-- **HDR-2 Step card.** Compact by default, about 100px: one top row with **‹ To-do**, **Step k of n · project**,
-  **Details ▾** and **Skip →** (and **Unpark** for a parked item, **Unskip** for a skipped one); then the title; then one row of action buttons
-  that scrolls sideways, ending in the note field and **Wait for…** (TODO-6). The why and the facts open under **Details ▾**.
+- **HDR-2 Step dock.** The step is the dock above the message box, as on a computer, compact by default: one top row with **‹ To-do**, **Step k of n · project**,
+  **Details ▾**, **Skip →** (and **Unpark** for a parked item, **Unskip** for a skipped one) and the dock's **▾**; then the title; then one row of action buttons
+  that scrolls sideways, ending in the dock's chat buttons, the note field and **Wait for…** (TODO-6). Folded, it is
+  the top row alone, with the verb and title in place of **Step k of n**. The why and the facts open under **Details ▾**.
   A Try step's proof video sits under the title at full width; the card scrolls to its buttons (HDR-4).
   The title is cut at two lines; **Details ▾** shows it whole, and a title over about 50 characters brings **Details ▾**
   even when there is no why or facts.
@@ -1064,11 +1127,12 @@ Below 700px Today is phone-first. The rules:
   with the **↑** or **Send** button. With the `/` list open, Enter picks the command. The new-task brief, the
   research question and the deploy confirm still send on **⌘/Ctrl+Enter**.
 - **HDR-3 Composer.** One row: attach (📎), the message box (it grows to at most 4 lines) and an **↑** send
-  button. **New topic**, the line that says where a message goes, and the project picker sit above it. The lines
+  button. The line that says where a message goes, the attached to-do's chip and the project picker sit above it;
+  **New topic** is the strip's **+**. The lines
   over the messages (where a chat runs and its resume command, **Started by**, **Read the change**, a design's
   **Documents**) wrap rather than being cut off; past three lines they scroll.
-- **HDR-4 Room to talk.** While a step is open the conversation gets at least 60% of the screen height; the step
-  card scrolls inside what is left. A long conversation never pushes the composer off the screen.
+- **HDR-4 Room to talk.** While a step is open the thread gets at least half the pane; the dock scrolls inside
+  what is left, and folds to one line with its **▾**. A long conversation never pushes the composer off the screen.
 - **PHONE-2 Back.** **‹ To-do** returns to the list, and so do **To-do** in the bottom bar and the phone's back
   gesture: opening a step or a project home, or a details panel, adds a history entry, and going back closes one level (the panel, then
   the step). Switching between Now and Activity adds no more entries, so one back from either reaches To-do. This
@@ -1084,13 +1148,14 @@ Below 700px Today is phone-first. The rules:
   close work as on a desktop, except where a minimised one waits: on Today the pill would cover the **↑** send
   button, so the header's **Ask** turns blue instead (with an orange dot when Claude replied), and tapping it
   brings the chat back. The other pages keep the pill. An empty tab's **Recent** list is the same, full width.
-- **PHONE-5 Earlier topics and Ended.** They sit where they do on a computer, at the top of the conversation in
-  the **Now** pane, for the project of the conversation shown. To reach another project's, or any when the list is
-  empty, use **Earlier topics and Ended** at the bottom of the **To-do** pane: one chip per project the header
-  filter shows. A chip opens Now on that project's conversation with Earlier topics unfolded; open **Ended** there
-  and tap **Reopen**, or tap the topic to open it. With a to-do open, the step stays and only the conversation
-  moves (as Ask Claude about this moves it); tapping that to-do in the list brings back its own conversation. The
-  chips are phone-only: a computer shows the conversation beside the list.
+- **PHONE-5 Topic tabs and Ended.** The tab strip sits at the top of the conversation in the **Now** pane, for the
+  project of the conversation shown, and scrolls sideways (its scrollbar hidden); the pinned tabs follow the topic
+  tabs in the same scrolling row, the **▾** stays at its right end, and the ▾ menu (Ended with Reopen, End read
+  topics) opens full width under it. To reach another project's topics, use **Topics and Ended** at the bottom of the **To-do** pane:
+  one chip per project the header filter shows. A chip opens Now on that project's conversation; tap a tab, or open
+  the ▾ and tap **Reopen**. With a to-do open, the dock stays and only the conversation moves (as Ask Claude about
+  this moves it); the dock's **Back to its project →**, or tapping that to-do in the list, brings back its own
+  conversation. The chips are phone-only: a computer shows the conversation beside the list.
 - **PHONE-6 Parity.** A phone's Today can do everything a computer's can, except what HDR-1 leaves out on purpose
   (the queue readouts and pause buttons). Anything new on Today must say how it works below 700px: where it sits,
   and that nothing hides it (a `display: none`, a one-line cut-off, or the bottom bar, the message box or the
