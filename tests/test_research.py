@@ -696,6 +696,19 @@ class Research(unittest.TestCase):
         self.chat_turn("Thanks", thread)
         self.assertIn(f"(Dashboard: added to-do todo:{rows[0]['id']}.)", (SCRATCH / "args").read_text())
 
+    def test_a_research_topic_is_told_its_open_agrees_and_a_message_leaves_them_open(self):
+        self.fake_projects()
+        self.link("plugins")
+        research.current()
+        opsd.q("DELETE FROM todos")
+        self.reply_with('```todo\n[{"verb": "Agree", "title": "Pick a scout area"}]\n```')
+        thread, _ = self.chat_turn("Ask me later")
+        tid = opsd.q("SELECT id FROM todos", one=True)["id"]
+        self.reply_with("ok")
+        self.chat_turn("About something else", thread)
+        self.assertIn(f"open Agree to-dos from this chat: todo:{tid} Pick a scout area", (SCRATCH / "args").read_text())
+        self.assertIsNone(opsd.q("SELECT closed FROM todos WHERE id=?", (tid,), one=True)["closed"])  # TODO-3
+
     def test_a_chat_todo_with_no_claude_ops_project_is_not_stored(self):
         self.fake_projects()  # neither links nor has the research repo as its checkout
         research.current()

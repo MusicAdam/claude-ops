@@ -4011,17 +4011,15 @@ def research_reports(p):
     return sorted(out, key=lambda x: (-(x["date"] or 0), x["path"]))
 
 
-def report_read(project, path, merged_only=False):
-    """Mark the report at path read: every research task of project that wrote it (with merged_only, only those done
-    and merged: what a Read step lists). Returns their ids (RES-5)."""
+def report_read(project, path):
+    """Mark the report at path read: every research task of project that wrote it. Returns their ids (RES-5)."""
     proj(project)
     path = os.path.normpath(path.strip()) if path and path.strip() else ""
-    only = " AND state='done' AND merged IS NOT NULL AND merged!=''" if merged_only else ""
     now = time.time()
     ids = [r["id"] for r in q("UPDATE tasks SET research=json_set(research, '$.read', ?) WHERE project=? AND "
                               "research IS NOT NULL AND json_extract(research, '$.path')=? AND "
-                              f"json_extract(research, '$.read') IS NULL{only} RETURNING id", (now, project, path))]
-    for t in reports_with(project, path, only):  # and a report any task listed (RES-10)
+                              "json_extract(research, '$.read') IS NULL RETURNING id", (now, project, path))]
+    for t in reports_with(project, path):  # and a report any task listed (RES-10)
         rs = reports_of(t)
         if any(x["path"] == path and not x.get("read") for x in rs):
             upd(t["id"], reports=json.dumps([{**x, "read": now} if x["path"] == path and not x.get("read") else x
@@ -4030,10 +4028,10 @@ def report_read(project, path, merged_only=False):
     return ids
 
 
-def reports_with(project, path, only=""):
+def reports_with(project, path):
     """The tasks of project whose listed reports (RES-10) include path."""
     return q("SELECT id,reports FROM tasks WHERE project=? AND reports IS NOT NULL AND EXISTS (SELECT 1 FROM "
-             f"json_each(reports) WHERE json_extract(value, '$.path')=?){only}", (project, path))
+             "json_each(reports) WHERE json_extract(value, '$.path')=?)", (project, path))
 
 
 def report_mark(project, path):
@@ -4050,12 +4048,8 @@ def report_mark(project, path):
 
 
 def serve_repo_file(p, rel):
-    """GET /api/files: repo_file, and a merged research report served this way counts as read (RES-5), whichever
-    dashboard view opened it."""
-    f, why = repo_file(p, rel)
-    if f and report_read(p.name, os.path.relpath(f, os.path.realpath(p.dev_wt)), merged_only=True):
-        state_changed()  # a GET, so do_POST didn't: the next poll drops the Read step
-    return f, why
+    """GET /api/files: repo_file. Opening a research report doesn't mark it read: only Mark read does (RES-5)."""
+    return repo_file(p, rel)
 
 
 def project_research(project):
@@ -6113,7 +6107,7 @@ def ops_note(p, did, extra=""):
         parts.append("checkout: " + "; ".join(
             f"{u['count']} uncommitted {files(u['count'])} in {u['repo']} (not on {p.dev}"
             + (f"; oldest {day(u['oldest'])}" if u["oldest"] else "") + ")" for u in dirty))
-    parts += news(did) + ([extra] if extra else [])
+    parts += news(did) + agree_open(did) + ([extra] if extra else [])
     return "[ops: " + " | ".join(parts) + "]\n\n"
 
 
@@ -6584,8 +6578,6 @@ def conv_say(project, text, todo=None):
     told = todo_line(todo)
     if cur and cur["ended"]:  # a message into an ended topic reopens it, as it does an ended chat
         topic_reopen(project, cur["id"])
-    if cur:
-        todos_agree_close(cur["id"])
     if cur and cur["mode"] != "research":
         if told and not q("SELECT 1 FROM design_msgs WHERE design_id=? AND role='ops' AND text=?",
                           (cur["id"], told[0]), one=True):
@@ -6708,7 +6700,7 @@ def design_turn(did, text, fresh_why=None):
     if handoff and not slash:
         text = handoff + "\n\n## Now\n\n" + text
     if chat:  # your own settings apply, like the CLI; auto mode stands in for prompts
-        said = news(did)  # word from a project it sent something to; a design chat gets it in ops_note
+        said = news(did) + agree_open(did)  # word from a project it sent something to; a design chat gets it in ops_note
         mcp, missing = mcp_servers(p)
         if missing and not d["session_id"]:  # once per session, as that is when servers load
             q("INSERT INTO design_msgs (design_id, role, text, ts) VALUES (?,?,?,?)",
@@ -7435,6 +7427,9 @@ PROJECT_CHAT_PROMPT = ("You are talking with the owner through the claude-ops da
                        'Close an '
                        'item that is settled with {"close": "todo:<id>"} in a `todo` block. #N means a task and '
                        'todo:N means a to-do; the ids the dashboard reports, and the owner pastes, come as todo:N. '
+                       "When the owner's reply settles one of your Agree items (a yes, a no, or a changed plan), close "
+                       "it that way; leave it open while it is still pending. The [ops: ...] line at the start of a "
+                       "message lists this chat's open Agree items with their todo:N ids. "
                        "When the owner asks for work that repeats (\"every Monday, check the dependencies\"), add a "
                        "fenced block with the language `schedule` holding a JSON list of {project, title, body, every, "
                        "hold?, model?, effort?}; every is local time: 'day HH:MM', 'weekday HH:MM', 'mon HH:MM' (any of "
@@ -8289,6 +8284,12 @@ TODO_GROUP = {"Answer": "unblock", "Fix": "unblock", "Promote": "ship", "Ship": 
 TODO_ORDER = ("unblock", "ship", "review", "only_me")
 TODO_MIN = {"Answer": 2, "Fix": 5, "Try": 5, "Review": 3, "Agree": 2, "Read": 3, "Promote": 1, "Ship": 2,
             "Commit": 2, "Do": 5}  # a guess at the minutes each takes you
+TODO_CLOSES = {"Answer": "Closes when you answer.", "Fix": "Closes when it is retried or cancelled.",
+               "Try": "Closes when you approve or send it back.", "Review": "Closes when you approve or send it back.",
+               "Promote": "Closes when dev is promoted to main.", "Ship": "Closes when you deploy.",
+               "Commit": "Closes when the files are committed or gone.",
+               "Agree": "Closes when Claude records your answer, or you click Done.",
+               "Do": "Closes when you click Done."}  # how each item leaves the list, shown under its why
 TODO_BLOCK = re.compile(r"```todo[ \t]*\n(.*?)^[ \t]*```[ \t]*$", re.S | re.M)
 
 
@@ -8296,8 +8297,16 @@ def todo_item(key, verb, project, title, why, since, kind, sid, **extra):
     """subject: the topic the item opens on Today (conv_open how=subject); a chat's item opens its chat instead."""
     subject = f"task:{sid}" if kind == "task" else key if kind == "project" else None
     return {"key": key, "subject": subject, "verb": verb, "group": TODO_GROUP[verb], "project": project, "title": title,
-            "why": why or "", "since": since or 0, "est_min": TODO_MIN[verb], "source": {"kind": kind, "id": sid},
-            **extra}
+            "why": why or "", "since": since or 0, "est_min": TODO_MIN[verb], "closes": todo_closes(verb, kind),
+            "source": {"kind": kind, "id": sid}, **extra}
+
+
+def todo_closes(verb, kind):
+    """The sentence the Today step and list show on how the item closes: a chat's Read when you end the topic, a
+    report's when you mark it read (RES-5)."""
+    if verb == "Read":
+        return "Closes when you end the topic." if kind == "chat" else "Closes when you mark it read."
+    return TODO_CLOSES[verb]
 
 
 def todo_add(project, items, kind, sid, queued=None):
@@ -8391,11 +8400,12 @@ def todo_done(tid, project=None):
                   + " RETURNING id", (time.time(), tid, *([project] if project else []))))
 
 
-def todos_agree_close(did):
-    """The owner sent a message in chat did: close the open Agree to-dos that chat added. Do items stay open.
-    Called from the owner's own send paths only, not from system inserts (ops notes, task results, the brief)."""
-    q("UPDATE todos SET closed=? WHERE verb='Agree' AND source_kind IN ('design','research') AND source_id=? "
-      "AND closed IS NULL", (time.time(), did))
+def agree_open(did):
+    """The [ops: ...] part naming chat did's open Agree to-dos, so Claude can close one the owner's reply settles
+    (TODO-3). Empty when there are none."""
+    rs = q("SELECT id,title FROM todos WHERE verb='Agree' AND source_kind IN ('design','research') AND source_id=? "
+           "AND closed IS NULL ORDER BY id", (did,))
+    return ["open Agree to-dos from this chat: " + "; ".join(f"todo:{r['id']} {r['title']}" for r in rs)] if rs else []
 
 
 def todos_from_reply(p, reply, did, queued=None):
@@ -9129,7 +9139,6 @@ class H(BaseHTTPRequestHandler):
             if d["quick"] and m.group(2) in ("say", "reopen"):  # it never becomes the topic Today shows (TODAY-6)
                 conv_pin(d["project"])
             if m.group(2) == "say":
-                todos_agree_close(did)
                 return {"queued": design_say(did, b["text"].strip())}
             elif m.group(2) == "unqueue":  # take back a queued message, by its place in the queue
                 with DESIGN_LOCK:

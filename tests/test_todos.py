@@ -151,6 +151,38 @@ class Todos(unittest.TestCase):
         self.assertEqual([x["verb"] for x in got], ["Fix", "Answer", "Commit", "Review", "Agree", "Do"])
         self.assertEqual([x["group"] for x in got], ["unblock", "unblock", "ship", "review", "review", "only_me"])
 
+    def test_every_item_says_how_it_closes(self):
+        """closes: one sentence per verb, written by the server, so every view says the same (TODO item shape)."""
+        self.task("web", "needs_input", question="?")
+        self.task("web", "failed", error="x")
+        self.task("game", "review")
+        self.task("web", "review")
+        rep = self.task("web", "done", merged="abc", research=json.dumps({"path": "docs/research/x.md"}))
+        opsd.q("INSERT INTO designs (project, title, state, created, updated) VALUES ('web','Plan it','idle',1,1)")
+        opsd.todo_add("web", [{"verb": "Do", "title": "Grant access"}, {"verb": "Agree", "title": "Use SQLite"}],
+                      "task", rep)
+        fs = [project_facts("web", ahead=["abc one"], main_since_kind="deploy", main_log=[{"at": 1}],
+                            uncommitted=[{"repo": "r", "count": 1, "paths": [], "oldest": 1}])]
+        tasks = opsd.q("SELECT * FROM tasks ORDER BY id DESC")
+        for t in tasks:
+            t["research"] = opsd.research_of(t)
+        got = {(x["verb"], x["source"]["kind"]): x["closes"] for x in opsd.todos_list(tasks, fs, {})}
+        self.assertEqual(got, {
+            ("Answer", "task"): "Closes when you answer.",
+            ("Fix", "task"): "Closes when it is retried or cancelled.",
+            ("Try", "task"): "Closes when you approve or send it back.",
+            ("Review", "task"): "Closes when you approve or send it back.",
+            ("Read", "task"): "Closes when you mark it read.",
+            ("Promote", "project"): "Closes when dev is promoted to main.",
+            ("Ship", "project"): "Closes when you deploy.",
+            ("Commit", "project"): "Closes when the files are committed or gone.",
+            ("Read", "chat"): "Closes when you end the topic.",
+            ("Agree", "task"): "Closes when Claude records your answer, or you click Done.",
+            ("Do", "task"): "Closes when you click Done."})
+        rel = self.task("web", "needs_input", kind="release", question="quit the app")  # a release's Promote too
+        self.assertEqual(opsd.todo_item(f"task:{rel}:promote", "Promote", "web", "t", "", 0, "task", rel)["closes"],
+                         "Closes when dev is promoted to main.")
+
     def test_todo_block_in_reply(self):
         p = FakeProject("web")
         block = '```todo\n[{"verb": "Do", "title": "Add the API key", "why": "only you have it"}]\n```'
@@ -474,7 +506,10 @@ class Todos(unittest.TestCase):
         self.assertTrue(opsd.todo_done(got["id"]))  # Done closes it
 
 
-class AgreeClosesOnReply(unittest.TestCase):
+class AgreeStaysOpenOnSay(unittest.TestCase):
+    """TODO-3: your message may be about something else, so sending one leaves the chat's Agree items open; Claude
+    closes one with {"close": "todo:N"} once your reply settles it, and each message tells it which are open."""
+
     def setUp(self):
         opsd.init_db()
         for t in ("designs", "design_msgs", "todos"):
@@ -498,33 +533,42 @@ class AgreeClosesOnReply(unittest.TestCase):
     def say(self, did, text="yes"):
         return opsd.H.__new__(opsd.H).route(f"/api/designs/{did}/say", {"text": text})
 
-    def test_reply_closes_agree_when_idle_and_when_queued(self):
+    def test_say_leaves_agree_open_when_idle_and_when_queued(self):
         agree = self.add("Agree", "Use SQLite", self.a)
         self.assertFalse(self.say(self.a)["queued"])
-        self.assertTrue(self.closed(agree))
-        again = self.add("Agree", "Use WAL", self.a)
-        self.assertTrue(self.say(self.a)["queued"])  # the chat is still replying
-        self.assertTrue(self.closed(again))
-
-    def test_do_and_other_chats_stay_open(self):
-        do = self.add("Do", "Grant access", self.a)
-        other = self.add("Agree", "Use Redis", self.b)
-        self.say(self.a)
-        self.assertFalse(self.closed(do))
-        self.assertFalse(self.closed(other))
-
-    def test_system_inserts_do_not_close(self):
-        agree = self.add("Agree", "Use SQLite", self.a)
-        opsd.q("INSERT INTO design_msgs (design_id, role, text, ts) VALUES (?,?,?,?)", (self.a, "ops", "note", 1))
-        opsd.send_queued(self.a)
         self.assertFalse(self.closed(agree))
+        self.assertTrue(self.say(self.a, "something else")["queued"])  # the chat is still replying
+        self.assertFalse(self.closed(agree))
+        self.assertFalse(hasattr(opsd, "todos_agree_close"))
 
-    def test_readding_after_close_makes_a_new_item(self):
-        first = self.add("Agree", "Use SQLite", self.a)
+    def test_reply_block_closes_it(self):
+        agree = self.add("Agree", "Use SQLite", self.a)
         self.say(self.a)
-        second = self.add("Agree", "Use SQLite", self.a)
-        self.assertNotEqual(first, second)
-        self.assertFalse(self.closed(second))
+        _, note = opsd.todos_from_reply(FakeProject("web"), f'Settled.\n```todo\n[{{"close": "todo:{agree}"}}]\n```',
+                                        self.a)
+        self.assertTrue(self.closed(agree))
+        self.assertIn(f"closed to-do todo:{agree}", note)
+
+    def test_message_lists_the_chats_open_agrees(self):
+        self.assertEqual(opsd.agree_open(self.a), [])
+        one = self.add("Agree", "Use SQLite", self.a)
+        two = self.add("Agree", "Use WAL", self.a)
+        self.add("Do", "Grant access", self.a)  # not an Agree
+        self.add("Agree", "Use Redis", self.b)  # another chat's
+        opsd.todo_done(two)
+        self.assertEqual(opsd.agree_open(self.a), [f"open Agree to-dos from this chat: todo:{one} Use SQLite"])
+
+    def test_prompts_say_claude_closes_agree(self):
+        root = Path(opsd.__file__).resolve().parent
+        texts = {"design": (root / "design_prompt.md").read_text(), "project": opsd.PROJECT_CHAT_PROMPT,
+                 "research": (root / "research.py").read_text()}
+        for name, text in texts.items():
+            flat = " ".join(text.replace('\\n"', "").replace('"', "").split())
+            self.assertNotIn("your open Agree items close", flat, name)
+            self.assertIn("settles one of your Agree items", flat, name)
+            self.assertIn("open Agree items with their todo:N", flat.replace("`", ""), name)
+        # the design chat's [ops: ...] line (ops_note) and the project chat's both carry them
+        self.assertEqual((root / "opsd.py").read_text().count("news(did) + agree_open(did)"), 2)
 
 
 class Uncommitted(unittest.TestCase):

@@ -484,6 +484,8 @@ details.tdparked .tditem { opacity: .8; }
 #tdundo button { padding: 2px 10px; font-size: 13px; }
 .tditem .t { font-weight: 550; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tditem .sub { grid-column: 2; color: var(--muted); font-size: 12px; }
+.tditem .tdc { grid-column: 2; color: var(--muted); font-size: 12px; }
+.stepcard .closes { color: var(--muted); font-size: 13px; margin: 4px 0; }
 .verb { font-size: 11px; font-weight: 600; padding: 1px 8px; border-radius: 99px; white-space: nowrap; border: 1px solid; }
 .verb.g-unblock { color: var(--bad); } .verb.g-ship { color: var(--ok); } .verb.g-review { color: var(--warn); } .verb.g-only_me { color: var(--accent); }
 .stepcard { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px; margin-bottom: 16px; }
@@ -2945,6 +2947,7 @@ const tdRow = x => `<div class="tditem ${x.key === TD.key ? "sel" : ""} ${x.skip
   ${verbPill(x)}<span class="t" title="${esc(x.title)}">${tdTid(x)}${esc(x.title)}</span>
   <span class="sub">${[pf ? "" : esc(P(x.project).title), x.parked ? `parked ${ago(x.parked.since, state.now)}` : x.since ? `${ago(x.since, state.now)} ago` : "",
     x.skipped ? "skipped" : "", x.parked && tdWaiting(x.parked) ? tdWaiting(x.parked) : ""].filter(Boolean).join(" · ")}</span>
+  ${x.closes && !(x.parked && tdWaiting(x.parked)) ? `<span class="tdc">${esc(x.closes)}</span>` : ""}
   ${x.note ? `<span class="tdn" title="${esc(x.note)}">${esc(x.note)}</span>` : ""}</div>`;
 function tdLeft(all, shown) {
   const parked = tdParked();
@@ -3017,11 +3020,11 @@ function tdActions(it) {
     // Send to dev underneath. It reaches main by itself when its task promotes after merge (the project's default)
     case "Commit": return [g.senddev_open ? A("details:" + g.senddev_open, `Sending… #${g.senddev_open}`, {primary: 1, title: "Open the task sending these files"})
       : A("senddev", "Commit these", {primary: 1, title: `Lands these files on ${g.direct_main || g.auto_release ? g.main_branch : g.dev_branch} through the gate, then clears them from your checkout`})];
-    case "Read": return it.report ? [A("report", "Open report", {primary: 1, title: `Read ${it.report.path} as on ${g.dev_branch || "dev"}. Opening it takes it off your list`}),
-        A("markreport", "Mark read", {title: "Take it off your list without opening it"}), A("details", "Details")]
+    case "Read": return it.report ? [A("markreport", "Mark read", {primary: 1, title: "Done with it: take it off your list"}),
+        A("report", "Open report", {title: `Read ${it.report.path} as on ${g.dev_branch || "dev"}. It stays on your list until you mark it read`}), A("details", "Details")]
       : it.unread ? [A("read", "Mark read", {primary: 1, title: "The reply is below. It stays on your list until you end the topic"}), A("endtopic", "End topic", {title: "Done with it: off your list, under Ended in Earlier topics"})]
       : [A("endtopic", "End topic", {primary: 1, title: "Done with it: off your list, under Ended in Earlier topics"}), A("reply", "Reply", {title: "Answer Claude in the message box below"})];
-    case "Agree": return [A("reply", "Reply", {primary: 1, title: "Answer Claude in the message box below"})].concat(it.todo ? [A("done", "Done")] : []);
+    case "Agree": return [A("reply", "Reply", {primary: 1, title: "Answer Claude in the message box below. Claude closes it once your answer settles it"})].concat(it.todo ? [A("done", "Done")] : []);
     case "Do": return [A("done", "Done", {primary: 1})];
   }
   return [];
@@ -3083,6 +3086,7 @@ function tdStep(it, shown) {
     ${it.parked && tdWaiting(it.parked) ? `<div class="tdwaiting">${tdWaiting(it.parked)}<button data-wclear title="Forget the wait and put it back in the list">Clear</button></div>` : ""}
     <div class="dets">${it.why ? `<div class="why">${esc(it.why)}</div>` : ""}
     ${facts ? `<div class="facts">${facts}</div>` : ""}${it.verb === "Commit" ? tdUncommitted() : ""}</div>
+    ${it.closes ? `<div class="closes">${esc(it.closes)}</div>` : ""}
     ${it.verb === "Ship" && P(it.project).deploys && P(it.project).deploys.length ? tdShipLog(P(it.project)) : ""}
     <div class="row">${acts.map(b => `<button data-ta="${esc(b.a)}" class="${b.primary ? "primary" : ""}" ${busy || b.disabled ? "disabled" : ""} title="${esc(b.title || "")}">${esc(b.label)}</button>`).join("")}
       ${noteIn}<button class="tdwaitb" data-waitfor title="Park it until tasks you pick merge or are released">Wait for…</button>${unpark("tdunpark")}<button class="skip" data-skip title="${esc(skipTip)}">Skip for now →</button></div>
@@ -3388,7 +3392,8 @@ async function tdDo(a) {
       convSet(cv, convFor()); tdDropChat(s.id); tdUndoOffer(it.project, s.id, it.title, cur); }));
   }
   if (a === "done") return run(() => api(`/api/todos/${it.todo}/done`, {}));
-  if (a === "report" || a === "markreport") return tdOpenReport(it.project, it.report.path, a === "report");
+  if (a === "report") return openRepoFile(it.project, it.report.path);  // looking at it doesn't mark it read (RES-5)
+  if (a === "markreport") return tdMarkRead(it.project, it.report.path);
 }
 async function tdSend(text) {
   const m = TD.mode;
@@ -3727,16 +3732,15 @@ function tdResearchList(sd) {
     + `<h3>Reports</h3>${reps || `<div class="muted">No reports yet on ${dev}. New research writes one to docs/research/.</div>`}`
     + `<h3>Recurring research</h3>${sch || `<div class="muted">None. Pick a repeat in New research to add one.</div>`}`;
 }
-// Open report and Mark read (RES-5, RES-10): the report's Read step leaves the list at once, before the mark returns,
-// and comes back with the reason, where the other to-do actions show theirs, only if the mark fails or finds no
-// report to mark. Steps match by path, so a research report and a listed one (task:<id>:report:<path>) both go.
-// The server also marks it read when it serves the file.
-async function tdOpenReport(project, path, open = true) {
+// Mark read (RES-5, RES-10): the report's Read step leaves the list at once, before the mark returns, and comes back
+// with the reason, where the other to-do actions show theirs, only if the mark fails or finds no report to mark.
+// Steps match by path, so a research report and a listed one (task:<id>:report:<path>) both go. Opening a report
+// marks nothing: only this does.
+async function tdMarkRead(project, path) {
   const mine = x => x.report && x.report.path === path && x.project === project;
   const gone = (state.todos || []).filter(mine), was = TD.key;
   gone.forEach(x => TD_GONE.set(x.key, Infinity));
   if (gone.length) { state.todos = state.todos.filter(x => !mine(x)); TD.msg = ""; delete $("#tdstep").dataset.html; renderToday(); }
-  if (open) openRepoFile(project, path);
   let why = "";
   try {
     const r = await api(`/api/projects/${encodeURIComponent(project)}/research/read`, {path});
@@ -3790,7 +3794,7 @@ function tdWireList(sd) {
   l.querySelectorAll("[data-chat]").forEach(el => el.onclick = e => { e.preventDefault(); tdShowConv(); tdOpenChat(+el.dataset.chat); });
   l.querySelectorAll("[data-task]").forEach(el => el.onclick = () => tdOpenTask(+el.dataset.task));
   l.querySelectorAll("[data-sched]").forEach(el => el.onclick = () => tdOpenPanel({kind: "schedule", id: +el.dataset.sched}));
-  l.querySelectorAll("[data-report]").forEach(el => el.onclick = () => tdOpenReport(sd.project, el.dataset.report));
+  l.querySelectorAll("[data-report]").forEach(el => el.onclick = () => openRepoFile(sd.project, el.dataset.report));
   l.querySelectorAll("[data-spec]").forEach(el => el.onclick = async () => {
     try {
       const r = await api("/api/designs", {project: sd.project, sub: el.dataset.sub, spec: el.dataset.spec});

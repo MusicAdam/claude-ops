@@ -144,7 +144,9 @@ command or code change can do is never a to-do, even setup that has to wait for 
 it as a task that waits for that one (`after` or `after_task`). When an item is settled, close it with
 `{{"close": "todo:<id>"}}` in a `todo` block; the next message tells you the ids it added. `#N` means a task and
 `todo:N` means a to-do: the ids the dashboard reports, and the owner pastes, come as `todo:N`. The block is taken out of the reply they see.
-When they send a message in this chat, your open Agree items close; if you still need a yes, add a new Agree.
+When the owner's reply settles one of your Agree items (a yes, a no, or a changed plan), close it with
+`{{"close": "todo:<id>"}}` in a `todo` block; leave it open while it is still pending. The `[ops: ...]` line
+at the start of a message lists this chat's open Agree items with their `todo:N` ids.
 
 An item may carry a `wait`, which hides it in the owner's Parked list until tasks end. `tasks` names task
 ids, `until` is "merged" (the default) or "released" (on main); `after` names tasks your `queue` block in
