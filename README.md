@@ -57,6 +57,13 @@ the config has a comment on how to opt out. Read it, adjust it, then click **Rel
         build the snapshot in <worktrees>/main ─▶ fast-forward main in your checkout
 ```
 
+`<worktrees>/dev` is the queue's integration worktree, and the queue owns it. Just before a merge into it, any
+uncommitted changes to tracked files there (say, a `pod install` that rewrote `Podfile.lock`) are saved as a patch,
+`~/.claude-ops/runs/<task id>/dev-uncommitted-<repo or root>.patch`, then discarded, and the task's log names the
+files. `git apply` the patch to get them back. Untracked and ignored files (`node_modules`, `Pods`, `.env`, build
+output) stay; nothing runs `git clean`. If the patch can't be written, nothing is discarded and the task fails,
+naming the files. To change dev by hand, commit in that worktree; don't leave edits sitting there.
+
 ## main is the golden version
 
 By default a project goes **Straight to main** (below): each merge moves main at once, and dev stays equal to it.
