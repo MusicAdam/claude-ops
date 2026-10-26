@@ -190,22 +190,17 @@ class ResearchTasks(unittest.TestCase):
         self.assertEqual(self.todos(), [])
         self.assertEqual(opsd.report_read("web", r["path"]), [])  # already read
 
-    def test_serving_the_report_marks_it_read(self):
+    def test_serving_the_report_leaves_it_unread(self):
+        """Looking at a report doesn't close its Read step: only Mark read does (RES-5, TODO-1)."""
         r = opsd.queue_research("web", "Is Rust worth it?")
         commit(self.root, r["path"], "# Rust\n\nYes.\n", 1_700_000_100)
         p = opsd.PROJECTS["web"]
-        f, why = opsd.serve_repo_file(p, r["path"])  # not merged yet: served, but nothing marked
-        self.assertTrue(f and not why)
-        self.assertIsNone(opsd.research_of(opsd.task(r["id"])).get("read"))
         opsd.upd(r["id"], state="done", merged="abc123")
-        opsd.serve_repo_file(p, "README.md")  # another file marks nothing
-        self.assertEqual([x["key"] for x in self.todos()], [f"task:{r['id']}:report"])
+        f, why = opsd.serve_repo_file(p, r["path"])
+        self.assertTrue(f and not why)
         self.assertEqual(opsd.serve_repo_file(p, "./" + r["path"])[1], None)
-        read = opsd.research_of(opsd.task(r["id"]))["read"]
-        self.assertTrue(read)
-        self.assertEqual(self.todos(), [])
-        opsd.serve_repo_file(p, r["path"])  # already read: stays as it was
-        self.assertEqual(opsd.research_of(opsd.task(r["id"]))["read"], read)
+        self.assertIsNone(opsd.research_of(opsd.task(r["id"])).get("read"))
+        self.assertEqual([x["key"] for x in self.todos()], [f"task:{r['id']}:report"])
 
     def test_mark_read_route(self):
         r = opsd.queue_research("web", "Is Rust worth it?")
@@ -233,18 +228,17 @@ class ResearchTasks(unittest.TestCase):
             with e:
                 return e.code, e.read()
 
-    def test_opening_a_merged_report_reads_it(self):
+    def test_opening_a_merged_report_leaves_it_on_the_list(self):
         r = opsd.queue_research("web", "Is Rust worth it?")
         commit(self.root, r["path"], "# Rust\n\nYes.\n", 1_700_000_100)
-        commit(self.root, "docs/other.md", "# Other\n", 1_700_000_200)
-        url = self.serve() + "/api/files?project=web&path="
-        self.assertEqual(self.call(url + quote(r["path"]))[0], 200)  # not merged yet: opening it marks nothing
-        self.assertIsNone(opsd.research_of(opsd.task(r["id"])).get("read"))
         opsd.upd(r["id"], state="done", merged="abc123")
-        self.assertEqual(self.call(url + "docs/other.md")[0], 200)  # another file marks nothing
+        opsd.READY.set()  # projects are loaded: the API answers
+        base = self.serve()
+        self.assertEqual(self.call(base + "/api/files?project=web&path=" + quote(r["path"])), (200, b"# Rust\n\nYes.\n"))
+        self.assertIsNone(opsd.research_of(opsd.task(r["id"])).get("read"))
         self.assertEqual([x["key"] for x in self.todos()], [f"task:{r['id']}:report"])
-        self.assertEqual(self.call(url + quote(r["path"])), (200, b"# Rust\n\nYes.\n"))
-        self.assertTrue(opsd.research_of(opsd.task(r["id"])).get("read"))
+        code, body = self.call(base + "/api/projects/web/research/read", {"path": r["path"]})  # Mark read
+        self.assertEqual((code, json.loads(body)["marked"]), (200, [r["id"]]))
         self.assertEqual(self.todos(), [])
 
     def test_mark_read_says_what_it_found(self):
@@ -302,9 +296,11 @@ class ResearchTasks(unittest.TestCase):
         self.assertEqual((got[0]["verb"], got[0]["title"], got[0]["why"], got[0]["report"]),
                          ("Read", "Nightly bug bash", "Report bugbash/a.md merged into dev", {"path": "bugbash/a.md"}))
         url = self.serve() + "/api/files?project=web&path="
-        self.assertEqual(self.call(url + quote("bugbash/a.md")), (200, b"# A\n"))  # opening one reads only that one
-        self.assertEqual([x["key"] for x in self.todos()], [f"task:{tid}:report:bugbash/b.md"])
+        self.assertEqual(self.call(url + quote("bugbash/a.md")), (200, b"# A\n"))  # opening one reads none
+        self.assertEqual(len(self.todos()), 2)
         h = opsd.H.__new__(opsd.H)
+        h.route("/api/projects/web/research/read", {"path": "bugbash/a.md"})  # Mark read takes only that one
+        self.assertEqual([x["key"] for x in self.todos()], [f"task:{tid}:report:bugbash/b.md"])
         self.assertEqual(h.route("/api/projects/web/research/read", {"path": "bugbash/b.md"}),
                          {"ok": True, "path": "bugbash/b.md", "marked": [tid], "already": []})
         self.assertEqual(self.todos(), [])

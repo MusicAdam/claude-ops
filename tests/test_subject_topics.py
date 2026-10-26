@@ -49,6 +49,13 @@ class SubjectTopics(unittest.TestCase):
     def rows(self):
         return opsd.q("SELECT * FROM designs ORDER BY id")
 
+    def test_say_leaves_the_topics_agree_open(self):
+        """TODO-3: a message in the topic may be about something else; Claude closes the Agree, not the send."""
+        did = opsd.conv_say("demo", "Plan it")["topic"]
+        opsd.todo_add("demo", [{"verb": "Agree", "title": "Use SQLite"}], "design", did)
+        self.assertEqual(opsd.conv_say("demo", "unrelated question")["topic"], did)
+        self.assertIsNone(opsd.q("SELECT closed FROM todos WHERE title='Use SQLite'", one=True)["closed"])
+
     def test_open_makes_no_row_and_first_say_makes_one(self):
         tid = self.task("Fix the login")
         opsd.q("INSERT INTO events (task_id, ts, text) VALUES (?,?,?)", (tid, time.time(), "gate passed: tests"))

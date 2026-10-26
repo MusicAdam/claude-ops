@@ -37,7 +37,7 @@ OFF = {"error": "research is off"}
 READONLY = "The old research dashboard is running. Stop it to make changes here."
 WRITE_TOOLS = {"Write", "Edit", "MultiEdit", "NotebookEdit"}
 # Bump when the chat context changes, so resumed conversations get told once.
-CONTEXT_VERSION = 5
+CONTEXT_VERSION = 6
 # Read-only Claude in Chrome tools (runs pass --chrome). Unattended runs drive Adam's
 # signed-in browser, so no click/type (computer, form_input), no javascript_tool and
 # no uploads: a hostile page can't steer the run into acting in his accounts.
@@ -1091,7 +1091,10 @@ def todo_rule(kind: str, tid: str) -> str:
             "  ```\n"
             '  `verb` is "Do" for what only he can do, "Agree" for a proposal awaiting a yes. When an item is\n'
             '  settled, close it with {"close": "todo:<id>"} in a `todo` block; the next message tells you the\n'
-            "  ids it added. #N means a task and todo:N a to-do. The block is taken out of the reply he sees. The research repo's own list (bin/todo,\n"
+            "  ids it added. #N means a task and todo:N a to-do. When his reply settles one of your Agree items\n"
+            "  (a yes, a no, or a changed plan), close it that way; leave it open while it is still pending. A\n"
+            "  `(Dashboard: ...)` line before his message lists this chat's open Agree items with their todo:N\n"
+            "  ids. The block is taken out of the reply he sees. The research repo's own list (bin/todo,\n"
             "  the todo skill) is retired: don't use it. Don't add to-dos he didn't ask for unless they matter.")
 
 
@@ -1163,7 +1166,9 @@ def chat(body: dict) -> dict:
             raise ValueError("Wait for the current reply, or stop it.")
         resume = next((s for s in (read_events(t)[2] for t in reversed(turns)) if s), None)
         # What the last turn's todo blocks did (the ids it added), as a design chat's next turn is told.
-        note = turns[-1].get("todoNote") if resume else None
+        # And the Agree items still open, so it can close one his message settles (TODO-3).
+        note = "; ".join(x for x in ((turns[-1].get("todoNote") if resume else None),
+                                     *ops.agree_open(f"r:{thread['id']}")) if x)
         said = f"(Dashboard: {note}.)\n\n{message}" if note else message
         if not resume:
             prompt = f"{chat_context(kind, tid)}\n\nAdam's first message:\n{message}"
