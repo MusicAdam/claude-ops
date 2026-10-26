@@ -25,7 +25,9 @@
 
 Per project (paths come from ~/.claude-ops/projects/<name>.toml):
   <repo>                 your checkout of the main branch. The queue only fast-forwards it, when a release passes.
-  <worktrees>/dev        integration worktree on the dev branch. Finished tasks merge here.
+  <worktrees>/dev        integration worktree on the dev branch. Finished tasks merge here. The queue owns it: at
+                         merge time, uncommitted changes to tracked files there are saved as a patch in the task's
+                         run folder (runs/<id>/dev-uncommitted-<repo>.patch) and discarded. Untracked files stay.
   <worktrees>/main       build of main, the golden version (detached). Changes only when a release passes.
   <worktrees>/t<id>      one worktree per task, branch task/<id>-<slug> (a release: detached at its dev snapshot).
   <worktrees>/deploy     where deploy targets run (detached). Reset for each deploy but never cleaned.
@@ -2373,7 +2375,7 @@ def _pipeline(p, tid):
         upd(tid, state="gating", phase=f"rebasing onto {p.dev}")
         if p.direct_main:  # commits made straight to main come into dev first, so the gate checks them too
             with p.lock:
-                err = catch_up_dev(p)
+                err = catch_up_dev(p, tid)
             if err:
                 return fail(p, tid, err + f"\n\nPromote once: the release has a worker merge {p.main} into "
                                           f"{p.dev}. Then Retry this task.")
@@ -2452,6 +2454,7 @@ def _pipeline(p, tid):
                 continue
             done = []
             for r in changed_parts(p, t["branch"]):
+                save_dev_changes(p, r, tid)
                 r.git("merge", "--no-ff", "-m", f"Merge task #{tid}: {t['title']}", t["branch"], cwd=r.at(p.dev_wt))
                 done.append((r, r.rev(p.dev)))
             merged = " ".join(sha for _, sha in done)
@@ -2487,7 +2490,7 @@ def land_on_main(p, tid):
             upd(tid, start_at="claude")  # a later merge already took it to main
             return finish(p, tid, merged=t["merged"], note=f"in {p.main} already")
         with p.lock:  # a commit made straight to main since: dev takes it in, or main could not fast-forward
-            err = catch_up_dev(p)
+            err = catch_up_dev(p, tid)
             commit = p.revs(p.dev)
         if err:
             return fail(p, tid, f"{p.dev} has the merge, but {p.main} could not move to it. {err}\n\nPromote "
@@ -2976,7 +2979,7 @@ def release_pipeline(p, tid):
     upd(tid, started=t["started"] or time.time(), error=None, next_prompt=None, start_at="claude")
     if not t["base"]:
         with p.lock:
-            err = merge_main_into_dev(p)
+            err = merge_main_into_dev(p, tid)
             if not err:
                 upd(tid, base=p.revs(p.dev))
         if err and not resolve_main_into_dev(p, tid, err):
@@ -4741,21 +4744,23 @@ def _move_main(p, tid, commit, note, left):
     return None
 
 
-def catch_up_dev(p):
+def catch_up_dev(p, tid):
     """direct_main: dev takes in commits made straight to main, by a fast-forward when dev has nothing main lacks
     (the usual case: main moves to dev after every merge). Returns an error or None. Call with p.lock held."""
     for part in p.parts:
         if not is_ancestor(part, p.main, p.dev) and is_ancestor(part, p.dev, p.main):
+            save_dev_changes(p, part, tid)
             part.git("merge", "--ff-only", "-q", p.main, cwd=part.at(p.dev_wt))
-    return merge_main_into_dev(p)
+    return merge_main_into_dev(p, tid)
 
 
-def merge_main_into_dev(p):
+def merge_main_into_dev(p, tid):
     """Commits made straight to main (outside the queue) come along into dev. Returns an error or None.
     Call with p.lock held."""
     for part in p.parts:
         if subprocess.run(["git", "merge-base", "--is-ancestor", p.main, p.dev], cwd=part.src).returncode == 0:
             continue
+        save_dev_changes(p, part, tid)
         r = subprocess.run(["git", "merge", "--no-ff", "-m", f"Merge {p.main} into {p.dev}", p.main],
                            cwd=part.at(p.dev_wt), capture_output=True, text=True)
         if r.returncode:
@@ -5448,6 +5453,34 @@ def peek_version(p, t, revs):
         VERSIONS.clear()
     VERSIONS[key] = (time.time(), v)
     return v
+
+
+def save_dev_changes(p, r, tid):
+    """Before a merge into repo r's part of p's dev worktree: uncommitted changes to tracked files there (a build's
+    pod install rewrote Podfile.lock) would stop it. opsd owns that worktree, so they are no one's work: they are
+    saved as a patch in task tid's run folder, discarded, and named in its log. If the patch can't be written they
+    stay, and this raises. Never `git clean`: untracked and ignored files (node_modules, Pods, .env, the build) stay.
+    Call with p.lock held."""
+    wt = r.at(p.dev_wt)
+    diff = subprocess.run(["git", "diff", "--binary", "HEAD"], cwd=wt, capture_output=True)
+    if diff.returncode or not diff.stdout:
+        return
+    files = r.git("diff", "--name-only", "HEAD", cwd=wt, check=False).splitlines()
+    named = ", ".join(files[:20]) + (f" and {len(files) - 20} more" if len(files) > 20 else "")
+    name = (r.sub if r.sub and not r.root else "root").replace("/", "-")
+    run = RUNS / str(tid)
+    try:
+        run.mkdir(parents=True, exist_ok=True)
+        patch, n = run / f"dev-uncommitted-{name}.patch", 1
+        while patch.exists():  # an earlier merge of this task saved some already: keep both
+            n += 1
+            patch = run / f"dev-uncommitted-{name}-{n}.patch"
+        patch.write_bytes(diff.stdout)
+    except OSError as e:
+        raise RuntimeError(f"uncommitted changes in {wt} would stop the merge ({named}), and they could not be "
+                           f"saved before discarding them: {e}")
+    r.git("reset", "--hard", "-q", cwd=wt)
+    ev(tid, f"discarded uncommitted changes in {wt}: {named}; saved to {patch} (git apply it to get them back)")
 
 
 def checkout_main(p, r, sha, tid=None, check=True):
