@@ -1697,7 +1697,7 @@ folder under a project's `<worktrees>/` that no longer exists. For what a worktr
   start-up, one gate run and one merge. A worker splits its task (with "after" ordering) only when parts must
   merge or release separately, or belong to different projects, never just to run in parallel. "Usage brake" next to it
   is the usage brake (setting `usage_brake`, default 85; see Usage limits), and "Taper from" the usage taper that
-  starts fewer workers as the 5-hour window fills (setting `usage_taper`, default 50). "Promote wait" is the promote train's
+  starts fewer workers as the 5-hour window fills (setting `usage_taper`, default 30). "Promote wait" is the promote train's
   longest wait in minutes (setting `release_wait`, default 180; see [Promote after merge](#main-is-the-golden-version)).
 - **Models.** Each kind of work picks its Claude model. "Model" on the Settings tab is the global setting (`model`);
   **Per kind of work** below it sets `model:task` (task workers and Send to dev), `model:release` (the workers a release
@@ -1780,27 +1780,36 @@ folder under a project's `<worktrees>/` that no longer exists. For what a worktr
     brake lifts when that window resets or a newer reading is under the brake. You get one notification per window
     per reset: `Usage at 85% of the 5-hour window: no new tasks until 3:00 pm`.
   - **Usage taper.** Below the brake, the queue starts fewer workers as the 5-hour window fills, so it reaches
-    the brake more slowly. The setting `usage_taper` is a percent: default 50, 0 turns the taper off. Set it as
-    **Taper from** on the Settings tab (`POST /api/settings {"usage_taper": 50}`, clamped to 0..100). Let pct be the
+    the brake more slowly. The setting `usage_taper` is a percent: default 30, 0 turns the taper off. Set it as
+    **Taper from** on the Settings tab (`POST /api/settings {"usage_taper": 30}`, clamped to 0..100). Let pct be the
     5-hour window's exact percent, and let end be `usage_brake` (or 100 with the brake off). When the taper is on,
-    pct is above it and end is above it, the taper cap is
-    `max(1, max_parallel - ceil((pct - usage_taper) * (max_parallel - 1) / (end - usage_taper)))`, so the cap
-    steps evenly from `max_parallel` at Taper from down to 1 just under the brake. Otherwise there is no taper cap:
-    with the taper off, at or below Taper from, or with the brake at or below Taper from (the taper has no room).
-    With `max_parallel` 6, taper 50 and brake 85 (steps of 7 points):
+    pct is above it and end is above it, let frac = (pct − usage_taper) / (end − usage_taper). The taper cap is
+    `max(1, max_parallel - ceil(sqrt(frac) * (max_parallel - 1)))`. The square root front-loads the cut: most
+    workers go soon after Taper from, and the last steps are spread out towards the brake. An exact step boundary
+    stays on the higher cap. Otherwise there is no taper cap: with the taper off, at or below Taper from, or with
+    the brake at or below Taper from (the taper has no room). With `max_parallel` 6, taper 30 and brake 85 (step k
+    ends at 30 + 55 × k² / 25):
 
     | 5-hour usage | workers that start Claude |
     |---|---|
-    | 0–50% | 6 |
-    | 50.x–57% | 5 |
-    | 57.x–64% | 4 |
-    | 64.x–71% | 3 |
-    | 71.x–78% | 2 |
-    | 78.x–84.x% | 1 |
+    | 0–30% | 6 |
+    | 30.x–32.2% | 5 |
+    | 32.3–38.8% | 4 |
+    | 38.9–49.8% | 3 |
+    | 49.9–65.2% | 2 |
+    | 65.3–84.x% | 1 |
     | 85%+ | 0 (the brake) |
 
-    With `max_parallel` 3, taper 50 and brake 85: 50.x–67.5% → 2, above 67.5% → 1. With the brake off and
-    `max_parallel` 6, the steps are 10 points each, ending at 100. With `max_parallel` 1 the cap is always 1, so
+    With `max_parallel` 3, taper 30 and brake 85:
+
+    | 5-hour usage | workers that start Claude |
+    |---|---|
+    | 0–30% | 3 |
+    | 30.x–43.75% | 2 |
+    | 43.8–84.x% | 1 |
+    | 85%+ | 0 (the brake) |
+
+    With the brake off and `max_parallel` 6, the steps end at 32.8, 41.2, 55.2 and 74.8%, then 1 up to 100. With `max_parallel` 1 the cap is always 1, so
     nothing changes. The rules:
     - It follows the **5-hour window only**; the 7-day window keeps only the brake. A stale reading counts as 0.
     - It limits only **new starts of tasks that start a Claude session** (the same ones the brake holds). The
@@ -1811,20 +1820,20 @@ folder under a project's `<worktrees>/` that no longer exists. For what a worktr
     - The brake wins: at or above `usage_brake` nothing that starts Claude starts. With the brake off (0) the
       taper still works on its own, spread up to 100%, never below 1.
     - No notification: only the brake notifies. A task held only by the taper says
-      `Usage at 63% of the 5-hour window · 4 of 6 workers`, and while the cap is below `max_parallel` the header
+      `Usage at 36% of the 5-hour window · 4 of 6 workers`, and while the cap is below `max_parallel` the header
       meter's hover adds `Tapering: 4 of 6 workers`. While tapering the header's working chip also shows the cap as
       its denominator (`3/4 working`), and its hover names the Parallel setting it lowers.
     - **Pace slowdown.** While the taper is on, the queue also slows whenever 5-hour usage runs ahead of the header
       meter's pace line. With a live reading, elapsed = the share of the 5-hour window that has passed (0 to 1),
       pace = elapsed × end (end = `usage_brake`, or 100 with the brake off, the same pace the meter shows) and
-      lead = pct − pace. When lead > 0 the pace cap is `max(1, max_parallel - ceil(lead / 5))`: one worker fewer
-      per 5 points ahead (`PACE_STEP` in opsd.py). On or behind pace, or with no live reading, there is no pace cap
+      lead = pct − pace. When lead > 0 the pace cap is `max(1, max_parallel - ceil(lead / 3))`: one worker fewer
+      per 3 points ahead (`PACE_STEP` in opsd.py). On or behind pace, or with no live reading, there is no pace cap
       and the taper alone applies. The lower of the taper cap and the pace cap applies, to the same new starts as the
       taper, and the brake still wins. It is off when the taper is off, and it follows the **5-hour window only**.
-      Example: `max_parallel` 6, brake 85, taper 50, one hour into the window: pace = 0.2 × 85 = 17. At 30% usage
-      the lead is 13, so the pace cap is 6 − 3 = 3; there is no taper cap at 30%, so 3 workers run. At 10% usage
+      Example: `max_parallel` 6, brake 85, taper 30, one hour into the window: pace = 0.2 × 85 = 17. At 25% usage
+      the lead is 8, so the pace cap is 6 − 3 = 3; there is no taper cap at 25%, so 3 workers run. At 10% usage
       the queue is behind pace, so all 6 run. When the pace cap is the lower one, a held task says
-      `Usage at 30% of the 5-hour window, 13 points ahead of pace · 3 of 6 workers`, the meter's hover says
+      `Usage at 25% of the 5-hour window, 8 points ahead of pace · 3 of 6 workers`, the meter's hover says
       `Tapering: 3 of 6 workers (ahead of pace)`, and the working chip's hover names the pace.
   - **The header meter** shows both windows, `5h 62% · 7d 14%`, with their reset times on hover. It turns amber at
     or above the brake, and red while the queue waits out the usage limit itself. Its pace line (see **Usage meters
