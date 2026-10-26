@@ -1953,15 +1953,19 @@ def stopped(tid):
     return task(tid)["state"] in STOPPED
 
 
-def run_claude(p, tid, prompt):
+def run_claude(p, tid, prompt, proof=False):
     """Run one headless Claude turn in the task worktree. Returns the parsed result file or None.
-    The prompt goes in on stdin, which stays open until the turn's result so the user can steer it."""
+    The prompt goes in on stdin, which stays open until the turn's result so the user can steer it.
+    proof: the recording turn (record_proof). It resumes the session as it is, takes no messages (they wait for the
+    next real turn), may write in runs/<id>, stops after PROOF_MINUTES, and never pauses the task."""
     t = task(tid)
     if t["state"] in STOPPED:
         if t["state"] == "paused":  # paused before Claude got this prompt: resume with it
             upd(tid, next_prompt=prompt, start_at="claude")
         return None
     if limited():  # it would hit the usage limit at once: wait for the reset with this prompt
+        if proof:
+            return {"status": "failed", "summary": "the queue is waiting out the Claude usage limit"}
         limit_pause(tid, prompt)
         return None
     run_dir = RUNS / str(tid)
@@ -1969,7 +1973,7 @@ def run_claude(p, tid, prompt):
     rp = result_path(t)
     rp.unlink(missing_ok=True)
     turn, kept = prompt, None
-    if why := stale_session(t):  # cheaper to start over than to resume: brief, handoff note, then this turn
+    if not proof and (why := stale_session(t)):  # cheaper to start over than to resume: brief, handoff note, then this turn
         kept = session_model(t, t["kind"])  # the fresh session stays on the model the old one ran
         brief = first_brief(p, t)
         prompt = "\n\n".join(x for x in (brief, handoff_note(p, t, why[0]),
@@ -1984,7 +1988,7 @@ def run_claude(p, tid, prompt):
            "--output-format", "stream-json", "--verbose",
            "--permission-mode", "auto", "--permission-prompts", "none", "--strict-mcp-config",
            "--no-chrome", "--name", f"{p.name} #{tid}", "--add-dir", str(IMAGES),
-           "--settings", guard_settings(t["worktree"], p)]
+           "--settings", guard_settings(t["worktree"], p)] + (["--add-dir", str(run_dir)] if proof else [])
     if t["session_id"]:
         cmd += ["--resume", t["session_id"]]
         model = session_model(t, t["kind"])
@@ -1998,7 +2002,7 @@ def run_claude(p, tid, prompt):
     port = p.port_for(tid)
     env = dict(os.environ, OPS_RESULT=str(rp), OPS_TASK_ID=str(tid), OPS_PORT=str(port), OPS_FROM=f"task:{tid}",
                OPS_DAEMON=DAEMON_URL, **{k: str(v).format(port=port) for k, v in p.env.items()})
-    upd(tid, phase="claude working")
+    upd(tid, phase="recording proof" if proof else "claude working")
     sid = t["session_id"]
     with open(run_dir / "claude.jsonl", "a") as log, open(run_dir / "claude.err", "a") as err:
         log.write(json.dumps({"type": "ops", "prompt": prompt[:2000], "ts": time.time(),
@@ -2006,23 +2010,32 @@ def run_claude(p, tid, prompt):
         proc = subprocess.Popen(cmd, cwd=t["worktree"], env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                 stderr=err, text=True, start_new_session=True)
         track(tid, proc)
+
+        def end_input():  # a recording turn's stdin is not in STEER_PIPES: close it here, or claude waits for more
+            if not proof:
+                return close_steer(tid)
+            try:
+                proc.stdin.close()
+            except OSError:
+                pass
         seen, stuck, last_tool = [time.time()], [], "its first step"  # see watch_stuck
         threading.Thread(target=watch_stuck, args=(proc, seen, stuck), daemon=True).start()
-        timed = []  # a research run that reached its tier's time limit (RES-4)
-        if rs:
-            limit_min = RESEARCH_TIERS[research_tier(rs.get("tier"))][0]
+        timed = []  # a research run that reached its tier's time limit (RES-4), or a recording its cap
+        if rs or proof:
+            limit_min = PROOF_MINUTES if proof else RESEARCH_TIERS[research_tier(rs.get("tier"))][0]
             timer = threading.Timer(limit_min * 60, lambda: (timed.append(limit_min), killgroup(proc.pid)))
             timer.daemon = True
             timer.start()
         try:
             send_user(proc.stdin, prompt)
-            with STEER_LOCK:
-                STEER_PIPES[tid] = proc.stdin
-                INFLIGHT[tid] = []
-                for m in pending_steers(tid):  # waited for this turn: sent like a live one, after the prompt
-                    text = WAITED_NOTE + with_images(m["text"])
-                    send_user(proc.stdin, text)
-                    INFLIGHT[tid].append((text, m["id"]))
+            if not proof:  # a recording turn takes no messages: they wait for the turn after it (the hold branch)
+                with STEER_LOCK:
+                    STEER_PIPES[tid] = proc.stdin
+                    INFLIGHT[tid] = []
+                    for m in pending_steers(tid):  # waited for this turn: sent like a live one, after the prompt
+                        text = WAITED_NOTE + with_images(m["text"])
+                        send_user(proc.stdin, text)
+                        INFLIGHT[tid].append((text, m["id"]))
         except OSError:
             pass  # claude died at once; its stderr says why
         for line in proc.stdout:
@@ -2075,15 +2088,17 @@ def run_claude(p, tid, prompt):
                 # one result per turn; a message sent at the very end adds a turn
                 q("UPDATE tasks SET cost=COALESCE(cost,0)+? WHERE id=?",
                   (cost_added(e.get("session_id") or sid, e.get("total_cost_usd")), tid))
-                close_steer(tid)  # messages already written still get their turn before claude exits
-        close_steer(tid)
+                end_input()  # messages already written still get their turn before claude exits
+        end_input()
         proc.wait()
-        if rs:
+        if rs or proof:
             timer.cancel()
         untrack(tid)
         with STEER_LOCK:
             INFLIGHT.pop(tid, None)  # written but never read: still pending, so the next turn gets them
     kill_app(p, t["worktree"])
+    if timed and proof and not stopped(tid):
+        return {"status": "failed", "summary": f"the recording turn ran past {timed[0]} min, so it was stopped"}
     if timed and not stopped(tid) and not rp.exists():  # a result written just in time still counts
         ev(tid, f"stopped at the {rs.get('tier')} time limit ({timed[0]} min)")
         return {"status": "failed", "summary": f"stopped at the {rs.get('tier')} time limit ({timed[0]} min)"}
@@ -2096,6 +2111,8 @@ def run_claude(p, tid, prompt):
                             "Privacy & Security, then answer to resume the worker."}
     if limit is not None:
         until = limit_hit(limit)
+        if not rp.exists() and proof:
+            return {"status": "failed", "summary": "the recording turn hit the Claude usage limit"}
         if not rp.exists():  # cut off mid-turn: wait for the reset, then resume the session
             ev(tid, f"hit the Claude usage limit; resumes after {clock(until)}")
             limit_pause(tid, None if task(tid)["session_id"] else asked)
@@ -2251,6 +2268,130 @@ def failure_detail(wt, g, rc, tail):
     if not lines:
         lines = tail.splitlines()[-40:]
     return f"`{g['run']}` exited {rc}\n" + "\n".join(lines[:60])
+
+
+# ---------------------------------------------------------------- proof video
+# A held task, in a project with [app] launch, gets a short video of what it changed before it goes to review: the
+# worker's session is resumed once more (run_claude with proof) to launch the build, record it and stop it, and the
+# Try card plays runs/<id>/proof.mp4. One recording at a time, queue-wide (there is one screen), each capped at
+# PROOF_MINUTES. Nothing about it ever blocks: no video, for whatever reason, is an event and the task goes to
+# review as before. Send back deletes the video; the next round records a new one.
+
+PROOF_LOCK = threading.Lock()  # one screen: one recording turn at a time
+PROOF_MINUTES = 10
+
+
+def proof_files(tid):
+    """(the video, its one-line note) of a task."""
+    return RUNS / str(tid) / "proof.mp4", RUNS / str(tid) / "proof.txt"
+
+
+def clear_proof(tid):
+    for f in proof_files(tid):
+        f.unlink(missing_ok=True)
+
+
+def proof_note(tid):
+    """The one line saying what the proof video shows, or None when there is no video or no note."""
+    video, note = proof_files(tid)
+    if not video.is_file():
+        return None
+    try:
+        return note.read_text(errors="replace").strip()[:300] or None
+    except OSError:
+        return None
+
+
+def screen_recording_granted():
+    """macOS Screen Recording permission for the daemon's TCC identity (Claude Ops.app), which workers inherit.
+    A preflight only: it never shows a prompt, which would hang a worker with nobody there to answer it."""
+    try:
+        cg = ctypes.CDLL("/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics")
+        cg.CGPreflightScreenCaptureAccess.restype = ctypes.c_bool
+        return bool(cg.CGPreflightScreenCaptureAccess())
+    except (OSError, AttributeError):
+        return False
+
+
+def is_mp4(path):
+    try:
+        with open(path, "rb") as f:
+            return f.read(12)[4:8] == b"ftyp"
+    except OSError:
+        return False
+
+
+def proof_prompt(p, t, granted):
+    video = proof_files(t["id"])[0]
+    if p.stop_cmd:
+        stop = f"run the project's stop command in the worktree: `{p.stop_cmd}`"
+    elif p.process:
+        stop = f"stop the app you started (its executable is `{p.process}` in this worktree) by its pid"
+    else:
+        stop = "stop the processes you started, by their pids"
+    native = ("- A native app: `screencapture -v -V <seconds> <file>.mov`, limited to the app's window (`-l <window "
+              "id>`, which CGWindowListCopyWindowInfo gives you) or else its display (`-D <n>`), then convert it to "
+              "MP4 the same way.\n" if granted else
+              "- A native app: Screen Recording is not granted to Claude Ops, so `screencapture` would hang on a "
+              "macOS prompt. Do not run it: skip, with the reason \"Screen Recording not granted to Claude Ops\".\n")
+    return (f"The queue checked your work on task #{t['id']} ({t['title']}). It is held for the owner to review "
+            "before it merges. First, record a short video that shows the behaviour this task targets, so the owner "
+            "can watch it instead of launching the build.\n\n"
+            "This turn only records: change no tracked file and commit nothing. Keep scratch files (scripts, raw "
+            f"recordings) in `{video.parent}`, not in the worktree.\n\n"
+            f"1. Launch the build from this worktree with the project's launch command: `{p.launch}`. It is already "
+            "built.\n"
+            "2. Drive it to show what this task changed. Never post OS-level mouse or keyboard events and never take "
+            "focus: the owner is using this Mac. Drive a web app from the headless browser that records it.\n"
+            f"3. Record 10 to 60 seconds and save it as `{video}`: H.264 MP4, so a browser `<video>` plays it.\n"
+            "- A web app (it serves on a port): headless Playwright with `record_video_dir`, then "
+            f"`ffmpeg -i <in> -c:v libx264 -pix_fmt yuv420p -movflags +faststart {video}`.\n"
+            + native +
+            "- Use whatever is installed. If neither way works, don't install anything large: skip, and say why.\n"
+            f"4. Stop the app: {stop}. Never `pkill`, `killall` or any pattern.\n"
+            f"5. As your last action, write JSON to $OPS_RESULT ({result_path(t)}):\n"
+            '- Recorded: `{"status": "done", "proof": "<one line: what the video shows>"}`\n'
+            '- Not recorded: `{"status": "skipped", "summary": "<why, in one line>"}`\n\n'
+            f"You have {PROOF_MINUTES} minutes; the queue stops this turn then.")
+
+
+def record_proof(p, tid):
+    """The step "recording proof" of a held task: resume its worker to record runs/<id>/proof.mp4. Logs why when
+    there is no video, and never fails the task. Returns early when the task is paused or cancelled."""
+    clear_proof(tid)
+    proof_files(tid)[0].parent.mkdir(parents=True, exist_ok=True)
+    granted = screen_recording_granted()
+    if not granted and not (p.running_cmd or p.stop_cmd):  # not a server-style app: only screencapture can record it
+        return ev(tid, "no proof video: Screen Recording not granted to Claude Ops")
+    upd(tid, phase="waiting to record proof")
+    while not PROOF_LOCK.acquire(timeout=2):
+        if stopped(tid):
+            return
+    try:
+        if stopped(tid):
+            return
+        upd(tid, phase="recording proof")
+        res = run_claude(p, tid, proof_prompt(p, task(tid), granted), proof=True)
+    except Exception as e:  # a recording must never fail the task
+        res = {"status": "failed", "summary": f"error: {e}"}
+    finally:
+        PROOF_LOCK.release()
+    if stopped(tid):
+        return
+    video, note = proof_files(tid)
+    res = res if isinstance(res, dict) else {}
+    if res.get("status") in ("done", None) and video.is_file() and is_mp4(video):  # None: saved it, wrote no result
+        line = (str(res.get("proof") or "").strip() or proof_note(tid) or "").splitlines()
+        note.write_text((line[0][:300] if line else "") + "\n")
+        return ev(tid, "proof video recorded" + (f": {line[0][:200]}" if line else ""))
+    if not res:
+        why = "the worker stopped without writing a result"
+    elif res.get("status") != "done":
+        why = str(res.get("summary") or res.get("question") or "").strip() or f"the worker reported {res.get('status')}"
+    else:
+        why = "proof.mp4 is not an MP4 file" if video.is_file() else "the worker saved no proof.mp4"
+    clear_proof(tid)
+    ev(tid, f"no proof video: {why.splitlines()[0][:300]}")
 
 
 # ---------------------------------------------------------------- task pipeline
@@ -2425,6 +2566,15 @@ def _pipeline(p, tid):
                 run_step(tid, "building for review", p.build, wt, "gate.log")
                 if stopped(tid):
                     return
+            heads = [r.git("rev-parse", "HEAD", cwd=r.at(wt)) for r in p.parts]
+            if not pending_steers(tid):  # with a message waiting the worker changes things first: record after
+                record_proof(p, tid)
+            if stopped(tid):
+                return
+            if [r.git("rev-parse", "HEAD", cwd=r.at(wt)) for r in p.parts] != heads:  # it was told not to commit
+                ev(tid, "the recording turn changed the branch; checking it again")
+                need_claude = False
+                continue
             with STEER_LOCK:
                 steered = bool(pending_steers(tid))
                 if not steered:
@@ -8738,6 +8888,8 @@ def state_payload():
         t["origin"] = origin_view(t["origin"])
         t["research"] = research_of(t)
         t["reports"] = reports_of(t) or None
+        t["proof"] = proof_files(t["id"])[0].is_file()  # GET /api/tasks/<id>/proof.mp4 plays it
+        t["proof_note"] = proof_note(t["id"]) if t["proof"] else None
     projects = []
     for p in PROJECTS.values():
         try:
@@ -8809,6 +8961,43 @@ class H(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def send_video(self, f):
+        """An MP4 file, whole or the byte range the Range header asks for: Safari plays a <video> only from a server
+        that answers Range requests. 404 when there is no file."""
+        try:
+            fh = open(f, "rb")
+        except OSError:
+            return self.send(404, {"error": "no proof video"})
+        with fh:
+            size = os.fstat(fh.fileno()).st_size
+            start, end = 0, size - 1
+            m = re.fullmatch(r"bytes=(\d*)-(\d*)", (self.headers.get("Range") or "").strip())
+            ranged = bool(m and (m.group(1) or m.group(2)))  # anything else is ignored: the whole file
+            if ranged:
+                if m.group(1):
+                    start = int(m.group(1))
+                    end = min(int(m.group(2)), size - 1) if m.group(2) else size - 1
+                else:  # bytes=-N: the last N bytes
+                    start = max(0, size - int(m.group(2)))
+                if start > end or start >= size:
+                    return self.send(416, b"", "text/plain", {"Content-Range": f"bytes */{size}"})
+            self.send_response(206 if ranged else 200)
+            self.send_header("Content-Type", "video/mp4")
+            self.send_header("Accept-Ranges", "bytes")
+            if ranged:
+                self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
+            self.send_header("Content-Length", str(end - start + 1))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            fh.seek(start)
+            left = end - start + 1
+            try:
+                while left > 0 and (chunk := fh.read(min(left, 1 << 16))):
+                    self.wfile.write(chunk)
+                    left -= len(chunk)
+            except (BrokenPipeError, ConnectionResetError):
+                pass  # the player seeks by dropping a request and asking for another range
+
     def host_ok(self):
         """Refuse DNS rebinding: a web page whose own domain is re-pointed at 127.0.0.1 could otherwise
         drive this API, and so start work on your machine, from your browser."""
@@ -8867,6 +9056,8 @@ class H(BaseHTTPRequestHandler):
                 t["merged_show"] = p.label(t["merged"])
                 t["base_show"] = p.label(t["base"])
             t["can_play"] = bool(p and p.launch and t["state"] == "review")
+            t["proof"] = proof_files(tid)[0].is_file()
+            t["proof_note"] = proof_note(tid) if t["proof"] else None
             t["start_words"] = start_words(t) if t["state"] == "queued" else None
             t["chat_from"] = chat_from(t)
             t["chat"] = q("SELECT role,text,ts,delivered FROM task_msgs WHERE task_id=? ORDER BY id", (tid,))
@@ -8879,6 +9070,9 @@ class H(BaseHTTPRequestHandler):
                 t["deploy"] = json.loads(t["deploy"] or "{}")
                 t["log"] = log_tail(RUNS / str(tid) / "deploy.log", 8000)
             return self.send(200, t)
+        m = re.fullmatch(r"/api/tasks/(\d+)/proof\.mp4", path)
+        if m:
+            return self.send_video(proof_files(int(m.group(1)))[0])
         m = re.fullmatch(r"/api/designs/(\d+)/files/([\w.-]+)", path)  # a design chat's document; no / in a name
         if m:
             f = CHAT_FILES / m.group(1) / m.group(2)
@@ -9230,6 +9424,7 @@ class H(BaseHTTPRequestHandler):
             if st != "review":
                 raise ValueError(f"task is {st}")
             kill_app(p, t["worktree"])
+            clear_proof(tid)  # it shows the work you sent back; the next review records a new one
             upd(tid, state="queued", rounds=0,
                 next_prompt=f"The user tried your change and wants this changed:\n\n{b['feedback']}\n\n"
                             "Update the work, re-run the checks, commit, and write $OPS_RESULT.")
