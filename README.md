@@ -515,8 +515,11 @@ the uncommitted-files banner, Deploy. `/api/state` gathers them into one list, `
   - **Answer**: a task (not a release or deploy) in needs_input. Why: its question.
   - **Fix**: a task in failed. Why: its error.
   - **Try**: a task in review whose project has a launch step (the same test as `can_play`). The card plays the
-    task's proof video when there is one (`proof`, see [Proof video](#proof-video)). **Review**: the same
-    without one; you read its diff and summary.
+    task's proof video when there is one (`proof`, see [Proof video](#proof-video)), with `proof_note` as its
+    caption under it. Then **Approve & merge** is the primary button and **▶ Play this build** a secondary one;
+    without a video Play stays primary, and a muted line says `no proof video` (with the reason the task's last
+    `no proof video: …` event gave). **Review**: a task in review whose project has no launch step; you read its
+    diff and summary.
   - **Promote**: a release or deploy in needs_input (**waiting on you**), or `dev` ahead of `main` in a project
     with **Promote after merge** off and no release under way. Under Straight to main dev is ahead only until
     the next merge (a project from before it was the default), or while a merge waits on you to move main.
@@ -746,6 +749,13 @@ stay on the right of the header.
   "Move to the end of the list until midnight" with an empty note, "Park it with this note" with one. A parked
   item's step has **Unpark** beside Skip; a skipped item's step has **Unskip** there, which calls the same
   endpoint. See TODO-6.
+
+  A **Try** step shows the task's proof video under the title: inline, muted, looping and autoplaying, with
+  controls, at most the card's width and about 360px high (less on a short screen; the card grows to fit it and
+  the buttons). Its one-line note is the caption. The video loads only once it is in view (`preload="none"`
+  until then), from `GET /api/tasks/<id>/proof.mp4?v=<when it was recorded>`, so a new recording after Send back
+  is fetched fresh. A poll's redraw keeps it playing. A held task's details page (the review state) shows the
+  same video above the feedback box, and there too Approve is primary when a video exists.
 
   The centre shows either a step or a project **home**. The home is a slim card: the project title, one muted
   status line from `/api/state` (for example `dev 3 ahead of main · 2 running · 4 to-dos`; zero running, nothing
@@ -1021,6 +1031,7 @@ Below 700px Today is phone-first. The rules:
 - **HDR-2 Step card.** Compact by default, about 100px: one top row with **‹ To-do**, **Step k of n · project**,
   **Details ▾** and **Skip →** (and **Unpark** for a parked item, **Unskip** for a skipped one); then the title; then one row of action buttons
   that scrolls sideways, ending in the note field and **Wait for…** (TODO-6). The why and the facts open under **Details ▾**.
+  A Try step's proof video sits under the title at full width; the card scrolls to its buttons (HDR-4).
   The title is cut at two lines; **Details ▾** shows it whole, and a title over about 50 characters brings **Details ▾**
   even when there is no why or facts.
 - **Sending a message.** In the Today composer, the Design and Chat tabs' message box, and a task page's ask or
