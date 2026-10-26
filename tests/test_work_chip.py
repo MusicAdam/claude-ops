@@ -35,10 +35,14 @@ class WorkChip(unittest.TestCase):
         self.assertIn("(the Parallel setting)", b["slotTip"])
 
     def test_pace_cap_names_the_pace(self):
-        (a,) = self.slots({"usage": {"taper": {"pct": 30, "cap": 3, "max": 6, "ahead": 13}}})
+        a, b, c = self.slots({"usage": {"taper": {"pct": 30, "cap": 3, "max": 6, "ahead": 13, "pace": True}}},
+                             {"usage": {"taper": {"pct": 14, "cap": 5, "max": 6, "ahead": -3, "pace": True}}},
+                             {"usage": {"taper": {"pct": 17, "cap": 4, "max": 6, "ahead": 0, "pace": True}}})
         self.assertEqual(a["slots"], 3)
         self.assertIn("5-hour window at 30%, 13 points ahead of pace", a["slotTip"])
         self.assertNotIn("Taper from", a["slotTip"])
+        self.assertIn("5-hour window at 14%, 3 points under pace", b["slotTip"])  # nearing the line
+        self.assertIn("5-hour window at 17%, at pace", c["slotTip"])
 
 
 if __name__ == "__main__":
