@@ -501,8 +501,9 @@ the uncommitted-files banner, Deploy. `/api/state` gathers them into one list, `
     `GET /api/projects/<name>/uncommitted`, read only (git status and diff without an index lock, file reads):
     `{repos: [{repo, files: [{path, status, added, removed, binary, mtime}], more}], diff, diff_lines, cut}`.
   - **Read**: a design or project chat with a reply you haven't opened, as ● in Earlier topics marks it.
-  - **Read** (a report): a research task merged into `dev` whose report you haven't opened, or a report any merged
-    task listed in its result (see [Research](#research), RES-5 and RES-10).
+  - **Read** (a report): a research task merged into `dev` whose report you haven't marked read, or a report any
+    merged task listed in its result (see [Research](#research), RES-5 and RES-10). Opening the report leaves it on
+    the list: a report you looked at may still need a decision. Only **Mark read** closes it.
 - **TODO-2 Two kinds Claude adds, and your own.** **Do**: something that truly needs you: a password or sudo, a macOS
   permission grant (Full Disk Access and the like), an API key or account you must create. **Agree**: a
   decision; Claude proposed something and waits for your yes. A step that a command or code change can do is
@@ -531,8 +532,11 @@ the uncommitted-files banner, Deploy. `/api/state` gathers them into one list, `
   twice: Claude's is skipped quietly, yours is a 400.
 - **TODO-3 Closing.** Derived items close by themselves. A stored item closes with
   `POST /api/todos/<id>/done` (your Done button), or when Claude writes `{"close": <id>}` in a `todo` block. The
-  id is the integer `12` or the string `"todo:12"`; anything else is noted back as not an id and closes nothing. A stored Agree also closes when you send a message
-  in the chat (or research topic) that added it, even if the message waits in the chat's queue; a Do stays open.
+  id is the integer `12` or the string `"todo:12"`; anything else is noted back as not an id and closes nothing.
+  Sending a message in the chat (or research topic) that added an Agree doesn't close it: the message may be about
+  something else. Claude closes it when your reply settles it (a yes, a no, or a changed plan), and leaves it open
+  while it is still pending. So it can, each message to a design or project chat carries the chat's open Agree
+  items, with their `todo:N` ids, in its `[ops: ...]` line (a research topic, in its `(Dashboard: ...)` line).
   Closed items stay in the table.
 - **TODO-4 Order and groups.** Each item has a group: `unblock` (Answer, Fix), `ship` (Promote, Ship, Commit),
   `review` (Try, Review, Agree, Read), `only_me` (Do). The list runs unblock, ship, review, only_me, oldest first
@@ -547,11 +551,18 @@ the uncommitted-files banner, Deploy. `/api/state` gathers them into one list, `
   as any dependent does. A worker resumed after a gate failure may list them again: a title already queued
   behind the task is skipped. Each body stands alone, like a split task: goal, exact steps, acceptance.
 
-Each item is `{key, verb, group, project, title, why, since, est_min, source: {kind, id}}`. `key` stays the same
+Each item is `{key, verb, group, project, title, why, since, est_min, closes, source: {kind, id}}`. `key` stays the same
 across polls (`task:231:review`, `chat:42:read`, `project:diskgame:commit`, `todo:7`, `task:240:report`).
 `since` is when the state began, as near as the queue knows: a task's last event, a chat's last reply, the oldest uncommitted file, the
 oldest commit not yet promoted or deployed. `est_min` is a guess at minutes: Answer 2, Fix 5, Try 5, Review 3,
-Agree 2, Read 3, Promote 1, Ship 2, Commit 2, Do 5. `source.kind` is `task`, `chat`, `project` or `owner`: a
+Agree 2, Read 3, Promote 1, Ship 2, Commit 2, Do 5. `closes` is one plain sentence on how the item leaves the
+list, which the Today step shows under the why and the list under the item, both in muted text (a parked item
+with a wait shows its wait text in the list instead): Answer "Closes when you answer.", Fix "Closes when it is
+retried or cancelled.", Try and Review "Closes when you approve or send it back.", Promote "Closes when dev is
+promoted to main.", Ship "Closes when you deploy.", Commit "Closes when the files are committed or gone.", Read of a
+chat "Closes when you end the topic.", Read of a report "Closes when you mark it read.", Agree "Closes when Claude
+records your answer, or you click Done.", Do "Closes when you click Done.". The server writes it, so every view
+says the same. `source.kind` is `task`, `chat`, `project` or `owner`: a
 stored item points at the chat or task that added it, and has `todo`, its id for the Done button; one you added
 yourself has kind `owner` and id `null`, and no source link. The database id is an integer, but everywhere a
 person or a model reads it, a stored to-do's id is written `todo:12`, so it can't be mistaken for task `#12`:
@@ -732,8 +743,8 @@ stay on the right of the header.
   | Promote | Promote dev → main; for a release waiting on you, Stop main when the app is running, else Reply… | Details; for a project with a launch step, ▶ Play dev (■ Stop dev while it runs) |
   | Ship | Deploy (the Deploy dialog), one per target, each with its own count: `Deploy <target> (N)`, `(up to date)`, `(first deploy)`, or `(?)` when its last deployed commit is gone. N counts from the previous release tag when the target has release tags (see "The note is drafted for you"), else from its last deploy; a target with a previous release tag is never `(first deploy)` | For a project with a launch step, ▶ Play main (■ Stop main while it runs; off until it is built or while a play is under way) |
   | Commit | Commit these: **Send to dev**, unchanged underneath. Its tooltip says it lands the files on `main` through the gate, then clears them from your checkout; `dev` in a project with Promote after merge off (and not straight to main). While one is open: Sending… #id | |
-  | Read | A chat: Mark read when it is new, else End topic. A report: Open report (RES-5) | A chat: End topic, or Reply. A report: Mark read, Details |
-  | Agree | Reply (focuses the message box; sending closes it) | Done |
+  | Read | A chat: Mark read when it is new, else End topic. A report: Mark read (RES-5) | A chat: End topic, or Reply. A report: Open report (it stays on the list), Details |
+  | Agree | Reply (focuses the message box; sending doesn't close it, Claude does once your answer settles it) | Done |
   | Do | Done (`POST /api/todos/<id>/done`); the same for one you added yourself (**+ Add**) | |
   | Every verb | | Wait for… (the chooser above), beside Skip |
 
@@ -887,7 +898,7 @@ stay on the right of the header.
     in each repo of the project that uses OpenSpec and commits the opsx commands and skills that changed to `dev`.
   - **Research.** The reports in `docs/research/*.md` on the project's `dev` (each repo's, in a workspace), newest
     first: the title from the first heading, the date of the last commit that touched it, and a one-line summary from
-    the first paragraph, with ● while it is unread. Click one to read it in the side drawer; that marks it read.
+    the first paragraph, with ● while it is unread. Click one to read it in the side drawer; that doesn't mark it read: its Read step's **Mark read** does (RES-5).
     Under them, the research runs under way and the project's recurring research jobs (schedules whose task is
     research). **New research** asks for a question, a tier (T0, T1, T2) and an optional repeat, and queues a
     research task (see [Research](#research)). `GET /api/projects/<name>/research` has all of it.
@@ -1078,14 +1089,14 @@ Research is ordinary queue work in the project it is about. A report lives in th
 - **RES-4 Time and size follow the tier.** T0 5, T1 15, T2 40 minutes per worker turn: a research task's worker is
   stopped at its tier's limit and the task fails with `stopped at the T1 time limit (15 min)`, so Retry is one click.
   Its size cap is `--max-budget-usd` 1, 3 or 10 (API-equivalent dollars, as the old runs used).
-- **RES-5 Read when it merges.** A research task that is done and merged, and whose report you haven't opened, is a
-  **Read** to-do (`task:<id>:report`, with `report: {path}`); so is each unread report a task listed (RES-10). The
-  report counts as read when any dashboard view opens
-  it: the step's **Open report**, the Research section, or a link to the file in Details or a chat. Serving the file
-  (`GET /api/files`) marks every done, merged task of the project that wrote that path, as its research report or
-  in its `reports`; it stores `read` in the task's `research`, or on that entry of `reports`. A Read step also has **Mark read**, which marks it without opening it. Open report and Mark
-  read take the step off your list at once, before the server answers, and an `/api/state` answer from before the
-  mark can't bring it back. Both post `POST /api/projects/<name>/research/read` with `{path}` (trimmed); it answers
+- **RES-5 Read when it merges.** A research task that is done and merged, and whose report you haven't marked read,
+  is a **Read** to-do (`task:<id>:report`, with `report: {path}`); so is each unread report a task listed (RES-10).
+  Opening the report marks nothing, from any view: the step's **Open report**, the Research section, or a link to
+  the file in Details or a chat (`GET /api/files` only serves it). Open report leaves the step on your list. Only
+  **Mark read**, the step's primary button, marks it: every task of the project that wrote that path, as its
+  research report or in its `reports`; it stores `read` in the task's `research`, or on that entry of `reports`.
+  Mark read takes the step off your list at once, before the server answers, and an `/api/state` answer from before
+  the mark can't bring it back. It posts `POST /api/projects/<name>/research/read` with `{path}` (trimmed); it answers
   `marked` (the ids it marked) and `already` (ids read before), counting research tasks and tasks that listed the
   path in `reports` alike. When both are empty no task of the project wrote that path:
   the step comes back with "Found no research report at <path> to mark read", as does any error. Research tasks
@@ -1118,7 +1129,7 @@ Research is ordinary queue work in the project it is about. A report lives in th
   shown as `reports` on each task in `/api/state` (null when none). A research task's own report path is skipped
   there, so the file never shows twice. Once the task is done and merged, each unread entry is a **Read** to-do
   (`task:<id>:report:<path>`, title the task's, why `Report <path> merged into <dev>`, `report: {path}`), with the
-  same Open report and Mark read as RES-5, which mark it read the same ways. Paths in a workspace are relative to the
+  same Open report and Mark read as RES-5: only Mark read marks it read. Paths in a workspace are relative to the
   task's worktree, as RES-5's are.
 
 ### Legacy: research runs in the research repo
