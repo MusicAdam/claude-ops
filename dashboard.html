@@ -471,6 +471,28 @@ details.tdfold[open] > summary .cnt { display: none; }  /* the count shows only 
 .tdprojs .tdp .t { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tdprojs .tdp .n { color: var(--muted); } .tdprojs .tdp .dot { color: var(--warn); }
 .stepcard .hst { margin: 4px 0 0; font-size: 13px; }
+/* The project home's pipeline (TODAY-2): dev → main on top, then a lane per deploy chain of stage chips joined by
+   arrows. A chip and the arrow after it never part, so a lane wraps after an arrow; lanes stack. */
+.stepcard .pipe { margin-top: 12px; display: flex; flex-direction: column; gap: 10px; font-size: 13px; }
+.pipe .ptop, .pipe .chain { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.pipe .pl { display: grid; grid-template-columns: 52px minmax(0, 1fr); align-items: start; gap: 6px; }
+.pipe .lanes { display: flex; flex-direction: column; gap: 6px; padding-left: 8px; border-left: 2px solid var(--line); }
+.pipe .lname { line-height: 40px; color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .04em; overflow: hidden; text-overflow: ellipsis; }
+.pipe .sg { display: inline-flex; align-items: center; gap: 6px; }
+.pipe .arr { color: var(--muted); }
+.pipe .pplay { padding: 3px 12px; font-size: 13px; }
+.stg { display: inline-flex; align-items: center; gap: 8px; min-height: 40px; padding: 3px 5px 3px 9px; border: 1px solid var(--line);
+       border-radius: 8px; background: var(--chip); white-space: nowrap; }
+.stg .st2 { display: flex; flex-direction: column; line-height: 1.25; } .stg .st2 > span { display: flex; gap: 5px; align-items: baseline; }
+.stg[data-ha] { cursor: pointer; } .stg[data-ha]:hover, .stg[data-ha]:focus-visible { border-color: var(--accent); outline: none; }
+.stg:not(:has(button)) { padding-right: 9px; }
+.stg.main { min-height: 32px; }
+.stg.off { opacity: .85; cursor: default; }
+.stg .sn { color: var(--ink); font-weight: 600; }
+.stg .ss.ok { color: var(--muted); } .stg .ss.todo { color: var(--accent); font-weight: 600; } .stg .ss.warn { color: var(--warn); font-weight: 600; cursor: help; }
+.stg a.ss { cursor: pointer; text-decoration: none; }
+.stg small { color: var(--muted); font-size: 11px; }
+.stg button { font-size: 12px; padding: 1px 8px; }
 details.tdparked { margin-top: 10px; }
 details.tdparked > summary { cursor: pointer; color: var(--muted); font-size: 13px; margin-bottom: 6px; }
 details.tdparked .tditem { opacity: .8; }
@@ -3174,19 +3196,72 @@ function tdStep(it, shown) {
   if ($("#tdstep [data-udiff]")) $("#tdstep [data-udiff]").ontoggle = e => { TD.udiff = e.target.open; };
 }
 // The project home (README TODAY-2): in place of a step, a slim card for convProject(): its title, one status line
-// from /api/state, and Play / Stop dev, Promote and Deploy as the Projects card has them.
-function tdHomeActions(g) {
-  const r = g.release, busy = r && !["done", "failed", "cancelled"].includes(r.state), A = [];
-  A.push(...tdPlay(g, "dev"));
-  if (!g.direct_main && (g.ahead || []).length) A.push({a: "promote", label: busy ? `Release #${r.id} in progress` : `Promote ${g.dev_branch} → ${g.main_branch}`, disabled: busy,
-    title: `If the gate passes on ${g.dev_branch}, ${g.main_branch} moves to it`});
-  for (const d of g.deploys || []) A.push({a: "deploy:" + d.name, label: `Deploy ${d.name}${tdBehind(d)}`, disabled: !!(d.error || d.blocked), title: d.error || d.blocked || ""});
-  return A;
+// from /api/state, and its pipeline: Play dev and dev → main (Promote) on top, then one lane per deploy chain.
+// ---- Deploy lanes, pure
+// The deploy targets as lanes: a lane starts at a target with no `from` (or one naming no target here, or a loop)
+// and follows its `from` children in config order; a second child of one stage starts a lane of its own, after its
+// parent's. Lanes keep the order of their repo's first target, so one repo's lanes sit together. Each lane has a
+// label (the first word all its names share, else its repo) and each stage a short name (that word cut off).
+function depLanes(deploys) {
+  const by = new Map(deploys.map(d => [d.name, d])), kids = new Map(), placed = new Set(), lanes = [];
+  for (const d of deploys) if (d.from && by.has(d.from) && d.from !== d.name) kids.set(d.from, [...(kids.get(d.from) || []), d]);
+  const lane = (d, after) => {
+    const ds = [], forks = [];
+    for (let x = d; x && !placed.has(x.name);) {
+      placed.add(x.name); ds.push(x);
+      const next = (kids.get(x.name) || []).filter(k => !placed.has(k.name));
+      forks.push(...next.slice(1).map(k => [k, x])); x = next[0];
+    }
+    lanes.push({ds, after}); forks.forEach(([k, from]) => lane(k, from.name));
+  };
+  for (const d of deploys) if (!d.from || !by.has(d.from) || d.from === d.name) lane(d, null);
+  for (const d of deploys) if (!placed.has(d.name)) lane(d, null);  // a loop of `from`s: start where the config does
+  const rank = new Map();
+  deploys.forEach(d => { if (!rank.has(d.repo || "")) rank.set(d.repo || "", rank.size); });
+  return lanes.map((l, i) => ({l, i})).sort((a, b) => rank.get(a.l.ds[0].repo || "") - rank.get(b.l.ds[0].repo || "") || a.i - b.i)
+    .map(({l}) => {
+      const w = l.ds[0].name.split(" ")[0], cut = l.ds.every(d => d.name.startsWith(w + " ") && d.name.length > w.length + 1);
+      return {label: cut ? w : l.ds[0].repo || "", repo: l.ds[0].repo || "", after: l.after,
+              stages: l.ds.map(d => ({name: d.name, short: cut ? d.name.slice(w.length + 1) : d.name}))};
+    });
+}
+// ---- end of Deploy lanes
+// One stage of a lane: its status, whether it gets a Deploy button, and its muted facts (version, last deploy).
+function depStage(d) {
+  const l = d.last, st = d.error ? {t: "error", c: "warn", tip: d.error} : d.blocked ? {t: "blocked", c: "warn", tip: d.blocked}
+    : d.log_unknown ? {t: "?", c: "warn", tip: "The commit it last deployed is gone from git (a rewritten history)"}
+    : !l && d.behind == null ? {t: "first deploy", c: "todo", tip: "Never deployed"}
+    : d.behind == null ? {t: "", c: ""}
+    : d.behind ? {t: `${nCommits(d.behind)} behind`, c: "todo", tip: d.since ? `${nCommits(d.behind)} since ${d.since}` : `${nCommits(d.behind)} not deployed${d.from ? ` from ${d.from}` : ""}`}
+    : {t: "✓ up to date", c: "ok"};
+  const meta = l ? [l.version, `${ago(l.time, state.now)} ago`].filter(Boolean).join(" · ") : "";
+  return {...st, stop: !!(d.error || d.blocked), button: st.c === "todo" || !!d.log_unknown, meta,
+          metaTip: l ? `Last deployed ${shas(l.commit)}${l.version ? ` (${l.version})` : ""} by #${l.task}` : ""};
+}
+function tdPipeline(g, busy) {
+  const r = g.release, rbusy = r && !["done", "failed", "cancelled"].includes(r.state), n = (g.ahead || []).length;
+  const play = tdPlay(g, "dev").map(b => `<button class="pplay" data-ha="${esc(b.a)}" ${busy || b.disabled ? "disabled" : ""} title="${esc(b.title || "")}">${esc(b.label)}</button>`);
+  const promote = g.direct_main ? "" : `<span class="stg main"><b class="sn">${esc(g.dev_branch)} → ${esc(g.main_branch)}</b>${
+    rbusy ? `<a class="ss todo pulse" data-task="${r.id}" title="Open the release">Release #${r.id} in progress</a>`
+    : n ? `<span class="ss todo">${n} ahead</span><button class="primary" data-ha="promote" ${busy ? "disabled" : ""} title="If the gate passes on ${esc(g.dev_branch)}, ${esc(g.main_branch)} moves to it">Promote</button>`
+    : `<span class="ss ok">✓ in sync</span>`}</span>`;
+  const by = new Map((g.deploys || []).map(d => [d.name, d]));
+  const lanes = depLanes(g.deploys || []).map(l => `<div class="pl"><span class="lname" title="${esc(l.repo ? `${l.repo}: ` : "")}${esc(l.stages.map(x => x.name).join(" → "))}">${esc(l.label)}</span><span class="chain">${
+    l.after ? `<span class="arr" title="Deploys what ${esc(l.after)} has">${esc(l.after)} →</span>` : ""}${l.stages.map((x, k) => {
+      const d = by.get(x.name), s = depStage(d), off = busy || s.stop;
+      const run = d.open ? `<a class="ss todo pulse" data-task="${d.open}" title="A deploy of ${esc(d.name)} is open. Open it">deploying #${d.open}</a>` : "";
+      const tip = s.stop ? s.tip : `Deploy ${d.name}${s.tip ? `: ${s.tip}` : ""}`;
+      return `<span class="sg"><span class="stg${off ? " off" : ""}" ${off ? "" : `data-ha="deploy:${esc(d.name)}" tabindex="0" role="button"`} title="${esc(tip)}">`
+        + `<span class="st2"><span><b class="sn">${esc(x.short)}</b>${run || (s.t ? `<span class="ss ${s.c}">${esc(s.t)}</span>` : "")}</span>`
+        + (s.meta ? `<small title="${esc(s.metaTip)}">${esc(s.meta)}</small>` : "") + `</span>`
+        + (s.button && !run && !off ? `<button tabindex="-1">Deploy</button>` : "") + `</span>${k < l.stages.length - 1 ? `<span class="arr">→</span>` : ""}</span>`;
+    }).join("")}</span></div>`).join("");
+  if (!play.length && !promote && !lanes) return "";
+  return `<div class="pipe"><div class="ptop">${play.join("")}${promote}</div>${lanes ? `<div class="lanes">${lanes}</div>` : ""}</div>`;
 }
 function tdHomeStatus(g) {
   const running = state.tasks.filter(t => t.project === g.name && t.state === "running").length, n = tdAll().filter(x => x.project === g.name).length;
-  const ahead = !g.direct_main && (g.ahead || []).length ? `${g.dev_branch} ${g.ahead.length} ahead of ${g.main_branch}` : "";
-  return [ahead, running ? `${running} running` : "", `${n} to-do${n === 1 ? "" : "s"}`].filter(Boolean).join(" · ");
+  return [running ? `${running} running` : "", `${n} to-do${n === 1 ? "" : "s"}`].filter(Boolean).join(" · ");
 }
 function tdHomeCard() {
   const name = convProject(), g = name ? P(name) : null;
@@ -3194,19 +3269,23 @@ function tdHomeCard() {
     put($("#tdstep"), `<div class="stepcard"><div class="k">All clear</div><h2>Nothing needs you right now</h2></div>`);
     return;
   }
-  const acts = tdHomeActions(g), busy = TD.busy === "home:" + name, pl = g.play;
+  const busy = TD.busy === "home:" + name, pl = g.play;
   const playErr = pl && pl.error && !pl.phase ? `${pl.stop ? "Stop" : "Play"} ${pl.where === "dev" ? g.dev_branch : g.main_branch} failed: ${pl.error}` : "";
   const clear = !TD.home && !tdAll().length ? " Nothing needs you right now." : "";
   const html = `<div class="stepcard"><div class="top"><button class="ph back" data-back title="Back to the list">‹ To-do</button>
     <div class="k">${TD.home ? "Project" : "All clear"}</div></div>
     <h2><span>${esc(g.title)}</span></h2>
     <div class="muted hst">${esc(tdHomeStatus(g))}${clear ? " · nothing needs you" : ""}</div>
-    ${acts.length ? `<div class="row">${acts.map(b => `<button data-ha="${esc(b.a)}" ${busy || b.disabled ? "disabled" : ""} title="${esc(b.title || "")}">${esc(b.label)}</button>`).join("")}</div>` : ""}
+    ${tdPipeline(g, busy)}
     ${TD.msg || playErr ? `<div class="err" style="margin-top:8px;white-space:pre-wrap">${esc(TD.msg || playErr)}</div>` : ""}</div>`;
   if (!put($("#tdstep"), html)) return;
   $("#tdstep").dataset.key = "";
   $("#tdstep [data-back]").onclick = () => tdGo("todo");
-  $("#tdstep").querySelectorAll("[data-ha]").forEach(b => b.onclick = () => tdHomeDo(name, b.dataset.ha));
+  // A stage chip is one target: a click anywhere on it (its Deploy button too) opens the Deploy dialog; its task link opens the task
+  $("#tdstep").querySelectorAll("[data-ha]").forEach(b => {
+    b.onclick = e => { if (!e.target.closest("a[data-task]")) tdHomeDo(name, b.dataset.ha); };
+    if (b.tagName !== "BUTTON") b.onkeydown = e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); tdHomeDo(name, b.dataset.ha); } };
+  });
 }
 async function tdHomeDo(project, a) {
   if (a.startsWith("deploy:")) return openDeploy(project, a.slice(7));
