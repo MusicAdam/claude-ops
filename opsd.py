@@ -38,7 +38,7 @@ and every repo has its own main, dev and task branches. With "." in repos the wo
 path above is then a worktree of it, with the other repos' worktrees in folders it gitignores, and nothing is copied.
 """
 from contextlib import nullcontext
-import base64, ctypes, datetime, fnmatch, json, math, os, plistlib, re, secrets, shlex, shutil, signal, sqlite3, subprocess, sys, threading, time, tomllib
+import base64, ctypes, datetime, filecmp, fnmatch, json, math, os, plistlib, re, secrets, shlex, shutil, signal, sqlite3, subprocess, sys, threading, time, tomllib
 import xml.etree.ElementTree as ET
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
@@ -669,6 +669,8 @@ def prepare_main(p, say, key):
         say(f"setting up {p.main_wt}")
         prepare_worktree(p, p.main_wt, src_first=p.repo, key=key)
         set_setting(f"main_prepared:{p.name}", "1")
+    else:
+        sync_clone_files(p, p.main_wt, src_first=p.repo)  # your edits to clone files since it was prepared
 
 
 _libc = ctypes.CDLL(None, use_errno=True)
@@ -714,17 +716,44 @@ def unprepared(dest):
     return bool(r) and r["value"] != "1"
 
 
-def prepare_worktree(p, dest, src_first=None, setup=True, key=None):
-    """Clone warm caches (APFS clone, seconds) and run the project's setup commands, logged to
-    runs/<key>/setup.log. Raises SetupFailed; the worktree counts as prepared only once every command succeeded."""
+def sync_clone_files(p, dest, src_first=None):
+    """Bring dest's [worktree] clone entries up to date (APFS clone, seconds). A folder (node_modules, .venv) is a
+    warm cache: cloned once, from src_first or the main worktree, else your checkout, and setup keeps it current. A
+    file (.env, a signing key, .xcode.env.local) is yours: it follows your checkout every time, so your edit reaches
+    the worktree, and a file you deleted, or took off the clone list, leaves it. Copies that never refreshed once
+    pinned a node brew had removed, in the main worktree and from there in every deploy (#437)."""
+    rec = f"cloned:{dest}"
+    before = set(json.loads(setting(rec) or "[]"))
+    files = set()
     for rel in p.clone:
-        if (dest / rel).exists():
+        out, mine = dest / rel, p.repo / rel
+        srcs = [s / rel for s in (src_first or p.main_wt, p.repo) if (s / rel).exists()]
+        if any(s.is_dir() for s in srcs) or out.is_dir():
+            if not out.exists() and srcs:
+                out.parent.mkdir(parents=True, exist_ok=True)
+                clone_tree(srcs[0], out)
             continue
-        for src in (src_first or p.main_wt, p.repo):
-            if (src / rel).exists():
-                (dest / rel).parent.mkdir(parents=True, exist_ok=True)
-                clone_tree(src / rel, dest / rel)
-                break
+        if not mine.is_file():  # you have none: the worktree's goes too, if it came from you
+            if rel in before and (out.is_file() or out.is_symlink()):
+                out.unlink()
+            continue
+        files.add(rel)
+        if out.is_file() and filecmp.cmp(mine, out, shallow=False):
+            continue
+        out.parent.mkdir(parents=True, exist_ok=True)
+        if out.exists() or out.is_symlink():
+            out.unlink()
+        clone_tree(mine, out)
+    for rel in before - set(p.clone):
+        if (dest / rel).is_file() or (dest / rel).is_symlink():
+            (dest / rel).unlink()
+    set_setting(rec, json.dumps(sorted(files)))
+
+
+def prepare_worktree(p, dest, src_first=None, setup=True, key=None):
+    """Sync the clone files (sync_clone_files) and run the project's setup commands, logged to
+    runs/<key>/setup.log. Raises SetupFailed; the worktree counts as prepared only once every command succeeded."""
+    sync_clone_files(p, dest, src_first)
     if setup and p.setup:
         set_setting(f"prepared:{dest}", "")
         run_setup(p, key or f"setup-{p.name}", dest)
@@ -1439,6 +1468,7 @@ def play_run(p, where):
                 prepare_worktree(p, path, key=f"play-{p.name}")
                 set_setting(f"dev_prepared:{p.name}", "1")
             if build:
+                sync_clone_files(p, path)
                 phase(f"building {p.dev} at {p.show(head)}")
                 log = RUNS / f"play-{p.name}" / "build.log"
                 rc, tail = run_step(f"play-{p.name}", f"building {p.dev}", p.build, path, "build.log")
@@ -5955,8 +5985,8 @@ def deploy_run(p, tid, tg, d):
     fresh = not all(r.present(path) for r in p.parts)
     for r, sha in p.root_first(p.pairs(revs)):
         checkout_detached(r, r.at(path), sha)
-    # The clone list, every time: it skips files already there, so entries added since the worktree was made
-    # (a signing key the first deploy lacked) reach it. Setup runs below, where its output is logged.
+    # The clone list, every time: entries added since the worktree was made (a signing key the first deploy lacked)
+    # reach it, and its files follow your checkout. Setup runs below, where its output is logged.
     prepare_worktree(p, path, setup=False)
     ev(tid, f"deploying {target_show(p, tg, target_commit(p, tg, revs))} in {path}")
     key = f"deploy_setup:{p.name}"
@@ -5998,6 +6028,7 @@ def deploy_run(p, tid, tg, d):
     if stopped(tid):
         return False
     if rc:
+        set_setting(key, "")  # Retry starts over, setup included: a fix outside git (a node_modules) gets its turn
         fail(p, tid, f"`{tg.run}` exited {rc}. {p.main} and the record of {tg.name} are unchanged; the deploy "
                      f"worktree {path} is left as it is. Retry starts the deploy over.\n\n{tail[-2000:]}")
         return False

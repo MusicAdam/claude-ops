@@ -293,7 +293,8 @@ run = "bin/swish release"
   (workspace files, the clone list, setup). Before each deploy every repo in it is put at the commit to deploy
   (`git checkout --force --detach`, then `git reset --hard`). It is **never cleaned**: untracked and ignored files
   stay, because a later target uploads what an earlier one built (swish's release uploads the builds its test build
-  left in `ios/build` and `android/app/build`). Setup runs again only when the commit changed since the last setup.
+  left in `ios/build` and `android/app/build`). Setup runs again when the commit changed since the last setup, and
+  after a failed deploy, so a Retry starts over with setup too. Its clone files follow your checkout (see below).
 - **Which commit.** main, in every repo. A target with `from` deploys the commit that target last deployed
   successfully, in its repo (other repos sit at main); before that target's first deploy it refuses with
   "Deploy swish test first."
@@ -1548,7 +1549,9 @@ chat_mcp = []                      # MCP servers a project chat loads, by name (
 
 # --- repo: the rest may also live in claude-ops.toml (repos too; it must list "." there)
 [worktree]
-clone = ["Library"]                # APFS-cloned into each new worktree (warm caches)
+clone = ["Library"]                # APFS-cloned into each new worktree. A folder (a warm cache) is cloned once;
+                                   # a file (.env, a key) follows your checkout before each deploy, dev build and
+                                   # promote: changed, it is copied again; deleted or taken off this list, it goes
 setup = ["npm ci --silent"]        # run in each new worktree; $OPS_REPO is your checkout
 setup_timeout = 15                 # minutes each setup command may run (default 15); then it is stopped
 
