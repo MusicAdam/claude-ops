@@ -48,11 +48,11 @@ the tasks this way:
 
 - **One task for the whole change** is the default. An OpenSpec checklist item is far too small for a
   queue task: each task costs a worktree, a worker start-up and a full merge check, and tasks that
-  share one design work best in one head. The worker can still split the task itself when it finds it big.
-- **One task per phase** (the `##` sections of `tasks.md`) only when the change is large (roughly 25
-  or more open items in three or more phases) or when the owner wants to check one phase before the
-  next starts. Fold a phase with only a few items, such as "Tests" or "Docs", into its neighbour.
-  Chain the phases with `after` unless they truly don't depend on each other.
+  share one design work best in one head. Size is no reason to split: the worker uses subagents for
+  parts that can run in parallel.
+- **One task per phase** (the `##` sections of `tasks.md`) only when the owner wants to check one
+  phase before the next starts, or a phase must release first. Fold a phase with only a few items,
+  such as "Tests" or "Docs", into its neighbour. Chain the phases with `after`.
 - Never one task per checklist item.
 
 Each task body points the worker at `{path}/` instead of copying it, names the `tasks.md` sections

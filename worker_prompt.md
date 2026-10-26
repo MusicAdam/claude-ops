@@ -69,7 +69,10 @@ question, answer and keep working.
 - Blocked on a decision only the user can make (commit useful partial work first):
   `{{"status": "needs_input", "question": "...", "summary": "what you did so far"}}`
 - Cannot be done: `{{"status": "failed", "summary": "why, and what you tried"}}`
-- The task is really several independent tasks that are faster in parallel. Make no changes, and list
+- The task is really several tasks that must merge or release separately: a release blocker or a
+  required order (an API must ship before the app that uses it), or parts in different projects. Don't
+  split because parts would be faster in parallel: use subagents for those inside this task (step 2
+  of How to work). Make no changes, and list
   them; `after` is the 0-based index of a task in this list that must merge first, or null:
   `{{"status": "split", "summary": "...", "tasks": [{{"title": "...", "body": "...", "after": null}}]}}`
   Write each `body` as a brief that stands alone. When you have read the code it touches, end it with
