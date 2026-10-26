@@ -1644,7 +1644,11 @@ folder under a project's `<worktrees>/` that no longer exists. For what a worktr
   is now. Play dev runs it in `<worktrees>/dev`, so you can try `dev` before you promote. The first Play
   dev runs the `[worktree]` clone and `setup` there; after that, if the project has a build and `dev`
   moved since its last one, Play dev builds first (the card says "dev needs build"; the log is in
-  `runs/play-<project>/build.log`). The card shows which one runs ("running: main", "running: dev"),
+  `runs/play-<project>/build.log`). Each step finishes before the next starts: clone and setup, then build,
+  then launch. When setup or build is about to run and the app already runs there, Play stops it first
+  (`[app] stop`, or SIGTERM) and the launch starts it fresh, so no server keeps serving a tree that setup
+  or build rewrote under it. A launch (Play or a task's Try) is refused while setup still runs in that
+  worktree, or after its setup failed. The card shows which one runs ("running: main", "running: dev"),
   and a **Stop main** or **Stop dev** button for each that runs. Stop runs `[app] stop` there, or else
   sends SIGTERM to the app's processes in that worktree.
   Merges into `dev` go on while you play it; Promote waits while `main` runs, as before.
@@ -1920,7 +1924,7 @@ Nothing claude-ops runs may stop, signal or quit a process it did not start.
 | `~/.claude-ops/ops.db` | SQLite: tasks, events, settings, design chats |
 | `~/.claude-ops/runs/<id>/` | `claude.jsonl` (full transcript), `claude.err`, `gate.log`; a deploy's `deploy.log`, `note.txt` |
 | `~/.claude-ops/images/` | screenshots attached to messages |
-| `~/.claude-ops/opsd.log` | daemon log |
+| `~/.claude-ops/opsd.log` | daemon log; each line starts with its local time |
 | `~/.claude-ops/opsd.pid` | the running daemon's pid |
 | `~/.claude-ops/research-backup/` | copies of the research state files, one folder per daemon start, newest 10 |
 

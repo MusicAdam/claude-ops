@@ -749,6 +749,12 @@ def run_setup(p, key, dest, log_name="setup.log"):
             raise SetupFailed(f"setup command `{cmd}` exited {rc} (log: {log}).\n" + tail[-1500:])
 
 
+def setup_running(dest):
+    """Setup still runs in dest: the pid run_setup recorded there is alive, with the start time it recorded."""
+    rec = setting(f"setup_pid:{dest}").split(" ", 1)
+    return len(rec) == 2 and rec[0].isdigit() and started_at(int(rec[0])) == rec[1]
+
+
 def stop_setup_in(dest):
     """Stop whatever setup is still running in dest: one this daemon started (a Play, a task paused moments ago),
     or one an earlier daemon left behind, by the pid and start time it recorded."""
@@ -1369,6 +1375,12 @@ def launch_app(p, path):
         raise ValueError(f"{p.name} has no [app] launch command")
     if p.artifact and not (Path(path) / p.artifact).exists():
         raise ValueError("there is no build there yet")
+    # Setup rewrites files the app serves (an npm install in node_modules): an app started while it runs, or after
+    # it failed half way, serves a broken tree. Launch only once every setup command has finished there.
+    if setup_running(path):
+        raise ValueError(f"wait: [worktree] setup is still running in {path}")
+    if unprepared(path):
+        raise ValueError(f"[worktree] setup has not succeeded in {path}: Play dev or a retry runs it again")
     if p.stop_cmd:  # a server-style app holds fixed ports, so only one worktree can serve: stop the others
         tasks = q(f"SELECT worktree FROM tasks WHERE project=? AND worktree IS NOT NULL AND state NOT IN "
                   f"({','.join('?' * len(ENDED))})", (p.name, *ENDED))
@@ -1383,6 +1395,8 @@ def launch_app(p, path):
 # The card's Play buttons run [app] launch in <worktrees>/main or <worktrees>/dev. Play dev first prepares the dev
 # worktree (the [worktree] clone files and setup, once) and runs [app] build there when dev has moved since its
 # last build. That can take minutes, so a Play runs in a thread, and PLAYS holds what it is doing for the card.
+# The steps run in order, each to its end: setup, then build, then launch. When setup or build is to run, a
+# running app is stopped first and the launch starts it fresh, so no server serves a tree rewritten under it.
 
 PLAYS = {}  # project name -> {"where": "main"|"dev", "phase": what it does now or None, "error": why it failed}
 PLAYS_LOCK = threading.Lock()
@@ -1404,25 +1418,38 @@ def play(p, where):
 def play_run(p, where):
     def phase(text):
         PLAYS[p.name] = {"where": where, "phase": text, "error": None}
+
+    def stop_first(path, name):
+        """Setup or build is about to rewrite files under a running app: stop it first, so no server goes on
+        serving (or caching) a tree that changes under it. The launch below starts it again from scratch."""
+        phase(f"stopping {name} before it changes")
+        kill_app(p, path)
     try:
         if where == "dev":
             path = p.dev_wt
-            if setting(f"dev_prepared:{p.name}") != "1":  # bootstrap made it without clone files and setup
+            prepare = setting(f"dev_prepared:{p.name}") != "1"  # bootstrap made it without clone files and setup
+            head = dev_head(p) if p.build else None
+            build = p.build and (setting(f"dev_built:{p.name}") != head
+                                 or (p.artifact and not (path / p.artifact).exists()))
+            if prepare or build:
+                stop_first(path, p.dev)
+            if prepare:
                 phase(f"setting up {path}")
                 copy_workspace_files(p, path)
                 prepare_worktree(p, path, key=f"play-{p.name}")
                 set_setting(f"dev_prepared:{p.name}", "1")
-            if p.build:
-                head = dev_head(p)
-                if setting(f"dev_built:{p.name}") != head or (p.artifact and not (path / p.artifact).exists()):
-                    phase(f"building {p.dev} at {p.show(head)}")
-                    log = RUNS / f"play-{p.name}" / "build.log"
-                    rc, tail = run_step(f"play-{p.name}", f"building {p.dev}", p.build, path, "build.log")
-                    if rc or (p.artifact and not (path / p.artifact).exists()):
-                        raise RuntimeError(f"Building {p.dev} failed (log: {log}).\n{tail[-1500:]}")
-                    set_setting(f"dev_built:{p.name}", head)  # what it was at the start: a merge meanwhile rebuilds
+            if build:
+                phase(f"building {p.dev} at {p.show(head)}")
+                log = RUNS / f"play-{p.name}" / "build.log"
+                rc, tail = run_step(f"play-{p.name}", f"building {p.dev}", p.build, path, "build.log")
+                if rc or (p.artifact and not (path / p.artifact).exists()):
+                    raise RuntimeError(f"Building {p.dev} failed (log: {log}).\n{tail[-1500:]}")
+                set_setting(f"dev_built:{p.name}", head)  # what it was at the start: a merge meanwhile rebuilds
         else:
             path = p.main_wt
+            r = q("SELECT value FROM settings WHERE key=?", (f"main_prepared:{p.name}",), one=True)
+            if r and r["value"] != "1":  # prepare_main is about to run setup there
+                stop_first(path, p.main)
             prepare_main(p, phase, f"play-{p.name}")
             if not p.build:  # no build pins main's worktree to what was built: play main as it is now
                 for r in p.parts:
@@ -9477,7 +9504,28 @@ def start_up():
     print(f"claude-ops ready  projects: {', '.join(PROJECTS) or 'none'}", flush=True)
 
 
+class Stamped:
+    """A text stream that starts each line with the local time: opsd.log is the daemon's stdout and stderr, and
+    without times the order of what happened (a setup, a build, a launch) could not be told from it."""
+
+    def __init__(self, out):
+        self.out, self.at_start, self.lock = out, True, threading.Lock()
+
+    def write(self, text):
+        with self.lock:
+            for part in text.splitlines(keepends=True):
+                if self.at_start:
+                    self.out.write(time.strftime("%Y-%m-%d %H:%M:%S "))
+                self.out.write(part)
+                self.at_start = part.endswith("\n")
+        return len(text)
+
+    def __getattr__(self, name):  # flush, fileno, isatty, encoding: the wrapped stream's
+        return getattr(self.out, name)
+
+
 def serve():
+    sys.stdout, sys.stderr = Stamped(sys.stdout), Stamped(sys.stderr)
     signal.signal(signal.SIGTERM, on_term)
     signal.signal(signal.SIGINT, on_term)
     print(f"claude-ops starting on http://{HOST}:{PORT}  (pid {os.getpid()})", flush=True)
