@@ -768,7 +768,7 @@ stay on the right of the header.
 
   | Verb | Primary | Others |
   |---|---|---|
-  | Try | ▶ Play this build (the task's play) | Approve & merge, Send back… |
+  | Try | ▶ Play this build (the task's play). With a proof video (`proof`), the card plays it above the buttons, `proof_note` as a one-line caption under it, and Approve & merge is primary | Approve & merge, Send back…; with a proof video, ▶ Play this build, Send back… |
   | Review | Approve & merge | Open diff (the task's details, files changed), Send back… |
   | Answer | Answer (focuses the message box; sending answers the task) | Details |
   | Fix | Retry | Retry with a note…, Retry after… |

@@ -499,6 +499,10 @@ details.tdparked .tditem { opacity: .8; }
 .stepcard .facts > * + *::before { content: "·"; margin-right: 6px; color: var(--muted); }
 .stepcard .facts a { cursor: pointer; color: var(--accent); }
 .stepcard .row { margin-top: 12px; }
+.proof { margin: 10px 0 0; }
+.proof video { display: block; max-width: 100%; max-height: 360px; background: #000; border-radius: 6px; }
+.stepcard .proof video { max-height: 220px; }
+.proof figcaption { color: var(--muted); font-size: 13px; margin-top: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .stepcard table.unc { border-collapse: collapse; font-size: 13px; margin: 8px 0; max-width: 100%; }
 .stepcard table.unc td, .stepcard table.unc th { padding: 2px 10px 2px 0; text-align: left; vertical-align: baseline; }
 .stepcard table.unc .p { word-break: break-all; }
@@ -1000,6 +1004,18 @@ function put(el, html) {
   return true;
 }
 // put, keeping focus and caret in the field you were typing in (fields carry data-fld), when keep allows
+// A task's proof video (README "Proof video") with its note as a one-line caption; none without one
+const proofVideo = t => t && t.proof ? `<figure class="proof"><video controls playsinline preload="metadata" data-proof="${t.id}" src="/api/tasks/${t.id}/proof.mp4"></video>${
+  t.proof_note ? `<figcaption title="${esc(t.proof_note)}">${esc(t.proof_note)}</figcaption>` : ""}</figure>` : "";
+// After a redraw, put back the video element that was there before (old) in place of the new one for the same
+// task, so a poll doesn't reload or restart a video you are watching. In the same task, so it never pauses.
+function keepVideo(el, old) {
+  const v = old && el.querySelector(`video[data-proof="${old.dataset.proof}"]`);
+  if (v) v.replaceWith(old);
+}
+// A video shown full screen or picture in picture would leave that mode when moved, so the redraw waits for it
+const videoAway = v => !!v && (document.fullscreenElement === v || document.webkitFullscreenElement === v
+  || document.pictureInPictureElement === v || !!v.webkitDisplayingFullscreen);
 function putKeep(el, html, keep = true) {
   const a = document.activeElement, fld = keep && a && el.contains(a) && a.dataset.fld;
   const sel = fld && "selectionStart" in a ? [a.selectionStart, a.selectionEnd] : null;
@@ -1713,7 +1729,7 @@ async function loadDetail(id, fresh) {
   const t = detail, live = ["running", "gating", "merging"].includes(t.state), links = chatCtx(t.project);
   const btn = (act, label, cls = "") => `<button class="${cls}" data-act="${act}">${label}</button>`;
   let actions = "";
-  if (t.state === "review") actions = (t.can_play ? btn("play", "▶ Try this build", "primary") : "") + btn("approve", "Approve & merge");
+  if (t.state === "review") actions = (t.can_play ? btn("play", "▶ Try this build", t.proof ? "" : "primary") : "") + btn("approve", "Approve & merge", t.proof ? "primary" : "");
   if (t.start_words) actions += btn("start-now", "▶ Start now", "primary");
   if (["queued", "running", "gating"].includes(t.state)) actions += btn("pause", "❚❚ Pause");
   if (t.state === "paused") actions += btn("resume", "▶ Resume", "primary");
@@ -1737,6 +1753,7 @@ async function loadDetail(id, fresh) {
       <div class="row">${btn("reject", "Send back with feedback")}</div>` : ""}
     ${t.summary ? `<div class="callout ok">${esc(t.summary)}</div>` : ""}
     ${t.error ? `<div class="callout bad"><pre class="mono">${esc(t.error)}</pre></div>` : ""}
+    ${t.state === "review" ? proofVideo(t) : ""}
     <div class="row">${actions}</div>
     ${ra ? raBox(RA) : ""}
     ${t.can_steer || t.can_chat || t.chat.length ? `<details data-k="chat" open><summary>${t.can_steer || t.chat_full ? "Talk to the worker" : "Ask the worker"}</summary>
@@ -1767,7 +1784,10 @@ async function loadDetail(id, fresh) {
   const scrolls = [...box.querySelectorAll("#feed, .tchat")].map(el => [el.id || el.className, el.scrollTop,
     el.scrollTop + el.clientHeight >= el.scrollHeight - 30]);
   const opens = Object.fromEntries([...box.querySelectorAll("details[data-k]")].map(d => [d.dataset.k, d.open]));
+  const oldVideo = box.querySelector("video[data-proof]");
+  if (videoAway(oldVideo)) return;
   box.innerHTML = detailHtml = html; box.dataset.id = t.id;
+  keepVideo(box, oldVideo);
   const tchat = box.querySelector(".tchat");
   if (tchat) chatLinks(tchat, t.project);
   if (same) box.querySelectorAll("details[data-k]").forEach(d => { if (d.dataset.k in opens) d.open = opens[d.dataset.k]; });
@@ -3006,7 +3026,9 @@ function tdTopics(project) {
 function tdActions(it) {
   const g = P(it.project), s = it.source || {}, A = (a, label, o = {}) => ({a, label, ...o});
   switch (it.verb) {
-    case "Try": return [A("play", "▶ Play this build", {primary: 1, title: "Run the task's build from its worktree"}), A("approve", "Approve & merge"), A("sendback", "Send back…")];
+    // With a proof video on the card, watching it comes first: Approve & merge leads and Play moves over
+    case "Try": return tdProof(it) ? [A("approve", "Approve & merge", {primary: 1}), A("play", "▶ Play this build", {title: "Run the task's build from its worktree"}), A("sendback", "Send back…")]
+      : [A("play", "▶ Play this build", {primary: 1, title: "Run the task's build from its worktree"}), A("approve", "Approve & merge"), A("sendback", "Send back…")];
     case "Review": return [A("approve", "Approve & merge", {primary: 1}), A("diff", "Open diff", {title: "The files it changed, in the task's details"}), A("sendback", "Send back…")];
     case "Answer": return [A("answer", "Answer", {primary: 1, title: "Type your answer in the message box below"}), A("details", "Details")];
     case "Fix": return [A("retry", "Retry", {primary: 1}), A("retrynote", "Retry with a note…"), A("retryafter", "Retry after…", {title: "Retry it once another task merges"}), A("details", "Details")];
@@ -3029,6 +3051,8 @@ function tdActions(it) {
   }
   return [];
 }
+// A Try step's task from /api/state when it has a proof video, else null
+const tdProof = it => { const s = it.source || {}, t = it.verb === "Try" && s.kind === "task" && state.tasks.find(x => x.id === s.id); return t && t.proof ? t : null; };
 // What one Deploy button ships: its own count of commits, as the Projects card's Deploys section says it.
 const tdBehind = d => d.log_unknown ? " (?)" : !d.last && !d.from && !d.since ? " (first deploy)" : d.behind == null ? "" : d.behind ? ` (${d.behind})` : " (up to date)";
 // Play or Stop the project's app from main or dev, as the Projects card's buttons do. None if it can't launch.
@@ -3088,13 +3112,17 @@ function tdStep(it, shown) {
     ${facts ? `<div class="facts">${facts}</div>` : ""}${it.verb === "Commit" ? tdUncommitted() : ""}</div>
     ${it.closes ? `<div class="closes">${esc(it.closes)}</div>` : ""}
     ${it.verb === "Ship" && P(it.project).deploys && P(it.project).deploys.length ? tdShipLog(P(it.project)) : ""}
+    ${it.verb === "Try" ? proofVideo(tdProof(it)) : ""}
     <div class="row">${acts.map(b => `<button data-ta="${esc(b.a)}" class="${b.primary ? "primary" : ""}" ${busy || b.disabled ? "disabled" : ""} title="${esc(b.title || "")}">${esc(b.label)}</button>`).join("")}
       ${noteIn}<button class="tdwaitb" data-waitfor title="Park it until tasks you pick merge or are released">Wait for…</button>${unpark("tdunpark")}<button class="skip" data-skip title="${esc(skipTip)}">Skip for now →</button></div>
     ${TD.wait && TD.wait.key === it.key ? tdWaitBox(it.project, TD.wait, `<button class="primary" data-wgo>Wait</button><button data-wx>Cancel</button>`) : ""}
     ${raHere ? raBox(RA) : ""}
     ${TD.msg || playErr ? `<div class="err" style="margin-top:8px;white-space:pre-wrap">${esc(TD.msg || playErr)}</div>` : TD.note ? `<div class="muted" style="margin-top:8px">${esc(TD.note)}</div>` : ""}</div>`;
   // A poll that rewrites the card while you type in the note (or the chooser) keeps your caret where it was
+  const oldVideo = $("#tdstep video[data-proof]");
+  if (videoAway(oldVideo)) return;
   if (!putKeep($("#tdstep"), html, $("#tdstep").dataset.key === it.key)) return;
+  keepVideo($("#tdstep"), oldVideo);
   $("#tdstep").dataset.key = it.key;
   $("#tdstep").querySelectorAll("[data-tdnote]").forEach(el => {
     el.oninput = () => { TD.drafts[it.key] = el.value; clearTimeout(TD.noteTimer); TD.noteTimer = setTimeout(() => tdSaveNote(it.key), 500); };
