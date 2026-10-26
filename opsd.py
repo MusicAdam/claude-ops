@@ -1083,11 +1083,12 @@ def init_db():
     q("""CREATE TABLE IF NOT EXISTS todos (id INTEGER PRIMARY KEY, project TEXT, verb TEXT, title TEXT, why TEXT,
         source_kind TEXT, source_id INTEGER, created REAL, closed REAL)""")  # what Claude asks of you (see To-dos)
     q("""CREATE TABLE IF NOT EXISTS todo_notes (key TEXT PRIMARY KEY, note TEXT, parked REAL, skipped REAL,
-        wake_tasks TEXT, wake_on TEXT DEFAULT 'merged', wake_set INTEGER DEFAULT 0, updated REAL)""")
-    # your note on a to-do, its skip or park, and the tasks a parked one waits on (TODO-6)
+        wake_tasks TEXT, wake_on TEXT DEFAULT 'merged', wake_set INTEGER DEFAULT 0, updated REAL, topic TEXT)""")
+    # your note on a to-do, its skip or park, the tasks a parked one waits on (TODO-6), and its topic (TODAY-2 bond)
     ncols = {r["name"] for r in q("PRAGMA table_info(todo_notes)")}
     for col, decl in (("wake_tasks", "TEXT"), ("wake_on", "TEXT DEFAULT 'merged'"),  # databases from before wait sets
-                      ("wake_set", "INTEGER DEFAULT 0")):  # 1: set by the picker or Claude, not read from the note
+                      ("wake_set", "INTEGER DEFAULT 0"),  # 1: set by the picker or Claude, not read from the note
+                      ("topic", "TEXT")):  # and before a to-do's bond: the topic ref it was first sent to
         if col not in ncols:
             q(f"ALTER TABLE todo_notes ADD COLUMN {col} {decl}")
             if col == "wake_tasks" and "wake_task" in ncols:  # one task becomes a set of one
@@ -6515,6 +6516,8 @@ def conv_state(project, tops):
         c.pop("subject", None)
     if c["topic"] is not None or c.get("new") is not True:  # New topic was clicked: the next message starts a fresh one
         c.pop("new", None)
+    if c["topic"] is not None or not isinstance(c.get("title"), str) or not c["title"].strip():
+        c.pop("title", None)  # a pending tab's title (New tab ↗, a panel's subject), until its first message
     return c
 
 
@@ -6525,7 +6528,7 @@ def conv_view(project):
     c = conv_state(project, tops)
     links = research_links(project)
     return {"project": project, "topic": c["topic"], "mode": c["mode"], "subject": c.get("subject"),
-            "new": bool(c.get("new")), "modes": MODES,
+            "new": bool(c.get("new")), "title": c.get("title"), "modes": MODES,
             "topics": tops,
             "from": next((t for t in tops if t["id"] == c.get("from")), None),
             "research": {"on": bool(research.current()), "name": links[0]["name"] if links else None}}
@@ -6555,18 +6558,18 @@ def quick_topics(limit=10):
 UNSEEN = object()  # conv_open's ended when the caller sent none
 
 
-def conv_open(project, how, ref=None, mode=None, ended=UNSEEN):
-    """Which topic the next message goes to (README: TODAY-2), kept in conv:<project>:
-    chat/topic: that one (a to-do whose source is a chat, or a click in Earlier topics). An ended one reopens only
+def conv_open(project, how, ref=None, mode=None, ended=UNSEEN, title=None):
+    """Which topic the next message goes to (README: TODAY-2), kept in conv:<project>: the tab you see.
+    chat/topic: that one (a tab, a to-do's topic, a row under Ended, a link). An ended one reopens only
     when ended, what the caller last saw of it (null, or when it ended), is what is stored: you knowingly opened an
     ended topic. Saw it open but it has ended since (a stale Today list): it stays ended and doesn't become the
     current topic, and the answer names it in still_ended. No ended sent (the CLI, older callers): it reopens;
-    subject: the open plan & design topic about ref (a to-do's or a panel's subject, see SUBJECT), else none yet:
-    the first message makes it (conv_say); task: the current plan & design topic, else the latest one, else a new
-    one (Ask Claude about the research runs); new: a new topic in the current mode, or mode; mode: switch mode, which starts a new
-    topic of that kind carrying a handoff of the one that was open (switching back before you send returns to it).
-    A message sent from a to-do step carries that to-do's subject itself (conv_say's todo), so it reaches the item's
-    topic even when this state was set before, or has changed since."""
+    subject: the open plan & design topic about ref (a panel's subject, see SUBJECT, or New tab ↗ for a to-do with
+    one), else none yet: the first message makes it (conv_say); task: the current plan & design topic, else the
+    latest one, else a new one (Ask Claude about the research runs); new: a new topic in the current mode, or mode;
+    mode: switch mode, which starts a new topic of that kind carrying a handoff of the one that was open (switching
+    back before you send returns to it). title: what a pending subject or new topic's tab is called until its first
+    message (the to-do's or the panel's title), cut to 80."""
     proj(project)
     tops = topics(project)
     ids = {t["id"]: t for t in tops}
@@ -6585,13 +6588,14 @@ def conv_open(project, how, ref=None, mode=None, ended=UNSEEN):
         if not isinstance(ref, str) or not SUBJECT.fullmatch(ref):
             raise ValueError(f"no subject {ref!r}")
         mine = next((t for t in tops if t.get("subject") == ref and t["mode"] == "design" and not t["ended"]), None)
-        c = {"topic": mine["id"], "mode": "design"} if mine else {"topic": None, "mode": "design", "subject": ref}
+        c = {"topic": mine["id"], "mode": "design"} if mine else {"topic": None, "mode": "design", "subject": ref,
+                                                                  **pending_title(title)}
     elif how == "task":
         if (cur["mode"] if cur else c["mode"]) != "design":
             latest = next((t for t in tops if t["mode"] == "design"), None)
             c = {"topic": latest["id"] if latest else None, "mode": "design"}
-    elif how == "new":  # marked, so a message sent from a to-do step doesn't turn it into the to-do's topic (conv_say)
-        c = {"topic": None, "mode": mode if mode in MODES else c["mode"], "new": True}
+    elif how == "new":  # New topic (+), or New tab ↗ for a to-do without a subject (with its title)
+        c = {"topic": None, "mode": mode if mode in MODES else c["mode"], "new": True, **pending_title(title)}
     elif how == "mode":
         if mode not in MODES:
             raise ValueError(f"no mode {mode!r}")
@@ -6608,7 +6612,13 @@ def conv_open(project, how, ref=None, mode=None, ended=UNSEEN):
     return conv_view(project)
 
 
-# A topic's subject: the one thing it is about, so a to-do or a panel opens its own topic (conv_open how=subject).
+def pending_title(title):
+    """{"title": ...} for a pending tab's title, cut to 80 characters, or {} for none."""
+    title = " ".join(str(title or "").split())[:80] if isinstance(title, str) else ""
+    return {"title": title} if title else {}
+
+
+# A topic's subject: the one thing it is about, so a panel or New tab ↗ opens its own topic (conv_open how=subject).
 SUBJECT = re.compile(r"task:\d+|project:[^:\s]+:(?:promote|ship|commit)|schedule:\d+")
 SUBJECT_CHARS = 4_000  # the note a subject topic's first turn carries
 
@@ -6653,7 +6663,7 @@ def subject_about(project, subject):
     p = proj(name)
     try:
         info = main_info(p, settings_now())
-        it = next((i for i in todos_list([], [info], {}) if i["key"] == subject), None)
+        it = next((i for i in todos_list([], [info], {}, notes=False) if i["key"] == subject), None)
     except Exception:
         info, it = {}, None
     verb = {"promote": "Promote", "ship": "Deploy", "commit": "Review uncommitted files in"}[what]
@@ -6755,27 +6765,27 @@ def topic_handoff(t, mode):
 
 
 def todo_line(todo):
-    """The line, and the note for Claude, that a message sent from a to-do step carries into a topic (conv_say):
-    which to-do the owner had open. None for no to-do."""
+    """The line, and the note for Claude, that a message sent with a to-do attached carries into a topic (conv_say):
+    which to-do the owner attached. None for no to-do."""
     if not isinstance(todo, dict) or not str(todo.get("title") or "").strip():
         return None
     key = clip(" ".join(str(todo.get("key") or "").split()), 40)
     title, why = clip(" ".join(str(todo["title"]).split()), 300), clip(str(todo.get("why") or "").strip(), 1000)
     verb = clip(" ".join(str(todo.get("verb") or "").split()), 20)
     line = f"Sent from to-do {key}: {verb + ' ' if verb else ''}{title}".strip()
-    note = (f"The owner sent the next message with this to-do open on Today, so it is about it unless it says "
+    note = (f"The owner sent the next message with this to-do attached on Today, so it is about it unless it says "
             f"otherwise: {key or 'to-do'} ({verb or 'to-do'}) “{title}”." + (f" Why: {why}" if why else ""))
     return line, note
 
 
 def conv_say(project, text, todo=None):
-    """POST /api/conversation/say: send text into the current topic, or start one in the current mode. A topic a
-    mode switch started carries the handoff of the one before it to Claude, and a line saying so in the chat.
-    todo: the to-do step shown when you sent it, {key, verb, title, why, subject?, pick?} (README: TODAY-2), so the
-    send itself says what it is about, whatever conv:<project> holds by now. With a subject, a message that would
-    start a new topic goes to that item's own topic instead (conv_open how=subject), unless New topic was clicked;
-    pick (the page never got the item's topic picked: the open failed or is still on its way) does that over any
-    current topic. The topic gets a line naming the to-do, with its title and why as a note for Claude, once."""
+    """POST /api/conversation/say: send text into the current topic, the tab you see, or start the pending one
+    (README: TODAY-2, which topic a message goes to). A pending topic with a subject (New tab ↗, a panel's Ask
+    Claude) is made with that subject and its note; one with a title (New tab ↗) gets that title. A topic a mode
+    switch started carries the handoff of the one before it to Claude, and a line saying so in the chat.
+    todo: the to-do attached to this message (the 📎 chip), {key, verb, title, why}, or None. It never moves the
+    message to another topic. The topic gets a line naming the to-do, with its title and why as a note for Claude,
+    once, and the to-do is bound to its topic for good (todo_bond)."""
     text = (text or "").strip()
     if not text:
         raise ValueError("say something first")
@@ -6783,12 +6793,6 @@ def conv_say(project, text, todo=None):
     tops = topics(project)
     c = conv_state(project, tops)
     todo = todo if isinstance(todo, dict) else None
-    subject = todo.get("subject") if todo else None
-    if (isinstance(subject, str) and SUBJECT.fullmatch(subject)
-            and ((c["topic"] is None and not c.get("new")) or todo.get("pick") is True)):
-        conv_open(project, "subject", subject)
-        tops = topics(project)
-        c = conv_state(project, tops)
     ids = {t["id"]: t for t in tops}
     cur, left = ids.get(c["topic"]), ids.get(c.get("from"))
     told = todo_line(todo)
@@ -6799,6 +6803,8 @@ def conv_say(project, text, todo=None):
                           (cur["id"], told[0]), one=True):
             q("INSERT INTO design_msgs (design_id, role, text, ts, note) VALUES (?,?,?,?,?)",
               (cur["id"], "ops", told[0], time.time(), told[1]))
+        if told:
+            todo_bond(str(todo.get("key") or ""), cur["id"])
         return {"topic": cur["id"], "queued": design_say(cur["id"], text)}
     handoff = topic_handoff(left, c["mode"]) if left and not cur else ""
     if c["mode"] == "research":
@@ -6815,7 +6821,7 @@ def conv_say(project, text, todo=None):
         now = time.time()
         about = subject_about(project, c["subject"]) if c.get("subject") and c["mode"] == "design" else None
         new = q("INSERT INTO designs (project, title, created, updated, kind, subject) VALUES (?,?,?,?,?,?)",
-                (project, (about["title"] if about else title_of(text))[:80], now, now, c["mode"],
+                (project, (about["title"] if about else c.get("title") or title_of(text))[:80], now, now, c["mode"],
                  c.get("subject") if about else None))
         if about:  # the same mechanism as a handoff: the note goes to Claude with the first message
             q("INSERT INTO design_msgs (design_id, role, text, ts, note) VALUES (?,?,?,?,?)",
@@ -6829,6 +6835,8 @@ def conv_say(project, text, todo=None):
                            f"short handoff of “{left['title']}”.", now, handoff))
         design_say(new, text)
     set_setting(f"conv:{project}", json.dumps({"topic": new, "mode": c["mode"]}))
+    if told:
+        todo_bond(str(todo.get("key") or ""), new)
     return {"topic": new, "queued": False}
 
 
@@ -8509,7 +8517,8 @@ TODO_BLOCK = re.compile(r"```todo[ \t]*\n(.*?)^[ \t]*```[ \t]*$", re.S | re.M)
 
 
 def todo_item(key, verb, project, title, why, since, kind, sid, **extra):
-    """subject: the topic the item opens on Today (conv_open how=subject); a chat's item opens its chat instead."""
+    """subject: what the item is about (task:<id>, project:<name>:promote|ship|commit): the latest topic with it is the
+    item's topic (todo_topic), and New tab ↗ opens a pending topic about it (conv_open how=subject)."""
     subject = f"task:{sid}" if kind == "task" else key if kind == "project" else None
     return {"key": key, "subject": subject, "verb": verb, "group": TODO_GROUP[verb], "project": project, "title": title,
             "why": why or "", "since": since or 0, "est_min": TODO_MIN[verb], "closes": todo_closes(verb, kind),
@@ -8696,7 +8705,7 @@ def todo_wait_set(key, ids, until, now=None):
     if not ids:
         q("UPDATE todo_notes SET wake_tasks=NULL, wake_on='merged', wake_set=0, parked=NULL, skipped=NULL, "
           "updated=? WHERE key=?", (now, key))
-        q("DELETE FROM todo_notes WHERE key=? AND note=''", (key,))
+        q("DELETE FROM todo_notes WHERE key=? AND note='' AND topic IS NULL", (key,))
         return {"parked": False}
     q("INSERT INTO todo_notes (key, note, parked, wake_tasks, wake_on, wake_set, updated) VALUES (?,'',?,?,?,1,?) "
       "ON CONFLICT(key) DO UPDATE SET parked=COALESCE(parked, excluded.parked), skipped=NULL, "
@@ -8722,7 +8731,7 @@ def todo_note(key, note):
       "note=excluded.note, updated=excluded.updated, wake_tasks=CASE WHEN wake_set=1 THEN wake_tasks "
       "ELSE excluded.wake_tasks END, wake_on=CASE WHEN wake_set=1 THEN wake_on ELSE 'merged' END",
       (key, note, json.dumps([n]) if n else None, time.time()))
-    q("DELETE FROM todo_notes WHERE key=? AND note='' AND parked IS NULL AND skipped IS NULL", (key,))
+    q("DELETE FROM todo_notes WHERE key=? AND note='' AND parked IS NULL AND skipped IS NULL AND topic IS NULL", (key,))
 
 
 def todo_skip(key, now=None):
@@ -8742,7 +8751,7 @@ def todo_skip(key, now=None):
 def todo_unpark(key):
     """Unpark (POST /api/todos/unpark): back into the list at its normal place, not skipped."""
     q("UPDATE todo_notes SET parked=NULL, skipped=NULL, updated=? WHERE key=?", (time.time(), key))
-    q("DELETE FROM todo_notes WHERE key=? AND note=''", (key,))
+    q("DELETE FROM todo_notes WHERE key=? AND note='' AND topic IS NULL", (key,))
 
 
 def todo_wake_tasks(r):
@@ -8836,7 +8845,7 @@ def todo_notes_apply(out, tasks, projects, now):
             r = rows[k] = {**r, "note": note, "parked": None, "skipped": None}
         if r["skipped"] and r["skipped"] < midnight:
             r = rows[k] = {**r, "skipped": None}
-        if not (r["note"] or r["parked"] or r["skipped"]):
+        if not (r["note"] or r["parked"] or r["skipped"] or r["topic"]):  # a bond stays (TODAY-2)
             q("DELETE FROM todo_notes WHERE key=?", (k,))
     main, skipped, parked = [], [], []
     for x in out:
@@ -8855,10 +8864,100 @@ def todo_notes_apply(out, tasks, projects, now):
             + sorted(parked, key=lambda x: x["parked"]["since"]))
 
 
-def todos_list(tasks, projects, last, now=None):
+class TopicIndex:
+    """What todo_topic looks topics up in, read once per list: every chat row, and a project's research threads only
+    when a ref names one."""
+    def __init__(self):
+        self.chats = {d["id"]: d for d in q("SELECT id, project, subject, ended, created FROM designs")}
+        self.latest = {}  # (project, subject): the latest chat about it, open or ended
+        for d in sorted(self.chats.values(), key=lambda d: (d["created"] or 0, d["id"])):
+            if d["subject"]:
+                self.latest[(d["project"], d["subject"])] = d
+        self.rs = {}
+
+    def get(self, project, ref):
+        """(ref, ended) of the topic ref names in project, or None."""
+        ref = int(ref) if str(ref).isdigit() else ref
+        if isinstance(ref, int):
+            d = self.chats.get(ref)
+            return (d["id"], d["ended"]) if d and d["project"] == project else None
+        if isinstance(ref, str) and ref.startswith("r:"):
+            if project not in self.rs:
+                try:
+                    self.rs[project] = {t["id"]: t["ended"] for t in research_topics(project)}
+                except Exception:  # the research repo is gone or unreadable: no research topics
+                    self.rs[project] = {}
+            return (ref, self.rs[project][ref]) if ref in self.rs[project] else None
+        return None
+
+
+def todo_topic(project, source, subject, bond, idx):
+    """A to-do's topic (README TODAY-2, a to-do's topic), as (ref, ended), or (None, None): its stored bond, else the
+    chat it came from, else the latest topic about its subject, open or ended."""
+    source = source or {}
+    for ref in (bond, source.get("id") if source.get("kind") == "chat" else None):
+        if ref is not None and (hit := idx.get(project, ref)):
+            return hit
+    d = idx.latest.get((project, subject)) if subject else None
+    return (d["id"], d["ended"]) if d else (None, None)
+
+
+def todo_topics_apply(out):
+    """Put each item's topic on it: topic, the ref, and topic_ended, when that topic ended (both None for none)."""
+    bonds = {r["key"]: r["topic"] for r in q("SELECT key, topic FROM todo_notes WHERE topic IS NOT NULL")}
+    idx = TopicIndex()
+    res = []
+    for x in out:
+        ref, ended = todo_topic(x["project"], x.get("source"), x.get("subject"), bonds.get(x["key"]), idx)
+        res.append({**x, "topic": ref, "topic_ended": ended})
+    return res
+
+
+def todo_source(key):
+    """(project, source, subject) of the to-do with this key, as todos_list builds it, from the key alone; None for
+    a key it doesn't know. For conv_say, which gets only the key of the to-do a message was sent with."""
+    parts = str(key or "").split(":")
+    if parts[0] == "task" and len(parts) >= 2 and parts[1].isdigit():
+        t = q("SELECT project FROM tasks WHERE id=?", (int(parts[1]),), one=True)
+        return (t["project"], {"kind": "task", "id": int(parts[1])}, f"task:{parts[1]}") if t else None
+    if parts[0] == "project" and len(parts) == 3:
+        return parts[1], {"kind": "project", "id": parts[1]}, key
+    if parts[0] == "chat" and len(parts) >= 2 and parts[1].isdigit():
+        d = q("SELECT project FROM designs WHERE id=?", (int(parts[1]),), one=True)
+        return (d["project"], {"kind": "chat", "id": int(parts[1])}, None) if d else None
+    if parts[0] == "todo" and len(parts) == 2 and parts[1].isdigit():
+        r = q("SELECT * FROM todos WHERE id=?", (int(parts[1]),), one=True)
+        if not r:
+            return None
+        kind = "chat" if r["source_kind"] in ("design", "research") else r["source_kind"]  # as todos_list has it
+        return r["project"], {"kind": kind, "id": r["source_id"]}, f"task:{r['source_id']}" if kind == "task" else None
+    return None
+
+
+def todo_bond(key, ref):
+    """A message was sent with this to-do attached and landed in topic ref (conv_say): store the to-do's topic for
+    good, unless it has a bond already. The bond is the topic it had (its chat, or its subject's), else ref, so it
+    never changes after the first send. Returns the bond, or None for a key it doesn't know."""
+    src = todo_source(key)
+    if not src:
+        return None
+    project, source, subject = src
+    row = q("SELECT topic FROM todo_notes WHERE key=?", (key,), one=True)
+    if row and row["topic"]:
+        return row["topic"]
+    had = todo_topic(project, source, subject, None, TopicIndex())[0]
+    bond = str(had if had is not None else ref)
+    q("INSERT INTO todo_notes (key, note, topic, updated) VALUES (?,'',?,?) ON CONFLICT(key) DO UPDATE SET "
+      "topic=COALESCE(todo_notes.topic, excluded.topic)", (key, bond, time.time()))
+    return bond
+
+
+def todos_list(tasks, projects, last, now=None, notes=True):
     """The to-do list for /api/state, from what state_payload already read: its tasks (with last, their latest
     events), its projects (main_info, so no git call here), and two small queries for chats and stored items.
-    Your notes, skips and parks go on last (TODO-6); now is the clock, for tests."""
+    Your notes, skips and parks go on last (TODO-6), then each item's topic (todo_topics_apply); now is the clock,
+    for tests. notes=False: a partial list (subject_about's), which must not touch todo_notes: its cleanup would
+    drop the rows of every item the partial list leaves out."""
     out = []
     for t in tasks:
         k, st = t["kind"], t["state"]
@@ -8923,7 +9022,9 @@ def todos_list(tasks, projects, last, now=None):
                              "chat" if r["source_kind"] in ("design", "research") else r["source_kind"], r["source_id"],
                              todo=r["id"]))
     out.sort(key=lambda x: (TODO_ORDER.index(x["group"]), x["since"], x["key"]))
-    return todo_notes_apply(out, tasks, projects, now or time.time())
+    if not notes:
+        return out
+    return todo_topics_apply(todo_notes_apply(out, tasks, projects, now or time.time()))
 
 
 # ---------------------------------------------------------------- http
@@ -9361,10 +9462,10 @@ class H(BaseHTTPRequestHandler):
             else:
                 set_setting(f"paused:{p.name}", "1" if act == "pause" else "0")
             return
-        # pick the topic: {project, how: chat|topic|subject|task|new|mode, ref?, mode?, ended?}
+        # pick the topic: {project, how: chat|topic|subject|task|new|mode, ref?, mode?, ended?, title?}
         if path == "/api/conversation":
             return conv_open(b.get("project") or "", b.get("how"), b.get("ref"), b.get("mode"),
-                             b["ended"] if "ended" in b else UNSEEN)
+                             b["ended"] if "ended" in b else UNSEEN, b.get("title"))
         if path == "/api/conversation/say":
             return conv_say(b.get("project") or "", b.get("text"), b.get("todo"))
         if path == "/api/conversation/end":  # {project, ref}: you are done with that topic

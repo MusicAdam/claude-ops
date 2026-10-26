@@ -1,5 +1,5 @@
-"""Today: a to-do or a panel opens its own topic, made on its first message (README: TODAY-2, conv_open
-how=subject). Stdlib only, no Claude calls. Run from the repo root:
+"""Today: a panel (Ask Claude about this) or a to-do's New tab ↗ opens a subject's own topic, made on its first
+message (README: TODAY-2, conv_open how=subject). Stdlib only, no Claude calls. Run from the repo root:
 /opt/homebrew/bin/python3 -m unittest discover -s tests -q"""
 import json
 import os
@@ -31,7 +31,7 @@ class SubjectTopics(unittest.TestCase):
         opsd.load_projects()
 
     def setUp(self):
-        for t in ("designs", "design_msgs", "tasks", "events", "schedules"):
+        for t in ("designs", "design_msgs", "tasks", "events", "schedules", "todos", "todo_notes"):
             opsd.q(f"DELETE FROM {t}")
         opsd.q("DELETE FROM settings WHERE key LIKE 'conv:%'")
         self.said = []
@@ -151,56 +151,61 @@ class SubjectTopics(unittest.TestCase):
         self.assertEqual([i["subject"] for i in items if i["key"].startswith("task:")], [f"task:{tid}"])
 
 
-    # A message sent from a to-do step carries the to-do (README: TODAY-2 rule 5), so the topic doesn't hang on the
-    # conv:<project> the page set earlier. Row 96 in the owner's database: to-do 20 (source task #313) was open, its
-    # topic was ended (topic_end keeps no subject), the page had already picked the topic for that item (TD.applied)
-    # and didn't post the subject again, so the next message made a topic with subject NULL and no note.
+    # A message carries a to-do only when it is attached (README: TODAY-2, attaching a to-do), and it goes to the tab
+    # you see: the to-do never moves it to its own topic. These were the old rule 5's cases (a step that was shown
+    # routed the message to the item's subject topic, with pick); row 96 in the owner's database started it.
     def todo(self, tid, **kw):
         return {"key": "todo:20", "verb": "Do", "title": "Paste the schedule", "why": "The stored body is a copy.",
-                "subject": f"task:{tid}", **kw}
+                **kw}
 
     def note_of(self, did, text):
         return opsd.q("SELECT note FROM design_msgs WHERE design_id=? AND role='ops' AND text=?", (did, text),
                       one=True)
 
-    def test_end_then_send_from_the_same_step_starts_its_topic(self):
+    def stored_todo(self, tid):
+        """To-do 20 of the old case: a Do a task added, so its subject is task:<tid>."""
+        opsd.q("DELETE FROM todos")
+        opsd.q("DELETE FROM todo_notes")
+        opsd.q("INSERT INTO todos (id, project, verb, title, why, source_kind, source_id, created) VALUES "
+               "(20,'demo','Do','Paste the schedule','The stored body is a copy.','task',?,?)", (tid, time.time()))
+
+    def test_end_then_send_with_it_attached_stays_in_the_new_tab(self):
         tid = self.task("Keep the doc")
-        opsd.conv_open("demo", "subject", f"task:{tid}")  # the first visit
+        self.stored_todo(tid)
+        opsd.conv_open("demo", "subject", f"task:{tid}")  # New tab ↗
         first = opsd.conv_say("demo", "Do this to-do", self.todo(tid))["topic"]
         opsd.topic_end("demo", first)
-        self.assertIsNone(opsd.conv_view("demo")["subject"])  # what the page saw: no subject pending
-        r = opsd.conv_say("demo", "I believe this was completed double check", self.todo(tid))  # no new open
-        self.assertNotEqual(r["topic"], first)
+        r = opsd.conv_say("demo", "I believe this was completed double check", self.todo(tid))
+        self.assertNotEqual(r["topic"], first)  # the plain new tab you see, not the item's topic
         d = opsd.design(r["topic"])
-        self.assertEqual(d["subject"], f"task:{tid}")
-        self.assertIn("Keep the doc", self.note_of(r["topic"], f"About task #{tid}")["note"])
+        self.assertIsNone(d["subject"])
+        self.assertIsNone(self.note_of(r["topic"], f"About task #{tid}"))
         note = self.note_of(r["topic"], "Sent from to-do todo:20: Do Paste the schedule")["note"]
-        self.assertIn("Paste the schedule", note)
         self.assertIn("The stored body is a copy.", note)
+        bond = opsd.q("SELECT topic FROM todo_notes WHERE key='todo:20'", one=True)["topic"]
+        self.assertEqual(bond, str(first))  # it already had a topic (its subject's): that stays its topic
 
-    def test_seen_before_step_reuses_its_open_topic(self):
+    def test_send_goes_to_the_tab_shown_not_the_items_topic(self):
         tid, other = self.task("A"), self.task("B")
         opsd.conv_open("demo", "subject", f"task:{tid}")
         mine = opsd.conv_say("demo", "one", self.todo(tid))["topic"]
-        opsd.conv_open("demo", "subject", f"task:{other}")  # another step, then back: the page skips the open
-        r = opsd.conv_say("demo", "two", self.todo(tid))
-        self.assertEqual(r["topic"], mine)
-        self.assertEqual(len([x for x in self.rows() if x["subject"] == f"task:{tid}"]), 1)
+        opsd.conv_open("demo", "subject", f"task:{other}")
+        r = opsd.conv_say("demo", "two", self.todo(tid, subject=f"task:{tid}", pick=True))  # old fields: ignored
+        self.assertNotEqual(r["topic"], mine)
+        self.assertEqual(opsd.design(r["topic"])["subject"], f"task:{other}")
 
     def test_first_send_with_no_open_at_all(self):
         tid = self.task("A")
-        r = opsd.conv_say("demo", "hi", self.todo(tid))  # the open failed: nothing kept, no topics yet
-        self.assertEqual(opsd.design(r["topic"])["subject"], f"task:{tid}")
+        r = opsd.conv_say("demo", "hi", self.todo(tid, subject=f"task:{tid}"))  # nothing pending: a plain topic
+        self.assertIsNone(opsd.design(r["topic"])["subject"])
 
-    def test_pick_routes_over_a_stale_current_topic(self):
+    def test_pick_no_longer_routes_over_the_current_topic(self):
         tid = self.task("A")
         opsd.conv_open("demo", "new", mode="design")
         other = opsd.conv_say("demo", "unrelated")["topic"]
-        r = opsd.conv_say("demo", "hi", self.todo(tid))  # the owner's (or a stale) current topic: kept
+        r = opsd.conv_say("demo", "hi", self.todo(tid, subject=f"task:{tid}", pick=True))
         self.assertEqual(r["topic"], other)
         self.assertTrue(self.note_of(other, "Sent from to-do todo:20: Do Paste the schedule"))
-        r = opsd.conv_say("demo", "hi", self.todo(tid, pick=True))  # the page never got the item's topic picked
-        self.assertEqual(opsd.design(r["topic"])["subject"], f"task:{tid}")
 
     def test_new_topic_click_is_kept(self):
         tid = self.task("A")

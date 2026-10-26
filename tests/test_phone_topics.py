@@ -1,4 +1,4 @@
-"""Earlier topics and Ended on a phone's Today (README "Today on a phone", PHONE-5) and Undo after an end (README
+"""Topic tabs and Ended on a phone's Today (README "Today on a phone", PHONE-5) and Undo after an end (README
 "Ending topics"), in dashboard.html. The helpers run in node with stubs; skipped without node. The rest is checked
 statically. Run from the repo root: /opt/homebrew/bin/python3 -m unittest discover -s tests -q"""
 import json
@@ -87,19 +87,26 @@ class Static(unittest.TestCase):
         phone = page[page.index("@media (max-width: 699px) {\n  body.td"):]
         self.assertIn(".tdtopics { display: block; }", phone[:phone.index("\n}\n")])
 
-    def test_chip_opens_earlier_topics_in_now(self):
+    def test_chip_opens_the_projects_tabs_in_now(self):
         js = page[page.index("function tdTopics("):]
         js = js[:js.index("\n}\n")]
-        for part in ('tdGo("now")', "TD.over = {key: TD.convKey, project}", "TD.earlierOpen = true", "tdShowConv()"):
+        for part in ('tdGo("now")', "TD.over = {key: TD.convKey, project}", "TD.menu = false", "tdShowConv()"):
             self.assertIn(part, js)
         # tdGo first: a filter change resets TD.over when the next render picks a new item
         self.assertLess(js.index('tdGo("now")'), js.index("TD.over ="))
+        self.assertIn('<div class="k">Topics and Ended</div>', page)
 
     def test_item_topic_only_in_its_project(self):
-        self.assertIn("if (project && (!it || it.project === project) && TD.applied !==", page)
+        self.assertIn("const tdJump = (it, project) => it && it.topic != null && it.project === project", page)
 
-    def test_summary_counts_ended(self):
-        self.assertIn("${ended.length ? ` · ${ended.length} ended` : \"\"}", page)
+    def test_menu_button_counts_ended(self):
+        self.assertIn("▾${ended.length ? ` ${ended.length}` : \"\"}", page)
+
+    def test_strip_scrolls_sideways_on_a_phone(self):
+        phone = page[page.index("@media (max-width: 699px) {\n  body.td"):]
+        phone = phone[:phone.index("\n}\n")]
+        self.assertIn(".tdscroll { overflow-x: auto; scrollbar-width: none;", phone)
+        self.assertIn("#tdmenu { left: 0; width: auto; }", phone)
 
     def test_every_today_end_offers_undo(self):
         self.assertEqual(len(re.findall(r'id="tdundo"', page)), 1)

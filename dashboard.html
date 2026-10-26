@@ -439,13 +439,66 @@ a[data-task] { color: var(--accent); cursor: pointer; }
 #tdgrip::after { content: ""; position: absolute; top: 0; bottom: 0; left: 3px; width: 2px; border-radius: 1px; }
 #tdgrip:hover::after, #tdgrip.on::after { background: var(--accent); }
 #todayview.tddrag { user-select: none; cursor: col-resize; }
-#tdstep { flex: none; max-height: 55%; overflow: auto; }
-@media (min-width: 700px) { #tdstep:has(.proof video) { max-height: 80%; } }  /* room for the clip and the buttons under it */
+/* The centre is always a chat (README TODAY-2): the tab strip, a project home's card, the thread, the step's dock
+   resting on the composer, the composer. */
+#tdhomebox { flex: none; max-height: 55%; overflow: auto; }
+#tdstep { flex: none; max-height: 45%; overflow: auto; }
+#tdstep:empty, #tdhomebox:empty { display: none; }
+@media (min-width: 700px) { #tdstep:has(.proof video) { max-height: 75%; } }  /* room for the clip and the buttons under it */
 #tdcentre #chat { flex: 1; min-height: 0; }
-/* The project's sections beside its conversation: Conversation · Specs & designs · Research · Tasks */
-#tdsecbar { flex: none; } #tdsecbar .tdchips { margin: 0 0 8px; }
+#tdcentre .composer { border-top: 1px solid var(--line); }
+#tdstep .stepcard.dock { margin: 0; border-bottom: 0; border-radius: 10px 10px 0 0; padding: 10px 16px 12px; }
+.stepcard.dock .top { display: flex; align-items: center; gap: 8px; }
+.stepcard.dock .top .k { flex: 1; min-width: 0; }
+.stepcard.dock .fold { flex: none; margin-left: auto; padding: 0 6px; background: none; border-color: transparent; color: var(--muted); }
+.stepcard.dock.folded { padding: 5px 16px; }
+.stepcard.dock .ft { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+.stepcard.dock .ft .verb { margin-right: 4px; } .stepcard.dock .ft .tid { margin-right: 6px; }
+.stepcard .tdbond { display: inline-flex; gap: 6px; align-items: center; flex: none; white-space: nowrap; }
+.stepcard .tdbond.muted { font-size: 13px; }
+/* The attached to-do, over the message box */
+#saychip { display: flex; align-items: center; gap: 4px; width: fit-content; max-width: 100%; box-sizing: border-box; margin-bottom: 6px;
+           padding: 1px 2px 1px 10px; border: 1px solid var(--warn); border-radius: 99px; font-size: 12px; }
+#saychip span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#saychip button { flex: none; padding: 0 6px; font-size: 12px; background: none; border-color: transparent; color: var(--muted); }
+/* The tab strip: folder tabs on a 1px line; the selected one merges into the thread. Topic tabs scroll sideways;
+   the pinned sections (TODAY-4, quieter) and ▾ stay at the right. */
+#tdstrip { flex: none; position: relative; margin: 0 0 10px; }
+.tdstripin { display: flex; align-items: flex-end; gap: 6px; background: linear-gradient(var(--line), var(--line)) bottom / 100% 1px no-repeat; }
+.tdscroll { display: flex; align-items: flex-end; gap: 8px; flex: 1; min-width: 0; }
+.tdtabs { display: flex; align-items: flex-end; gap: 2px; flex: 0 1 auto; min-width: 0; overflow-x: auto; scrollbar-width: none; }
+.tdtabs::-webkit-scrollbar { display: none; }
+.tdtab { display: flex; align-items: center; gap: 4px; flex: none; max-width: 200px; padding: 5px 2px 5px 10px; border: 1px solid transparent;
+         border-bottom: 0; border-radius: 7px 7px 0 0; cursor: pointer; color: var(--muted); font-size: 13px; white-space: nowrap; }
+.tdtab:hover { color: var(--ink); border-color: var(--line); }
+.tdtab.on { background: var(--bg); border-color: var(--line); color: var(--ink); font-weight: 600; }
+.tdtab.pending .tt { font-style: italic; }
+.tdtab.pending { padding-right: 10px; }
+.tdtab .tt { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.tdtab .tdun { color: var(--warn); font-size: 10px; }
+.tdtab .tdact { color: var(--accent); font-size: 10px; letter-spacing: -1px; }
+.tdtab .tx { flex: none; padding: 0 5px; line-height: 16px; font-size: 13px; background: none; border-color: transparent; color: var(--muted); }
+.tdtab .tx:hover:not(:disabled) { color: var(--ink); border-color: var(--line); }
+.tdplus { flex: none; align-self: center; padding: 0 9px; line-height: 22px; margin: 0 2px 3px; background: none; color: var(--muted); }
+.tdpins { display: flex; align-items: flex-end; gap: 2px; flex: none; margin-left: auto; }
+.tdpin { flex: none; padding: 3px 8px; font-size: 12px; white-space: nowrap; background: none; color: var(--muted); border: 1px solid transparent;
+         border-bottom: 0; border-radius: 6px 6px 0 0; }
+.tdpin:hover { color: var(--ink); }
+.tdpin.on { background: var(--bg); border-color: var(--line); color: var(--ink); }
+#tdmenub { margin-bottom: 1px; }
+#tdmenu { position: absolute; right: 0; top: 100%; z-index: 4; width: min(380px, 100%); max-height: 50vh; overflow: auto; margin-top: 4px;
+          padding: 8px 10px; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; box-shadow: 0 6px 20px rgba(0, 0, 0, .3); }
+#tdmenu .k { font-size: 12px; color: var(--muted); margin-bottom: 4px; }
+#tdmenu .tdend { display: grid; grid-template-columns: 1fr auto; gap: 0 8px; align-items: center; padding: 4px 0; border-bottom: 1px solid var(--line); }
+#tdmenu .tdend a { cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#tdmenu .tdend .sub { grid-row: 2; font-size: 11px; color: var(--muted); }
+#tdmenu .tdend button { grid-row: 1 / 3; grid-column: 2; font-size: 11px; padding: 1px 8px; }
+#tdmenu .endread { margin: 8px 0 0; gap: 6px; } #tdmenu .endread :is(button, select) { font-size: 11px; padding: 1px 8px; }
 #tdsec { flex: 1; min-height: 0; overflow: auto; padding-bottom: 16px; }
-#tdcentre.secopen #chat { display: none; }
+/* A pinned section shows in place of the thread and the message box; the dock stays */
+#tdcentre.secopen #chat { flex: none; min-height: 0; max-height: 45%; }
+#tdcentre.secopen #tdstep { max-height: none; flex: 0 1 auto; }
+#tdcentre.secopen #chat > :not(#tdstep) { display: none; }
 #tdsechead .row { margin: 0 0 8px; gap: 6px; flex-wrap: wrap; }
 #tdsechead textarea, #tdsechead input[type=text] { width: 100%; box-sizing: border-box; margin-bottom: 6px; }
 #tdsec .tlitem .t .dot { color: var(--warn); margin-right: 4px; }
@@ -496,7 +549,7 @@ details.tdfold[open] > summary .cnt { display: none; }  /* the count shows only 
 details.tdparked { margin-top: 10px; }
 details.tdparked > summary { cursor: pointer; color: var(--muted); font-size: 13px; margin-bottom: 6px; }
 details.tdparked .tditem { opacity: .8; }
-/* PHONE-5: under the list, a way to each project's Earlier topics and Ended; a desktop has them beside the list */
+/* PHONE-5: under the list, a way to each project's topics and Ended; a desktop has them beside the list */
 .tdtopics { display: none; margin-top: 14px; }
 .tdtopics .k { color: var(--muted); font-size: 13px; margin-bottom: 6px; }
 /* Undo after an end (README "Ending topics"): a few seconds at the bottom of the screen */
@@ -556,21 +609,10 @@ details.tdparked .tditem { opacity: .8; }
 .wrow .seg button { border-radius: 0; font-size: 12px; padding: 3px 10px; background: none; color: var(--muted); }
 .wrow .seg button:first-child { border-radius: 6px 0 0 6px; } .wrow .seg button:last-child { border-radius: 0 6px 6px 0; }
 .wrow .seg button.on { background: var(--chip); color: var(--ink); border-color: var(--accent); font-weight: 600; }
-/* Today's conversation: Earlier topics, the divider at the top of a topic, New topic */
-#convtop details { margin: 0 0 8px; }
-#convtop summary { font-size: 12px; color: var(--muted); cursor: pointer; }
-#convtop details[open] { max-height: 40vh; overflow: auto; border-bottom: 1px solid var(--line); padding-bottom: 6px; }
+/* Today's conversation: the divider at the top of a topic */
 .topicdiv { display: flex; align-items: center; gap: 10px; color: var(--muted); font-size: 12px; margin: 4px 0 12px; }
 .topicdiv::before, .topicdiv::after { content: ""; flex: 1; border-top: 1px solid var(--line); }
 .topicdiv span { max-width: 80%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-#convmodes .row { margin: 0 0 6px; }
-#convmodes :is(#newtopic, #endtopic) { font-size: 12px; padding: 3px 10px; }
-#convtop .topicrow { display: flex; gap: 8px; align-items: center; }
-#convtop .topicrow span { flex: 1; min-width: 0; }
-#convtop .topicrow button, #convtop .endread :is(button, select) { font-size: 11px; padding: 1px 8px; }
-#convtop .endread { margin: 6px 0; gap: 6px; }
-#convtop #endedtopics { margin: 6px 0 0; }
-.convnote { font-size: 12px; color: var(--muted); margin: 0 0 6px; }
 #saymode { font-size: 12px; margin-bottom: 6px; display: flex; gap: 8px; align-items: center; color: var(--warn); }
 #saymode button { padding: 1px 8px; font-size: 12px; }
 .tl h3 { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: 16px 0 6px; }
@@ -629,15 +671,21 @@ details.tdparked .tditem { opacity: .8; }
   #tdnav button.on { color: var(--accent); font-weight: 600; }
   #tdnav .badge { position: absolute; top: -6px; left: 14px; min-width: 18px; padding: 0 5px; border-radius: 99px; background: var(--bad);
                   color: var(--on-accent); font-size: 11px; font-weight: 600; line-height: 18px; }
-  /* The step: compact, at most what leaves the conversation 60% of the screen. The chat takes the rest at a
-     bounded height and never grows to its content, so only #msgs scrolls; a tall step card shrinks and scrolls. */
-  #tdstep { flex: 0 1 auto; min-height: 44px; max-height: none; overflow: auto; padding-top: 6px; }
-  #tdcentre #chat { flex: 1 1 0; min-height: 60vh; }
-  @supports (height: 100dvh) { #tdcentre #chat { min-height: 60dvh; } }
-  #tdcentre #msgs { min-height: 0; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; }
-  #tdsecbar .tdchips { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; margin-bottom: 6px; }
-  #tdsecbar .tdchips::-webkit-scrollbar { display: none; }
-  #tdsecbar .tdchips button { flex: none; white-space: nowrap; }
+  /* HDR-4: the thread keeps at least half the pane at a bounded height and never grows to its content, so only
+     #msgs scrolls; the dock (and a home's card) shrinks and scrolls inside what is left. */
+  #tdhomebox { flex: 0 1 auto; min-height: 44px; max-height: 40%; overflow: auto; padding-top: 6px; }
+  #tdstep { flex: 0 1 auto; min-height: 36px; max-height: 40%; overflow: auto; }
+  #tdstep .stepcard.dock { padding: 6px 10px 8px; }
+  #tdcentre #chat { flex: 1 1 0; min-height: 0; }
+  #tdcentre #msgs { flex: 1 1 50%; min-height: 0; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; }
+  /* PHONE-5: the topic tabs and the pinned ones scroll sideways in one row; ▾ stays at the right, its menu full width */
+  #tdstrip { margin: 6px 0; }
+  .tdscroll { overflow-x: auto; scrollbar-width: none; gap: 6px; }
+  .tdscroll::-webkit-scrollbar { display: none; }
+  .tdtabs { flex: none; overflow: visible; }
+  .tdpins { margin-left: 6px; }
+  .tdtab { max-width: 150px; }
+  #tdmenu { left: 0; width: auto; }
   .stepcard { padding: 6px 10px 8px; margin-bottom: 6px; }
   .stepcard .ph { display: inline-flex; }
   /* PHONE-2: ‹ To-do stays in view however the card scrolls or the conversation grows */
@@ -667,13 +715,11 @@ details.tdparked .tditem { opacity: .8; }
   #tdcentre #msgs { overflow-x: hidden; }
   #tdcentre .msg { overflow-wrap: anywhere; padding: 8px 10px; }
   #tdcentre .msg table { display: block; overflow-x: auto; }
-  /* The composer: attach, the box (up to 4 lines), send; the mode line and project picker above */
+  /* The composer: attach, the box (up to 4 lines), send; the mode line, the attached to-do and the project picker above */
   #tdcentre .composer { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 6px; padding: 6px 0 8px; }
   #tdcentre .composer > .row { display: contents; }
-  #tdcentre .composer #convmodes { order: 0; flex-basis: 100%; min-width: 0; }
-  #tdcentre .composer #convmodes .row { flex-wrap: nowrap; gap: 6px; margin: 0; }
-  #tdcentre .composer #convmodes #newtopic { flex: none; white-space: nowrap; }
   #tdcentre .composer #saymode, #tdcentre .composer #cprojwrap, #tdcentre .composer #chatmsg:not(:empty) { order: 0; flex-basis: 100%; margin: 0; }
+  #tdcentre .composer #saychip { order: 0; margin: 0; }
   #tdcentre .composer #chatmsg:empty, #tdcentre .composer .row > .muted { display: none; }
   #tdcentre .composer #clip { order: 1; }
   #tdcentre .composer #say { order: 2; flex: 1; min-width: 0; min-height: 0; height: 40px; max-height: calc(4 * 1.45em + 18px);
@@ -754,16 +800,16 @@ details.tdparked .tditem { opacity: .8; }
 <div id="tip" class="hidden"></div>
 <div id="todayview" class="hidden" data-pane="todo">
   <aside class="side" id="tdleft"></aside>
-  <section id="tdcentre"><div id="tdstep"></div><div id="tdsecbar"></div>
+  <section id="tdcentre"><div id="tdstrip"></div><div id="tdhomebox"></div>
     <div id="tdsec" class="tl hidden"><div id="tdsechead"></div><div id="tdsecmsg"></div><div id="tdseclist"></div></div>
     <section id="chat">
-      <div id="convtop" class="hidden"></div>
       <div id="chathead" class="chathead"></div>
       <div id="msgs"></div>
+      <div id="tdstep"></div>
       <div class="composer">
         <div id="slash" class="hidden"></div>
-        <div id="convmodes" class="hidden"></div>
         <div id="saymode" class="hidden"></div>
+        <div id="saychip" class="hidden"></div>
         <textarea id="say"></textarea>
         <div class="row"><label id="cprojwrap">Project <select id="cproj"></select></label><button class="primary" id="send">Send</button><span class="muted">↩</span>
           <button id="clip" title="Attach pictures (or paste or drop them on the message box)">📎</button><input type="file" id="clipfile" accept="image/*" multiple class="hidden">
@@ -2797,29 +2843,26 @@ async function sendChat() {
 $("#send").onclick = sendChat;
 $("#cproj").onchange = () => { if (tab === "today") { TD.applied = ""; chatKey = ""; refreshDesign(); } };
 // ---- the to-do a message is sent from
-// The to-do step shown when you send (README TODAY-2 rule 5), for conv_say: its key, title and why, and its subject
-// (task:<id>, …), so the message lands in its topic and Claude knows what it is about, whatever the conversation state
-// was set to before. pick: the page never got the item's topic picked for this item and project (the open failed or
-// is on its way). None for a chat's item (it opens its chat), or an item of another project than the conversation's.
-function convTodo(it, project, applied) {
-  if (!it || !project || it.project !== project || (it.source && it.source.kind === "chat")) return null;
-  const t = {key: it.key, verb: it.verb, title: it.title, why: it.why || ""};
-  if (it.subject) { t.subject = it.subject; if (applied !== `${it.key}|${project}`) t.pick = true; }
-  return t;
+// Only the attached to-do (the 📎 chip, README TODAY-2 attaching a to-do) reaches a chat: its key, verb, title and
+// why, for conv_say, which adds the Sent from to-do line once and binds the to-do to the topic. Never because a step
+// shows, and never into another project's conversation. tests/test_todo_send.py runs this block in node.
+function convTodo(chip, project) {
+  return chip && project && chip.project === project ? {key: chip.key, verb: chip.verb, title: chip.title, why: chip.why || ""} : null;
 }
-// ---- end of the to-do a message is sent from
-// Today: the message goes to the project's current topic, or starts one in the current mode (conv_say); sent from a
-// to-do step, it carries that to-do.
+// Today: the message goes to the tab you see (conv_say): its topic, or the pending one it creates. It carries the
+// attached to-do, once: the chip clears after the send, and the next poll has the to-do's topic (its bond).
 async function convSay(text) {
   const project = convProject();
   if (!project) { $("#chatmsg").textContent = "pick a project"; return; }
-  const todo = convTodo(TD.item, project, TD.applied);
+  const todo = convTodo(TD.chip, project);
   try {
     await api("/api/conversation/say", {project, text, ...(todo ? {todo} : {})});
     $("#say").value = ""; $("#chatmsg").textContent = ""; TD.starter = ""; chatKey = ""; renderSlash();
+    if (todo) { TD.chip = null; renderChip(); refresh(); }
     await refreshDesign(); toBottom($("#msgs"));
   } catch (e) { $("#chatmsg").textContent = e.message; }
 }
+// ---- end of the to-do a message is sent from
 // Today: a link to a chat (where a task came from, say) makes it the current topic of its project.
 async function tdOpenChat(id) {
   try {
@@ -2880,8 +2923,9 @@ new ResizeObserver(() => document.documentElement.style.setProperty("--hdr-h", $
 // right column is read-only status, and a click opens a panel over it, the task page
 // among them (moved here from History). See README "Today view".
 const TD = {key: "", home: null, filter: "all", drafts: {}, noteTimer: null, parkOpen: false, projsOpen: true, todoOpen: true, order: [], item: null, convKey: null, task: null, mode: null, busy: "",
-            msg: "", note: "", panel: null, cv: null, rs: null, over: null, applied: "", starter: "", earlierOpen: false,
+            msg: "", note: "", panel: null, cv: null, rs: null, over: null, applied: "", starter: "",
             pane: "todo", dets: false, sec: "conv", sd: null, unc: null, udiff: false,
+            chip: null, menu: false, fold: false,  // the attached to-do, the strip's ▾ menu, the dock folded
             wait: null, add: null};  // the open Wait for… chooser {key, ids, other, until}, and the + Add form
 try {
   TD.key = localStorage.getItem("ops-todo") || "";
@@ -2890,6 +2934,7 @@ try {
   TD.sec = localStorage.getItem("ops-td-sec") || "conv";
   TD.projsOpen = localStorage.getItem("ops-td-projs-open") !== "0";  // both sections start open
   TD.todoOpen = localStorage.getItem("ops-td-todo-open") !== "0";
+  TD.fold = localStorage.getItem("ops-td-dock") === "1";
 } catch {}
 const TD_FILTERS = [["all", "All"], ["review", "Review"], ["unblock", "Unblock"], ["ship", "Ship"], ["only_me", "Only me"]];
 const SEND_WORDS = {answer: "Send answer", reject: "Send back", retry: "Retry", queue: "Queue task"};
@@ -2897,7 +2942,8 @@ const STAGES = ["Queued", "Working", "Gate", "Review", "Merged", "Promoted"];
 const midnight = () => { const d = new Date(); d.setHours(0, 0, 0, 0); return d.getTime() / 1000; };
 const tdSave = () => { try { localStorage.setItem("ops-todo", TD.key); localStorage.setItem("ops-td-home", TD.home || ""); localStorage.setItem("ops-todo-filter", TD.filter);
   localStorage.setItem("ops-td-sec", TD.sec); localStorage.setItem("ops-td-projs-open", TD.projsOpen ? "1" : "0");
-  localStorage.setItem("ops-td-todo-open", TD.todoOpen ? "1" : "0"); localStorage.removeItem("ops-skip"); } catch {} };
+  localStorage.setItem("ops-td-todo-open", TD.todoOpen ? "1" : "0"); localStorage.setItem("ops-td-dock", TD.fold ? "1" : "0");
+  localStorage.removeItem("ops-skip"); } catch {} };
 // The right column's width, set by dragging #tdgrip; desktop only (the narrower layouts stack the columns).
 const TD_WIDE = matchMedia("(min-width: 1100px)");
 let tdRight = 0;  // px, or 0 for the default 320px
@@ -2996,10 +3042,12 @@ function renderToday() {
   document.querySelectorAll("#tdnav [data-pane]").forEach(b => b.classList.toggle("on", b.dataset.pane === TD.pane));
   const badge = $("#tdnav .badge"); badge.textContent = all.length; badge.classList.toggle("hidden", !all.length);
 }
-// A new item under the step: its own message-box mode, facts and conversation.
+// A new item in the dock: its facts, and its conversation (which jumps to its topic when it has one).
+// Selecting doesn't touch the message box: no mode (Answer's is its button's) and no chip but this item's own.
 function tdChanged(it, ck) {
   TD.convKey = ck;
-  TD.mode = it && it.verb === "Answer" ? tdAnswerMode(it) : null;
+  TD.mode = null;
+  if (!it || !TD.chip || TD.chip.key !== it.key) TD.chip = null;
   TD.task = null; TD.unc = null; TD.uncSig = ""; TD.udiff = false; TD.over = null; TD.msg = ""; TD.note = ""; chatKey = ""; TD.dets = false; tdClearStarter();
   renderConv();  // the last item's End topic waits until this one's conversation loads
   refreshDesign();
@@ -3035,8 +3083,15 @@ function tdLeft(all, shown) {
   tdAddWire($("#tdleft"));
   $("#tdleft").querySelectorAll("[data-f]").forEach(b => b.onclick = () => { TD.filter = b.dataset.f; tdSave(); renderToday(); });
   $("#tdleft").querySelectorAll("[data-key]").forEach(el => el.onclick = () => {
+    const again = !TD.home && el.dataset.key === TD.key;
+    // The selected one again: back to its tab when it has one and another is shown (or another project's), else on
+    // a computer its project's home
+    if (again && ["back", "project"].includes(tdDockMode(TD.item, convReady() ? TD.cv : null))) {
+      if (TD.pane === "todo") tdGo("now");
+      return tdBackToTab();
+    }
     if (phone() && el.dataset.key === TD.convKey) TD.over = null;  // back to its own conversation after Topics moved it
-    if (!TD.home && el.dataset.key === TD.key && !phone()) return tdHome(TD.item ? TD.item.project : "");  // the selected one again
+    if (again && !phone()) return tdHome(TD.item ? TD.item.project : "");
     TD.home = null; TD.key = el.dataset.key; tdSave(); if (TD.pane === "todo") tdGo("now"); else renderToday(); });
   $("#tdleft").querySelectorAll("[data-home]").forEach(el => el.onclick = () => tdHome(el.dataset.home));
   $("#tdleft").querySelectorAll("[data-topics]").forEach(b => b.onclick = () => tdTopics(b.dataset.topics));
@@ -3059,18 +3114,18 @@ function tdHome(project) {
   TD.home = project; TD.key = ""; TD.over = null; tdSave();
   if (TD.pane === "todo") tdGo("now"); else renderToday();
 }
-// PHONE-5: on a phone the conversation, with Earlier topics and Ended, is in the Now pane and shows one project's.
-// Under the list, a chip per project in view opens Now on that project's conversation with Earlier topics unfolded,
-// whatever item is open or none. CSS hides the row on wider screens.
+// PHONE-5: on a phone the conversation, with its tab strip and the ▾ that holds Ended, is in the Now pane and shows
+// one project's. Under the list, a chip per project in view opens Now on that project's conversation, whatever item
+// is open or none. CSS hides the row on wider screens.
 function tdTopicsRow() {
   const projs = state.projects.filter(g => !g.error && inView(g.name));
-  return projs.length ? `<div class="tdtopics"><div class="k">Earlier topics and Ended</div><div class="tdchips">${
-    projs.map(g => `<button data-topics="${esc(g.name)}" title="Open ${esc(g.title)}'s earlier and ended topics">${esc(g.title)} ›</button>`).join("")}</div></div>` : "";
+  return projs.length ? `<div class="tdtopics"><div class="k">Topics and Ended</div><div class="tdchips">${
+    projs.map(g => `<button data-topics="${esc(g.name)}" title="Open ${esc(g.title)}'s topics: its tabs, and Ended under ▾">${esc(g.title)} ›</button>`).join("")}</div></div>` : "";
 }
 function tdTopics(project) {
   tdGo("now");  // first: a new item (after a filter change) resets TD.over
   if (project !== convProject()) TD.over = {key: TD.convKey, project};
-  TD.earlierOpen = true; tdShowConv(); renderToday(); chatKey = ""; refreshDesign();
+  TD.menu = false; tdShowConv(); renderToday(); chatKey = ""; refreshDesign();
 }
 
 // What the step can do: one primary action, then the others. Each calls an endpoint the older pages use.
@@ -3095,8 +3150,8 @@ function tdActions(it) {
       : A("senddev", "Commit these", {primary: 1, title: `Lands these files on ${g.direct_main || g.auto_release ? g.main_branch : g.dev_branch} through the gate, then clears them from your checkout`})];
     case "Read": return it.report ? [A("markreport", "Mark read", {primary: 1, title: "Done with it: take it off your list"}),
         A("report", "Open report", {title: `Read ${it.report.path} as on ${g.dev_branch || "dev"}. It stays on your list until you mark it read`}), A("details", "Details")]
-      : it.unread ? [A("read", "Mark read", {primary: 1, title: "The reply is below. It stays on your list until you end the topic"}), A("endtopic", "End topic", {title: "Done with it: off your list, under Ended in Earlier topics"})]
-      : [A("endtopic", "End topic", {primary: 1, title: "Done with it: off your list, under Ended in Earlier topics"}), A("reply", "Reply", {title: "Answer Claude in the message box below"})];
+      : it.unread ? [A("read", "Mark read", {primary: 1, title: "The reply is below. It stays on your list until you end the topic"}), A("endtopic", "End topic", {title: "Done with it: off your list, under Ended (▾ in the tab strip)"})]
+      : [A("endtopic", "End topic", {primary: 1, title: "Done with it: off your list, under Ended (▾ in the tab strip)"}), A("reply", "Reply", {title: "Attach it and answer Claude in the message box below"})];
     case "Agree": return [A("reply", "Reply", {primary: 1, title: "Answer Claude in the message box below. Claude closes it once your answer settles it"})].concat(it.todo ? [A("done", "Done")] : []);
     case "Do": return [A("done", "Done", {primary: 1})];
   }
@@ -3139,8 +3194,30 @@ function tdFacts(it) {
   }
   return out.join("");
 }
+// The dock's chat buttons (README TODAY-2, a to-do's topic): attach it, or say where its topic is.
+function tdBondHtml(it) {
+  const m = tdDockMode(it, convReady() ? TD.cv : null), on = !!TD.chip && TD.chip.key === it.key;
+  if (m === "attach") return `<span class="tdbond"><button data-ta="attach" ${on ? "disabled" : ""} title="${on ? "Attached: your next message carries it" : "Attach it to your next message in this tab. Sending it makes this tab its topic"}">＋ Add to this chat</button>`
+    + `<button data-ta="newtab" title="Open a new tab for it, with it attached; your first message creates the topic">New tab ↗</button></span>`;
+  if (m === "here") return `<span class="tdbond muted" title="Messages here are about this to-do: it was sent here, or it came from here">This tab is its topic</span>`;
+  if (m === "back") return `<span class="tdbond"><button data-ta="backtab" title="Select its topic's tab again">Back to its tab →</button></span>`;
+  if (m === "project") return `<span class="tdbond"><button data-ta="backtab" title="Back to ${esc(P(it.project).title || it.project)}'s conversation">Back to its project →</button></span>`;
+  return "";
+}
+// The selected item's step, as the dock between the thread and the message box. ▾ folds it to one line.
 function tdStep(it, shown) {
   if (!it) return tdHomeCard();
+  put($("#tdhomebox"), "");
+  if (TD.fold) {
+    const html = `<div class="stepcard dock folded"><div class="top"><button class="ph back" data-back title="Back to the list">‹ To-do</button>
+      <span class="ft" title="${esc(it.title)}">${verbPill(it)} ${tdTid(it)}${esc(it.title)}</span>
+      <button class="fold" data-fold title="Show the step">▸</button></div></div>`;
+    if (!put($("#tdstep"), html)) return;
+    $("#tdstep").dataset.key = it.key;
+    $("#tdstep [data-back]").onclick = () => tdGo("todo");
+    $("#tdstep [data-fold]").onclick = () => { TD.fold = false; tdSave(); renderToday(); };
+    return;
+  }
   const busy = TD.busy === it.key, acts = tdActions(it), facts = tdFacts(it), g = P(it.project), pl = g.play;
   const raHere = !!RA && RA.where === "today" && RA.id === (it.source || {}).id && acts.some(b => b.a === "retryafter");
   // A Play or Stop from this step that failed says so in the step's message line, as on the Projects card
@@ -3153,10 +3230,11 @@ function tdStep(it, shown) {
     : "Move it to the end of the list until midnight. With a note, it parks instead";
   const noteIn = `<input class="tdnote" data-tdnote data-fld="note" maxlength="300" placeholder="Note to self, e.g. wait for #249" value="${esc(note)}" title="Saves as you type">`;
   const unpark = cls => (it.parked || it.skipped) ? `<button class="${cls}" data-unpark title="Back into the list at its normal place">${it.parked ? "Unpark" : "Unskip"}</button>` : "";
-  const html = `<div class="stepcard${TD.dets ? " open" : ""}"><div class="top"><button class="ph back" data-back title="Back to the list">‹ To-do</button>
+  const html = `<div class="stepcard dock${TD.dets ? " open" : ""}"><div class="top"><button class="ph back" data-back title="Back to the list">‹ To-do</button>
     <div class="k">${it.parked ? `Parked ${ago(it.parked.since, state.now)}` : `Step ${shown.indexOf(it) + 1} of ${shown.length}`} · ${esc(P(it.project).title)}</div>
     ${dets ? `<button class="ph" data-dets aria-expanded="${TD.dets}">Details ${TD.dets ? "▴" : "▾"}</button>` : ""}
-    ${unpark("ph skip")}<button class="ph skip" data-skip title="${esc(skipTip)}">Skip →</button></div>
+    ${unpark("ph skip")}<button class="ph skip" data-skip title="${esc(skipTip)}">Skip →</button>
+    <button class="fold" data-fold title="Fold the step to one line">▾</button></div>
     <h2>${verbPill(it)}<span>${tdTid(it)}${esc(it.title)}</span></h2>
     ${it.verb === "Try" && TD.task && TD.task.id === (it.source || {}).id ? proofHtml(TD.task, true) : ""}
     ${it.parked && tdWaiting(it.parked) ? `<div class="tdwaiting">${tdWaiting(it.parked)}<button data-wclear title="Forget the wait and put it back in the list">Clear</button></div>` : ""}
@@ -3165,7 +3243,7 @@ function tdStep(it, shown) {
     ${it.closes ? `<div class="closes">${esc(it.closes)}</div>` : ""}
     ${it.verb === "Ship" && P(it.project).deploys && P(it.project).deploys.length ? tdShipLog(P(it.project)) : ""}
     <div class="row">${acts.map(b => `<button data-ta="${esc(b.a)}" class="${b.primary ? "primary" : ""}" ${busy || b.disabled ? "disabled" : ""} title="${esc(b.title || "")}">${esc(b.label)}</button>`).join("")}
-      ${noteIn}<button class="tdwaitb" data-waitfor title="Park it until tasks you pick merge or are released">Wait for…</button>${unpark("tdunpark")}<button class="skip" data-skip title="${esc(skipTip)}">Skip for now →</button></div>
+      ${tdBondHtml(it)}${noteIn}<button class="tdwaitb" data-waitfor title="Park it until tasks you pick merge or are released">Wait for…</button>${unpark("tdunpark")}<button class="skip" data-skip title="${esc(skipTip)}">Skip for now →</button></div>
     ${TD.wait && TD.wait.key === it.key ? tdWaitBox(it.project, TD.wait, `<button class="primary" data-wgo>Wait</button><button data-wx>Cancel</button>`) : ""}
     ${raHere ? raBox(RA) : ""}
     ${TD.msg || playErr ? `<div class="err" style="margin-top:8px;white-space:pre-wrap">${esc(TD.msg || playErr)}</div>` : TD.note ? `<div class="muted" style="margin-top:8px">${esc(TD.note)}</div>` : ""}</div>`;
@@ -3192,6 +3270,7 @@ function tdStep(it, shown) {
   $("#tdstep").querySelectorAll("[data-skip]").forEach(b => b.onclick = tdSkip);
   $("#tdstep").querySelectorAll("[data-tdproj]").forEach(a => a.onclick = () => tdDo("projects"));
   $("#tdstep [data-back]").onclick = () => tdGo("todo");
+  $("#tdstep [data-fold]").onclick = () => { TD.fold = true; tdSave(); renderToday(); };
   if ($("#tdstep [data-dets]")) $("#tdstep [data-dets]").onclick = () => { TD.dets = !TD.dets; renderToday(); };
   if ($("#tdstep [data-udiff]")) $("#tdstep [data-udiff]").ontoggle = e => { TD.udiff = e.target.open; };
 }
@@ -3265,8 +3344,9 @@ function tdHomeStatus(g) {
 }
 function tdHomeCard() {
   const name = convProject(), g = name ? P(name) : null;
+  put($("#tdstep"), ""); $("#tdstep").dataset.key = "";  // no to-do: no dock
   if (!g || !g.title) {
-    put($("#tdstep"), `<div class="stepcard"><div class="k">All clear</div><h2>Nothing needs you right now</h2></div>`);
+    put($("#tdhomebox"), `<div class="stepcard"><div class="k">All clear</div><h2>Nothing needs you right now</h2></div>`);
     return;
   }
   const busy = TD.busy === "home:" + name, pl = g.play;
@@ -3278,11 +3358,10 @@ function tdHomeCard() {
     <div class="muted hst">${esc(tdHomeStatus(g))}${clear ? " · nothing needs you" : ""}</div>
     ${tdPipeline(g, busy)}
     ${TD.msg || playErr ? `<div class="err" style="margin-top:8px;white-space:pre-wrap">${esc(TD.msg || playErr)}</div>` : ""}</div>`;
-  if (!put($("#tdstep"), html)) return;
-  $("#tdstep").dataset.key = "";
-  $("#tdstep [data-back]").onclick = () => tdGo("todo");
+  if (!put($("#tdhomebox"), html)) return;
+  $("#tdhomebox [data-back]").onclick = () => tdGo("todo");
   // A stage chip is one target: a click anywhere on it (its Deploy button too) opens the Deploy dialog; its task link opens the task
-  $("#tdstep").querySelectorAll("[data-ha]").forEach(b => {
+  $("#tdhomebox").querySelectorAll("[data-ha]").forEach(b => {
     b.onclick = e => { if (!e.target.closest("a[data-task]")) tdHomeDo(name, b.dataset.ha); };
     if (b.tagName !== "BUTTON") b.onkeydown = e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); tdHomeDo(name, b.dataset.ha); } };
   });
@@ -3491,7 +3570,27 @@ async function tdAddGo() {
   renderToday(); refresh();
 }
 // The message box answers a task, sends it back, or retries it with a note, instead of talking in the chat above it.
-function tdMode(m) { tdShowConv(); tdClearStarter(); TD.mode = m; renderSayMode(); $("#say").focus(); }
+// These buttons, and Reply, attach the to-do too (README TODAY-2, attaching a to-do).
+function tdMode(m) { tdShowConv(); tdClearStarter(); TD.mode = m; tdAttach(TD.item); }
+// Attach it: the 📎 chip over the message box. The next send carries it, once.
+function tdAttach(it) {
+  if (it) TD.chip = tdChipOf(it);
+  tdShowConv(); renderSayMode(); renderToday(); $("#say").focus();
+}
+// New tab ↗: a pending topic for it, titled as its topic will be, with it attached.
+async function tdNewTab(it) {
+  TD.mode = null;
+  await convOpen(tdNewTabOpen(it, id => (state.tasks.find(t => t.id === id) || {}).title));
+  tdAttach(it);
+}
+// Back to its tab →: its project's conversation (after Ask Claude about this moved it), then its topic's tab.
+async function tdBackToTab() {
+  const it = TD.item; if (!it) return;
+  if (TD.over) { TD.over = null; chatKey = ""; renderToday(); await refreshDesign(); }
+  const how = tdJump(it, convProject());
+  if (how && !(TD.cv && TD.cv.project === it.project && TD.cv.topic === it.topic)) await convOpen(how);
+  else tdShowConv();
+}
 async function tdDo(a) {
   const it = TD.item; if (!it) return;
   const s = it.source || {};
@@ -3508,7 +3607,9 @@ async function tdDo(a) {
     return;
   }
   if (a === "answer") return tdMode(tdAnswerMode(it));
-  if (a === "reply") { tdShowConv(); TD.mode = null; renderSayMode(); $("#say").focus(); return; }
+  if (a === "reply" || a === "attach") { TD.mode = null; return tdAttach(it); }
+  if (a === "newtab") return tdNewTab(it);
+  if (a === "backtab") return tdBackToTab();
   if (a === "diff" || a === "details") return tdOpenTask(s.id, a === "diff");
   if (a.startsWith("details:")) return tdOpenTask(+a.slice(8));
   if (a.startsWith("deploy:")) return openDeploy(it.project, a.slice(7));
@@ -3533,7 +3634,7 @@ async function tdSend(text) {
   const m = TD.mode;
   try {
     await api(`/api/tasks/${m.id}/${m.a}`, m.a === "answer" ? {answer: text} : m.a === "reject" ? {feedback: text} : {note: text});
-    $("#say").value = ""; $("#chatmsg").textContent = ""; TD.mode = null; chatKey = "";
+    $("#say").value = ""; $("#chatmsg").textContent = ""; TD.mode = null; TD.chip = null; chatKey = "";  // to the worker: no bond
     renderSayMode(); refresh(); refreshDesign();
   } catch (e) { $("#chatmsg").textContent = e.message; }
 }
@@ -3560,8 +3661,7 @@ function renderSayMode() {
   el.classList.toggle("hidden", !m);
   if (put(el, m ? `<span>${esc(m.words)}</span><button id="saycancel">Cancel</button>` : "") && m)
     $("#saycancel").onclick = () => { TD.mode = null; renderSayMode(); };
-  $("#convmodes").classList.toggle("hidden", !today);
-  $("#convtop").classList.toggle("hidden", !today);
+  renderChip();
   if (!today) { $("#send").disabled = false; return; }
   $("#say").placeholder = tdPlaceholder();
   const rs = !m && tdResearch();
@@ -3569,6 +3669,14 @@ function renderSayMode() {
   else if (rs) $("#send").textContent = TD.rs && TD.rs.running ? "Working…" : "Send";
   $("#send").disabled = !!rs && !!(TD.rs && TD.rs.running);
   $("#cprojwrap").classList.toggle("hidden", !!pf || !!TD.item || !!TD.home || !!m);
+}
+
+// The attached to-do's chip over the message box, with ✕ to take it off. Shown only with its own project's conversation.
+function renderChip() {
+  const c = TD.chip, on = tab === "today" && !!c && c.project === convProject();
+  $("#saychip").classList.toggle("hidden", !on);
+  if (put($("#saychip"), on ? `<span title="${esc(c.title)}">📎 ${esc(c.verb)}: ${esc(c.title)}</span><button id="saychipx" title="Take it off: your message goes without it">✕</button>` : "") && on)
+    $("#saychipx").onclick = () => { TD.chip = null; renderChip(); renderToday(); };
 }
 
 // ---- the conversation under the step: one per project, made of topics (README TODAY-2). The daemon keeps the
@@ -3608,7 +3716,7 @@ function tdDropChat(id) {
   }
 }
 async function loadConv() {
-  const it = TD.item, key = TD.convKey, s = (it && it.source) || {}, project = convProject(), want = convFor();
+  const it = TD.item, key = TD.convKey, s = (it && it.source) || {}, project = convProject(), want = convFor(), first = !TD.cv;
   if (s.kind === "task") {
     try { TD.task = await api(`/api/tasks/${s.id}`); } catch { TD.task = null; }
     if (TD.convKey !== key) return;
@@ -3616,16 +3724,17 @@ async function loadConv() {
   }
   let cv = null;
   try {
-    // A new item picks the topic once: its chat, or its own topic (task:<id>, project:<name>:ship, …), made when
-    // you send the first message. After that you choose.
-    if (project && (!it || it.project === project) && TD.applied !== `${key}|${project}`) {
-      // A chat on the list is open as far as this list knows (ended: null), so one ended since stays ended: it
-      // isn't opened, and its Read step leaves the list (conv_open's compare-and-set, README TODAY-2).
-      const how = s.kind === "chat" ? {how: "chat", ref: s.id, ended: null} : it && it.subject ? {how: "subject", ref: it.subject} : null;
+    // A new item with a topic (its bond, its chat, or its subject's topic) jumps to that tab once; one without a topic
+    // leaves the tab alone (README TODAY-2, selecting a to-do). After that you choose.
+    if (project && TD.applied !== `${key}|${project}`) {
+      // It sends the topic_ended /api/state gave the item, so an ended topic reopens; one ended since this list was
+      // read stays ended (conv_open's compare-and-set), and a chat's Read step for it leaves the list.
+      const how = tdJump(it, project);
       if (how) cv = await api("/api/conversation", {project, ...how}).catch(() => null);
-      // Only once it took: a failed open is tried again on the next load, and the send says pick meanwhile.
+      // Only once it took: a failed open is tried again on the next load.
       if (!how || cv) TD.applied = `${key}|${project}`;
       if (cv && cv.still_ended != null) tdDropChat(cv.still_ended);
+      if (cv && cv.still_ended == null && TD.convKey === key && !first) tdShowConv();  // a reload keeps a pinned tab
     }
     if (!cv && project) cv = await api(`/api/conversation?project=${encodeURIComponent(project)}`);
   } catch { cv = null; }
@@ -3640,6 +3749,7 @@ async function loadConv() {
     if (typeof t === "string") await loadResearchConv(t); else { TD.rs = null; renderChat(); }
   }
   renderConv(); renderSayMode();
+  if (TD.item) renderToday();  // the dock's chat buttons follow the tab shown
 }
 const topicOf = id => TD.cv && TD.cv.topics.find(t => t.id === id);
 const modeWord = m => (TD.cv && TD.cv.modes[m]) || m;
@@ -3662,51 +3772,102 @@ function convIntro() {
                 research: `Ask about the research project “${esc(cv.research.name || "")}”, or ask for new research. The agent reads its briefs and reports first.`}[cv.mode];
   return topicDivider() + `<div class="muted" style="padding:12px 0">${what}</div>`;
 }
-// Earlier topics above the timeline, and New topic above the message box.
+// ---- the tab strip and the dock, pure (README TODAY-2; tests/test_td_tabs.py runs this block in node)
+// The strip's topic tabs: every open topic of cv's project and the current one, oldest first (a new tab goes on the
+// right), then the pending tab while the current topic is still to be made, titled from cv.title or "New topic".
+function tdTabs(cv) {
+  if (!cv) return [];
+  const born = t => t.created || t.last || 0;
+  return cv.topics.filter(t => !t.ended || t.id === cv.topic)
+    .sort((a, b) => born(a) - born(b) || String(a.id).localeCompare(String(b.id), undefined, {numeric: true}))
+    .map(t => ({id: t.id, title: t.title || "Untitled", on: t.id === cv.topic, unread: !!t.unread, busy: t.state === "thinking",
+                mode: t.mode, last: t.last, ended: t.ended ?? null}))
+    .concat(cv.topic === null ? [{id: null, title: cv.title || "New topic", on: true, pending: true, plain: !cv.title && !cv.subject}] : []);
+}
+// What selecting it opens: its topic's tab, with the ended /api/state gave it so an ended topic reopens; null for a
+// to-do with no topic, or of another project than the conversation's.
+const tdJump = (it, project) => it && it.topic != null && it.project === project
+  ? {how: "topic", ref: it.topic, ended: it.topic_ended ?? null} : null;
+// The dock's chat buttons: attach (Add to this chat, New tab ↗), here (this tab is its topic), back (Back to its
+// tab →), project (another project's conversation is shown); "" until the conversation has loaded.
+function tdDockMode(it, cv) {
+  if (!it || !cv) return "";
+  if (it.project !== cv.project) return "project";
+  if (it.topic == null) return "attach";
+  return cv.topic === it.topic ? "here" : "back";
+}
+// The chip Add to this chat puts over the message box.
+const tdChipOf = it => ({key: it.key, project: it.project, verb: it.verb, title: it.title, why: it.why || ""});
+// New tab ↗'s open: a pending topic about its subject, else a plain new one, titled as its topic will be:
+// "#<id> <task title>" for a task's, else the item's title, cut to 80. taskTitle(id) looks a task's title up.
+function tdNewTabOpen(it, taskTitle) {
+  const m = /^task:(\d+)$/.exec(it.subject || ""), title = (m ? `#${m[1]} ${taskTitle(+m[1]) || it.title}` : it.title).slice(0, 80);
+  return it.subject ? {how: "subject", ref: it.subject, title} : {how: "new", mode: "design", title};
+}
+// ---- end of the tab strip and the dock, pure
+
+// The tab strip over the thread: the topic tabs and +, the pinned sections (TODAY-4) and ▾, which holds Ended and
+// End read topics. Until the clicked item's conversation loads, TD.cv is the last one's: the tabs wait for it.
+function tdStrip() {
+  const el = $("#tdstrip"), project = convProject(), cv = TD.cv && TD.cv.project === project ? TD.cv : null;
+  if (!project) { put(el, ""); return; }
+  const conv = TD.sec === "conv", tabs = tdTabs(cv), now = Date.now() / 1000, days = TD.endDays || 7;
+  const ended = cv ? cv.topics.filter(t => t.ended && t.id !== cv.topic).sort((a, b) => b.ended - a.ended) : [];
+  const id = t => esc(String(t.id));
+  const tab = t => {
+    const tip = t.pending ? (t.plain ? "A new topic: your first message starts it" : `${t.title}: your first message starts this topic`)
+      : `${t.title} · ${modeWord(t.mode)} · ${t.busy ? "Claude is replying" : t.unread ? "new reply" : `${ago(t.last, now)} ago`}`;
+    return `<div class="tdtab${t.on && conv ? " on" : ""}${t.pending ? " pending" : ""}" ${t.pending ? "data-pend" : `data-tab="${id(t)}"`} title="${esc(tip)}">`
+      + `<span class="tt">${esc(t.title)}</span>${t.busy ? '<span class="tdact pulse" title="Claude is replying">•••</span>' : t.unread ? '<span class="tdun" title="A reply you haven\'t read">●</span>' : ""}`
+      + (t.pending ? "" : `<button class="tx" data-tabx="${id(t)}" ${t.busy ? "disabled" : ""} title="${t.busy ? "Claude is replying: stop the reply or wait, then end it" : "End this topic: it moves under Ended (▾) and off your to-do list"}">×</button>`)
+      + `</div>`;
+  };
+  const plainPending = !!cv && cv.topic === null && !cv.title && !cv.subject;
+  const menu = !TD.menu ? "" : `<div id="tdmenu"><div class="k">Ended (${ended.length})</div>${ended.map(t =>
+      `<div class="tdend"><a data-reopento="${id(t)}" title="Reopen it and show it">${esc(t.title || "Untitled")}</a><span class="sub">${esc(modeWord(t.mode))} · ended ${ago(t.ended, now)} ago</span>
+        <button data-reopen="${id(t)}" title="Put it back in the strip">Reopen</button></div>`).join("") || `<div class="muted">No ended topics.</div>`}
+    <div class="row endread"><button id="endread" title="Ends every topic here you have read, that Claude isn't replying in, other than the one shown, whose last activity is older than that">End read topics older than</button>
+      <select id="enddays">${[1, 7, 30, 90].map(n => `<option value="${n}" ${n === days ? "selected" : ""}>${n} day${n === 1 ? "" : "s"}</option>`).join("")}</select></div></div>`;
+  const html = `<div class="tdstripin"><div class="tdscroll"><div class="tdtabs">${tabs.map(tab).join("")}
+      <button class="tdplus" id="tdnew" ${!cv || plainPending ? "disabled" : ""} title="New topic: your next message starts it">+</button></div>
+    <div class="tdpins">${TD_SECS.map(([k, l]) => `<button class="tdpin${TD.sec === k ? " on" : ""}" data-sec="${k}">${l}</button>`).join("")}</div></div>
+    <button id="tdmenub" class="tdpin" aria-haspopup="true" aria-expanded="${TD.menu}" title="Ended topics, and End read topics">▾${ended.length ? ` ${ended.length}` : ""}</button></div>${menu}`;
+  const sc = el.querySelector(".tdtabs"), ph = el.querySelector(".tdscroll"), x = sc ? sc.scrollLeft : 0, px = ph ? ph.scrollLeft : 0;
+  if (!put(el, html)) return;
+  el.querySelector(".tdtabs").scrollLeft = x; el.querySelector(".tdscroll").scrollLeft = px;
+  const on = el.querySelector(".tdtab.on"), onKey = `${project}|${on ? on.dataset.tab ?? "" : "-"}`;
+  if (on && TD.stripOn !== onKey) on.scrollIntoView({block: "nearest", inline: "nearest"});
+  TD.stripOn = onKey;
+  const ref = v => /^\d+$/.test(v) ? +v : v, mine = () => convReady() && TD.cv.project === project;
+  el.querySelectorAll("[data-tab]").forEach(t => t.onclick = () => {
+    if (!mine()) return;  // the last item's tabs, still shown while this one's loads
+    const r = ref(t.dataset.tab), top = topicOf(r);
+    if (TD.cv.topic === r) { tdShowConv(); toBottom($("#msgs")); return; }
+    convOpen({how: "topic", ref: r, ...(top ? {ended: top.ended ?? null} : {})});
+  });
+  el.querySelectorAll("[data-pend]").forEach(t => t.onclick = () => { tdShowConv(); $("#say").focus(); });
+  const act = (sel, what, body) => el.querySelectorAll(sel).forEach(b => b.onclick = e => {
+    e.stopPropagation(); if (mine()) { if (what !== "end") TD.menu = false; convAct(what, body(b)); } });
+  act("[data-tabx]", "end", b => ({ref: ref(b.dataset.tabx)}));
+  act("[data-reopen]", "reopen", b => ({ref: ref(b.dataset.reopen)}));
+  act("#endread", "end-read", () => ({days: +$("#enddays").value}));
+  el.querySelectorAll("[data-reopento]").forEach(a => a.onclick = () => {
+    if (!mine()) return;
+    const r = ref(a.dataset.reopento), top = topicOf(r);
+    TD.menu = false; convOpen({how: "topic", ref: r, ended: top ? top.ended ?? null : null});
+  });
+  $("#tdnew").onclick = () => { if (mine()) { convOpen({how: "new", mode: "design"}); $("#say").focus(); } };
+  el.querySelectorAll("[data-sec]").forEach(b => b.onclick = () => { TD.sec = b.dataset.sec; tdSave(); tdSections(); });
+  $("#tdmenub").onclick = e => { e.stopPropagation(); TD.menu = !TD.menu; tdStrip(); };
+  if ($("#enddays")) $("#enddays").onchange = e => { TD.endDays = +e.target.value; };
+}
+document.addEventListener("click", e => { if (TD.menu && e.target.closest && !e.target.closest("#tdmenu, #tdmenub")) { TD.menu = false; tdStrip(); } });
 function renderConv() {
   const cv = TD.cv;
-  if (!cv) { put($("#convtop"), ""); put($("#convmodes"), ""); return; }
-  // Earlier topics lists the open ones; End moves one to the folded Ended group, where Reopen (or opening it) puts it back.
-  const now = Date.now() / 1000, others = cv.topics.filter(t => t.id !== cv.topic);
-  const older = others.filter(t => !t.ended), ended = others.filter(t => t.ended), days = TD.endDays || 7;
-  const row = (t, btn) => `<div class="chatitem ${t.unread ? "unread" : ""}" data-topic="${esc(String(t.id))}"><div class="topicrow"><span>${esc(t.title || "Untitled")}</span>${btn}</div>
-      <div class="sub">${esc(modeWord(t.mode))}${t.spec ? " · OpenSpec" : ""} · ${t.state === "thinking" ? '<span class="pulse s-running">replying</span>' : t.unread ? '<span class="s-review">new reply</span>' : `${ago(t.ended || t.last, now)} ago`}</div></div>`;
-  const top = others.length ? `<details id="earlier" ${TD.earlierOpen ? "open" : ""}><summary>Earlier topics (${older.length})${ended.length ? ` · ${ended.length} ended` : ""}${older.some(t => t.unread) ? ' <span class="s-review">●</span>' : ""}</summary>
-    ${older.map(t => row(t, `<button data-end="${esc(String(t.id))}" title="${t.state === "thinking" ? "Stop Claude's reply and end this topic" : "Done with this topic"}: it moves under Ended and off your to-do list">End</button>`)).join("")}
-    ${older.length ? `<div class="row endread"><button id="endread" title="Ends every topic here you have read whose last activity is older than that">End read topics older than</button>
-      <select id="enddays">${[1, 7, 30, 90].map(n => `<option value="${n}" ${n === days ? "selected" : ""}>${n} day${n === 1 ? "" : "s"}</option>`).join("")}</select></div>` : ""}
-    ${ended.length ? `<details id="endedtopics" ${TD.endedOpen ? "open" : ""}><summary>Ended (${ended.length})</summary>
-      ${ended.map(t => row(t, `<button data-reopen="${esc(String(t.id))}" title="Put it back under Earlier topics">Reopen</button>`)).join("")}</details>` : ""}</details>` : "";
-  if (put($("#convtop"), top)) {
-    const ref = id => /^\d+$/.test(id) ? +id : id;
-    $("#convtop").querySelectorAll("[data-topic]").forEach(el => el.onclick = () => {
-      if (!convReady()) return;  // the last item's topics, still listed while this one's loads
-      const t = topicOf(ref(el.dataset.topic));  // the ended you see on the row: Ended's rows reopen, a stale row doesn't
-      TD.earlierOpen = false; convOpen({how: "topic", ref: ref(el.dataset.topic), ...(t ? {ended: t.ended ?? null} : {})}); });
-    const act = (sel, what, body) => $("#convtop").querySelectorAll(sel).forEach(el => el.onclick = e => {
-      e.stopPropagation(); if (convReady()) convAct(what, body(el)); });
-    act("[data-end]", "end", el => ({ref: ref(el.dataset.end)}));
-    act("[data-reopen]", "reopen", el => ({ref: ref(el.dataset.reopen)}));
-    act("#endread", "end-read", () => ({days: +$("#enddays").value}));
-    if ($("#enddays")) $("#enddays").onchange = e => { TD.endDays = +e.target.value; };
-    if ($("#earlier")) $("#earlier").ontoggle = e => { if (e.target.id === "earlier") TD.earlierOpen = e.target.open; };
-    if ($("#endedtopics")) $("#endedtopics").ontoggle = e => { e.stopPropagation(); TD.endedOpen = e.target.open; };
-  }
-  // One kind of new topic: plan & design, which queues tasks, starts research and edits your checkout when asked.
-  // A topic left new in another mode (an older mode switch) goes back to plan & design.
-  // Until the clicked item's conversation loads, TD.cv is the last one's: End topic and New topic wait for it.
-  const ready = convReady();
-  if (ready && cv.topic === null && (cv.mode !== "design" || cv.from)) { convOpen({how: "new", mode: "design"}); return; }
-  const cur = topicOf(cv.topic), busy = cur && cur.state === "thinking";
-  const html = `<div class="row"><span style="flex:1"></span>${cur ? `<button id="endtopic" ${!ready ? "disabled" : ""} title="${!ready ? "Loading this item's conversation…" : busy ? "Stop Claude's reply and end this topic: it moves under Ended and off your to-do list" : "Done with this topic: it moves under Ended and off your to-do list"}">End topic</button>` : ""}
-    <button id="newtopic" title="Your next message starts a new topic" ${cv.topic === null || !ready ? "disabled" : ""}>New topic</button></div>
-    ${cv.topic === null && (cv.subject || (!cv.new && convTodo(TD.item, cv.project, TD.applied)?.subject)) ? `<div class="convnote">Your next message starts this item's own topic.</div>`
-      : cv.topic === null && cv.topics.length ? `<div class="convnote">Your next message starts a new topic.</div>` : ""}`;
-  if (put($("#convmodes"), html)) {
-    $("#newtopic").onclick = () => { convOpen({how: "new", mode: "design"}); $("#say").focus(); };
-    // put() keeps these buttons, handlers and all, while the html is unchanged: read the topic when clicked, not now.
-    if ($("#endtopic")) $("#endtopic").onclick = () => { if (convReady()) convAct("end", {ref: TD.cv.topic}); };
-  }
+  tdStrip();
+  if (!cv) return;
+  // One kind of new topic: plan & design. A topic left new in another mode (an older mode switch) goes back to it.
+  if (convReady() && cv.topic === null && (cv.mode !== "design" || cv.from)) convOpen({how: "new", mode: "design"});
 }
 // End or reopen a topic, or end the read ones older than some days: POST /api/conversation/<what>, for the project of
 // the conversation shown (TD.cv.project), which the topics listed belong to. A refusal is shown, and the conversation
@@ -3766,21 +3927,20 @@ function renderResearchConv(th) {
   if (stick || (TD.rs && TD.rs.running)) toBottom(box);
 }
 
-// ---- the project's sections beside its conversation (README TODAY-4): Specs & designs, Research, Tasks. The lists
+// ---- the project's sections, pinned tabs in the strip (README TODAY-4): Specs & designs, Research, Tasks. The lists
 // load when a section opens and at most every 8 s while it is open; Tasks reads /api/state. The forms sit in their
 // own element, so a poll that redraws the lists never wipes what you are typing.
-const TD_SECS = [["conv", "Conversation"], ["specs", "Specs & designs"], ["research", "Research"], ["tasks", "Tasks"]];
+const TD_SECS = [["specs", "Specs & designs"], ["research", "Research"], ["tasks", "Tasks"]];  // TD.sec "conv": a topic tab
 const TD_TIERS = [["T0", "T0 · quick, ~5 min"], ["T1", "T1 · ~15 min"], ["T2", "T2 · deep, ~40 min"]];
 const TD_REPEATS = [["", "Don't repeat"], ["day 09:00", "Every day 09:00"], ["weekday 09:00", "Weekdays 09:00"],
                     ["mon 09:00", "Every Monday 09:00"], ["hour", "Every hour"]];
 const PROTOTYPE = "Make a one-file HTML prototype of: ";
 const tdSd = project => ({project, at: {}, loading: {}, err: {}, specs: null, docs: null, rs: null, form: "", res: null, busy: ""});
-function tdShowConv() { if (TD.sec !== "conv") { TD.sec = "conv"; tdSave(); tdSections(); } }
+function tdShowConv() { if (TD.sec !== "conv") { TD.sec = "conv"; tdSave(); tdSections(); toBottom($("#msgs")); } }
 function tdSections() {
+  if (!TD_SECS.some(([k]) => k === TD.sec)) TD.sec = "conv";  // "conv", or an old saved value
   const project = convProject(), on = !!project && TD.sec !== "conv";
-  if (put($("#tdsecbar"), project ? `<div class="tdchips">${TD_SECS.map(([k, l]) => `<button data-sec="${k}" class="${TD.sec === k ? "on" : ""}">${l}</button>`).join("")}</div>` : ""))
-    $("#tdsecbar").querySelectorAll("[data-sec]").forEach(b => b.onclick = () => { TD.sec = b.dataset.sec; tdSave(); tdSections(); if (TD.sec === "conv") toBottom($("#msgs")); });
-  else $("#tdsecbar").querySelectorAll("[data-sec]").forEach(b => b.classList.toggle("on", b.dataset.sec === TD.sec));
+  tdStrip();
   $("#tdcentre").classList.toggle("secopen", on);
   $("#tdsec").classList.toggle("hidden", !on);
   if (!on) return;
@@ -4121,7 +4281,9 @@ async function tdAsk() {
   if (phone()) tdPanelToNow();  // the message box is under the step
   const project = p.kind === "task" ? (t ? t.project : "") : p.kind === "train" ? p.project : sch ? sch.project : "";
   if (project && project !== convProject()) TD.over = {key: TD.convKey, project};
-  await convOpen(subject ? {how: "subject", ref: subject} : {how: "task"});
+  // its pending tab is titled as the topic will be (subject_about's title)
+  const title = p.kind === "task" ? `#${p.id} ${t ? t.title : ""}`.trim() : p.kind === "train" ? `Promote ${P(p.project).title || p.project}` : sch ? sch.title : "";
+  await convOpen(subject ? {how: "subject", ref: subject, ...(title ? {title} : {})} : {how: "task"});
   renderSayMode();
   const say = $("#say"); say.value = start + say.value; say.focus(); say.setSelectionRange(start.length, start.length); sayFit();
 }
@@ -4140,6 +4302,7 @@ document.addEventListener("keydown", e => {
   if (e.key !== "Escape") return;
   if (!$("#moremenu").classList.contains("hidden")) closeMore();
   else if (!$("#projmenu").classList.contains("hidden")) closeProj();
+  else if (tab === "today" && TD.menu) { TD.menu = false; tdStrip(); }
   else if (tab === "today" && TD.panel && !dlg) tdClosePanel();
   else if (tab === "today" && !dlg && !e.defaultPrevented && TD.item && !TD.home && !TD.wait && !TD.add && !$("#rsdoc") && !/^(INPUT|TEXTAREA|SELECT)$/.test((document.activeElement || {}).tagName || "")
            && !(document.activeElement || {}).isContentEditable) tdHome(TD.item.project);
