@@ -42,9 +42,9 @@ the config has a comment on how to opt out. Read it, adjust it, then click **Rel
                                rebase onto dev ─▶ gate: the [[gate]] commands, in order
                                   │ conflict / fail: the worker is resumed with the error (max 3 rounds)
                                   ▼ pass
-        "hold for review" and an [app] launch? ── yes ─▶ build, wait for Try / Approve / Send back
+        "hold for review" and an [app] launch? ── yes ─▶ build, record proof, wait for Try / Approve / Send back
         (a project with no [app] launch has nothing to try, so a held task merges like any other;
-         a worker with a question still stops as needs_input)
+         a worker with a question still stops as needs_input. See "Proof video" below)
                                   │ no
                                   ▼
                             merge --no-ff into dev   (<worktrees>/dev)
@@ -63,6 +63,37 @@ uncommitted changes to tracked files there (say, a `pod install` that rewrote `P
 files. `git apply` the patch to get them back. Untracked and ignored files (`node_modules`, `Pods`, `.env`, build
 output) stay; nothing runs `git clean`. If the patch can't be written, nothing is discarded and the task fails,
 naming the files. To change dev by hand, commit in that worktree; don't leave edits sitting there.
+
+### Proof video
+
+A held task stops before merge so you can check it before it reaches dev. So that you need not launch every
+build, the queue first records a short video of what the task changed, and the Try card plays it.
+
+- **The step.** "recording proof" runs in the hold branch, after "building for review" and before the task goes
+  to `review`. Only for a held task in a project with `[app] launch`; with no launch the task merges, as before.
+- **Who records.** The queue resumes the task's own worker session once more (it knows what it changed) with a
+  recording prompt: launch the build with the `[app] launch` command from the worktree, drive it to show the
+  change, record 10 to 60 seconds, save `~/.claude-ops/runs/<id>/proof.mp4` (H.264, so a browser `<video>` plays
+  it), and stop the app (the `[app] stop` command, or by pid; never by pattern). A web app is recorded with
+  headless Playwright (`record_video_dir`, converted with ffmpeg); a native app with `screencapture -v -V <secs>`,
+  limited to its window (`-l <window id>`) or display. The worker reports one line, what the video shows, in
+  `$OPS_RESULT` (`{"status": "done", "proof": "..."}`) or in `runs/<id>/proof.txt`. The turn may write in
+  `runs/<id>`; it changes no tracked file. If it commits anyway, the queue gates the branch again.
+- **One at a time.** A queue-wide lock admits one recording turn at a time (there is one screen); a task waiting
+  for it shows the phase "waiting to record proof". Each turn is capped at 10 minutes, then stopped.
+- **Permission.** Before a turn the daemon calls `CGPreflightScreenCaptureAccess()`, which never prompts. If
+  Screen Recording isn't granted to Claude Ops, a native app's recording is skipped (event `no proof video:
+  Screen Recording not granted to Claude Ops`). A server-style app (one with `[app] running` or `stop`) is still
+  recorded, headless only. See "macOS permissions".
+- **Failure never blocks.** No file, a file that isn't an MP4, a timeout, an error or a missing permission: the
+  task logs `no proof video: <reason>` and goes to `review` as before.
+- **Messages.** The recording turn takes no messages. One you send meanwhile waits; after recording the queue
+  resumes the worker with it, as for a message sent during the gate. With a message already waiting when the
+  step starts, nothing is recorded: the worker gets the message, and the next pass records.
+- **Send back** deletes `proof.mp4` and `proof.txt`; the next round of review records a new video.
+- **API.** `/api/state` and `GET /api/tasks/<id>` give each task `proof` (true when `runs/<id>/proof.mp4`
+  exists) and `proof_note` (the one line, or null). `GET /api/tasks/<id>/proof.mp4` serves the file as
+  `video/mp4`, answering `Range` requests with 206 (Safari plays video only that way), and 404 when there is none.
 
 ## main is the golden version
 
@@ -483,8 +514,9 @@ the uncommitted-files banner, Deploy. `/api/state` gathers them into one list, `
   state does and goes when the state changes: there is nothing to tick off.
   - **Answer**: a task (not a release or deploy) in needs_input. Why: its question.
   - **Fix**: a task in failed. Why: its error.
-  - **Try**: a task in review whose project has a launch step (the same test as `can_play`). **Review**: the
-    same without one; you read its diff and summary.
+  - **Try**: a task in review whose project has a launch step (the same test as `can_play`). The card plays the
+    task's proof video when there is one (`proof`, see [Proof video](#proof-video)). **Review**: the same
+    without one; you read its diff and summary.
   - **Promote**: a release or deploy in needs_input (**waiting on you**), or `dev` ahead of `main` in a project
     with **Promote after merge** off and no release under way. Under Straight to main dev is ahead only until
     the next merge (a project from before it was the default), or while a merge waits on you to move main.
@@ -1495,7 +1527,7 @@ report = "Logs/test-editmode.xml"  # optional: NUnit/JUnit XML; failed cases are
 
 [app]                              # optional: something to build and run
 build = "scripts/unity.sh build"
-launch = "open -n 'Builds/macOS/MyGame.app'"   # run from the worktree for Play / Try
+launch = "open -n 'Builds/macOS/MyGame.app'"   # run from the worktree for Play / Try and the proof video
 process = "Builds/macOS/MyGame.app"            # the app's executable or its folder, inside the worktree
 artifact = "Builds/macOS/MyGame.app"           # must exist after build; kept as a backup on promote
 # running = "scripts/app-running.sh"   # optional, server-style apps: exit 0 = the app runs from this worktree
@@ -1807,6 +1839,9 @@ folder under a project's `<worktrees>/` that no longer exists. For what a worktr
   `launcher.c` by `opsctl start`), so privacy prompts (App Management, folder access) name **Claude Ops**,
   not python3. A grant then covers the daemon, its workers and their builds, and not every Python script.
   The app is rebuilt only when `launcher.c` changes; a rebuild changes its signature, so macOS asks again.
+  **Screen Recording** for Claude Ops (System Settings → Privacy & Security → Screen & System Audio Recording)
+  is needed for a native app's [proof video](#proof-video). The daemon only checks it and never asks, so grant it
+  there yourself; without it those videos are skipped.
 - **Workers** run `claude -p --permission-mode auto --permission-prompts none --strict-mcp-config`.
   Anything that would prompt is denied. By default they work only in their worktree: they don't push, and
   don't touch your checkout, dev or main. A step outside it (your checkout, `~/.claude-ops`, a commit on main)
