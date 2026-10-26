@@ -35,7 +35,7 @@ class Base(unittest.TestCase):
             opsd.q("DELETE FROM settings WHERE key=?", (k,))
         opsd.set_setting("paused", "0")
         opsd.set_setting("usage_brake", "85")
-        opsd.set_setting("usage_taper", "50")
+        opsd.set_setting("usage_taper", "30")
         opsd.set_setting("max_parallel", "6")
         notify = opsd.notify
         opsd.notify = lambda *a: None
@@ -51,53 +51,78 @@ class Base(unittest.TestCase):
 
 class Taper(Base):
     def test_cap_steps_with_six_workers(self):
-        # most 6, taper 50, brake 85: steps of 7 points, exact boundaries on the lower step
-        for pct, want in ((50, None), (50.5, 5), (57, 5), (57.1, 4), (64, 4), (64.1, 3), (71, 3), (71.1, 2), (78, 2),
-                          (78.1, 1), (84.9, 1)):
+        # most 6, taper 30, brake 85: cap = 6 - ceil(5 * sqrt(frac)), so step k ends at 30 + 55 * k² / 25 = 30 + 2.2k²
+        # (32.2, 38.8, 49.8, 65.2): exact boundaries on the lower step
+        for pct, want in ((30, None), (30.1, 5), (32.2, 5), (32.3, 4), (38.8, 4), (38.9, 3), (49.8, 3), (49.9, 2),
+                          (65.2, 2), (65.3, 1), (84.9, 1)):
             self.five(pct)
             self.assertEqual(self.cap(), want, pct)
         self.five(85)
         info = opsd.usage_info()
         self.assertTrue(info["braked"])  # the brake takes over at 85
-        self.assertEqual(opsd.usage_taper_cap(63, 50, 6, 85), 4)
+        self.assertEqual(opsd.usage_taper_cap(36, 30, 6, 85), 4)
+
+    def test_reference_values(self):
+        cap = opsd.usage_taper_cap
+        # most 6, taper 30, brake 90: 35 -> sqrt(5/60) * 5 = 1.44 -> 4; 45 -> sqrt(.25) * 5 = 2.5 -> 3;
+        # 60 -> sqrt(.5) * 5 = 3.54 -> 2; 75 -> sqrt(.75) * 5 = 4.33 -> 1; 89 -> 1
+        self.assertEqual([cap(p, 30, 6, 90) for p in (35, 45, 60, 75, 89)], [4, 3, 2, 1, 1])
+        # most 3, taper 30, brake 90: one boundary at sqrt(frac) * 2 = 1, frac .25, pct 45 (stays on 2)
+        self.assertEqual([cap(p, 30, 3, 90) for p in (30, 30.1, 35, 45, 45.1, 60, 89)], [None, 2, 2, 2, 1, 1, 1])
+        opsd.set_setting("usage_brake", "90")
+        for pct, want in ((35, 4), (45, 3), (60, 2)):  # behind the pace line (72), so the taper alone
+            self.five(pct)
+            self.assertEqual(self.cap(), want, pct)
 
     def test_pure_boundaries(self):
         cap = opsd.usage_taper_cap
-        for pct in range(51, 85):  # every whole-percent boundary of the table above
-            self.assertEqual(cap(pct, 50, 6, 85), 6 - -(-(pct - 50) // 7), pct)
-        self.assertEqual([cap(p, 50, 3, 85) for p in (50, 50.1, 67.5, 67.6, 84)], [None, 2, 2, 1, 1])
-        self.assertEqual([cap(p, 50, 6, 0) for p in (60, 60.1, 90, 90.1, 99)], [5, 4, 2, 1, 1])  # brake off: to 100
-        self.assertEqual([cap(p, 50, 6, 100) for p in (60, 60.1)], [5, 4])
-        self.assertIsNone(cap(70, 50, 6, 50))  # brake at Taper from: no room
-        self.assertIsNone(cap(70, 50, 6, 40))  # brake below it
+        for pct in range(31, 85):  # every whole percent, against the step ends 30 + 2.2k²
+            k = next(k for k in range(1, 6) if 30 + 2.2 * k * k >= pct)
+            self.assertEqual(cap(pct, 30, 6, 85), 6 - k, pct)
+        self.assertEqual([cap(p, 30, 3, 85) for p in (30, 30.1, 43.75, 43.8, 84)], [None, 2, 2, 1, 1])
+        # brake off: to 100, step ends 30 + 2.8k² (32.8, 41.2, 55.2, 74.8)
+        self.assertEqual([cap(p, 30, 6, 0) for p in (32.8, 32.9, 41.2, 41.3, 55.2, 55.3, 74.8, 74.9, 99)],
+                         [5, 4, 4, 3, 3, 2, 2, 1, 1])
+        self.assertEqual([cap(p, 30, 6, 100) for p in (41.2, 41.3)], [4, 3])
+        self.assertIsNone(cap(30, 30, 6, 85))  # at Taper from
+        self.assertIsNone(cap(70, 30, 6, 30))  # brake at Taper from: no room
+        self.assertIsNone(cap(70, 30, 6, 20))  # brake below it
         self.assertIsNone(cap(70, 0, 6, 85))  # taper off
-        self.assertEqual([cap(p, 50, 1, 85) for p in (51, 70, 84)], [1, 1, 1])  # most 1: always 1
+        self.assertEqual([cap(p, 30, 1, 85) for p in (31, 70, 84)], [1, 1, 1])  # most 1: always 1
 
     def test_floor_is_one(self):
         opsd.set_setting("max_parallel", "3")
-        for pct, want in ((51, 2), (67.5, 2), (67.6, 1), (84, 1)):
+        for pct, want in ((31, 2), (43.75, 2), (43.8, 1), (84, 1)):
             self.five(pct)
             self.assertEqual(self.cap(), want, pct)
         opsd.set_setting("usage_brake", "0")  # the taper alone, spread to 100, never below 1
-        for pct, want in ((75, 2), (75.1, 1), (99, 1)):
+        for pct, want in ((47.5, 2), (47.6, 1), (99, 1)):
             self.five(pct)
             self.assertEqual(self.cap(), want, pct)
         self.assertFalse(opsd.usage_info()["braked"])
 
     def test_no_room_and_most_one(self):
-        opsd.set_setting("usage_brake", "50")
-        self.five(49, left=60)  # late in the window, so behind the pace line (49.8) too
+        opsd.set_setting("usage_brake", "30")
+        self.five(29, left=60)  # late in the window, so behind the pace line (29.9) too
         self.assertIsNone(opsd.usage_info()["taper"])  # brake at Taper from: no taper
         opsd.set_setting("usage_brake", "85")
         opsd.set_setting("max_parallel", "1")
         self.five(80)
         self.assertIsNone(opsd.usage_info()["taper"])  # cap 1 of 1 is no change
 
+    def test_default_is_30(self):
+        opsd.q("DELETE FROM settings WHERE key='usage_taper'")
+        opsd.init_db()
+        self.assertEqual(opsd.setting("usage_taper"), "30")
+        opsd.set_setting("usage_taper", "50")
+        opsd.init_db()
+        self.assertEqual(opsd.setting("usage_taper"), "50")  # a stored value is kept
+
     def test_off_seven_day_and_stale(self):
         opsd.set_setting("usage_taper", "0")
         self.five(80)
         self.assertIsNone(opsd.usage_info()["taper"])
-        opsd.set_setting("usage_taper", "50")
+        opsd.set_setting("usage_taper", "30")
         opsd.set_setting("usage:seven_day", reading(80))
         self.five(10)
         self.assertIsNone(opsd.usage_info()["taper"])  # the 7-day window keeps only the brake
@@ -105,8 +130,8 @@ class Taper(Base):
         self.assertIsNone(opsd.usage_info()["taper"])  # its reset has passed: counts as 0
 
     def test_words(self):
-        self.five(63)
-        self.assertEqual(opsd.usage_info()["taper"]["words"], "Usage at 63% of the 5-hour window · 4 of 6 workers")
+        self.five(45)
+        self.assertEqual(opsd.usage_info()["taper"]["words"], "Usage at 45% of the 5-hour window · 3 of 6 workers")
 
 
 NOW = 1_800_000_000.0  # a fixed 'now'
@@ -126,47 +151,48 @@ class Pace(Base):
         self.assertAlmostEqual(opsd.usage_lead(30, NOW + 99999, NOW, 85), 30)  # elapsed clamps at 0
         self.assertIsNone(opsd.usage_lead(30, NOW - 1, NOW, 85))  # stale
         cap = opsd.usage_pace_cap
-        self.assertEqual([cap(x, 50, 6) for x in (-3, 0, 0.1, 5, 5.1, 13, 25, 99)], [None, None, 5, 5, 4, 3, 1, 1])
+        self.assertEqual([cap(x, 30, 6) for x in (-3, 0, 0.1, 3, 3.1, 6, 6.1, 9, 12, 12.1, 99)],
+                         [None, None, 5, 5, 4, 4, 3, 3, 2, 1, 1])  # one fewer per 3 points ahead
         self.assertIsNone(cap(13, 0, 6))  # taper off
-        self.assertIsNone(cap(None, 50, 6))  # no live reading
+        self.assertIsNone(cap(None, 30, 6))  # no live reading
 
     def test_example_ahead_and_behind(self):
-        t = self.at(30)
-        self.assertEqual((t["cap"], t["max"], t["ahead"]), (3, 6, 13))
-        self.assertEqual(t["words"], "Usage at 30% of the 5-hour window, 13 points ahead of pace · 3 of 6 workers")
+        t = self.at(25)  # lead 8: 6 - ceil(8 / 3); no taper cap at 25
+        self.assertEqual((t["cap"], t["max"], t["ahead"]), (3, 6, 8))
+        self.assertEqual(t["words"], "Usage at 25% of the 5-hour window, 8 points ahead of pace · 3 of 6 workers")
         self.assertIsNone(self.at(10))  # behind pace: all 6
         self.assertIsNone(self.at(17))  # on pace
 
     def test_taper_only_when_behind(self):
-        t = self.at(63, left=600)  # pace 82.2: behind, so the taper cap 4 alone
-        self.assertEqual((t["cap"], t["ahead"]), (4, 0))
-        self.assertEqual(t["words"], "Usage at 63% of the 5-hour window · 4 of 6 workers")
+        t = self.at(45, left=600)  # pace 82.2: behind, so the taper cap 3 alone
+        self.assertEqual((t["cap"], t["ahead"]), (3, 0))
+        self.assertEqual(t["words"], "Usage at 45% of the 5-hour window · 3 of 6 workers")
 
     def test_lower_cap_wins_both_ways(self):
         t = self.at(80, left=600)  # taper cap 1, lead -2.2: taper
         self.assertEqual((t["cap"], t["ahead"]), (1, 0))
-        t = self.at(55)  # taper cap 5; lead 38: pace cap 1 is lower
-        self.assertEqual((t["cap"], t["ahead"]), (1, 38))
-        t = self.at(64, left=3 * 3600)  # pace 34, lead 30: pace cap 1 vs taper cap 4
-        self.assertEqual(t["cap"], 1)
-        t = self.at(72, left=1800)  # pace 76.5: behind; taper cap 2
+        t = self.at(31)  # taper cap 5; lead 14: pace cap 1 is lower
+        self.assertEqual((t["cap"], t["ahead"]), (1, 14))
+        t = self.at(40, left=3 * 3600)  # pace 34, lead 6: pace cap 4 vs taper cap 3: the taper binds
+        self.assertEqual((t["cap"], t["ahead"]), (3, 0))
+        t = self.at(55, left=1800)  # pace 76.5: behind; taper cap 2
         self.assertEqual((t["cap"], t["ahead"]), (2, 0))
-        t = self.at(60, left=2 * 3600)  # pace 51, lead 9: pace cap 4 vs taper cap 4: tie, the pace cap binds
-        self.assertEqual((t["cap"], t["ahead"]), (4, 9))
+        t = self.at(38, left=3 * 3600)  # pace 34, lead 4: pace cap 4 vs taper cap 4: tie, the pace cap binds
+        self.assertEqual((t["cap"], t["ahead"]), (4, 4))
 
     def test_floor_is_one(self):
-        self.assertEqual(self.at(49)["cap"], 1)  # 32 ahead: 6 - 7 floors at 1
+        self.assertEqual(self.at(49)["cap"], 1)  # 32 ahead: 6 - 11 floors at 1
 
     def test_taper_off_and_stale(self):
         opsd.set_setting("usage_taper", "0")
         self.assertIsNone(self.at(30))
-        opsd.set_setting("usage_taper", "50")
+        opsd.set_setting("usage_taper", "30")
         self.assertIsNone(self.at(30, live=False))
 
     def test_brake_off_runs_to_100(self):
         opsd.set_setting("usage_brake", "0")
-        t = self.at(30)  # pace 20, lead 10: 6 - 2
-        self.assertEqual((t["cap"], t["ahead"]), (4, 10))
+        t = self.at(30)  # pace 20, lead 10: 6 - ceil(10 / 3)
+        self.assertEqual((t["cap"], t["ahead"]), (2, 10))
 
     def test_seven_day_ignored(self):
         opsd.set_setting("usage:seven_day", json.dumps({"utilization": 0.5, "resetsAt": NOW + 3600, "ts": NOW}))
@@ -221,7 +247,7 @@ class Schedule(Base):
                 th.join(5)
 
     def test_starts_no_more_than_the_cap(self):
-        self.five(63)  # cap 4 of 6
+        self.five(36)  # cap 4 of 6
         self.add(state="running")
         self.add(state="running")
         self.add("deploy", state="running")  # not a Claude worker
@@ -231,17 +257,17 @@ class Schedule(Base):
         self.assertEqual([opsd.task(i)["state"] for i in queued[2:]], ["queued", "queued"])
 
     def test_pace_cap_limits_starts(self):
-        self.five(30, left=HOUR_IN)  # 13 ahead of pace: cap 3 of 6, no taper cap
+        self.five(25, left=HOUR_IN)  # 8 ahead of pace: cap 3 of 6, no taper cap
         self.add(state="running")
         self.add("deploy", state="running")
         queued = [self.add() for _ in range(4)]
         self.schedule()
         self.assertEqual(sorted(self.started), queued[:2])  # 1 running + 2 new = the pace cap of 3
         why = opsd.wait_reasons([opsd.task(queued[2])])
-        self.assertEqual(why[queued[2]], "Usage at 30% of the 5-hour window, 13 points ahead of pace · 3 of 6 workers")
+        self.assertEqual(why[queued[2]], "Usage at 25% of the 5-hour window, 8 points ahead of pace · 3 of 6 workers")
 
     def test_deploys_and_resumes_start_while_tapered(self):
-        self.five(75)  # cap 2 of 6
+        self.five(55)  # cap 2 of 6
         for _ in range(2):
             self.add(state="running")
         held = self.add()
@@ -252,12 +278,12 @@ class Schedule(Base):
         self.assertEqual(opsd.task(held)["state"], "queued")
 
     def test_held_task_says_why(self):
-        self.five(63)
+        self.five(36)  # cap 4 of 6
         for _ in range(4):
             self.add(state="running")
         held, dep = self.add(), self.add("deploy")
         why = opsd.wait_reasons([opsd.task(held), opsd.task(dep)])
-        self.assertEqual(why[held], "Usage at 63% of the 5-hour window · 4 of 6 workers")
+        self.assertEqual(why[held], "Usage at 36% of the 5-hour window · 4 of 6 workers")
         self.assertEqual(why[dep], "starting now")
         self.five(85)  # the brake's words win
         self.assertTrue(opsd.wait_reasons([opsd.task(held)])[held].startswith("Usage at 85% of the 5-hour window · "

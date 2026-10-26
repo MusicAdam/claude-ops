@@ -1118,7 +1118,7 @@ def init_db():
         q("ALTER TABLE schedules ADD COLUMN research TEXT")
     q("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)")
     q("CREATE TABLE IF NOT EXISTS session_costs (session_id TEXT PRIMARY KEY, total REAL)")  # see cost_added
-    for k, v in {"max_parallel": "3", "paused": "0", "model": "", "usage_brake": "85", "usage_taper": "50", "model:release": "sonnet",
+    for k, v in {"max_parallel": "3", "paused": "0", "model": "", "usage_brake": "85", "usage_taper": "30", "model:release": "sonnet",
                  "release_wait": "180", "effort": "medium"}.items():
         q("INSERT OR IGNORE INTO settings VALUES (?,?)", (k, v))
     q("DELETE FROM settings WHERE key='draining'")  # the old restart's stored hold: a crash could leave it set
@@ -3463,9 +3463,9 @@ def limit_pause(tid, prompt=None):
 # usage is account-wide, so it counts your own Claude use too. The daemon keeps the latest reading per window in
 # settings usage:<window>, and at usage_brake percent (default 85, 0 = off) of either window the scheduler starts no
 # new task until that window resets, which leaves the rest of it for your design chats, chats and answers. Running
-# work carries on, and chats are never held. Below the brake, the usage taper (usage_taper, default 50, 0 = off)
-# starts fewer Claude workers as the 5-hour window fills, stepping evenly from max_parallel at the taper down to 1
-# just under the brake (or 100 with the brake off): see usage_taper_cap. The dashboard's 5-hour pace line likewise
+# work carries on, and chats are never held. Below the brake, the usage taper (usage_taper, default 30, 0 = off)
+# starts fewer Claude workers as the 5-hour window fills, on a square-root curve that cuts most of them early, from
+# max_parallel at the taper down to 1 just under the brake (or 100 with the brake off): see usage_taper_cap. The dashboard's 5-hour pace line likewise
 # runs up to the brake. With the taper on, the pace slowdown also starts fewer workers while 5-hour usage runs ahead
 # of that pace line: one fewer per PACE_STEP points ahead, never below 1 (see usage_pace_cap). The lower of the two
 # caps applies, to the same new starts. The 7-day window has neither: only the brake.
@@ -3521,18 +3521,18 @@ def usage_taper_pct(s):
 
 
 def usage_taper_cap(pct, taper, most, brake=0):
-    """How many Claude workers may run at pct percent of the 5-hour window. With end = brake (100 with the brake off):
-    max(1, most - ceil((pct - taper) * (most - 1) / (end - taper))) above the taper, so the cap steps evenly from most
-    at the taper to 1 just under the brake. None (no cap) at or below the taper, with the taper off, or when end is at
-    or below the taper (no room to taper)."""
+    """How many Claude workers may run at pct percent of the 5-hour window. With end = brake (100 with the brake off)
+    and frac = (pct - taper) / (end - taper): max(1, most - ceil(sqrt(frac) * (most - 1))) above the taper, so the cap
+    falls fast just past the taper and slowly near the brake, reaching 1 before it. None (no cap) at or below the
+    taper, with the taper off, or when end is at or below the taper (no room to taper)."""
     end = brake if brake > 0 else 100
     if not taper or pct <= taper or end <= taper:
         return None
-    # rounded before ceil, so an exact step boundary (57 at most 6, taper 50, brake 85) stays on the lower step
-    return max(1, most - math.ceil(round((pct - taper) * (most - 1) / (end - taper), 9)))
+    # rounded before ceil, so an exact step boundary (38.8 at most 6, taper 30, brake 85) stays on the lower step
+    return max(1, most - math.ceil(round(math.sqrt((pct - taper) / (end - taper)) * (most - 1), 9)))
 
 
-PACE_STEP = 5  # points ahead of pace per worker dropped
+PACE_STEP = 3  # points ahead of pace per worker dropped
 FIVE_HOUR = 18000  # the 5-hour window's length in seconds, as the dashboard's USAGE_LEN.five_hour
 
 
