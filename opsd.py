@@ -8814,7 +8814,8 @@ def todos_list(tasks, projects, last, now=None):
         elif st == "review":
             p = PROJECTS.get(t["project"])
             if p and p.launch:  # can_play in GET /api/tasks/<id>
-                out.append(item(f"task:{t['id']}:try", "Try", why="Play it, then approve or send it back"))
+                out.append(item(f"task:{t['id']}:try", "Try", why="Watch its proof video, then approve or send it back"
+                                if proof_files(t["id"])[0].is_file() else "Play it, then approve or send it back"))
             else:
                 out.append(item(f"task:{t['id']}:review", "Review", why="Read the diff and summary, then approve"))
         if st == "done" and t["merged"]:  # the reports it listed (RES-10), next to RES-5's own
