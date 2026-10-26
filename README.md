@@ -1823,18 +1823,25 @@ folder under a project's `<worktrees>/` that no longer exists. For what a worktr
       `Usage at 36% of the 5-hour window · 4 of 6 workers`, and while the cap is below `max_parallel` the header
       meter's hover adds `Tapering: 4 of 6 workers`. While tapering the header's working chip also shows the cap as
       its denominator (`3/4 working`), and its hover names the Parallel setting it lowers.
-    - **Pace slowdown.** While the taper is on, the queue also slows whenever 5-hour usage runs ahead of the header
-      meter's pace line. With a live reading, elapsed = the share of the 5-hour window that has passed (0 to 1),
-      pace = elapsed × end (end = `usage_brake`, or 100 with the brake off, the same pace the meter shows) and
-      lead = pct − pace. When lead > 0 the pace cap is `max(1, max_parallel - ceil(lead / 3))`: one worker fewer
-      per 3 points ahead (`PACE_STEP` in opsd.py). On or behind pace, or with no live reading, there is no pace cap
-      and the taper alone applies. The lower of the taper cap and the pace cap applies, to the same new starts as the
-      taper, and the brake still wins. It is off when the taper is off, and it follows the **5-hour window only**.
+    - **Pace slowdown.** While the taper is on, the queue also slows as 5-hour usage nears the header meter's pace
+      line, starting 6 points before it (`PACE_MARGIN` in opsd.py). With a live reading, elapsed = the share of the
+      5-hour window that has passed (0 to 1), pace = elapsed × end (end = `usage_brake`, or 100 with the brake off,
+      the same pace the meter shows) and lead = pct − pace (negative while usage is under the line). When lead >
+      −6 the pace cap is `max(1, max_parallel - ceil((lead + 6) / 3))`: one worker fewer from 6 points under the
+      line, then one fewer per 3 points more (`PACE_STEP`). So lead in (−6, −3] gives `max_parallel` − 1, (−3, 0]
+      gives − 2, (0, 3] gives − 3, and so on, never below 1; an exact step boundary stays on the higher cap. At 6 or
+      more points under pace, or with no live reading, there is no pace cap and the taper alone applies. The lower of
+      the taper cap and the pace cap applies, to the same new starts as the taper, and the brake still wins. It is
+      off when the taper is off, and it follows the **5-hour window only**. Early in the window, while the pace is
+      still under 6, the pace cap can apply at very low usage.
       Example: `max_parallel` 6, brake 85, taper 30, one hour into the window: pace = 0.2 × 85 = 17. At 25% usage
-      the lead is 8, so the pace cap is 6 − 3 = 3; there is no taper cap at 25%, so 3 workers run. At 10% usage
-      the queue is behind pace, so all 6 run. When the pace cap is the lower one, a held task says
-      `Usage at 25% of the 5-hour window, 8 points ahead of pace · 3 of 6 workers`, the meter's hover says
-      `Tapering: 3 of 6 workers (ahead of pace)`, and the working chip's hover names the pace.
+      the lead is 8, so the pace cap is 6 − ceil(14 / 3) = 1; there is no taper cap at 25%, so 1 worker runs. At
+      14% the lead is −3, so the pace cap is 6 − ceil(3 / 3) = 5. At 10% the lead is −7, past the margin, so all 6
+      run. When the pace cap is the lower one, a held task says how far usage is from the line:
+      `Usage at 25% of the 5-hour window, 8 points ahead of pace · 1 of 6 workers` and the meter's hover says
+      `Tapering: 1 of 6 workers (ahead of pace)`; under the line it is
+      `Usage at 14% of the 5-hour window, 3 points under pace · 5 of 6 workers` (`at pace` at a lead of 0) and
+      `Tapering: 5 of 6 workers (nearing pace)`. The working chip's hover says the same.
   - **The header meter** shows both windows, `5h 62% · 7d 14%`, with their reset times on hover. It turns amber at
     or above the brake, and red while the queue waits out the usage limit itself. Its pace line (see **Usage meters
     and pace**) runs up to the brake for the 5-hour window, so it says whether usage is on track to reach the brake,
