@@ -723,14 +723,19 @@ stay on the right of the header.
     every device agrees. A parked row shows its verb, title, project, the note and `parked 4d` (its age since
     parking). A parked item with a wait says so on its row: `Waiting on #283, #284 to merge` (or `to
     release`). An item with a note shows the note on its row, muted and cut with an ellipsis.
-  - **+ Add** sits at the top of the list (on a phone, at the top of the To-do column). It opens a small form:
+  - **+ Add** sits at the top of the list, under the filter chips. It opens a small form:
     a title, an optional why, and the project: the switcher's when one is ticked, else a select of the projects
     in view (every project, or the ticked ones).
     **Wait for…** in it opens the same chooser as on a step (TODAY-2), so the new item starts parked. **Add**
     calls `POST /api/todos` (TODO-2); the item is a **Do** you close with **Done**. An error (a duplicate title,
     an unknown task) shows under the form, which keeps what you typed.
   - The next item selected when one leaves the list is never a parked one.
-  - **Projects** sits under the list and above **Parked (N)**: one compact row per project in view (every
+  - **Projects** sits at the top of the column, above the filter chips, **+ Add** and the to-dos; **Parked (N)**
+    and (on a phone) the Topics row follow the to-dos. **Projects** and **To-do** each have a header you click to
+    fold or unfold the section, like **Parked**. Both start unfolded. A folded header keeps a count:
+    **Projects (N)**, the projects in view, and **To-do (N)**, the to-dos under the current filter. Whether each
+    is folded is kept in this browser (`ops-td-projs-open`, `ops-td-todo-open`), so it survives reloads and polls.
+    The Projects section has one compact row per project in view (every
     non-archived project, or only the ticked ones), in the order of `/api/state`'s `projects`. A row shows the
     title, its count of open (not parked) to-dos when above 0, and a ● when it has an unread chat (a Read to-do
     from a chat). With one project ticked its one row still shows. Clicking a row opens that project's **home**
@@ -1022,7 +1027,7 @@ Below 700px Today is phone-first. The rules:
 
 - **PHONE-1 One column at a time.** A bottom bar switches between **To-do** (with a red count badge), **Now** (the
   step and its conversation) and **Activity** (the timeline). The page opens on To-do. Tapping a to-do opens it in
-  Now. The Projects section is in the To-do pane under the list; tapping a project opens Now on its home
+  Now. The Projects section is at the top of the To-do pane, above the list, and folds as on a computer; tapping a project opens Now on its home
   (compact: a title row with **‹ To-do**, and the buttons in one row that scrolls sideways). Task details, and the other timeline panels, open full screen.
 - **HDR-1 Header.** One row, about 40px: the name, the project switcher and **More**. The switcher takes the
   room left on the row, cuts its label short to fit, and opens the same checklist as on a computer. The Today button, the queue

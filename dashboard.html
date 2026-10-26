@@ -462,8 +462,9 @@ a[data-task] { color: var(--accent); cursor: pointer; }
 .tditem.sel { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
 .tditem.skipped { opacity: .65; }
 .tditem .tdn { grid-column: 2; color: var(--muted); font-size: 12px; font-style: italic; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.tdprojs { margin-top: 12px; }
-.tdprojs .k { color: var(--muted); font-size: 13px; margin-bottom: 6px; }
+details.tdfold { margin-top: 10px; } #tdleft > details.tdfold:first-child { margin-top: 0; }
+details.tdfold > summary { cursor: pointer; color: var(--muted); font-size: 13px; margin-bottom: 6px; }
+details.tdfold[open] > summary .cnt { display: none; }  /* the count shows only while folded */
 .tdprojs .tdp { display: flex; gap: 8px; align-items: baseline; padding: 5px 10px; border: 1px solid var(--line); border-radius: 8px;
                 background: var(--panel); margin-bottom: 4px; cursor: pointer; font-size: 13px; }
 .tdprojs .tdp.sel { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
@@ -2856,7 +2857,7 @@ new ResizeObserver(() => document.documentElement.style.setProperty("--hdr-h", $
 // The left column is /api/state's todos; the centre is the selected one as a step, over the chat column; the
 // right column is read-only status, and a click opens a panel over it, the task page
 // among them (moved here from History). See README "Today view".
-const TD = {key: "", home: null, filter: "all", drafts: {}, noteTimer: null, parkOpen: false, order: [], item: null, convKey: null, task: null, mode: null, busy: "",
+const TD = {key: "", home: null, filter: "all", drafts: {}, noteTimer: null, parkOpen: false, projsOpen: true, todoOpen: true, order: [], item: null, convKey: null, task: null, mode: null, busy: "",
             msg: "", note: "", panel: null, cv: null, rs: null, over: null, applied: "", starter: "", earlierOpen: false,
             pane: "todo", dets: false, sec: "conv", sd: null, unc: null, udiff: false,
             wait: null, add: null};  // the open Wait for… chooser {key, ids, other, until}, and the + Add form
@@ -2865,13 +2866,16 @@ try {
   TD.home = localStorage.getItem("ops-td-home") || null;
   TD.filter = localStorage.getItem("ops-todo-filter") || "all";
   TD.sec = localStorage.getItem("ops-td-sec") || "conv";
+  TD.projsOpen = localStorage.getItem("ops-td-projs-open") !== "0";  // both sections start open
+  TD.todoOpen = localStorage.getItem("ops-td-todo-open") !== "0";
 } catch {}
 const TD_FILTERS = [["all", "All"], ["review", "Review"], ["unblock", "Unblock"], ["ship", "Ship"], ["only_me", "Only me"]];
 const SEND_WORDS = {answer: "Send answer", reject: "Send back", retry: "Retry", queue: "Queue task"};
 const STAGES = ["Queued", "Working", "Gate", "Review", "Merged", "Promoted"];
 const midnight = () => { const d = new Date(); d.setHours(0, 0, 0, 0); return d.getTime() / 1000; };
 const tdSave = () => { try { localStorage.setItem("ops-todo", TD.key); localStorage.setItem("ops-td-home", TD.home || ""); localStorage.setItem("ops-todo-filter", TD.filter);
-  localStorage.setItem("ops-td-sec", TD.sec); localStorage.removeItem("ops-skip"); } catch {} };
+  localStorage.setItem("ops-td-sec", TD.sec); localStorage.setItem("ops-td-projs-open", TD.projsOpen ? "1" : "0");
+  localStorage.setItem("ops-td-todo-open", TD.todoOpen ? "1" : "0"); localStorage.removeItem("ops-skip"); } catch {} };
 // The right column's width, set by dragging #tdgrip; desktop only (the narrower layouts stack the columns).
 const TD_WIDE = matchMedia("(min-width: 1100px)");
 let tdRight = 0;  // px, or 0 for the default 320px
@@ -2992,15 +2996,20 @@ const tdRow = x => `<div class="tditem ${x.key === TD.key ? "sel" : ""} ${x.skip
 function tdLeft(all, shown) {
   const parked = tdParked();
   const n = g => g === "all" ? all.length : all.filter(x => x.group === g).length;
-  const html = `<div class="tdchips">${TD_FILTERS.map(([k, l]) => `<button data-f="${k}" class="${TD.filter === k ? "on" : ""}">${l}<b>${n(k)}</b></button>`).join("")}</div>`
+  // Projects first, then the to-dos; both fold like Parked, their open state kept in TD and localStorage
+  const html = tdProjects()
+    + `<details class="tdfold tdtodo" ${TD.todoOpen ? "open" : ""}><summary>To-do <span class="cnt">(${shown.length})</span></summary>`
+    + `<div class="tdchips">${TD_FILTERS.map(([k, l]) => `<button data-f="${k}" class="${TD.filter === k ? "on" : ""}">${l}<b>${n(k)}</b></button>`).join("")}</div>`
     + tdAddForm()
     + (shown.map(tdRow).join("")
       || `<div class="muted">${all.length ? "Nothing under this filter." : "Nothing needs you right now."}</div>`)
-    + tdProjects()
+    + `</details>`
     + (parked.length ? `<details class="tdparked" ${TD.parkOpen ? "open" : ""}><summary>Parked (${parked.length})</summary>${parked.map(tdRow).join("")}</details>` : "")
     + tdTopicsRow();
   if (!putKeep($("#tdleft"), html)) return;
   if ($("#tdleft .tdparked")) $("#tdleft .tdparked").ontoggle = e => { TD.parkOpen = e.target.open; };
+  for (const [sel, k] of [[".tdprojs", "projsOpen"], [".tdtodo", "todoOpen"]])
+    if ($(`#tdleft ${sel}`)) $(`#tdleft ${sel}`).ontoggle = e => { if (TD[k] !== e.target.open) { TD[k] = e.target.open; tdSave(); } };
   tdAddWire($("#tdleft"));
   $("#tdleft").querySelectorAll("[data-f]").forEach(b => b.onclick = () => { TD.filter = b.dataset.f; tdSave(); renderToday(); });
   $("#tdleft").querySelectorAll("[data-key]").forEach(el => el.onclick = () => {
@@ -3015,11 +3024,11 @@ function tdLeft(all, shown) {
 function tdProjects() {
   const projs = state.projects.filter(g => !g.error && inView(g.name)), open = tdAll();
   if (!projs.length) return "";
-  return `<div class="tdprojs"><div class="k">Projects</div>${projs.map(g => {
+  return `<details class="tdfold tdprojs" ${TD.projsOpen ? "open" : ""}><summary>Projects <span class="cnt">(${projs.length})</span></summary>${projs.map(g => {
     const n = open.filter(x => x.project === g.name).length, unread = open.some(x => x.project === g.name && x.verb === "Read" && x.source && x.source.kind === "chat");
     return `<div class="tdp ${TD.home === g.name ? "sel" : ""}" data-home="${esc(g.name)}" title="Open ${esc(g.title)}'s home"><span class="t">${esc(g.title)}</span>${
       n ? `<span class="n">${n}</span>` : ""}${unread ? `<span class="dot" title="An unread chat">●</span>` : ""}</div>`;
-  }).join("")}</div>`;
+  }).join("")}</details>`;
 }
 // Open a project's home: no step selected; the centre shows the project and its conversation. On a phone it also
 // moves to Now, with the same history entry a step has.
