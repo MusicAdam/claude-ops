@@ -763,11 +763,28 @@ stay on the right of the header.
   same video above the feedback box, and there too Approve is primary when a video exists.
 
   The centre shows either a step or a project **home**. The home is a slim card: the project title, one muted
-  status line from `/api/state` (for example `dev 3 ahead of main · 2 running · 4 to-dos`; zero running, nothing
-  ahead, and a straight-to-main project's ahead count are left out), and the project's main buttons with the
-  Projects card's endpoints and rules: **▶ Play dev** / **■ Stop dev** (only with a launch step), **Promote**
-  (dev ahead, not straight to main) and **Deploy** (opens the Deploy dialog). Errors show in the card's message
-  line. The **All clear** card (empty list, no home) is this card for the conversation's project, with a muted
+  status line from `/api/state` (for example `2 running · 4 to-dos`; zero running is left out), and the project's
+  **pipeline**, with the Projects card's endpoints and rules:
+  - The top line: **▶ Play dev** / **■ Stop dev** (only with a launch step), then a **dev → main** stage (left out
+    for a straight-to-main project). It says **N ahead** with a **Promote** button, **Release #N in progress**
+    (pulsing, a link to the release) while a release is open, or **✓ in sync**.
+  - Below it, one **lane** per deploy chain. A lane starts at a `[[deploy]]` target with no `from` (or a `from`
+    that names no target, or a loop of them) and follows the targets whose `from` names the stage before, joined
+    by arrows: for ballup-monorepo **swish** test → distribute, **dunk** prod, **web** preview → prod. A second
+    target with the same `from` starts a lane of its own, after its parent's, led by `<parent> →`. Lanes of one
+    repo sit together, in config order. A lane's label is the first word all its target names share, cut off each
+    stage's name ("test", "distribute"); with no shared word the label is the repo and stages keep their names.
+    The grouping is `depLanes()`, tested in `tests/test_deploy_lanes.py`.
+  - Each stage chip shows the short name, a status and, when known, the last deployed version and how long ago,
+    in small muted text. Status: **N commits behind** or **first deploy** (accent, with a compact **Deploy**
+    button), **✓ up to date** (muted, no button), **?** (the commit it last deployed is gone from git), **blocked**
+    or **error** (warning colour, the reason on hover, not clickable), or **deploying #N** (a link to the open
+    deploy task) in place of the status. A click anywhere on a chip that isn't blocked opens the Deploy dialog,
+    so an up-to-date stage can still be redeployed.
+  - A project with no launch step, straight to main and no deploy targets shows no pipeline. On a phone the
+    lanes stack, and a lane's chips wrap after an arrow.
+
+  Errors show in the card's message line. The **All clear** card (empty list, no home) is this card for the conversation's project, with a muted
   line that nothing needs you. The tabs and conversation below are unchanged. A message sent from a home
   carries no to-do (rule 5).
 
