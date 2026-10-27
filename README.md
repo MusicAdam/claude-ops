@@ -51,7 +51,7 @@ the config has a comment on how to opt out. Read it, adjust it, then click **Rel
                                   │
                                   ├─ Straight to main (the default): main moves to dev at once, no release
                                   │
-     direct_main = false or [[deploy]]: you click Promote ▼
+                   direct_main = false: you click Promote ▼
    release task: snapshot dev ─▶ gate ─▶ Claude builds and plays it (blocks, or passes)
                                   ▼ pass
         build the snapshot in <worktrees>/main ─▶ fast-forward main in your checkout
@@ -134,7 +134,8 @@ build, the queue first records a short video of what the task changed, and the T
 
 By default a project goes **Straight to main** (below): each merge moves main at once, and dev stays equal to it.
 The release, Promote and Promote after merge described here are for a project that opted out with
-`direct_main = false`, or one with `[[deploy]]` targets.
+`direct_main = false`. `[[deploy]]` targets don't turn Straight to main off: a deploy and a merge take turns moving
+main (see below).
 
 - **dev** gets every task that passes the gate. It is the newest version.
 - **main** moves only when a **release** passes, and its build (`<worktrees>/main`) always matches it. The one
@@ -195,7 +196,7 @@ The release, Promote and Promote after merge described here are for a project th
   carry conflict still uses a worker). A gate failure blocks it. Its summary starts `Gate-only release: the merge
   check passed (<checks>)`, then gives each released task's summary, and **Not part of this release** as usual.
   A gate-only release starts while the usage brake is on, as it starts no Claude session.
-- **Promote after merge** (only for a project that opted out of Straight to main, or has `[[deploy]]` targets; a
+- **Promote after merge** (only for a project that opted out of Straight to main, with or without `[[deploy]]` targets; a
   checkbox on a new task, and on its page until it finishes) promotes for you, as a
   **promote train**: once the task merges into dev, the queue queues a release, the same one Promote makes, but
   only when either
@@ -231,8 +232,14 @@ The release, Promote and Promote after merge described here are for a project th
   - Turned on while dev is ahead of main (as for a project from before it was the default), the next merge brings all of dev into main with it (its gate ran on
     all of it). Until then the card shows Promote, to release it at once.
   - Commits made straight to main come into dev before each task's gate (a fast-forward when they can). If they
-    conflict with dev, the task fails and says to Promote once: the release has a worker merge them.
+    conflict with dev, the task fails and says to Promote once: the release has a worker merge them. The commits a
+    deploy makes on main (a build-number bump) come in the same way.
   - Tasks move main one at a time, and never alongside a release.
+  - A merge never moves main while a deploy of the same project is open (from its start until it has landed its
+    commits on main, failed or been cancelled): the merge is done, and the task waits, queued, saying `waiting for
+    deploy #N`, then moves main once the deploy has ended. Likewise a deploy doesn't start while a merge is moving
+    main: it says `waiting for task #N`. A merge waiting on you (say the main build is running) doesn't hold a
+    deploy.
   - Send to dev lands on main too: it clears your checkout after the merge into dev, then main moves and brings
     the work back into your checkout, committed.
   - For claude-ops itself, every merge restarts the daemon to load the new code. As a restart pauses every
@@ -240,8 +247,6 @@ The release, Promote and Promote after merge described here are for a project th
     merging, for at most 15 minutes, and no new task starts meanwhile (they say `waiting for claude-ops to
     restart`). A running deploy, in any project, holds the restart with no time limit: after 15 minutes it
     restarts only once no deploy is running. A Promote restarts sooner: see below.
-  - Not for a project with `[[deploy]]` targets: a deploy moves main too, and builds from the main a release
-    checked. There the option is ignored, with a line in the daemon log.
 - Promoting claude-ops itself restarts the daemon to load the new code (`opsctl restart`: running
   tasks pause and resume). If the new daemon doesn't answer within 30 s, the release's log says so; its
   output is in `runs/<id>/restart.log`.
@@ -324,6 +329,8 @@ run = "bin/swish release"
   its step, its events and `deploy.log`. You get notified when it needs you, fails or succeeds.
 - **One at a time.** A project runs one deploy at a time; a later click queues behind it. A release and a deploy of the
   same project never run at once: the one that waits says `waiting for deploy #N` or `waiting for release #N`.
+  Under [Straight to main](#main-is-the-golden-version) a merge moving main and a deploy take turns the same way:
+  the merge says `waiting for deploy #N`, the deploy `waiting for task #N`.
 - **The deploy worktree.** Each project has one, `<worktrees>/deploy`, made on first use like a task worktree
   (workspace files, the clone list, setup). Before each deploy every repo in it is put at the commit to deploy
   (`git checkout --force --detach`, then `git reset --hard`). It is **never cleaned**: untracked and ignored files
@@ -364,8 +371,9 @@ run = "bin/swish release"
   commits, they are kept at `refs/ops/deploy-<id>` and main fast-forwards to them as a release would move it (the
   `[app]` build, your uncommitted changes carried over). If main moved during the deploy, the task needs you: merge
   `refs/ops/deploy-<id>` into main yourself and it goes on by itself, or cancel it to leave main alone. Tags the
-  command made are already in your repo. dev picks the commits up at the next release, which merges commits made
-  straight to main into dev. If the deploy succeeded but main couldn't move (say the build failed), Retry only
+  command made are already in your repo. dev picks the commits up as it picks up any commit made straight to
+  main: under Straight to main before the next task's gate (a fast-forward when it can; on a conflict the task
+  fails and says to Promote once), otherwise at the next release. If the deploy succeeded but main couldn't move (say the build failed), Retry only
   moves main.
 - **Where you deploy.** Open the project on the Projects tab: its card has a **Deploys** section, one block per target. It
   shows what the target last shipped (commit, when, its task), how far behind main (or its `from` target) it is, and
@@ -1832,7 +1840,8 @@ worktrees = "/Users/you/dev/mygame-wt"   # default: <repo>-wt
 # repos = ["backend", "app"]       # a workspace: repo is a folder and these folders in it are the git repos
 # repos = ["backend", "app", "."]  # "." too: the folder is a repo of its own that ignores the others (see Workspaces)
 max_parallel = 0                   # per-project cap; 0 = only the global "Parallel" limit
-# direct_main = false              # default true: a merge moves main at once, no release (see Straight to main)
+# direct_main = false              # default true: a merge moves main at once, no release (see Straight to main);
+                                   # [[deploy]] targets keep it on: a deploy and a merge take turns moving main
 chat_mcp = []                      # MCP servers a project chat loads, by name (see Chat mode); default none
 
 # --- repo: the rest may also live in claude-ops.toml (repos too; it must list "." there)

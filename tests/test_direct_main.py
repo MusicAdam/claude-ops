@@ -1,5 +1,7 @@
 """Straight to main (direct_main) is the default: how a project's toml sets it, and a Send to dev landing on main.
 Stdlib only. Run from the repo root: /opt/homebrew/bin/python3 -m unittest discover -s tests -q"""
+import contextlib
+import io
 import os
 import subprocess
 import sys
@@ -49,9 +51,13 @@ class Config(unittest.TestCase):
     def test_false_opts_out(self):
         self.assertFalse(self.load("direct_main = false\n").direct_main)
 
-    def test_deploy_forces_it_off(self):
-        self.assertFalse(self.load('[[deploy]]\nname = "web"\nrun = "true"\n').direct_main)
-        self.assertFalse(self.load('direct_main = true\n[[deploy]]\nname = "web"\nrun = "true"\n').direct_main)
+    def test_deploy_targets_keep_it(self):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            p = self.load('[[deploy]]\nname = "web"\nrun = "true"\n')
+        self.assertTrue(p.direct_main)
+        self.assertNotIn("direct_main is off", out.getvalue())
+        self.assertFalse(self.load('direct_main = false\n[[deploy]]\nname = "web"\nrun = "true"\n').direct_main)
 
     def test_add_project_writes_no_key_but_says_how_to_opt_out(self):
         repo = new_repo()
@@ -101,6 +107,103 @@ class SendToDevLandsOnMain(unittest.TestCase):
         self.assertEqual(git(self.repo, "rev-parse", "main"), merged)  # main moved, no Promote
         self.assertEqual((self.repo / "a.txt").read_text(), "two\n")  # the work is back in your checkout, committed
         self.assertEqual(git(self.repo, "status", "--porcelain"), "")
+
+
+class DeployAndMerge(unittest.TestCase):
+    """A project with [[deploy]] targets: under direct_main a merge moving main and a deploy take turns, and a deploy's
+    commits on main come into dev; with direct_main = false a merge stops at dev, as before."""
+
+    def make(self, extra=""):
+        opsd.init_db()
+        self.repo = new_repo()
+        opsd.PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
+        name = f"dd{self.repo.parent.name[-6:].lower()}"
+        toml = opsd.PROJECTS_DIR / f"{name}.toml"
+        toml.write_text(f'repo = "{self.repo}"\nworktrees = "{self.repo.parent / "wt"}"\n{extra}'
+                        '[[deploy]]\nname = "site"\n'
+                        'run = "git -c user.name=t -c user.email=t@example.com commit -q --allow-empty -m bump"\n')
+        opsd.load_projects()
+        self.p = opsd.PROJECTS[name]
+        self.addCleanup(lambda: (opsd.q("DELETE FROM tasks WHERE project=?", (name,)), toml.unlink(),
+                                 opsd.load_projects()))
+        opsd.bootstrap(self.p)
+
+    def merged_task(self):
+        """A task the gate passed, merged --no-ff into dev, at the point land() takes over."""
+        tid = opsd.q("INSERT INTO tasks (project, title, body, created, state, kind) VALUES (?, 'work', '', 0, "
+                     "'merging', 'task')", (self.p.name,))
+        dev = self.p.dev_wt
+        git(dev, "checkout", "-q", "-b", f"task/{tid}")
+        (dev / "a.txt").write_text(f"task {tid}\n")
+        git(dev, "commit", "-q", "-am", "work")
+        git(dev, "checkout", "-q", self.p.dev)
+        git(dev, "merge", "-q", "--no-ff", "-m", "merge", f"task/{tid}")
+        return tid, git(dev, "rev-parse", "HEAD")
+
+    def deploy(self, state):
+        return opsd.q("INSERT INTO tasks (project, title, body, created, state, kind) VALUES (?, 'Deploy site', '', "
+                      "0, ?, 'deploy')", (self.p.name, state))
+
+    def events(self, tid):
+        return [e["text"] for e in opsd.q("SELECT text FROM events WHERE task_id=? ORDER BY id", (tid,))]
+
+    def test_merge_waits_for_a_running_deploy_then_lands(self):
+        self.make()
+        dep = self.deploy("running")
+        tid, merged = self.merged_task()
+        main = git(self.repo, "rev-parse", "main")
+        opsd.land(self.p, tid, merged, "merged")
+        t = opsd.task(tid)
+        self.assertEqual((t["state"], t["start_at"]), ("queued", "main"))
+        self.assertIn(f"waiting for deploy #{dep}: it moves main too", self.events(tid))
+        self.assertEqual(git(self.repo, "rev-parse", "main"), main)  # main stayed put
+        self.assertEqual(opsd.wait_reasons([t])[tid], f"waiting for deploy #{dep}")
+        opsd.upd(dep, state="done")
+        self.assertIsNone(opsd.exclusive_blocker(opsd.task(tid)))
+        opsd._pipeline(self.p, tid)  # what the scheduler starts once the deploy has ended
+        self.assertEqual(opsd.task(tid)["state"], "done", opsd.task(tid)["error"])
+        self.assertEqual(git(self.repo, "rev-parse", "main"), merged)
+
+    def test_a_deploy_waits_for_a_merge_moving_main(self):
+        self.make()
+        dep = self.deploy("queued")
+        tid, _ = self.merged_task()
+        self.assertIsNone(opsd.exclusive_blocker(opsd.task(dep)))
+        opsd.upd(tid, start_at="main")  # land(): moving main now
+        self.assertEqual(opsd.exclusive_blocker(opsd.task(dep))["id"], tid)
+        opsd.upd(tid, state="needs_input")  # waiting for you to quit the build: the deploy may go
+        self.assertIsNone(opsd.exclusive_blocker(opsd.task(dep)))
+
+    def test_deploy_commit_moves_main_and_reaches_dev(self):
+        self.make()
+        before = git(self.repo, "rev-parse", "main")
+        dep = opsd.queue_deploy(self.p, "site")
+        opsd.upd(dep, state="running")
+        opsd.deploy_pipeline(self.p, dep)
+        self.assertEqual(opsd.task(dep)["state"], "done", opsd.task(dep)["error"])
+        main = git(self.repo, "rev-parse", "main")
+        self.assertNotEqual(main, before)
+        self.assertEqual(git(self.repo, "log", "-1", "--format=%s", "main"), "bump")
+        self.assertNotEqual(git(self.repo, "rev-parse", self.p.dev), main)
+        tid = opsd.q("INSERT INTO tasks (project, title, body, created, state) VALUES (?, 'next', '', 0, 'gating')",
+                     (self.p.name,))
+        with self.p.lock:  # what the next task's gate start does under direct_main
+            self.assertIsNone(opsd.catch_up_dev(self.p, tid))
+        self.assertEqual(git(self.repo, "rev-parse", self.p.dev), main)  # a fast-forward: dev has the bump
+
+    def test_direct_main_false_keeps_dev_and_promote(self):
+        self.make("direct_main = false\n")
+        self.assertFalse(self.p.direct_main)
+        dep = self.deploy("running")
+        tid, merged = self.merged_task()
+        main = git(self.repo, "rev-parse", "main")
+        opsd.land(self.p, tid, merged, "merged")
+        t = opsd.task(tid)
+        self.assertEqual(t["state"], "done")
+        self.assertNotEqual(t["start_at"], "main")
+        self.assertEqual(git(self.repo, "rev-parse", "main"), main)  # main waits for Promote
+        self.assertIsNone(opsd.exclusive_blocker(opsd.task(dep)))
+        self.assertFalse(any("waiting for deploy" in e for e in self.events(tid)))
 
 
 class RestartWhenIdle(unittest.TestCase):

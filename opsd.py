@@ -208,13 +208,9 @@ class Project:
         self.deploy_wt = self.wt / "deploy"  # persistent: build output survives from one deploy to the next
         self.deploys = deploy_targets(self, c.get("deploy", []))
         # direct_main (the default; `direct_main = false` opts out): a task's merge goes on to move main at once (see
-        # land), with no release. Not with [[deploy]]: a deploy moves main too, and its targets build from the main a
-        # release checked.
+        # land), with no release. [[deploy]] targets keep it: a deploy and a merge moving main take turns
+        # (exclusive_blocker), and commits a deploy makes on main reach dev before the next gate (catch_up_dev).
         self.direct_main = bool(c.get("direct_main", True))
-        if self.direct_main and self.deploys:
-            print(f"project {path.name}: direct_main is off: a project with [[deploy]] targets keeps {self.dev} "
-                  "and Promote", flush=True)
-            self.direct_main = False
         self.config_blob = ""  # claude-ops.toml's blob on main, "" with none (see load_project)
         self.config_error = None  # why the repo file on main is not the config in use
         self.config_warnings = []  # keys the repo file sets that only the home toml may
@@ -2825,6 +2821,11 @@ def land_on_main(p, tid):
     with p.main_lock:
         if stopped(tid):
             return
+        deploy = exclusive_blocker(task(tid))  # it moves main too: this goes on once it has ended
+        if deploy:
+            upd(tid, state="queued", phase="")
+            ev(tid, f"waiting for deploy #{deploy['id']}: it moves {p.main} too")
+            return
         if all(any(is_ancestor(r, sha, p.main) for r in p.parts if r.has(sha)) for sha in t["merged"].split()):
             upd(tid, start_at="claude")  # a later merge already took it to main
             return finish(p, tid, merged=t["merged"], note=f"in {p.main} already")
@@ -3826,9 +3827,17 @@ def schedule_once():
             dep = task(t["depends_on"])
             if dep and dep["state"] != "done":
                 continue
-        if exclusive_blocker(t):
+        # a deploy of a direct_main project starts only with main_lock free: a merge holding it is moving main
+        held = p.main_lock if t["kind"] == "deploy" and p.direct_main else None
+        if held and not held.acquire(blocking=False):
             continue
-        upd(t["id"], state="running", phase="starting", pid=None, pid_start=None)
+        try:
+            if exclusive_blocker(t):
+                continue
+            upd(t["id"], state="running", phase="starting", pid=None, pid_start=None)
+        finally:
+            if held:
+                held.release()
         if task(t["id"])["state"] != "running":  # paused or cancelled just now
             continue
         ev(t["id"], "started")
@@ -3843,9 +3852,22 @@ def schedule_once():
 def exclusive_blocker(t):
     """The deploy or release of t's project that t has to wait for, or None. A project runs one deploy at a time,
     and never a deploy and a release at once: both move main. Releases are one at a time already (queue_release).
-    An open one blocks unless it is queued behind t too, so two waiting ones never wait for each other."""
+    An open one blocks unless it is queued behind t too, so two waiting ones never wait for each other.
+    direct_main: a merge about to move main (start_at 'main') waits for a deploy that has started and not ended,
+    and a deploy waits for a merge that is moving main. Check and start a deploy with p.main_lock held (schedule_once),
+    as land_on_main checks with it held, so the two never both go."""
+    p = PROJECTS.get(t["project"])
+    if getattr(p, "direct_main", False) and t["kind"] in MERGES and t.get("start_at") == "main":
+        return q("SELECT id,kind,state,priority FROM tasks WHERE project=? AND kind='deploy' AND state NOT IN "
+                 "(?,?,?,'queued') ORDER BY id", (t["project"], *ENDED), one=True)
     if t["kind"] not in ("deploy", "release"):
         return None
+    if t["kind"] == "deploy" and getattr(p, "direct_main", False):
+        o = q(f"SELECT id,kind,state,priority FROM tasks WHERE project=? AND id!=? AND kind IN "
+              f"({','.join('?' * len(MERGES))}) AND start_at='main' AND state IN ('running','merging') ORDER BY id",
+              (t["project"], t["id"], *MERGES), one=True)
+        if o:
+            return o
     kinds = ("deploy", "release") if t["kind"] == "deploy" else ("deploy",)
     for o in q(f"SELECT id,kind,state,priority FROM tasks WHERE project=? AND id!=? AND kind IN "
                f"({','.join('?' * len(kinds))}) AND state NOT IN (?,?,?) ORDER BY priority DESC, id",
