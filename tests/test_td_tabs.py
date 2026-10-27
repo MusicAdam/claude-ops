@@ -10,7 +10,7 @@ from pathlib import Path
 
 PAGE = Path(__file__).resolve().parent.parent / "dashboard.html"
 page = PAGE.read_text()
-START, END = "// ---- the tab strip and the dock, pure", "// ---- end of the tab strip and the dock, pure"
+START, END = "// ---- the tab strip and the step, pure", "// ---- end of the tab strip and the step, pure"
 # Each case is [function name, ...args]; a taskTitles map stands in for state.tasks in tdNewTabOpen.
 RUN = r"""
 const h = require("fs").readFileSync(process.argv[1], "utf8");
@@ -119,7 +119,9 @@ class Wiring(unittest.TestCase):
     def test_selection_clears_mode_and_another_items_chip(self):
         js = self.body("function tdChanged(")
         self.assertIn("TD.mode = null;", js)
-        self.assertIn("if (it ? !TD.chip || TD.chip.key !== it.key : !TD.none) TD.chip = null;", js)
+        # ✕ keeps the closed to-do's chip through the move to its project's home
+        self.assertIn("if (!TD.chip || TD.chip.key !== (it ? it.key : TD.closed)) TD.chip = null;", js)
+        self.assertIn("TD.closed = it.key;", self.body("function tdDockClose("))
 
     def test_buttons_that_attach(self):
         js = self.body("async function tdDo(")
@@ -133,11 +135,28 @@ class Wiring(unittest.TestCase):
         for there in ('id="tdstrip"', 'id="saychip"', 'id="tdhomebox"'):
             self.assertIn(there, page)
 
-    def test_dock_sits_between_the_thread_and_the_message_box(self):
-        a = page.index('<section id="chat">')
-        chat = page[a:page.index("</section>", a)]
-        self.assertLess(chat.index('id="msgs"'), chat.index('id="tdstep"'))
-        self.assertLess(chat.index('id="tdstep"'), chat.index('class="composer"'))
+    def test_step_sits_under_the_project_header_above_the_thread(self):
+        a = page.index('<section id="tdcentre">')
+        centre = page[a:page.index('class="composer"', a)]
+        order = [centre.index(x) for x in ('id="tdstrip"', 'id="tdhomebox"', 'id="tdhead"', 'id="tdtodo"', 'id="msgs"')]
+        self.assertEqual(order, sorted(order))
+        chat = centre[centre.index('<section id="chat">'):]
+        self.assertNotIn('id="td', chat[chat.index('id="msgs"') + 1:])  # nothing between the thread and the composer
+        self.assertNotIn("tdstep", page)
+        self.assertNotIn("stepcard dock", page)
+
+    def test_no_chat_only_state(self):
+        self.assertNotIn("TD.none", page)
+        self.assertIn('localStorage.removeItem("ops-td-none")', page)  # a stale value is dropped
+        self.assertEqual(page.count("ops-td-none"), 1)
+
+    def test_deploy_lanes_toggle(self):
+        self.assertIn('TD.lanes = localStorage.getItem("ops-td-lanes") === "1";', page)
+        js = self.body("function tdPipeline(")
+        self.assertIn("const tog = compact && nd ?", js)  # no toggle without deploy targets
+        self.assertIn("Deploys (${nd})", js)
+        self.assertIn("lanes && open ?", js)
+        self.assertIn("tdPipeline(g, busy, true)", self.body("function tdHead("))
 
     def test_fold_is_kept(self):
         self.assertIn('TD.fold = localStorage.getItem("ops-td-dock") === "1";', page)

@@ -111,7 +111,7 @@ build, the queue first records a short video of what the task changed, and the T
   lines of what to watch, with rough timestamps, under each video. Clips stay short: 20 seconds or less, a few MB.
   With `proof/report.md` there when the worker is done, the recording turn is skipped and the task logs
   `proof report: <n> videos, <m> images` (counted in the folder); without one, the turn runs as above.
-- **Open report.** With a report (`proof_report`), the Try step (the dock and the to-do's full-screen view) and
+- **Open report.** With a report (`proof_report`), the Try step (the step card and the to-do's full-screen view) and
   the task's details page have **Open report**, and Approve & merge is primary, as with a video. It opens the
   report full screen (`#proofrep`, over everything, like the full-screen to-do: Esc, ✕ or a phone's back close
   it), rendered with the dashboard's markdown renderer: its relative media resolve to `GET
@@ -797,35 +797,49 @@ stay on the right of the header.
     title, its count of open (not parked) to-dos when above 0, and a ● when it has an unread chat (a Read to-do
     from a chat). With one project ticked its one row still shows. Clicking a row opens that project's **home**
     in the centre (TODAY-2): no to-do is selected. The home is kept in this browser (`ops-td-home`) and its row is
-    highlighted. Clicking a to-do clears the home. Clicking the selected to-do again, or **Esc** on Today with no
+    highlighted. Clicking a to-do clears the home and selects the to-do and its project: the to-do's row has its
+    normal highlight and its project's row a softer one (an accent bar on its left and a light tint), and the
+    centre shows that project's header with the step under it (TODAY-2). The project shown always follows the
+    selected item, the auto-selected one too; it is the item's own project, not stored. Clicking the selected to-do again, or **Esc** on Today with no
     menu, panel or dialog open and focus outside a text field, goes to the home of that item's project; except that
     clicking it again while it has a topic and another tab is shown jumps back to its tab, as **Back to its tab →**
     does (TODAY-2). While a
     home is open nothing is auto-selected, so a new to-do arriving doesn't move the centre. If the home project
     leaves view (the switcher changes, or it is archived or removed), the home clears and the auto-select
     returns.
-- **TODAY-2 Centre: always a chat, with the step as a dock.** The centre column is always the conversation (see
-  *one conversation per project* below): a strip of tabs on top, one per open topic, then the thread, then the
-  message box. Selecting a to-do never moves you to another tab by itself unless the to-do already has a topic
+- **TODAY-2 Centre: always a chat, with the project and its step on top.** The centre column is always the conversation (see
+  *one conversation per project* below): a strip of tabs on top, one per open topic, then the header block (the
+  project and, with a to-do selected, its step), then the thread, then the message box. Nothing sits between the
+  thread and the message box. Selecting a to-do never moves you to another tab by itself unless the to-do already has a topic
   (see *A to-do's topic* below), and never puts anything into the chat by itself.
 
-  **The dock.** The selected item's step sits in a dock between the thread and the message box: a `--panel` card
-  with rounded top corners, resting on the composer's top border. With no to-do selected there is no dock. A **▾**
-  at its top right folds it to one line (the verb and the title) and **▸** unfolds it; this browser keeps the choice
-  (`ops-td-dock` in localStorage, `1` folded), for every item. The dock scrolls inside itself when it is taller than
-  about half the column, so the thread always keeps room.
+  **The header block.** Under the tab strip is one card (`#tdhomebox`) in two parts: the project on top and,
+  with a to-do selected, the to-do's step under a divider. With no to-do selected (a project home, or All clear)
+  it is the project alone, with the full pipeline (see *the home* below). The block scrolls inside itself when it
+  is taller than about 55% of the column (75% on a wide screen when the step has a proof video), so the thread
+  always keeps room.
+  - **The project header, compact.** While a to-do is selected the project part shows the project title, the
+    muted status line (`2 running · 4 to-dos`) and only the pipeline's top line: **▶ Play dev** / **■ Stop dev**
+    and the **dev → main** stage with **Promote**, **Release #N in progress** or **✓ in sync**. The deploy lanes
+    fold behind **Deploys (N) ▸**, N the number of deploy targets, which opens them in place (**Deploys (N) ▾**
+    folds them again); a project with no deploy targets has no such toggle. This browser keeps whether the lanes
+    are open (`ops-td-lanes`, `1` open). They start folded.
+  - **The step.** Under the divider, the selected item's step. A **▾** at its top right folds it to one line (the
+    verb and the title) and **▸** unfolds it; this browser keeps the choice (`ops-td-dock` in localStorage, `1`
+    folded), for every item. Folded, the card is the project header and that one line.
 
-  After **▾** the top row has **⤢** ("Open full screen") and, for a to-do with no topic (the dock offers **＋ Add to
-  this chat**), **✕** ("Close: keep it on your list"). Both show folded or not, on a computer and a phone.
+  After **▾** the step's top row has **⤢** ("Open full screen") and, for a to-do with no topic (the step offers
+  **＋ Add to this chat**), **✕** ("Close: keep it on your list"). Both show folded or not, on a computer and a phone.
   - **✕** deselects the to-do and changes nothing about it: it is not skipped, parked or closed, and stays on the
-    list. The centre shows the conversation, on the same tab, with no dock and no home card, and nothing is
-    auto-selected (kept in this browser as `ops-td-none`, the project whose conversation stays) until you click a
-    to-do or a project. Its 📎 chip, if attached, stays attached; the chip's own ✕ takes it off. Selecting the to-do
-    again brings the dock back. On a phone ✕ is **‹ To-do** (PHONE-2). A to-do with a topic has no ✕.
+    list. The centre shows its project's **home**: the full pipeline and the project's conversation, on the same
+    tab, and nothing is auto-selected (the home rule, TODAY-1), so a reload keeps the home. Its 📎 chip, if
+    attached, stays attached, so a message from that home still carries it; the chip's own ✕ takes it off.
+    Selecting the to-do again brings its step back. On a phone ✕ is **‹ To-do** (PHONE-2) and also leaves that
+    home behind it. A to-do with a topic has no ✕.
   - **⤢** opens the to-do over the whole window (`#tdfull`; on a phone full screen, as task details are). **Esc**,
     the **✕** in its header and a phone's back gesture close it; on a phone it is one history entry. It shows what
-    the dock cuts short: the whole title, the why, the key facts, the proof video as large as the window allows,
-    every action button (the dock's endpoints), the chat buttons, **Wait for…**, **Skip for now →** and the note.
+    the step card cuts short: the whole title, the why, the key facts, the proof video as large as the window allows,
+    every action button (the step's endpoints), the chat buttons, **Wait for…**, **Skip for now →** and the note.
     A button that carries on elsewhere (Send back, Answer, attach, a task's details, Wait for…) closes the view
     first. When the to-do is about a task (its source is a task, its subject is `task:<id>`, or it is parked
     waiting on tasks: the first), the view loads `GET /api/tasks/<id>` once on open, saying `Loading…` and then the
@@ -836,7 +850,7 @@ stay on the right of the header.
   The step: **Step k of n** (k within the filter) · project,
   the title, the why, and key facts. For a task: its number, the gate result, how many files it changed, and how
   long ago it was built. One primary button, a few secondary ones, and **Skip for now →**. Every button calls an
-  endpoint the older pages already use. After them come the dock's chat buttons (see *A to-do's topic*):
+  endpoint the older pages already use. After them come the step's chat buttons (see *A to-do's topic*):
   **＋ Add to this chat** and **New tab ↗** for a to-do with no topic, `This tab is its topic` when its topic is the
   tab shown, or **Back to its tab →** when it has a topic and another tab is shown. Beside **Skip for now →**, on the desktop and phone layouts alike, is a
   one-line note field, always shown, with the placeholder `Note to self, e.g. wait for #249`. It saves as you
@@ -854,8 +868,8 @@ stay on the right of the header.
   report (Proof video) shows in a Try step's details and, on the details page, between the video and the feedback
   box.
 
-  The centre shows either a step (in the dock) or a project **home**. The home is a slim card above the thread,
-  under the tab strip: the project title, one muted
+  With no to-do selected the centre shows a project **home**: the header block alone, a slim card above the
+  thread, under the tab strip: the project title, one muted
   status line from `/api/state` (for example `2 running · 4 to-dos`; zero running is left out), and the project's
   **pipeline**, with the Projects card's endpoints and rules:
   - The top line: **▶ Play dev** / **■ Stop dev** (only with a launch step), then a **dev → main** stage (left out
@@ -879,7 +893,7 @@ stay on the right of the header.
 
   Errors show in the card's message line. The **All clear** card (empty list, no home) is this card for the conversation's project, with a muted
   line that nothing needs you. The tabs and the conversation under it are unchanged. A message sent from a home
-  or the All clear card carries no to-do: there is nothing to attach.
+  or the All clear card carries no to-do, unless a step's ✕ led there and left its chip attached.
 
   Every step also has **Wait for…** beside Skip. It opens a small chooser under the step. A header line says
   what it does: `Park this item until tasks finish or a time comes. It comes back when they do.` First comes
@@ -949,7 +963,7 @@ stay on the right of the header.
       still pending).
     - **Pinned tabs.** At the right of the same strip are **Specs & designs**, **Research** and **Tasks** (TODAY-4),
       styled quieter than topic tabs. Picking one shows that section in place of the thread and the message box; the
-      dock stays. Picking a topic tab goes back to the thread. The tab you pick is kept in this browser
+      header block stays. Picking a topic tab goes back to the thread. The tab you pick is kept in this browser
       (`ops-td-sec`). There is no separate Conversation tab: any topic tab is the conversation.
     - **▾** at the right end of the strip opens a small menu: **Ended (N)**, the ended topics newest first, each
       with **Reopen** (clicking its title reopens it too and selects it), and **End read topics older than N days**.
@@ -984,7 +998,7 @@ stay on the right of the header.
       topic has ended sends the `topic_ended` that `/api/state` gave the item, so it reopens (see *A to-do's
       topic*). If you saw it open but it has ended since (a tab or `/api/state` answer from before the end), it stays
       ended, doesn't become the current topic, and the answer carries `still_ended: <ref>`; for a chat's Read step the
-      dashboard drops the step and moves to the next item, for any other to-do the tab stays and the dock offers
+      dashboard drops the step and moves to the next item, for any other to-do the tab stays and the step offers
       **Back to its tab →**, which reopens it once the next poll has the new value. End topic also drops the
       chat's Read step at once, and keeps it off for 20 s against an older `/api/state` answer. A call without
       `ended` (the CLI, older callers) reopens as before. No time windows.
@@ -1016,10 +1030,10 @@ stay on the right of the header.
     `null`) and `topic_ended` (when that topic ended, or `null`). `todo_topic()` and `todo_bond()` in opsd.py.
   - **Selecting a to-do.**
     - **With a topic** (of the conversation's project): the view jumps to its tab (`how: topic`, with
-      `ended: topic_ended`). If that topic has ended, this reopens it and selects it. The dock says
+      `ended: topic_ended`). If that topic has ended, this reopens it and selects it. The step says
       `This tab is its topic` instead of the attach buttons. It jumps once, when you select it: after that you choose.
-    - **Without a topic**: the current tab doesn't change. The dock shows **＋ Add to this chat** and **New tab ↗**.
-    - When you switch to another tab while a to-do with a topic is selected, the dock shows **Back to its tab →** in
+    - **Without a topic**: the current tab doesn't change. The step shows **＋ Add to this chat** and **New tab ↗**.
+    - When you switch to another tab while a to-do with a topic is selected, the step shows **Back to its tab →** in
       place of the attach buttons; it selects that tab again. A to-do of another project than the conversation shown
       (after **Ask Claude about this** moved it) shows **Back to its project →**, which goes back to its project's
       conversation.
@@ -1043,7 +1057,7 @@ stay on the right of the header.
       to another project's conversation.
   - **Which topic a message goes to** (`conv_say()` in opsd.py): always the tab you see. A message continues the
     current topic, or creates the pending one (a plain new topic, a to-do's **New tab ↗**, or a panel's subject).
-    A message without an attached chip carries no to-do, whatever step the dock shows. Nothing routes a message to
+    A message without an attached chip carries no to-do, whatever step is shown. Nothing routes a message to
     a to-do's topic behind your back: to talk in a to-do's topic, select it (it jumps there) or use **Back to its tab →**.
 
     Picking another tab, **+**, or **New tab ↗** for another item replaces a pending topic still waiting for its
@@ -1186,20 +1200,21 @@ stay on the right of the header.
 Below 700px Today is phone-first. The rules:
 
 - **PHONE-1 One column at a time.** A bottom bar switches between **To-do** (with a red count badge), **Now** (the
-  conversation, with the step in its dock) and **Activity** (the timeline). The page opens on To-do. Tapping a to-do opens it in
+  tab strip, the header block with the project and the step, the thread and the message box, in that order) and **Activity** (the timeline). The page opens on To-do. Tapping a to-do opens it in
   Now. The Projects section is at the top of the To-do pane, above the list, and folds as on a computer; tapping a project opens Now on its home
   (compact: a title row with **‹ To-do**, and the buttons in one row that scrolls sideways). Task details, and the other timeline panels, open full screen.
 - **HDR-1 Header.** One row, about 40px: the name, the project switcher and **More**. The switcher takes the
   room left on the row, cuts its label short to fit, and opens the same checklist as on a computer. The Today button, the queue
   readouts and the pause buttons are left out on Today; the other pages still show them. The usage-limit bar
   still shows when the limit is hit.
-- **HDR-2 Step dock.** The step is the dock above the message box, as on a computer, compact by default: one top row with **‹ To-do**, **Step k of n · project**,
-  **Details ▾**, **Skip →** (and **Unpark** for a parked item, **Unskip** for a skipped one) and the dock's **▾**; then the title; then one row of action buttons
-  that scrolls sideways, ending in the dock's chat buttons, the note field and **Wait for…** (TODO-6). Folded, it is
+- **HDR-2 Step card.** The step sits in the header block under its project's compact header, above the thread, as on
+  a computer, compact by default: one top row with **‹ To-do**, **Step k of n · project**,
+  **Details ▾**, **Skip →** (and **Unpark** for a parked item, **Unskip** for a skipped one) and the step's **▾**; then the title; then one row of action buttons
+  that scrolls sideways, ending in the step's chat buttons, the note field and **Wait for…** (TODO-6). Folded, it is
   the top row alone, with the verb and title in place of **Step k of n**. The why and the facts open under **Details ▾**.
   A Try step's proof video sits under the title at full width; the card scrolls to its buttons (HDR-4).
   The title is cut at two lines; **Details ▾** shows it whole, and a title over about 50 characters brings **Details ▾**
-  even when there is no why or facts. A Try step's review report is under **Details ▾** too. After the dock's **▾**
+  even when there is no why or facts. A Try step's review report is under **Details ▾** too. After the step's **▾**
   come **⤢** and, for a to-do with no topic, **✕** (TODAY-2), small enough that the top row still fits a phone;
   **✕** goes back to the list as **‹ To-do** does. **⤢**'s view covers the whole screen, the bottom bar and the
   header included, inside the safe-area insets; it scrolls as one page, its header with **✕** stays at the top, its
@@ -1215,8 +1230,8 @@ Below 700px Today is phone-first. The rules:
   **New topic** is the strip's **+**. The lines
   over the messages (where a chat runs and its resume command, **Started by**, **Read the change**, a design's
   **Documents**) wrap rather than being cut off; past three lines they scroll.
-- **HDR-4 Room to talk.** While a step is open the thread gets at least half the pane; the dock scrolls inside
-  what is left, and folds to one line with its **▾**. A long conversation never pushes the composer off the screen.
+- **HDR-4 Room to talk.** While a step is open the thread gets at least half the pane; the header block scrolls
+  inside what is left, and folds to one line with its **▾**. A long conversation never pushes the composer off the screen.
 - **PHONE-2 Back.** **‹ To-do** returns to the list, and so do **To-do** in the bottom bar and the phone's back
   gesture: opening a step or a project home, or a details panel or a to-do's full-screen view, adds a history entry, and going back closes one level (the panel or the full-screen view, then
   the step). Switching between Now and Activity adds no more entries, so one back from either reaches To-do. This
@@ -1237,8 +1252,8 @@ Below 700px Today is phone-first. The rules:
   tabs in the same scrolling row, the **▾** stays at its right end, and the ▾ menu (Ended with Reopen, End read
   topics) opens full width under it. To reach another project's topics, use **Topics and Ended** at the bottom of the **To-do** pane:
   one chip per project the header filter shows. A chip opens Now on that project's conversation; tap a tab, or open
-  the ▾ and tap **Reopen**. With a to-do open, the dock stays and only the conversation moves (as Ask Claude about
-  this moves it); the dock's **Back to its project →**, or tapping that to-do in the list, brings back its own
+  the ▾ and tap **Reopen**. With a to-do open, the step stays and only the conversation moves (as Ask Claude about
+  this moves it); the step's **Back to its project →**, or tapping that to-do in the list, brings back its own
   conversation. The chips are phone-only: a computer shows the conversation beside the list.
 - **PHONE-6 Parity.** A phone's Today can do everything a computer's can, except what HDR-1 leaves out on purpose
   (the queue readouts and pause buttons). Anything new on Today must say how it works below 700px: where it sits,

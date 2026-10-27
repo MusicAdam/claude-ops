@@ -1,5 +1,5 @@
 """dashboard.html: only an attached to-do (the 📎 chip) reaches a chat (README TODAY-2, attaching a to-do; conv_say's
-todo). A step showing in the dock carries nothing. Runs the page's own convTodo and convSay in node with stubs;
+todo). A step showing in the header block carries nothing. Runs the page's own convTodo and convSay in node with stubs;
 skipped without node. Run from the repo root: /opt/homebrew/bin/python3 -m unittest discover -s tests -q"""
 import json
 import shutil
@@ -9,7 +9,7 @@ from pathlib import Path
 
 PAGE = Path(__file__).resolve().parent.parent / "dashboard.html"
 START, END = "// ---- the to-do a message is sent from", "// ---- end of the to-do a message is sent from"
-# Each case is {item, chip, project}: TD.item is the step in the dock, TD.chip the attached to-do. Prints what
+# Each case is {item, chip, project}: TD.item is the step shown, TD.chip the attached to-do. Prints what
 # convSay posted and the chip after it, per case.
 RUN = r"""
 const h = require("fs").readFileSync(process.argv[1], "utf8");

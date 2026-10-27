@@ -439,22 +439,28 @@ a[data-task] { color: var(--accent); cursor: pointer; }
 #tdgrip::after { content: ""; position: absolute; top: 0; bottom: 0; left: 3px; width: 2px; border-radius: 1px; }
 #tdgrip:hover::after, #tdgrip.on::after { background: var(--accent); }
 #todayview.tddrag { user-select: none; cursor: col-resize; }
-/* The centre is always a chat (README TODAY-2): the tab strip, a project home's card, the thread, the step's dock
-   resting on the composer, the composer. */
-#tdhomebox { flex: none; max-height: 55%; overflow: auto; }
-#tdstep { flex: none; max-height: 45%; overflow: auto; }
-#tdstep:empty, #tdhomebox:empty { display: none; }
-@media (min-width: 700px) { #tdstep:has(.proof video) { max-height: 75%; } }  /* room for the clip and the buttons under it */
+/* The centre is always a chat (README TODAY-2): the tab strip, the header block (one card: the project, then the
+   selected to-do's step under a divider), the thread, the composer. */
+#tdhomebox { flex: none; max-height: 55%; overflow: auto; margin-bottom: 8px; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; }
+#tdhomebox:not(:has(.stepcard)) { display: none; }
+@media (min-width: 700px) { #tdhomebox:has(.proof video) { max-height: 75%; } }  /* room for the clip and the buttons under it */
+#tdhomebox .stepcard { margin: 0; border: 0; border-radius: 0; background: none; }
+#tdhomebox .stepcard.tdo { border-top: 1px solid var(--line); padding: 10px 16px 12px; }
+#tdhomebox .stepcard.tdproj { padding: 10px 16px; }
+.stepcard.tdproj .ptitle { display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; }
+.stepcard.tdproj .ptitle h2 { margin: 0; font-size: 16px; }
+.stepcard.tdproj .ptitle .hst { margin: 0; }
+.stepcard.tdproj .pipe { margin-top: 8px; }
+.pipe .lanesbtn { padding: 3px 10px; font-size: 13px; background: none; color: var(--muted); }
 #tdcentre #chat { flex: 1; min-height: 0; }
 #tdcentre .composer { border-top: 1px solid var(--line); }
-#tdstep .stepcard.dock { margin: 0; border-bottom: 0; border-radius: 10px 10px 0 0; padding: 10px 16px 12px; }
-.stepcard.dock .top { display: flex; align-items: center; gap: 8px; }
-.stepcard.dock .top .k { flex: 1; min-width: 0; }
-.stepcard.dock .fold { flex: none; margin-left: auto; padding: 0 6px; background: none; border-color: transparent; color: var(--muted); }
-.stepcard.dock.folded { padding: 5px 16px; }
-.stepcard.dock .ft { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
-.stepcard.dock .ft .verb { margin-right: 4px; } .stepcard.dock .ft .tid { margin-right: 6px; }
-.stepcard.dock .tbtn { flex: none; padding: 0 6px; background: none; border-color: transparent; color: var(--muted); }
+.stepcard.tdo .top { display: flex; align-items: center; gap: 8px; }
+.stepcard.tdo .top .k { flex: 1; min-width: 0; }
+.stepcard.tdo .fold { flex: none; margin-left: auto; padding: 0 6px; background: none; border-color: transparent; color: var(--muted); }
+#tdhomebox .stepcard.tdo.folded { padding: 5px 16px; }
+.stepcard.tdo .ft { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+.stepcard.tdo .ft .verb { margin-right: 4px; } .stepcard.tdo .ft .tid { margin-right: 6px; }
+.stepcard.tdo .tbtn { flex: none; padding: 0 6px; background: none; border-color: transparent; color: var(--muted); }
 /* The full-screen view of a to-do (README TODAY-2, HDR-2): the whole viewport, over the header on a phone too */
 #tdfull { position: fixed; inset: 0; z-index: 9; background: var(--bg); overflow: auto; overscroll-behavior: contain;
           padding: 0 max(16px, env(safe-area-inset-right)) max(16px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left)); }
@@ -530,10 +536,8 @@ body:not(.td) #tdfull { display: none; }
 #tdmenu .tdend button { grid-row: 1 / 3; grid-column: 2; font-size: 11px; padding: 1px 8px; }
 #tdmenu .endread { margin: 8px 0 0; gap: 6px; } #tdmenu .endread :is(button, select) { font-size: 11px; padding: 1px 8px; }
 #tdsec { flex: 1; min-height: 0; overflow: auto; padding-bottom: 16px; }
-/* A pinned section shows in place of the thread and the message box; the dock stays */
-#tdcentre.secopen #chat { flex: none; min-height: 0; max-height: 45%; }
-#tdcentre.secopen #tdstep { max-height: none; flex: 0 1 auto; }
-#tdcentre.secopen #chat > :not(#tdstep) { display: none; }
+/* A pinned section shows in place of the thread and the message box; the header block stays */
+#tdcentre.secopen #chat { display: none; }
 #tdsechead .row { margin: 0 0 8px; gap: 6px; flex-wrap: wrap; }
 #tdsechead textarea, #tdsechead input[type=text] { width: 100%; box-sizing: border-box; margin-bottom: 6px; }
 #tdsec .tlitem .t .dot { color: var(--warn); margin-right: 4px; }
@@ -556,6 +560,8 @@ details.tdfold[open] > summary .cnt { display: none; }  /* the count shows only 
 .tdprojs .tdp { display: flex; gap: 8px; align-items: baseline; padding: 5px 10px; border: 1px solid var(--line); border-radius: 8px;
                 background: var(--panel); margin-bottom: 4px; cursor: pointer; font-size: 13px; }
 .tdprojs .tdp.sel { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+/* The selected to-do's project (TODAY-1): softer than a home's highlight */
+.tdprojs .tdp.with { box-shadow: inset 3px 0 0 var(--accent); background: color-mix(in srgb, var(--accent) 8%, var(--panel)); }
 .tdprojs .tdp .t { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tdprojs .tdp .n { color: var(--muted); } .tdprojs .tdp .dot { color: var(--warn); }
 .stepcard .hst { margin: 4px 0 0; font-size: 13px; }
@@ -708,10 +714,9 @@ details.tdparked .tditem { opacity: .8; }
   #tdnav .badge { position: absolute; top: -6px; left: 14px; min-width: 18px; padding: 0 5px; border-radius: 99px; background: var(--bad);
                   color: var(--on-accent); font-size: 11px; font-weight: 600; line-height: 18px; }
   /* HDR-4: the thread keeps at least half the pane at a bounded height and never grows to its content, so only
-     #msgs scrolls; the dock (and a home's card) shrinks and scrolls inside what is left. */
-  #tdhomebox { flex: 0 1 auto; min-height: 44px; max-height: 40%; overflow: auto; padding-top: 6px; }
-  #tdstep { flex: 0 1 auto; min-height: 36px; max-height: 40%; overflow: auto; }
-  #tdstep .stepcard.dock { padding: 6px 10px 8px; }
+     #msgs scrolls; the header block (the project and the step) shrinks and scrolls inside what is left. */
+  #tdhomebox { flex: 0 1 auto; min-height: 44px; max-height: 40%; overflow: auto; margin-bottom: 6px; }
+  #tdhomebox .stepcard.tdo, #tdhomebox .stepcard.tdproj { padding: 6px 10px 8px; }
   #tdcentre #chat { flex: 1 1 0; min-height: 0; }
   #tdcentre #msgs { flex: 1 1 50%; min-height: 0; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; }
   /* PHONE-5: the topic tabs and the pinned ones scroll sideways in one row; ▾ stays at the right, its menu full width */
@@ -836,12 +841,11 @@ details.tdparked .tditem { opacity: .8; }
 <div id="tip" class="hidden"></div>
 <div id="todayview" class="hidden" data-pane="todo">
   <aside class="side" id="tdleft"></aside>
-  <section id="tdcentre"><div id="tdstrip"></div><div id="tdhomebox"></div>
+  <section id="tdcentre"><div id="tdstrip"></div><div id="tdhomebox"><div id="tdhead"></div><div id="tdtodo"></div></div>
     <div id="tdsec" class="tl hidden"><div id="tdsechead"></div><div id="tdsecmsg"></div><div id="tdseclist"></div></div>
     <section id="chat">
       <div id="chathead" class="chathead"></div>
       <div id="msgs"></div>
-      <div id="tdstep"></div>
       <div class="composer">
         <div id="slash" class="hidden"></div>
         <div id="saymode" class="hidden"></div>
@@ -3066,13 +3070,13 @@ new ResizeObserver(() => document.documentElement.style.setProperty("--hdr-h", $
 const TD = {key: "", home: null, filter: "all", drafts: {}, noteTimer: null, parkOpen: false, projsOpen: true, todoOpen: true, order: [], item: null, convKey: null, task: null, mode: null, busy: "",
             msg: "", note: "", panel: null, cv: null, rs: null, over: null, applied: "", starter: "",
             pane: "todo", dets: false, sec: "conv", sd: null, unc: null, udiff: false,
-            chip: null, menu: false, fold: false,  // the attached to-do, the strip's ▾ menu, the dock folded
+            chip: null, menu: false, fold: false, lanes: false,  // the attached to-do, the strip's ▾ menu, the step folded, Deploys (N) open
             wait: null, add: null,  // the open Wait for… chooser {key, ids, other, until}, and the + Add form
-            none: null, full: null, ft: null, fullNext: null};  // ✕'s project (no step, no home), the full-screen view  // the open Wait for… chooser {key, ids, other, until}, and the + Add form
+            closed: null, full: null, ft: null, fullNext: null};  // the to-do ✕ just closed (its chip stays), the full-screen view
 try {
   TD.key = localStorage.getItem("ops-todo") || "";
   TD.home = localStorage.getItem("ops-td-home") || null;
-  TD.none = localStorage.getItem("ops-td-none") || null;
+  TD.lanes = localStorage.getItem("ops-td-lanes") === "1";
   TD.filter = localStorage.getItem("ops-todo-filter") || "all";
   TD.sec = localStorage.getItem("ops-td-sec") || "conv";
   TD.projsOpen = localStorage.getItem("ops-td-projs-open") !== "0";  // both sections start open
@@ -3083,10 +3087,10 @@ const TD_FILTERS = [["all", "All"], ["review", "Review"], ["unblock", "Unblock"]
 const SEND_WORDS = {answer: "Send answer", reject: "Send back", retry: "Retry", queue: "Queue task"};
 const STAGES = ["Queued", "Working", "Gate", "Review", "Merged", "Promoted"];
 const midnight = () => { const d = new Date(); d.setHours(0, 0, 0, 0); return d.getTime() / 1000; };
-const tdSave = () => { try { localStorage.setItem("ops-todo", TD.key); localStorage.setItem("ops-td-home", TD.home || ""); localStorage.setItem("ops-td-none", TD.none || ""); localStorage.setItem("ops-todo-filter", TD.filter);
+const tdSave = () => { try { localStorage.setItem("ops-todo", TD.key); localStorage.setItem("ops-td-home", TD.home || ""); localStorage.setItem("ops-todo-filter", TD.filter);
   localStorage.setItem("ops-td-sec", TD.sec); localStorage.setItem("ops-td-projs-open", TD.projsOpen ? "1" : "0");
   localStorage.setItem("ops-td-todo-open", TD.todoOpen ? "1" : "0"); localStorage.setItem("ops-td-dock", TD.fold ? "1" : "0");
-  localStorage.removeItem("ops-skip"); } catch {} };
+  localStorage.setItem("ops-td-lanes", TD.lanes ? "1" : "0"); localStorage.removeItem("ops-skip"); localStorage.removeItem("ops-td-none"); } catch {} };
 // The right column's width, set by dragging #tdgrip; desktop only (the narrower layouts stack the columns).
 const TD_WIDE = matchMedia("(min-width: 1100px)");
 let tdRight = 0;  // px, or 0 for the default 320px
@@ -3162,13 +3166,16 @@ function tdHomeRule(home, viewNames, hasSel, nShown) {
   const h = home && viewNames.includes(home) ? home : null;
   return {home: h, auto: !h && !hasSel && nShown > 0};
 }
+// The project the centre shows, and whose Projects row is highlighted: the home, else the selected item's own
+// project (derived, never stored). sel: a home's highlight; with: the softer one beside a selected to-do.
+function tdShownProject(home, item) { return home ? {name: home, how: "sel"} : item ? {name: item.project, how: "with"} : null; }
+// A step's ✕: the to-do stays as it is, and its project's home opens (so nothing auto-selects, reloads included)
+function tdAfterClose(it) { return {key: "", home: it.project}; }
 // ---- end of Today's pick rule
 function tdPick(shown) {
   let it = shown.find(x => x.key === TD.key) || tdParked().find(x => x.key === TD.key);
   const names = state.projects.filter(g => inView(g.name)).map(g => g.name);
-  // After the dock's ✕ nothing is selected and nothing auto-selects, until you pick a to-do or a home
-  if (TD.none && (it || TD.home || !names.includes(TD.none))) { TD.none = null; tdSave(); }
-  const rule = tdHomeRule(TD.home, names, !!it || !!TD.none, shown.length);
+  const rule = tdHomeRule(TD.home, names, !!it, shown.length);
   if (rule.home !== TD.home) { TD.home = rule.home; tdSave(); }
   if (TD.home) it = null;
   if (rule.auto) {
@@ -3184,20 +3191,21 @@ function renderToday() {
   if (tab !== "today" || !state) return;
   const all = tdAll(), shown = tdShown(all), it = tdPick(shown);
   TD.item = it;
-  const ck = it ? it.key : TD.home ? "home:" + TD.home : TD.none ? "none:" + TD.none : "";
+  const ck = it ? it.key : TD.home ? "home:" + TD.home : "";
   if (ck !== TD.convKey) tdChanged(it, ck);
   if (it && it.verb === "Commit") tdLoadUncommitted(it);
-  tdLeft(all, shown); tdStep(it, shown); tdFull(it); tdSections(); tdTimeline(); tdPanel(); renderSayMode();
+  tdLeft(all, shown); tdHead(it); tdStep(it, shown); tdFull(it); tdSections(); tdTimeline(); tdPanel(); renderSayMode();
   $("#todayview").dataset.pane = TD.pane;
   document.querySelectorAll("#tdnav [data-pane]").forEach(b => b.classList.toggle("on", b.dataset.pane === TD.pane));
   const badge = $("#tdnav .badge"); badge.textContent = all.length; badge.classList.toggle("hidden", !all.length);
 }
-// A new item in the dock: its facts, and its conversation (which jumps to its topic when it has one).
+// A new item in the centre: its facts, and its conversation (which jumps to its topic when it has one).
 // Selecting doesn't touch the message box: no mode (Answer's is its button's) and no chip but this item's own.
 function tdChanged(it, ck) {
   TD.convKey = ck;
   TD.mode = null;
-  if (it ? !TD.chip || TD.chip.key !== it.key : !TD.none) TD.chip = null;  // ✕ keeps the closed to-do's chip
+  if (!TD.chip || TD.chip.key !== (it ? it.key : TD.closed)) TD.chip = null;  // ✕ keeps the closed to-do's chip
+  TD.closed = null;
   TD.task = null; TD.unc = null; TD.uncSig = ""; TD.udiff = false; TD.over = null; TD.msg = ""; TD.note = ""; chatKey = ""; TD.dets = false; tdClearStarter();
   renderConv();  // the last item's End topic waits until this one's conversation loads
   refreshDesign();
@@ -3249,11 +3257,11 @@ function tdLeft(all, shown) {
 // The Projects section (README TODAY-1): a row per project in view, in state.projects' order, with its open to-dos
 // and a ● for an unread chat. A click opens the project's home in the centre, with no step.
 function tdProjects() {
-  const projs = state.projects.filter(g => !g.error && inView(g.name)), open = tdAll();
+  const projs = state.projects.filter(g => !g.error && inView(g.name)), open = tdAll(), on = tdShownProject(TD.home, TD.item);
   if (!projs.length) return "";
   return `<details class="tdfold tdprojs" ${TD.projsOpen ? "open" : ""}><summary>Projects <span class="cnt">(${projs.length})</span></summary>${projs.map(g => {
     const n = open.filter(x => x.project === g.name).length, unread = open.some(x => x.project === g.name && x.verb === "Read" && x.source && x.source.kind === "chat");
-    return `<div class="tdp ${TD.home === g.name ? "sel" : ""}" data-home="${esc(g.name)}" title="Open ${esc(g.title)}'s home"><span class="t">${esc(g.title)}</span>${
+    return `<div class="tdp ${on && on.name === g.name ? on.how : ""}" data-home="${esc(g.name)}" title="Open ${esc(g.title)}'s home"><span class="t">${esc(g.title)}</span>${
       n ? `<span class="n">${n}</span>` : ""}${unread ? `<span class="dot" title="An unread chat">●</span>` : ""}</div>`;
   }).join("")}</details>`;
 }
@@ -3261,7 +3269,7 @@ function tdProjects() {
 // moves to Now, with the same history entry a step has.
 function tdHome(project) {
   if (!project) return;
-  TD.home = project; TD.key = ""; TD.none = null; TD.over = null; tdSave();
+  TD.home = project; TD.key = ""; TD.over = null; tdSave();
   if (TD.pane === "todo") tdGo("now"); else renderToday();
 }
 // PHONE-5: on a phone the conversation, with its tab strip and the ▾ that holds Ended, is in the Now pane and shows
@@ -3345,7 +3353,7 @@ function tdFacts(it) {
   }
   return out.join("");
 }
-// The dock's chat buttons (README TODAY-2, a to-do's topic): attach it, or say where its topic is.
+// The step's chat buttons (README TODAY-2, a to-do's topic): attach it, or say where its topic is.
 function tdBondHtml(it) {
   const m = tdDockMode(it, convReady() ? TD.cv : null), on = !!TD.chip && TD.chip.key === it.key;
   if (m === "attach") return `<span class="tdbond"><button data-ta="attach" ${on ? "disabled" : ""} title="${on ? "Attached: your next message carries it" : "Attach it to your next message in this tab. Sending it makes this tab its topic"}">＋ Add to this chat</button>`
@@ -3355,19 +3363,17 @@ function tdBondHtml(it) {
   if (m === "project") return `<span class="tdbond"><button data-ta="backtab" title="Back to ${esc(P(it.project).title || it.project)}'s conversation">Back to its project →</button></span>`;
   return "";
 }
-// The selected item's step, as the dock between the thread and the message box. ▾ folds it to one line.
+// The selected item's step, in the header block under its project's header (README TODAY-2). ▾ folds it to one line.
 function tdStep(it, shown) {
-  if (!it && TD.none) { put($("#tdstep"), ""); $("#tdstep").dataset.key = ""; put($("#tdhomebox"), ""); return; }  // ✕: only the chat
-  if (!it) return tdHomeCard();
-  put($("#tdhomebox"), "");
+  if (!it) { put($("#tdtodo"), ""); $("#tdtodo").dataset.key = ""; return; }
   if (TD.fold) {
-    const html = `<div class="stepcard dock folded"><div class="top"><button class="ph back" data-back title="Back to the list">‹ To-do</button>
+    const html = `<div class="stepcard tdo folded"><div class="top"><button class="ph back" data-back title="Back to the list">‹ To-do</button>
       <span class="ft" title="${esc(it.title)}">${verbPill(it)} ${tdTid(it)}${esc(it.title)}</span>
       <button class="fold" data-fold title="Show the step">▸</button>${tdTopBtns(it)}</div></div>`;
-    if (!put($("#tdstep"), html)) return;
-    $("#tdstep").dataset.key = it.key;
-    $("#tdstep [data-back]").onclick = () => tdGo("todo");
-    $("#tdstep [data-fold]").onclick = () => { TD.fold = false; tdSave(); renderToday(); };
+    if (!put($("#tdtodo"), html)) return;
+    $("#tdtodo").dataset.key = it.key;
+    $("#tdtodo [data-back]").onclick = () => tdGo("todo");
+    $("#tdtodo [data-fold]").onclick = () => { TD.fold = false; tdSave(); renderToday(); };
     tdTopWire(it);
     return;
   }
@@ -3384,7 +3390,7 @@ function tdStep(it, shown) {
     : "Move it to the end of the list until midnight. With a note, it parks instead";
   const noteIn = `<input class="tdnote" data-tdnote data-fld="note" maxlength="300" placeholder="Note to self, e.g. wait for #249" value="${esc(note)}" title="Saves as you type">`;
   const unpark = cls => (it.parked || it.skipped) ? `<button class="${cls}" data-unpark title="Back into the list at its normal place">${it.parked ? "Unpark" : "Unskip"}</button>` : "";
-  const html = `<div class="stepcard dock${TD.dets ? " open" : ""}"><div class="top"><button class="ph back" data-back title="Back to the list">‹ To-do</button>
+  const html = `<div class="stepcard tdo${TD.dets ? " open" : ""}"><div class="top"><button class="ph back" data-back title="Back to the list">‹ To-do</button>
     <div class="k">${it.parked ? `Parked ${ago(it.parked.since, state.now)}` : `Step ${shown.indexOf(it) + 1} of ${shown.length}`} · ${esc(P(it.project).title)}</div>
     ${dets ? `<button class="ph" data-dets aria-expanded="${TD.dets}">Details ${TD.dets ? "▴" : "▾"}</button>` : ""}
     ${unpark("ph skip")}<button class="ph skip" data-skip title="${esc(skipTip)}">Skip →</button>
@@ -3402,44 +3408,44 @@ function tdStep(it, shown) {
     ${raHere ? raBox(RA) : ""}
     ${TD.msg || playErr ? `<div class="err" style="margin-top:8px;white-space:pre-wrap">${esc(TD.msg || playErr)}</div>` : TD.note ? `<div class="muted" style="margin-top:8px">${esc(TD.note)}</div>` : ""}</div>`;
   // A poll that rewrites the card while you type in the note (or the chooser) keeps your caret where it was
-  if (videoAway($("#tdstep video[data-src]"))) return;
-  if (!proofKeep($("#tdstep"), () => putKeep($("#tdstep"), html, $("#tdstep").dataset.key === it.key))) return;
-  $("#tdstep").dataset.key = it.key;
-  $("#tdstep").querySelectorAll("[data-tdnote]").forEach(el => {
+  if (videoAway($("#tdtodo video[data-src]"))) return;
+  if (!proofKeep($("#tdtodo"), () => putKeep($("#tdtodo"), html, $("#tdtodo").dataset.key === it.key))) return;
+  $("#tdtodo").dataset.key = it.key;
+  $("#tdtodo").querySelectorAll("[data-tdnote]").forEach(el => {
     el.oninput = () => { TD.drafts[it.key] = el.value; clearTimeout(TD.noteTimer); TD.noteTimer = setTimeout(() => tdSaveNote(it.key), 500); };
     el.onblur = () => tdSaveNote(it.key);
     el.onkeydown = e => { if (e.key === "Enter") { e.preventDefault(); el.blur(); } };
   });
-  $("#tdstep").querySelectorAll("[data-unpark]").forEach(b => b.onclick = tdUnpark);
-  $("#tdstep [data-waitfor]").onclick = () => {
+  $("#tdtodo").querySelectorAll("[data-unpark]").forEach(b => b.onclick = tdUnpark);
+  $("#tdtodo [data-waitfor]").onclick = () => {
     TD.wait = TD.wait && TD.wait.key === it.key ? null : {key: it.key, ...tdWaitNew(it.project, it.parked)}; renderToday();
-    if (TD.wait) $("#tdstep .tdwaitbox").scrollIntoView({block: "nearest"}); };  // a phone's step card is short
-  if (TD.wait && TD.wait.key === it.key) tdWaitWire($("#tdstep .tdwaitbox"), TD.wait);
-  if ($("#tdstep [data-wgo]")) $("#tdstep [data-wgo]").onclick = tdWaitGo;
-  if ($("#tdstep [data-wx]")) $("#tdstep [data-wx]").onclick = () => { TD.wait = null; renderToday(); };
-  if ($("#tdstep [data-wclear]")) $("#tdstep [data-wclear]").onclick = tdWaitClear;
-  if (raHere) raWire($("#tdstep .rabox"), RA, tdRaGo, () => { RA = null; renderToday(); });
-  $("#tdstep").querySelectorAll("[data-ta]").forEach(b => b.onclick = () => tdDo(b.dataset.ta));
-  $("#tdstep").querySelectorAll("[data-files]").forEach(a => a.onclick = () => tdOpenTask(+a.dataset.files, true));
-  $("#tdstep").querySelectorAll("[data-skip]").forEach(b => b.onclick = tdSkip);
-  $("#tdstep").querySelectorAll("[data-tdproj]").forEach(a => a.onclick = () => tdDo("projects"));
-  $("#tdstep [data-back]").onclick = () => tdGo("todo");
-  $("#tdstep [data-fold]").onclick = () => { TD.fold = true; tdSave(); renderToday(); };
-  if ($("#tdstep [data-dets]")) $("#tdstep [data-dets]").onclick = () => { TD.dets = !TD.dets; renderToday(); };
+    if (TD.wait) $("#tdtodo .tdwaitbox").scrollIntoView({block: "nearest"}); };  // a phone's step card is short
+  if (TD.wait && TD.wait.key === it.key) tdWaitWire($("#tdtodo .tdwaitbox"), TD.wait);
+  if ($("#tdtodo [data-wgo]")) $("#tdtodo [data-wgo]").onclick = tdWaitGo;
+  if ($("#tdtodo [data-wx]")) $("#tdtodo [data-wx]").onclick = () => { TD.wait = null; renderToday(); };
+  if ($("#tdtodo [data-wclear]")) $("#tdtodo [data-wclear]").onclick = tdWaitClear;
+  if (raHere) raWire($("#tdtodo .rabox"), RA, tdRaGo, () => { RA = null; renderToday(); });
+  $("#tdtodo").querySelectorAll("[data-ta]").forEach(b => b.onclick = () => tdDo(b.dataset.ta));
+  $("#tdtodo").querySelectorAll("[data-files]").forEach(a => a.onclick = () => tdOpenTask(+a.dataset.files, true));
+  $("#tdtodo").querySelectorAll("[data-skip]").forEach(b => b.onclick = tdSkip);
+  $("#tdtodo").querySelectorAll("[data-tdproj]").forEach(a => a.onclick = () => tdDo("projects"));
+  $("#tdtodo [data-back]").onclick = () => tdGo("todo");
+  $("#tdtodo [data-fold]").onclick = () => { TD.fold = true; tdSave(); renderToday(); };
+  if ($("#tdtodo [data-dets]")) $("#tdtodo [data-dets]").onclick = () => { TD.dets = !TD.dets; renderToday(); };
   tdTopWire(it);
-  if ($("#tdstep [data-udiff]")) $("#tdstep [data-udiff]").ontoggle = e => { TD.udiff = e.target.open; };
+  if ($("#tdtodo [data-udiff]")) $("#tdtodo [data-udiff]").ontoggle = e => { TD.udiff = e.target.open; };
 }
-// The dock's top row ends in ⤢ (the full-screen view) and, for a to-do with no topic, ✕ (README TODAY-2, the dock).
+// The step's top row ends in ⤢ (the full-screen view) and, for a to-do with no topic, ✕ (README TODAY-2, the header block).
 const tdTopBtns = it => `<button class="tbtn" data-full title="Open full screen">⤢</button>`
   + (tdCanClose(it, convReady() ? TD.cv : null) ? `<button class="tbtn" data-close title="Close: keep it on your list">✕</button>` : "");
 function tdTopWire(it) {
-  if ($("#tdstep [data-full]")) $("#tdstep [data-full]").onclick = () => tdFullOpen(it);
-  if ($("#tdstep [data-close]")) $("#tdstep [data-close]").onclick = () => tdDockClose(it);
+  if ($("#tdtodo [data-full]")) $("#tdtodo [data-full]").onclick = () => tdFullOpen(it);
+  if ($("#tdtodo [data-close]")) $("#tdtodo [data-close]").onclick = () => tdDockClose(it);
 }
-// ✕: deselect it and change nothing about it. The conversation stays, with no dock and no home, and nothing
-// auto-selects until you pick a to-do (TD.none). Its chip stays attached. On a phone it is ‹ To-do.
+// ✕: deselect it and change nothing about it. Its project's home opens, with the full pipeline and the
+// conversation, and nothing auto-selects (the home rule). Its chip stays attached. On a phone it is ‹ To-do.
 function tdDockClose(it) {
-  TD.key = ""; TD.home = null; TD.none = it.project; TD.wait = null; tdSave();
+  Object.assign(TD, tdAfterClose(it)); TD.closed = it.key; TD.over = null; TD.wait = null; tdSave();
   if (TD.pane !== "todo" && phone()) return tdGo("todo");
   renderToday();
 }
@@ -3459,7 +3465,7 @@ function tdFullClose() {
   if (history.state?.td === "full") return history.back();  // tdArrive closes it
   TD.full = null; TD.fullNext = null; renderToday();
 }
-// Close the view, then fn: a click that goes on in the dock, the composer or a panel
+// Close the view, then fn: a click that goes on in the step, the composer or a panel
 function tdFullThen(fn) {
   if (history.state?.td === "full") { TD.fullNext = fn; return history.back(); }
   TD.full = null; renderToday(); fn();
@@ -3519,7 +3525,7 @@ function tdFull(it) {
   box.querySelector("[data-skip]").onclick = () => tdFullThen(tdSkip);
   if (box.querySelector("[data-unpark]")) box.querySelector("[data-unpark]").onclick = tdUnpark;
   box.querySelector("[data-waitfor]").onclick = () => tdFullThen(() => {
-    TD.fold = false; tdSave(); renderToday(); const b = $("#tdstep [data-waitfor]"); if (b) b.click(); });
+    TD.fold = false; tdSave(); renderToday(); const b = $("#tdtodo [data-waitfor]"); if (b) b.click(); });
   const el = box.querySelector("[data-tdnote]");
   el.oninput = () => { TD.drafts[it.key] = el.value; clearTimeout(TD.noteTimer); TD.noteTimer = setTimeout(() => tdSaveNote(it.key), 500); };
   el.onblur = () => tdSaveNote(it.key);
@@ -3568,7 +3574,8 @@ function depStage(d) {
   return {...st, stop: !!(d.error || d.blocked), button: st.c === "todo" || !!d.log_unknown, meta,
           metaTip: l ? `Last deployed ${shas(l.commit)}${l.version ? ` (${l.version})` : ""} by #${l.task}` : ""};
 }
-function tdPipeline(g, busy) {
+// compact (a to-do is selected): the top line, and the deploy lanes behind Deploys (N) ▸
+function tdPipeline(g, busy, compact) {
   const r = g.release, rbusy = r && !["done", "failed", "cancelled"].includes(r.state), n = (g.ahead || []).length;
   const play = tdPlay(g, "dev").map(b => `<button class="pplay" data-ha="${esc(b.a)}" ${busy || b.disabled ? "disabled" : ""} title="${esc(b.title || "")}">${esc(b.label)}</button>`);
   const promote = g.direct_main ? "" : `<span class="stg main"><b class="sn">${esc(g.dev_branch)} → ${esc(g.main_branch)}</b>${
@@ -3587,32 +3594,42 @@ function tdPipeline(g, busy) {
         + (s.button && !run && !off ? `<button tabindex="-1">Deploy</button>` : "") + `</span>${k < l.stages.length - 1 ? `<span class="arr">→</span>` : ""}</span>`;
     }).join("")}</span></div>`).join("");
   if (!play.length && !promote && !lanes) return "";
-  return `<div class="pipe"><div class="ptop">${play.join("")}${promote}</div>${lanes ? `<div class="lanes">${lanes}</div>` : ""}</div>`;
+  const nd = (g.deploys || []).length, open = !compact || TD.lanes;
+  const tog = compact && nd ? `<button class="lanesbtn" data-lanes aria-expanded="${TD.lanes}" title="${TD.lanes ? "Fold the deploy lanes" : "Show the deploy lanes"}">Deploys (${nd}) ${TD.lanes ? "▾" : "▸"}</button>` : "";
+  return `<div class="pipe"><div class="ptop">${play.join("")}${promote}${tog}</div>${lanes && open ? `<div class="lanes">${lanes}</div>` : ""}</div>`;
 }
 function tdHomeStatus(g) {
   const running = state.tasks.filter(t => t.project === g.name && t.state === "running").length, n = tdAll().filter(x => x.project === g.name).length;
   return [running ? `${running} running` : "", `${n} to-do${n === 1 ? "" : "s"}`].filter(Boolean).join(" · ");
 }
-function tdHomeCard() {
-  const name = convProject(), g = name ? P(name) : null;
-  put($("#tdstep"), ""); $("#tdstep").dataset.key = "";  // no to-do: no dock
+// The header block's top part (README TODAY-2): with a to-do selected, its project, compact; else the home (or All
+// clear) with the full pipeline.
+function tdHead(it) {
+  const name = it ? it.project : convProject(), g = name ? P(name) : null;
   if (!g || !g.title) {
-    put($("#tdhomebox"), `<div class="stepcard"><div class="k">All clear</div><h2>Nothing needs you right now</h2></div>`);
+    put($("#tdhead"), it ? "" : `<div class="stepcard"><div class="k">All clear</div><h2>Nothing needs you right now</h2></div>`);
     return;
   }
   const busy = TD.busy === "home:" + name, pl = g.play;
   const playErr = pl && pl.error && !pl.phase ? `${pl.stop ? "Stop" : "Play"} ${pl.where === "dev" ? g.dev_branch : g.main_branch} failed: ${pl.error}` : "";
   const clear = !TD.home && !tdAll().length ? " Nothing needs you right now." : "";
-  const html = `<div class="stepcard"><div class="top"><button class="ph back" data-back title="Back to the list">‹ To-do</button>
+  // The step shows TD.msg, and its own Play's error; the header says only what the step doesn't
+  const herr = it ? (playErr && !tdActions(it).some(b => /^(play|stop):/.test(b.a)) ? playErr : "") : TD.msg || playErr;
+  const html = it ? `<div class="stepcard tdproj"><div class="ptitle"><h2><span>${esc(g.title)}</span></h2>
+    <span class="muted hst">${esc(tdHomeStatus(g))}</span></div>
+    ${tdPipeline(g, busy, true)}
+    ${herr ? `<div class="err" style="margin-top:8px;white-space:pre-wrap">${esc(herr)}</div>` : ""}</div>`
+  : `<div class="stepcard"><div class="top"><button class="ph back" data-back title="Back to the list">‹ To-do</button>
     <div class="k">${TD.home ? "Project" : "All clear"}</div></div>
     <h2><span>${esc(g.title)}</span></h2>
     <div class="muted hst">${esc(tdHomeStatus(g))}${clear ? " · nothing needs you" : ""}</div>
     ${tdPipeline(g, busy)}
-    ${TD.msg || playErr ? `<div class="err" style="margin-top:8px;white-space:pre-wrap">${esc(TD.msg || playErr)}</div>` : ""}</div>`;
-  if (!put($("#tdhomebox"), html)) return;
-  $("#tdhomebox [data-back]").onclick = () => tdGo("todo");
+    ${herr ? `<div class="err" style="margin-top:8px;white-space:pre-wrap">${esc(herr)}</div>` : ""}</div>`;
+  if (!put($("#tdhead"), html)) return;
+  if ($("#tdhead [data-back]")) $("#tdhead [data-back]").onclick = () => tdGo("todo");
+  if ($("#tdhead [data-lanes]")) $("#tdhead [data-lanes]").onclick = () => { TD.lanes = !TD.lanes; tdSave(); renderToday(); };
   // A stage chip is one target: a click anywhere on it (its Deploy button too) opens the Deploy dialog; its task link opens the task
-  $("#tdhomebox").querySelectorAll("[data-ha]").forEach(b => {
+  $("#tdhead").querySelectorAll("[data-ha]").forEach(b => {
     b.onclick = e => { if (!e.target.closest("a[data-task]")) tdHomeDo(name, b.dataset.ha); };
     if (b.tagName !== "BUTTON") b.onkeydown = e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); tdHomeDo(name, b.dataset.ha); } };
   });
@@ -3778,7 +3795,7 @@ async function tdRaGo() {
   r.busy = true; TD.msg = ""; TD.note = ""; renderToday();
   try { await raSend(r); RA = null; TD.note = `Retried #${r.id}: it starts once #${String(r.other.trim() || r.pick).replace(/^#/, "")} merges.`; }
   catch (e) { TD.msg = e.message; r.busy = false; }
-  delete $("#tdstep").dataset.html; renderToday(); refresh();
+  delete $("#tdtodo").dataset.html; renderToday(); refresh();
 }
 async function tdWaitGo() {
   const it = TD.item, w = TD.wait; if (!it || !w || w.key !== it.key) return;
@@ -3870,14 +3887,14 @@ async function tdDo(a) {
   const run = async (fn, note = "") => {
     TD.busy = it.key; TD.msg = ""; TD.note = ""; renderToday();
     try { await fn(); TD.note = note; } catch (e) { TD.msg = e.message; }
-    TD.busy = ""; delete $("#tdstep").dataset.html; renderToday(); refresh();
+    TD.busy = ""; delete $("#tdtodo").dataset.html; renderToday(); refresh();
   };
   if (a === "proofreport") return proofReportOpen(s.id, it.title);
   if (a === "sendback") return tdMode({a: "reject", id: s.id, words: `Sends #${s.id} back to its worker: say what to change.`});
   if (a === "retrynote") return tdMode({a: "retry", id: s.id, words: `Retries #${s.id} with this note to its worker.`});
   if (a === "retryafter") {
     RA = RA && RA.where === "today" && RA.id === s.id ? null : raNew(s.id, "today"); TD.msg = ""; renderToday();
-    if (RA) $("#tdstep .rabox").scrollIntoView({block: "nearest"});
+    if (RA) $("#tdtodo .rabox").scrollIntoView({block: "nearest"});
     return;
   }
   if (a === "answer") return tdMode(tdAnswerMode(it));
@@ -3942,7 +3959,7 @@ function renderSayMode() {
   if (m) $("#send").textContent = SEND_WORDS[m.a];
   else if (rs) $("#send").textContent = TD.rs && TD.rs.running ? "Working…" : "Send";
   $("#send").disabled = !!rs && !!(TD.rs && TD.rs.running);
-  $("#cprojwrap").classList.toggle("hidden", !!pf || !!TD.item || !!TD.home || !!TD.none || !!m);
+  $("#cprojwrap").classList.toggle("hidden", !!pf || !!TD.item || !!TD.home || !!m);
 }
 
 // The attached to-do's chip over the message box, with ✕ to take it off. Shown only with its own project's conversation.
@@ -3958,7 +3975,7 @@ function renderChip() {
 // or a research thread ("r:<id>"), drawn by renderResearchConv.
 const tdResearch = () => !!(TD.cv && TD.cv.mode === "research" && (TD.cv.topic === null || typeof TD.cv.topic === "string"));
 // The project in view: the one Ask Claude about this moved to, else the item's, else the filter's, else the picker's.
-const convProject = () => (TD.over && TD.over.key === TD.convKey && TD.over.project) || (TD.item && TD.item.project) || TD.home || TD.none || pf || $("#cproj").value || "";
+const convProject = () => (TD.over && TD.over.key === TD.convKey && TD.over.project) || (TD.item && TD.item.project) || TD.home || pf || $("#cproj").value || "";
 // Text put in an empty message box (Ask Claude about the research runs); taken out again if you leave it as it was.
 function tdClearStarter() { if (TD.starter && $("#say").value === TD.starter) $("#say").value = ""; TD.starter = ""; }
 // TD.cv is the conversation of one item and project (TD.cvFor). Click another item and, until its conversation loads,
@@ -3986,7 +4003,7 @@ function tdDropChat(id) {
   const key = `chat:${id}:read`;
   TD_GONE.set(key, Date.now() + TD_GONE_MS);
   if (state && (state.todos || []).some(x => x.key === key)) {
-    state.todos = state.todos.filter(x => x.key !== key); delete $("#tdstep").dataset.html; renderToday();
+    state.todos = state.todos.filter(x => x.key !== key); delete $("#tdtodo").dataset.html; renderToday();
   }
 }
 async function loadConv() {
@@ -4023,7 +4040,7 @@ async function loadConv() {
     if (typeof t === "string") await loadResearchConv(t); else { TD.rs = null; renderChat(); }
   }
   renderConv(); renderSayMode();
-  if (TD.item) renderToday();  // the dock's chat buttons follow the tab shown
+  if (TD.item) renderToday();  // the step's chat buttons follow the tab shown
 }
 const topicOf = id => TD.cv && TD.cv.topics.find(t => t.id === id);
 const modeWord = m => (TD.cv && TD.cv.modes[m]) || m;
@@ -4046,7 +4063,7 @@ function convIntro() {
                 research: `Ask about the research project “${esc(cv.research.name || "")}”, or ask for new research. The agent reads its briefs and reports first.`}[cv.mode];
   return topicDivider() + `<div class="muted" style="padding:12px 0">${what}</div>`;
 }
-// ---- the tab strip and the dock, pure (README TODAY-2; tests/test_td_tabs.py runs this block in node)
+// ---- the tab strip and the step, pure (README TODAY-2; tests/test_td_tabs.py runs this block in node)
 // The strip's topic tabs: every open topic of cv's project and the current one, oldest first (a new tab goes on the
 // right), then the pending tab while the current topic is still to be made, titled from cv.title or "New topic".
 function tdTabs(cv) {
@@ -4062,7 +4079,7 @@ function tdTabs(cv) {
 // to-do with no topic, or of another project than the conversation's.
 const tdJump = (it, project) => it && it.topic != null && it.project === project
   ? {how: "topic", ref: it.topic, ended: it.topic_ended ?? null} : null;
-// The dock's chat buttons: attach (Add to this chat, New tab ↗), here (this tab is its topic), back (Back to its
+// The step's chat buttons: attach (Add to this chat, New tab ↗), here (this tab is its topic), back (Back to its
 // tab →), project (another project's conversation is shown); "" until the conversation has loaded.
 function tdDockMode(it, cv) {
   if (!it || !cv) return "";
@@ -4070,7 +4087,7 @@ function tdDockMode(it, cv) {
   if (it.topic == null) return "attach";
   return cv.topic === it.topic ? "here" : "back";
 }
-// The dock's ✕ (README TODAY-2, the dock): only for a to-do with no topic, where the dock offers to attach it.
+// The step's ✕ (README TODAY-2, the header block): only for a to-do with no topic, where the step offers to attach it.
 const tdCanClose = (it, cv) => tdDockMode(it, cv) === "attach";
 // The task a to-do is about, for its full-screen view: its source task, its subject's, else the first one it waits on.
 function tdTaskOf(it) {
@@ -4085,7 +4102,7 @@ function tdNewTabOpen(it, taskTitle) {
   const m = /^task:(\d+)$/.exec(it.subject || ""), title = (m ? `#${m[1]} ${taskTitle(+m[1]) || it.title}` : it.title).slice(0, 80);
   return it.subject ? {how: "subject", ref: it.subject, title} : {how: "new", mode: "design", title};
 }
-// ---- end of the tab strip and the dock, pure
+// ---- end of the tab strip and the step, pure
 
 // The tab strip over the thread: the topic tabs and +, the pinned sections (TODAY-4) and ▾, which holds Ended and
 // End read topics. Until the clicked item's conversation loads, TD.cv is the last one's: the tabs wait for it.
@@ -4315,7 +4332,7 @@ async function tdMarkRead(project, path) {
   const mine = x => x.report && x.report.path === path && x.project === project;
   const gone = (state.todos || []).filter(mine), was = TD.key;
   gone.forEach(x => TD_GONE.set(x.key, Infinity));
-  if (gone.length) { state.todos = state.todos.filter(x => !mine(x)); TD.msg = ""; delete $("#tdstep").dataset.html; renderToday(); }
+  if (gone.length) { state.todos = state.todos.filter(x => !mine(x)); TD.msg = ""; delete $("#tdtodo").dataset.html; renderToday(); }
   let why = "";
   try {
     const r = await api(`/api/projects/${encodeURIComponent(project)}/research/read`, {path});
