@@ -8,6 +8,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 from pathlib import Path
 
 DATA = tempfile.mkdtemp()
@@ -505,6 +506,103 @@ class Todos(unittest.TestCase):
         self.assertEqual(self.keyed()[got["key"]]["parked"]["wake_tasks"], [a])
         self.assertTrue(opsd.todo_done(got["id"]))  # Done closes it
 
+
+    # Queue as task (TODO-7)
+    def own(self, title="Rotate the key", why="it expires friday"):
+        return self.route("/api/todos", {"project": "web", "title": title, "why": why})["key"]
+
+    def finish(self, tid, merged):
+        """opsd.finish without its notification, sender message or release."""
+        with mock.patch.object(opsd, "notify"), mock.patch.object(opsd, "tell_sender"), \
+                mock.patch.object(opsd, "auto_release"):
+            p = FakeProject("web")
+            p.title = "Web"
+            opsd.finish(p, tid, merged, "merged")
+
+    def test_queue_as_task(self):
+        key = self.own()
+        n = int(key.split(":")[1])
+        self.assertNotIn("queued", self.keyed()[key])
+        opsd.todo_note(key, "use the vault")
+        self.assertEqual(opsd.todo_brief(n, "Rotate the key", "it expires friday", "use the vault"),
+                         f"Rotate the key\n\nWhy: it expires friday\n\nNote: use the vault\n\nFrom to-do todo:{n}.")
+        got = self.route("/api/todos/queue", {"key": key})  # no body: the brief
+        t = opsd.task(got["id"])
+        self.assertEqual((t["project"], t["title"], t["priority"], t["hold"], t["model"], t["effort"]),
+                         ("web", "Rotate the key", 0, 0, None, None))
+        self.assertEqual(t["body"], opsd.todo_brief(n, "Rotate the key", "it expires friday", "use the vault"))
+        item = self.keyed()[key]
+        self.assertEqual(item["queued"], got["id"])
+        self.assertEqual(item["parked"]["wake_tasks"], [got["id"]])
+        self.assertEqual(item["parked"]["wake_on"], "merged")
+        self.assertIn(f"#{got['id']} merges", item["closes"])
+        with self.assertRaisesRegex(ValueError, f"queued already as #{got['id']}"):
+            self.route("/api/todos/queue", {"key": key, "body": "again"})
+        self.assertEqual(opsd.q("SELECT COUNT(*) AS n FROM tasks", one=True)["n"], 1)
+
+    def test_queue_takes_the_edited_body(self):
+        key = self.own()
+        got = self.route("/api/todos/queue", {"key": key, "body": "  Rotate it with the new vault  "})
+        self.assertEqual(opsd.task(got["id"])["body"], "Rotate it with the new vault")
+
+    def test_queue_refuses_others(self):
+        a = self.task("web", "failed", error="x")
+        with self.assertRaisesRegex(ValueError, "only a stored to-do"):
+            self.route("/api/todos/queue", {"key": f"task:{a}:fix"})
+        with self.assertRaisesRegex(ValueError, "only a stored to-do"):
+            self.route("/api/todos/queue", {"key": "project:web:promote"})
+        opsd.todo_add("web", [{"verb": "Agree", "title": "Ship it?"}], "design", 3)
+        agree = opsd.q("SELECT id FROM todos WHERE verb='Agree'", one=True)["id"]
+        with self.assertRaisesRegex(ValueError, "only a Do"):
+            self.route("/api/todos/queue", {"key": f"todo:{agree}"})
+        self.assertNotIn("queued", self.keyed()[f"todo:{agree}"])
+        with self.assertRaisesRegex(ValueError, "no open to-do todo:9999"):
+            self.route("/api/todos/queue", {"key": "todo:9999"})
+        opsd.q("INSERT INTO todos (project, verb, title, why, source_kind, created) VALUES ('gone','Do','x','','owner',0)")
+        gone = opsd.q("SELECT id FROM todos WHERE project='gone'", one=True)["id"]
+        with self.assertRaisesRegex(ValueError, "no project 'gone'"):
+            self.route("/api/todos/queue", {"key": f"todo:{gone}"})
+        self.assertEqual(opsd.q("SELECT COUNT(*) AS n FROM tasks", one=True)["n"], 1)  # only the failed one
+
+    def test_queued_todo_closes_when_its_task_merges(self):
+        key = self.own()
+        got = self.route("/api/todos/queue", {"key": key})
+        self.finish(got["id"], "abc123")
+        self.assertIsNotNone(opsd.q("SELECT closed FROM todos WHERE id=?", (int(key[5:]),), one=True)["closed"])
+        self.assertNotIn(key, self.keyed())
+
+    def test_queued_todo_returns_when_its_task_fails(self):
+        key = self.own()
+        got = self.route("/api/todos/queue", {"key": key})
+        opsd.upd(got["id"], state="failed")
+        item = self.keyed()[key]
+        self.assertNotIn("parked", item)
+        self.assertIn(f"#{got['id']} failed", item["note"])
+        self.assertEqual(item["queued"], got["id"])  # still its task: Fix retries it, no second queue
+        with self.assertRaisesRegex(ValueError, "queued already"):
+            self.route("/api/todos/queue", {"key": key})
+        self.finish(got["id"], "abc123")  # retried and merged after all: the to-do closes
+        self.assertNotIn(key, self.keyed())
+
+    def test_queue_again_once_cancelled(self):
+        key = self.own()
+        first = self.route("/api/todos/queue", {"key": key})["id"]
+        opsd.upd(first, state="cancelled")
+        item = self.keyed()[key]
+        self.assertNotIn("parked", item)
+        self.assertNotIn("queued", item)
+        self.assertEqual(item["closes"], "Closes when you click Done.")
+        second = self.route("/api/todos/queue", {"key": key})["id"]
+        self.assertEqual(self.keyed()[key]["queued"], second)
+
+    def test_done_without_merge_keeps_it_open(self):
+        key = self.own()
+        got = self.route("/api/todos/queue", {"key": key})
+        self.finish(got["id"], None)
+        item = self.keyed()[key]
+        self.assertNotIn("parked", item)
+        self.assertNotIn("queued", item)
+        self.assertIn(f"#{got['id']} done", item["note"])
 
     # Timed waits: hide an item until a time, alone or with tasks (TODO-6)
     def later(self, days=2):

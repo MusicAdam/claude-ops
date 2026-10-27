@@ -639,6 +639,7 @@ details.tdparked .tditem { opacity: .8; }
 .tdaddf, .tdwaitbox { display: flex; flex-direction: column; gap: 6px; border: 1px solid var(--line); border-radius: 8px;
                       background: var(--panel); padding: 8px 10px; margin-bottom: 6px; }
 .stepcard .tdwaitbox { margin: 10px 0 0; }
+.qtbox textarea { font-family: inherit; font-size: 13px; line-height: 1.4; padding: 6px 8px; resize: vertical; min-height: 6em; }
 .tdaddf .tdwaitbox { margin: 0; padding: 6px 8px; background: var(--bg); }
 .tdaddf input, .tdwaitbox input[data-wother], .tdwaitbox input[data-wat] { font-size: 13px; padding: 4px 8px; }
 .tdwaitbox input[data-wat] { flex: 1; min-width: 120px; }
@@ -3073,6 +3074,7 @@ const TD = {key: "", home: null, filter: "all", drafts: {}, noteTimer: null, par
             pane: "todo", dets: false, sec: "conv", sd: null, unc: null, udiff: false,
             chip: null, menu: false, fold: false, lanes: false,  // the attached to-do, the strip's ▾ menu, the step folded, Deploys (N) open
             wait: null, add: null,  // the open Wait for… chooser {key, ids, other, until}, and the + Add form
+            qt: null,  // the open Queue as task box {key, body, busy} (README TODO-7)
             closed: null, full: null, ft: null, fullNext: null};  // the to-do ✕ just closed (its chip stays), the full-screen view
 try {
   TD.key = localStorage.getItem("ops-todo") || "";
@@ -3313,7 +3315,10 @@ function tdActions(it) {
       : it.unread ? [A("read", "Mark read", {primary: 1, title: "The reply is below. It stays on your list until you end the topic"}), A("endtopic", "End topic", {title: "Done with it: off your list, under Ended (▾ in the tab strip)"})]
       : [A("endtopic", "End topic", {primary: 1, title: "Done with it: off your list, under Ended (▾ in the tab strip)"}), A("reply", "Reply", {title: "Attach it and answer Claude in the message box below"})];
     case "Agree": return [A("reply", "Reply", {primary: 1, title: "Answer Claude in the message box below. Claude closes it once your answer settles it"})].concat(it.todo ? [A("done", "Done")] : []);
-    case "Do": return [A("done", "Done", {primary: 1})];
+    // Queue as task (README TODO-7): a stored Do becomes a task; while that task is under way, its id instead
+    case "Do": return [A("done", "Done", {primary: 1})].concat(!it.todo ? [] : it.queued
+      ? [A("details:" + it.queued, `Queued #${it.queued}`, {title: "Open the task it was queued as. The to-do closes when it merges"})]
+      : [A("queuetask", "Queue as task", {title: "Queue a task in its project to do this; the to-do waits for it and closes when it merges"})]);
   }
   return [];
 }
@@ -3406,6 +3411,7 @@ function tdStep(it, shown) {
     <div class="row">${acts.map(b => `<button data-ta="${esc(b.a)}" class="${b.primary ? "primary" : ""}" ${busy || b.disabled ? "disabled" : ""} title="${esc(b.title || "")}">${esc(b.label)}</button>`).join("")}
       ${tdBondHtml(it)}${noteIn}<button class="tdwaitb" data-waitfor title="Park it until tasks you pick merge or are released, or until a time">Wait for…</button>${unpark("tdunpark")}<button class="skip" data-skip title="${esc(skipTip)}">Skip for now →</button></div>
     ${TD.wait && TD.wait.key === it.key ? tdWaitBox(it.project, TD.wait, `<button class="primary" data-wgo>Wait</button><button data-wx>Cancel</button>`) : ""}
+    ${TD.qt && TD.qt.key === it.key ? tdQtBox(it, TD.qt) : ""}
     ${raHere ? raBox(RA) : ""}
     ${TD.msg || playErr ? `<div class="err" style="margin-top:8px;white-space:pre-wrap">${esc(TD.msg || playErr)}</div>` : TD.note ? `<div class="muted" style="margin-top:8px">${esc(TD.note)}</div>` : ""}</div>`;
   // A poll that rewrites the card while you type in the note (or the chooser) keeps your caret where it was
@@ -3426,6 +3432,7 @@ function tdStep(it, shown) {
   if ($("#tdtodo [data-wx]")) $("#tdtodo [data-wx]").onclick = () => { TD.wait = null; renderToday(); };
   if ($("#tdtodo [data-wclear]")) $("#tdtodo [data-wclear]").onclick = tdWaitClear;
   if (raHere) raWire($("#tdtodo .rabox"), RA, tdRaGo, () => { RA = null; renderToday(); });
+  if (TD.qt && TD.qt.key === it.key) tdQtWire($("#tdtodo .qtbox"), TD.qt);
   $("#tdtodo").querySelectorAll("[data-ta]").forEach(b => b.onclick = () => tdDo(b.dataset.ta));
   $("#tdtodo").querySelectorAll("[data-files]").forEach(a => a.onclick = () => tdOpenTask(+a.dataset.files, true));
   $("#tdtodo").querySelectorAll("[data-skip]").forEach(b => b.onclick = tdSkip);
@@ -3471,7 +3478,7 @@ function tdFullThen(fn) {
   if (history.state?.td === "full") { TD.fullNext = fn; return history.back(); }
   TD.full = null; renderToday(); fn();
 }
-const TD_FULL_GO = /^(sendback|retrynote|retryafter|answer|reply|attach|newtab|backtab|diff|details|projects|report)$|^(details|deploy):/;
+const TD_FULL_GO = /^(sendback|retrynote|retryafter|queuetask|answer|reply|attach|newtab|backtab|diff|details|projects|report)$|^(details|deploy):/;
 function tdFull(it) {
   const box = $("#tdfull");
   if (TD.full && (!it || it.key !== TD.full)) {  // it left the list, or another one was selected
@@ -3817,6 +3824,34 @@ async function tdWaitClear() {
   const x = tdItem(it.key); if (x) { delete x.parked; delete x.skipped; }
   TD.wait = null; renderToday(); refresh();
 }
+// Queue as task (README TODO-7): a box under the step, prefilled with the brief, to add detail before it queues.
+// Enter makes a new line; only the Queue button sends it.
+const tdBrief = it => [it.title.trim(), it.why && it.why.trim() ? `Why: ${it.why.trim()}` : "",
+  tdNoteVal(it).trim() ? `Note: ${tdNoteVal(it).trim()}` : "", `From to-do todo:${it.todo}.`].filter(Boolean).join("\n\n");
+const tdQtBox = (it, b) => `<div class="tdwaitbox qtbox">
+    <div class="whead">Queue a task in ${esc(P(it.project).title || it.project)} titled “${esc(it.title)}”. Its brief:</div>
+    <textarea data-fld="qtbody" rows="6" maxlength="20000">${esc(b.body)}</textarea>
+    <div class="wrow"><button class="primary" data-qtgo ${b.busy ? "disabled" : ""}>Queue</button><button data-qtx>Cancel</button>
+      <span class="muted">The to-do waits for it, and closes when it merges.</span></div></div>`;
+function tdQtWire(box, b) {
+  if (!box) return;
+  const t = box.querySelector("textarea");
+  t.oninput = () => { b.body = t.value; };
+  t.onkeydown = e => { if (e.key === "Escape") { TD.qt = null; renderToday(); } };
+  box.querySelector("[data-qtgo]").onclick = tdQtGo;
+  box.querySelector("[data-qtx]").onclick = () => { TD.qt = null; renderToday(); };
+}
+async function tdQtGo() {
+  const it = TD.item, b = TD.qt; if (!it || !b || b.key !== it.key || b.busy) return;
+  if (!b.body.trim()) { TD.msg = "Write a brief for the task."; return renderToday(); }
+  b.busy = true; TD.msg = ""; TD.note = ""; renderToday();
+  try {
+    const r = await api("/api/todos/queue", {key: it.key, body: b.body}), x = tdItem(it.key);
+    if (x) { x.queued = r.id; x.parked = {since: Date.now() / 1000, wake_tasks: [r.id], wake_on: "merged", wake_at: null, wake_task: r.id}; delete x.skipped; }
+    TD.qt = null; TD.note = `Queued #${r.id}. This to-do waits for it, and closes when it merges.`;
+  } catch (e) { TD.msg = e.message; b.busy = false; }
+  delete $("#tdtodo").dataset.html; tdSave(); renderToday(); refresh();
+}
 // + Add (README TODO-1): your own Do, in the project you filter on, or one you pick; it may start parked.
 function tdAddForm() {
   const a = TD.add;
@@ -3896,6 +3931,11 @@ async function tdDo(a) {
   if (a === "retryafter") {
     RA = RA && RA.where === "today" && RA.id === s.id ? null : raNew(s.id, "today"); TD.msg = ""; renderToday();
     if (RA) $("#tdtodo .rabox").scrollIntoView({block: "nearest"});
+    return;
+  }
+  if (a === "queuetask") {
+    TD.qt = TD.qt && TD.qt.key === it.key ? null : {key: it.key, body: tdBrief(it), busy: false}; TD.msg = ""; renderToday();
+    if (TD.qt) { const t = $("#tdtodo .qtbox textarea"); if (t) { t.scrollIntoView({block: "nearest"}); t.focus(); } }
     return;
   }
   if (a === "answer") return tdMode(tdAnswerMode(it));

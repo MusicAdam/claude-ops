@@ -707,6 +707,27 @@ may wake at, or null; `wake_task` is the first of
     and it is neither parked nor skipped since today's midnight. Items of a project whose facts failed to load
     keep their rows.
 
+- **TODO-7 Queue as task.** A stored **Do** (from a design or research chat, a worker, or one you added) can become
+  a task with one click, instead of a chat round trip to ask Claude to queue it. Derived items (Answer, Fix, Try,
+  Review, Promote, Ship, Commit, Read) have their own actions, and **Agree** is a decision, so neither has it.
+  - `POST /api/todos/queue {key, body?}` queues a task in the to-do's project, titled as the to-do, with `body`
+    as its brief, at the queue's defaults: normal priority, no hold, the default model and effort. With no `body`
+    the brief is the default one the box shows: the title, `Why: <why>` and `Note: <your note>` (each only when
+    there is one), then `From to-do todo:<id>.`, as paragraphs. It stores the task's id on the to-do (`todos.task`; a
+    database from before gets the column empty) and parks the to-do with an explicit wait on that task until
+    merged (TODO-6), replacing any wait it had. Returns `{id, key}`, `id` the new task.
+  - It is a 400 that says so, and nothing is queued, for a key that isn't `todo:N`, a to-do that is closed or gone,
+    one that isn't a Do, one whose project is unknown, or one whose task from this button is still under way:
+    `todo:12 is queued already as #N`. A task is under way until it is done or cancelled (or deleted), so a
+    failed or held one still counts: Fix retries it. Once it is done without a merge, or cancelled, the to-do
+    can be queued again.
+  - **Closing.** When the task finishes with a merge (`finish` with merge commits, which is also where a
+    straight-to-main merge ends), every open to-do queued as it closes, as Done would close it. If it fails, needs
+    you, goes to review, is paused, or is stopped, the wait wakes the to-do as any wait does (TODO-6), with the
+    word in its note (` · #N failed`); it stays linked, so a retry that merges still closes it.
+  - On the list, a Do whose task is under way has `queued: <task id>`, and its `closes` reads `Closes when #N
+    merges, or when you click Done.`
+
 There is no `done_today` count yet: derived items leave no record when they close, so only stored items could be
 counted, and a number that skips most of what you did would mislead.
 
@@ -934,8 +955,17 @@ stay on the right of the header.
   | Commit | Commit these: **Send to dev**, unchanged underneath. Its tooltip says it lands the files on `main` through the gate, then clears them from your checkout; `dev` in a project with Promote after merge off (and not straight to main). While one is open: Sending… #id | |
   | Read | A chat: Mark read when it is new, else End topic. A report: Mark read (RES-5) | A chat: End topic, or Reply. A report: Open report (it stays on the list), Details |
   | Agree | Reply (focuses the message box; sending doesn't close it, Claude does once your answer settles it) | Done |
-  | Do | Done (`POST /api/todos/<id>/done`); the same for one you added yourself (**+ Add**) | |
+  | Do | Done (`POST /api/todos/<id>/done`); the same for one you added yourself (**+ Add**) | **Queue as task** (TODO-7); while the task it queued is under way, **Queued #N** in its place, which opens the task |
   | Every verb | | Wait for… (the chooser above), beside Skip |
+
+  **Queue as task** opens a small box under the step, as **Wait for…** does: `Queue a task in <Project> titled
+  “<title>”. Its brief:` over a text box prefilled with the default brief (TODO-7), your unsaved note draft
+  included, then **Queue** and **Cancel**. Enter in the box makes a new line; only **Queue** sends it, through
+  `POST /api/todos/queue` with the box's text. Esc or Cancel closes it. After it queues, the step stays on the
+  to-do, now parked: it reads `Waiting on #N to merge`, the button becomes **Queued #N**, and the message line says
+  `Queued #N. This to-do waits for it, and closes when it merges.` An error (an unknown project, a to-do queued
+  already) shows in the step's message line. From the full-screen view the button closes the view and opens the
+  box in the step.
 
   The Ship step also lists its changelog, open, under the why: `main_log`, the rows the Projects card's
   `main` changelog shows (task or short sha, repo, title, how long ago), at most 15, then **and N more**, which
