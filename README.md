@@ -685,11 +685,19 @@ link. A reference whose target is missing is never a link that fails on click. T
   details, for any task id: one older than the 500 in `/api/state` comes from `/api/tasks/<id>`.
 - **LINK-3 Repo files.** A relative repo path such as `docs/design.md`, `opsd.py:5914` or `README.md § Design mode`
   opens that file as it is on the project's dev worktree, in a side drawer. Markdown renders as on the page and
-  scrolls to the `§` heading; other files show as numbered lines, scrolled to `:line`. An
+  scrolls to the `§` heading; other files show as numbered lines, scrolled to `:line`, and a video or picture
+  shows as itself. In a markdown file the drawer opens, a relative image, video or link path (not `http(s):`,
+  `#`, `/`, `~` or another scheme) resolves against that file's folder, `./` and `../` included, to its
+  `/api/files` URL; a path that climbs out of the repo stays as written. `![alt](clip.mp4)` (or `.webm`, any case,
+  `?query` allowed) renders a `<video controls muted playsinline preload="metadata">` instead of a picture, sized
+  like one (`.mdvideo`), wherever markdown renders. An
   `openspec/changes/<name>/…` path (a `spec:` link) opens that change's chat as the current topic in the Today
   view, and adds its project to the project filter when it is out of view. A design-folder file opens
   from `/api/designs/<id>/files/<name>`. `GET /api/files?project=<name>&path=<rel>` serves the file: only one
-  inside that project's dev worktree (symlinks resolved), not git-ignored, and 1 MB or smaller.
+  inside that project's dev worktree (symlinks resolved), not git-ignored, and 1 MB or smaller (`FILE_MAX`); a
+  video or picture (`.mp4`, `.webm`, `.png` and the other image types) may be up to 50 MB (`MEDIA_MAX`) and is
+  sent as `video/mp4`, `video/webm` or its image type by byte range, as the proof video is (`send_video`: 206
+  with `Content-Range`, 416 for a range past the end, `Accept-Ranges: bytes`).
 - **LINK-4 Places in the app.** Names of places, such as Today view, Projects tab, Settings, Research tab or Analyze,
   link to that place's hash route. The old names Design tab and Chat tab link to `#today`. One table in
   `dashboard.html`, `APP_PLACES`, maps each phrase to its route; a new place (the Today view's Scheduled,

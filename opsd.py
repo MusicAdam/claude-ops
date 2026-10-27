@@ -6280,7 +6280,7 @@ FILE_TEXT = "text/plain; charset=utf-8"
 FILE_TYPES = {".html": "text/html; charset=utf-8", ".htm": "text/html; charset=utf-8", ".md": FILE_TEXT,
               ".txt": FILE_TEXT, ".json": "application/json", ".csv": FILE_TEXT, ".css": "text/css",
               ".js": "text/javascript", ".svg": "image/svg+xml", ".png": "image/png", ".jpg": "image/jpeg",
-              ".gif": "image/gif", ".webp": "image/webp"}
+              ".gif": "image/gif", ".webp": "image/webp", ".mp4": "video/mp4", ".webm": "video/webm"}
 
 
 def chat_files(did):
@@ -6299,11 +6299,14 @@ def chat_files(did):
 # A chat message names tasks, repo files, pictures and design documents. The dashboard asks link_check about all of
 # a message's targets in one request, and links only those that exist; /api/files serves a repo file from dev.
 FILE_MAX = 1 << 20
+MEDIA_MAX = 50 << 20  # a video or picture, which /api/files serves by byte range
+MEDIA = {k for k, v in FILE_TYPES.items() if v.startswith(("image/", "video/"))}
 
 
 def repo_file(p, rel):
     """(path, None) for rel, a file of p as on its dev worktree, or (None, why not). Only a file inside the dev
-    worktree once symlinks and '..' are resolved, outside .git, not git-ignored and at most FILE_MAX bytes."""
+    worktree once symlinks and '..' are resolved, outside .git, not git-ignored and at most FILE_MAX bytes
+    (MEDIA_MAX for a video or picture)."""
     rel = (rel or "").strip()
     if not rel or rel.startswith(("/", "~")) or "\0" in rel:
         return None, f"Not a repo path: {rel}"
@@ -6317,8 +6320,9 @@ def repo_file(p, rel):
     if not part or subprocess.run(["git", "check-ignore", "-q", "--", os.path.realpath(path)], cwd=part.at(root),
                                   capture_output=True).returncode == 0:
         return None, f"Ignored by git: {rel}"
-    if path.stat().st_size > FILE_MAX:
-        return None, f"Over 1 MB: {rel}"
+    media = path.suffix.lower() in MEDIA
+    if path.stat().st_size > (MEDIA_MAX if media else FILE_MAX):
+        return None, f"Over {50 if media else 1} MB: {rel}"
     return Path(os.path.realpath(path)), None
 
 
@@ -9284,9 +9288,9 @@ class H(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
-    def send_video(self, f):
-        """An MP4 file, whole or the byte range the Range header asks for: Safari plays a <video> only from a server
-        that answers Range requests. 404 when there is no file."""
+    def send_video(self, f, ctype="video/mp4", headers=None):
+        """A video (or any file), whole or the byte range the Range header asks for: Safari plays a <video> only
+        from a server that answers Range requests. 404 when there is no file."""
         try:
             fh = open(f, "rb")
         except OSError:
@@ -9303,9 +9307,11 @@ class H(BaseHTTPRequestHandler):
                 else:  # bytes=-N: the last N bytes
                     start = max(0, size - int(m.group(2)))
                 if start > end or start >= size:
-                    return self.send(416, b"", "text/plain", {"Content-Range": f"bytes */{size}"})
+                    return self.send(416, b"", "text/plain", {"Content-Range": f"bytes */{size}", **(headers or {})})
             self.send_response(206 if ranged else 200)
-            self.send_header("Content-Type", "video/mp4")
+            self.send_header("Content-Type", ctype)
+            for k, v in (headers or {}).items():
+                self.send_header(k, v)
             self.send_header("Accept-Ranges", "bytes")
             if ranged:
                 self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
@@ -9412,8 +9418,11 @@ class H(BaseHTTPRequestHandler):
             f, why = serve_repo_file(p, qs.get("path", [""])[0]) if p else (None, "unknown project")
             if not f:
                 return self.send(404, {"error": why})
-            return self.send(200, f.read_bytes(), FILE_TYPES.get(f.suffix.lower(), FILE_TEXT),
-                             {"Content-Security-Policy": "sandbox allow-scripts allow-forms allow-popups"})
+            ctype, csp = FILE_TYPES.get(f.suffix.lower(), FILE_TEXT), {
+                "Content-Security-Policy": "sandbox allow-scripts allow-forms allow-popups"}
+            if f.suffix.lower() in MEDIA:  # by byte range, so a <video> plays and seeks
+                return self.send_video(f, ctype, csp)
+            return self.send(200, f.read_bytes(), ctype, csp)
         m = re.fullmatch(r"/api/images/([\w-]+(\.\w+))", path)
         if m and m.group(2) in IMAGE_TYPES.values() and (IMAGES / m.group(1)).is_file():
             ctype = next(k for k, v in IMAGE_TYPES.items() if v == m.group(2))
