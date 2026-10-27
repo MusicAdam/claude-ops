@@ -173,7 +173,7 @@ ul.clog { max-height: 220px; }
 #slash .sl.on { background: var(--chip); }
 #slash .sl code { font: 12px var(--mono); color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 #slash .muted { padding: 4px 8px; font-size: 12px; }
-.mdimg { display: block; max-width: 100%; max-height: 480px; margin: 6px 0; border-radius: 6px; border: 1px solid var(--line); }
+.mdimg, .mdvideo { display: block; max-width: 100%; max-height: 480px; margin: 6px 0; border-radius: 6px; border: 1px solid var(--line); }
 .ref.bad { color: var(--muted); cursor: help; }
 .fdhead { position: sticky; top: -16px; margin: -16px -16px 12px; padding: 12px 16px; background: var(--panel); border-bottom: 1px solid var(--line); z-index: 1; }
 .flines { font-size: 12px; white-space: pre; overflow-x: auto; }
@@ -2296,15 +2296,32 @@ function mdLocal(u) {
   m = u.match(new RegExp(`^${data}/designs/(\\d+)/([\\w.-]+)$`));
   return m ? `/api/designs/${m[1]}/files/${m[2]}` : u;
 }
+// In a repo markdown file opened in the file drawer (base: its project and folder), a relative path is that repo's
+// file on dev, served by /api/files. ./ and ../ resolve against the file's folder; a path that climbs out of the
+// repo, and any URL with a scheme, a leading / or ~, or only an #anchor, stays as written.
+function mdRepoUrl(u, base) {
+  if (!base || /^([a-z][\w+.-]*:|[#/~])/i.test(u)) return u;
+  const [, p, , h = ""] = u.match(/^([^?#]*)(\?[^#]*)?(#.*)?$/), out = [];
+  if (!p) return u;
+  for (const s of (base.dir ? `${base.dir}/${p}` : p).split("/")) {
+    if (s === "..") { if (!out.length) return u; out.pop(); }
+    else if (s && s !== ".") out.push(s);
+  }
+  const path = out.join("/").replace(/&amp;/g, "&");
+  return out.length ? `/api/files?project=${encodeURIComponent(base.project)}&amp;path=${encodeURIComponent(path)}${h}` : u;
+}
+const MD_VIDEO = /\.(mp4|webm)(\?[^#]*)?(#.*)?$/i;
 function inline(s, ctx = {}) {
   // Code spans, escapes, images and links are set aside first, so no formatting reaches inside them.
   const keep = [], put = h => `\u0000${keep.push(h) - 1}\u0000`;
   // In a chat message (ctx.links) every reference is a checked link: see lnRef and chatLinks
   const L = ctx.links, ref = (r, h) => put(lnSpan(r, h));
-  const img = (alt, url) => { url = mdLocal(url);
+  // ![alt](clip.mp4) is a video that plays in place; any other ![alt](url) a picture that opens in a new tab
+  const img = (alt, url) => { const video = MD_VIDEO.test(url); url = mdRepoUrl(mdLocal(url), ctx.base);
+    if (video) return put(`<video class="mdvideo" src="${url}" controls muted playsinline preload="metadata" title="${alt}"></video>`);
     return put(`<a href="${url}" target="_blank" rel="noopener"><img class="mdimg" src="${url}" alt="${alt}" title="${alt}"></a>`); };
   const link = (text, url) => {
-    url = mdLocal(url);
+    url = mdRepoUrl(mdLocal(url), ctx.base);
     const local = url.startsWith("#"), href = local && ctx.idPrefix ? "#" + esc(ctx.idPrefix) + url.slice(1) : url;
     return put(`<a href="${href}"${local ? "" : ' target="_blank" rel="noopener"'}>${text}</a>`);
   };
@@ -2486,10 +2503,11 @@ function mdMissing(e) {
 }
 document.addEventListener("error", mdMissing, true);
 // links: a chat message's chat (see lnRef), so its references become links; chatLinks then checks them.
-function md(src, idPrefix, links) {
+// base: {project, dir} of a repo file, so its relative paths resolve (mdRepoUrl).
+function md(src, idPrefix, links, base) {
   const lines = esc(String(src ?? "").replace(/\u0000/g, "")).split(/\r?\n/)
     .map(l => l.replace(/^[ \t]+/, w => w.replace(/\t/g, "    ")));
-  return mdBlocks(lines, { idPrefix, ids: new Set(), links });
+  return mdBlocks(lines, { idPrefix, ids: new Set(), links, base });
 }
 // What you wrote in a chat: your text as typed, with its pictures and references linked as in a reply.
 const userMd = (text, links) => esc(String(text ?? "").replace(/\u0000/g, "").replace(/(\[image: [^\]\n]+\])\n/g, "$1"))
@@ -2566,6 +2584,11 @@ async function openRepoFile(project, val) {
   document.body.append(bg, dr);
   bg.onclick = rsCloseDoc; $("#rsdocx").onclick = rsCloseDoc;
   const body = dr.lastChild;
+  if (MD_VIDEO.test(path) || LN_IMG.test(path)) {  // a video or picture shows as itself, not as lines of bytes
+    body.outerHTML = MD_VIDEO.test(path) ? `<video class="mdvideo" src="${url}" controls muted playsinline preload="metadata"></video>`
+      : `<img class="mdimg" src="${url}" alt="${esc(path)}">`;
+    return;
+  }
   let text;
   try {
     const r = await fetch(url);
@@ -2575,7 +2598,7 @@ async function openRepoFile(project, val) {
   if (!dr.isConnected) return;
   const doc = document.createElement("div");
   if (!line && /\.(md|markdown)$/i.test(path)) {
-    doc.className = "msg rsdoc"; doc.innerHTML = md(text, "fd-");
+    doc.className = "msg rsdoc"; doc.innerHTML = md(text, "fd-", undefined, {project, dir: path.includes("/") ? path.replace(/\/[^/]*$/, "") : ""});
     body.replaceWith(doc);
     const words = t => t.toLowerCase().replace(/[`*_]/g, "").split(/\s+/).filter(Boolean).join(" "), want = sec && words(sec);
     const h = want && [...doc.querySelectorAll("h1, h2, h3, h4")].map(h => [h, words(h.textContent)])
