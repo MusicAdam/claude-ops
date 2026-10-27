@@ -1083,7 +1083,10 @@ def init_db():
         text TEXT, ts REAL, task_ids TEXT, note TEXT)""")
     q("CREATE INDEX IF NOT EXISTS design_msgs_design ON design_msgs (design_id, id)")
     q("""CREATE TABLE IF NOT EXISTS todos (id INTEGER PRIMARY KEY, project TEXT, verb TEXT, title TEXT, why TEXT,
-        source_kind TEXT, source_id INTEGER, created REAL, closed REAL)""")  # what Claude asks of you (see To-dos)
+        source_kind TEXT, source_id INTEGER, created REAL, closed REAL, task INTEGER)""")  # what Claude asks of you
+    # (see To-dos); task: the task Queue as task made of it (TODO-7)
+    if "task" not in {r["name"] for r in q("PRAGMA table_info(todos)")}:  # databases from before Queue as task
+        q("ALTER TABLE todos ADD COLUMN task INTEGER")
     q("""CREATE TABLE IF NOT EXISTS todo_notes (key TEXT PRIMARY KEY, note TEXT, parked REAL, skipped REAL,
         wake_tasks TEXT, wake_on TEXT DEFAULT 'merged', wake_set INTEGER DEFAULT 0, updated REAL, topic TEXT,
         wake_at REAL)""")
@@ -2894,6 +2897,7 @@ def finish(p, tid, merged, note):
     notify(f"{p.title}: task done", f"#{tid}: {t['title']}")
     tell_sender(tid, f"is done ({note}): " + (task(tid)["summary"] or "no summary"))
     if merged:  # a task marked "Promote after merge", or a release that ends with more of them in dev
+        todo_queued_merged(tid)  # and a to-do queued as this task is done (TODO-7)
         auto_release(p)
 
 
@@ -8813,6 +8817,59 @@ def todo_own(b):
 REMIND_WHY = "Pick up this chat"  # a reminder's why, which also tells it from the chat's other stored to-dos
 
 
+TODO_QUEUE_ENDED = ("done", "cancelled")  # a to-do's task in these (or deleted) no longer blocks another Queue as task
+
+
+def todo_queue(b):
+    """Queue as task (POST /api/todos/queue {key, body?}): queue a stored Do as a task in its project, titled as the
+    to-do, with body (default todo_brief) at the queue's defaults, and park the to-do on it until it merges (TODO-7).
+    Its merge closes the to-do (todo_queued_merged); a fail or stop wakes it as any wait does. A to-do whose task is
+    still under way can't be queued again."""
+    key = todo_key(b.get("key"))
+    m = re.fullmatch(r"todo:(\d+)", key.strip())
+    if not m:
+        raise ValueError("only a stored to-do (todo:N) can be queued as a task")
+    tid = int(m.group(1))
+    r = q("SELECT * FROM todos WHERE id=? AND closed IS NULL", (tid,), one=True)
+    if not r:
+        raise ValueError(f"no open to-do todo:{tid}")
+    if r["verb"] != "Do":
+        raise ValueError(f"todo:{tid} is {r['verb']}: only a Do can be queued as a task")
+    if r["project"] not in PROJECTS:
+        raise ValueError(f"no project {r['project']!r}")
+    if live := todo_queued_live(r["task"]):
+        raise ValueError(f"todo:{tid} is queued already as #{live}")
+    note = q("SELECT note FROM todo_notes WHERE key=?", (f"todo:{tid}",), one=True)
+    body = str(b.get("body") or "").strip() or todo_brief(tid, r["title"], r["why"], note and note["note"])
+    task_id = add_task(r["project"], body, r["title"])
+    q("UPDATE todos SET task=? WHERE id=?", (task_id, tid))
+    todo_wait_set(f"todo:{tid}", [task_id], "merged")
+    return {"id": task_id, "key": f"todo:{tid}"}
+
+
+def todo_brief(tid, title, why, note=None):
+    """The brief Queue as task suggests: the to-do's title, why and note, and where it came from (TODO-7)."""
+    parts = [title.strip(), *([f"Why: {why.strip()}"] if (why or "").strip() else []),
+             *([f"Note: {note.strip()}"] if (note or "").strip() else []), f"From to-do todo:{tid}."]
+    return "\n\n".join(parts)
+
+
+def todo_queued_live(task_id, states=None):
+    """The to-do's task (todos.task) while it is under way, else None: done, cancelled or deleted frees the button.
+    states: task id -> state already read, to skip the query."""
+    if not task_id:
+        return None
+    st = (states or {}).get(task_id)
+    if st is None and (t := q("SELECT state FROM tasks WHERE id=?", (task_id,), one=True)):
+        st = t["state"]
+    return task_id if st and st not in TODO_QUEUE_ENDED else None
+
+
+def todo_queued_merged(task_id):
+    """A task merged: close the to-dos Queue as task made it from (TODO-7)."""
+    q("UPDATE todos SET closed=? WHERE task=? AND closed IS NULL", (time.time(), task_id))
+
+
 def todo_remind(b):
     """Remind me (POST /api/todos/remind {project, ref}): put a topic, usually an ended one, back on your list as a Do
     linked to it, without reopening it (TODO-2). Picking the to-do reopens it, as its chat is its topic (TODAY-2). One
@@ -9276,10 +9333,14 @@ def todos_list(tasks, projects, last, now=None, notes=True):
                              "Claude replied" if unread else "Open: reply, or end it when you are done",
                              d["replied"] if unread else max(d["seen"] or 0, d["replied"] or 0, d["updated"] or 0),
                              "chat", d["id"], unread=unread))
+    states = {t["id"]: t["state"] for t in tasks}
     for r in q("SELECT * FROM todos WHERE closed IS NULL"):
-        out.append(todo_item(f"todo:{r['id']}", r["verb"], r["project"], r["title"], r["why"], r["created"],
-                             "chat" if r["source_kind"] in ("design", "research") else r["source_kind"], r["source_id"],
-                             todo=r["id"]))
+        x = todo_item(f"todo:{r['id']}", r["verb"], r["project"], r["title"], r["why"], r["created"],
+                      "chat" if r["source_kind"] in ("design", "research") else r["source_kind"], r["source_id"],
+                      todo=r["id"])
+        if r["verb"] == "Do" and (live := todo_queued_live(r["task"], states)):  # Queue as task (TODO-7)
+            x = {**x, "queued": live, "closes": f"Closes when #{live} merges, or when you click Done."}
+        out.append(x)
     out.sort(key=lambda x: (TODO_ORDER.index(x["group"]), x["since"], x["key"]))
     if not notes:
         return out
@@ -9635,6 +9696,8 @@ class H(BaseHTTPRequestHandler):
             return todo_own(b)
         if path == "/api/todos/remind":  # {project, ref}: Remind me on an ended topic (TODO-2)
             return todo_remind(b)
+        if path == "/api/todos/queue":  # {key, body?}: Queue as task (TODO-7)
+            return todo_queue(b)
         if path == "/api/todos/wait":  # TODO-6
             return todo_wait(b["key"], b.get("tasks"), b.get("until"), b.get("at"))
         if path == "/api/todos/note":  # TODO-6
