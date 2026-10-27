@@ -4476,6 +4476,86 @@ def project_documents(project):
     return sorted(out, key=lambda x: -x["mtime"])
 
 
+RECAP_TASKS = 8  # done tasks the digest reads
+RECAP_DONE = 5  # done tasks the recap lists
+RECAP_MODEL = "haiku"
+RECAP_PROMPT = """Write a short digest of the recent work in a software project called "{title}", for its owner, who \
+wants to pick up where they left off.
+
+Rules:
+- 2 or 3 short sentences in plain language.
+- Name the themes of the work, not a list of tasks. No task ids.
+- Output only the digest: no heading, no preamble.
+
+The last tasks that finished, newest first, each a title and maybe the worker's summary:
+
+{tasks}
+
+Topics still open in the project's conversation:
+
+{topics}
+"""
+
+
+def recap_done(project, limit):
+    """The project's tasks that finished done, newest first (releases and deploys aren't tasks here)."""
+    return q("SELECT id,title,finished,summary FROM tasks WHERE project=? AND state='done' AND "
+             "COALESCE(kind,'task')='task' ORDER BY finished DESC, id DESC LIMIT ?", (project, limit))
+
+
+def project_recap(project):
+    """GET /api/projects/<name>/recap: a project home's Lately and Open (README TODAY-2). Reads only: never calls
+    Claude. The digest is the one Summarize last wrote, with how many tasks finished done since."""
+    p = proj(project)
+    try:
+        d = json.loads(setting(f"recap:{project}") or "null")
+    except ValueError:
+        d = None
+    digest = None
+    if isinstance(d, dict) and d.get("text"):
+        since = q("SELECT COUNT(*) n FROM tasks WHERE project=? AND state='done' AND COALESCE(kind,'task')='task' "
+                  "AND id>?", (project, int(d.get("last_task") or 0)), one=True)["n"]
+        digest = {"text": d["text"], "written": d.get("written"), "since": since}
+    n = q("SELECT COUNT(*) n FROM tasks WHERE project=? AND state='done' AND COALESCE(kind,'task')='task'",
+          (project,), one=True)["n"]
+    tops = topics(project)
+    cur = conv_state(project, tops)["topic"]
+    try:
+        changes = spec_changes(p)
+    except Exception:  # an unreadable change folder: the rest of the recap still shows
+        changes = []
+    return {"digest": digest if n >= 2 else None, "can_summarize": n >= 2,
+            "done": [{"id": t["id"], "title": t["title"], "finished": t["finished"],
+                      "summary_first_line": next((ln.strip() for ln in (t["summary"] or "").splitlines() if ln.strip()), "")}
+                     for t in recap_done(project, RECAP_DONE)],
+            "topics": [{"ref": t["id"], "title": t["title"], "unread": bool(t["unread"]), "current": t["id"] == cur}
+                       for t in tops if not t["ended"]],
+            "changes": [{"name": c["name"], "sub": c["sub"], "title": c["title"], "done": c["done"],
+                         "total": c["done"] + c["open"]} for c in changes]}
+
+
+def recap_write(project):
+    """POST /api/projects/<name>/recap: Summarize. One haiku turn writes the digest from the last RECAP_TASKS done
+    tasks and the open topics' titles, saved in recap:<project>. On a failure or the usage limit the old digest
+    stays and the answer carries error."""
+    p = proj(project)
+    rows = recap_done(project, RECAP_TASKS)
+    if len(rows) < 2:
+        return {**project_recap(project), "error": "Summarize needs at least 2 done tasks."}
+    if limited():
+        return {**project_recap(project), "error": "Claude is at the usage limit: try again after it resets."}
+    tasks = "\n".join(f"- {t['title']}" + (f"\n  {' '.join((t['summary'] or '').split())[:600]}" if (t["summary"] or "").strip()
+                                           else "") for t in rows)
+    tops = [t["title"] for t in topics(project) if not t["ended"] and (t["title"] or "").strip()]
+    text = claude_text(RECAP_PROMPT.format(title=p.title, tasks=tasks,
+                                           topics="\n".join(f"- {t}" for t in tops) or "(none)"), RECAP_MODEL)
+    if not text:
+        return {**project_recap(project), "error": "Couldn't write the summary: Claude gave no answer. Try again."}
+    set_setting(f"recap:{project}", json.dumps({"text": text.strip()[:2000], "written": time.time(),
+                                                "last_task": max(t["id"] for t in rows)}))
+    return project_recap(project)
+
+
 UNCOMMITTED_DIFF = 400  # diff lines the Commit to-do's card shows
 UNCOMMITTED_FILES = 500  # files it lists per repo
 UNCOMMITTED_READ = 2 << 20  # bytes of an untracked file read for its line count and diff
@@ -9606,11 +9686,11 @@ class H(BaseHTTPRequestHandler):
         if path == "/api/analyze":  # the Analyze tab: ?period=1|7|30|all&project=<name>[,<name>…]
             qs = parse_qs(urlparse(self.path).query)
             return self.send(200, analysis(qs.get("period", ["7"])[0], qs.get("project", [""])[0]))
-        m = re.fullmatch(r"/api/projects/([\w-]+)/(research|documents|uncommitted)", path)  # TODAY-4; the Commit card
+        m = re.fullmatch(r"/api/projects/([\w-]+)/(research|documents|uncommitted|recap)", path)  # TODAY-4; the Commit card; a home's recap
         if m:
             try:
                 return self.send(200, {"research": project_research, "documents": project_documents,
-                                       "uncommitted": project_uncommitted}[m.group(2)](m.group(1)))
+                                       "uncommitted": project_uncommitted, "recap": project_recap}[m.group(2)](m.group(1)))
             except ValueError as e:
                 return self.send(404, {"error": str(e)})
         if path == "/api/conversation":  # the Today view's conversation: ?project=<name>
@@ -9720,6 +9800,8 @@ class H(BaseHTTPRequestHandler):
             return {"id": tid, **({"warning": w} if p and (w := uncommitted_warning(p)) else {})}
         if path == "/api/schedules":
             return {"id": add_schedule(b)}
+        if m := re.fullmatch(r"/api/projects/([\w-]+)/recap", path):  # Summarize on a project home (TODAY-2)
+            return recap_write(m.group(1))
         if m := re.fullmatch(r"/api/projects/([\w-]+)/research", path):  # New research (RES-2)
             return new_research(m.group(1), b)
         if m := re.fullmatch(r"/api/projects/([\w-]+)/research/read", path):  # you opened a report (RES-5)
