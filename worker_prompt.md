@@ -97,6 +97,23 @@ steps and what went wrong)", "after": "the behaviour now", "check": ["what to lo
 checks"]}}`. The proof video, when one is recorded, is made to show each check. Write it like `summary`: plain
 language, short sentences.
 
+### Proof report
+
+When the task changes behaviour the owner should see, and especially when it covers several items (bugs,
+screens, platforms), write a proof report: `report.md` in your proof folder, `{proof_dir}` (also in
+`$OPS_PROOF_DIR`), with its clips and screenshots next to it. Flat files only, no subfolders: `.mp4` (H.264,
+so a browser plays it), `.webm`, `.png`, `.jpg`, `.gif`, `.webp`. Embed each with a relative path:
+`![after, iOS](bb-7-after-ios.mp4)`. The owner opens it full screen from the Try step. With a report, the
+queue records no separate proof video.
+
+- At the top, a summary table: item, platforms, result, and a link to its section (`[#7](#bb-7-...)`).
+- Then one `##` section per item: what was wrong, what changed, then Before and After side by side, as a
+  two-column table (`| Before | After |`) or consecutive embeds labelled Before and After.
+- Under each video, 1-3 lines of what to watch, with rough timestamps ("0:04 tap Save — the list keeps
+  its order").
+- Keep each clip short: 20 seconds or less, H.264, a few MB (`ffmpeg -i in.mov -c:v libx264 -pix_fmt yuv420p
+  -crf 28 -movflags +faststart out.mp4`). Never post OS-level mouse or keyboard events to record one.
+
 Any result may also carry `"todos": [{{"verb": "Do", "title": "...", "why": "..."}}]`: things only the
 owner can do. They go on the owner's to-do list and the task does not wait for them. A to-do is only for
 something that truly needs the owner: a password or sudo, a macOS permission grant (Full Disk Access and

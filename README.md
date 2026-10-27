@@ -64,7 +64,7 @@ files. `git apply` the patch to get them back. Untracked and ignored files (`nod
 output) stay; nothing runs `git clean`. If the patch can't be written, nothing is discarded and the task fails,
 naming the files. To change dev by hand, commit in that worktree; don't leave edits sitting there.
 
-### Proof video
+### Proof video and report
 
 A held task stops before merge so you can check it before it reaches dev. So that you need not launch every
 build, the queue first records a short video of what the task changed, and the Try card plays it.
@@ -100,11 +100,35 @@ build, the queue first records a short video of what the task changed, and the T
   **Details ▾**), a to-do's full-screen view and the task's details page show the report as **What was fixed**,
   **Before**, **Now** and **Check in the video** (the watch list, else the checks; **Check** with no video). A
   task without one shows as before.
-- **Send back** deletes `proof.mp4`, `proof.txt` and `proof_watch.json`; the next round of review records a new video.
+- **The proof report.** One video can't show a task that fixes eight bugs on two platforms, so a worker may also
+  write a report: `~/.claude-ops/runs/<id>/proof/report.md`, with any number of clips and screenshots next to it
+  (`.mp4` H.264, `.webm`, `.png`, `.jpg`, `.gif`, `.webp`), embedded by relative path:
+  `![after, iOS](bb-7-after-ios.mp4)`. Flat files only. Every worker turn gets the folder in `$OPS_PROOF_DIR` (and
+  `--add-dir`, so it may write there), and `worker_prompt.md` ("Proof report") names it and asks for one when the
+  task changes behaviour the owner should see, above all when it covers several items. Its shape: a summary table
+  (item, platforms, result, a link to its section), then one `##` section per item with what was wrong, what
+  changed, and Before and After side by side (a two-column table, or embeds labelled Before and After), with 1-3
+  lines of what to watch, with rough timestamps, under each video. Clips stay short: 20 seconds or less, a few MB.
+  With `proof/report.md` there when the worker is done, the recording turn is skipped and the task logs
+  `proof report: <n> videos, <m> images` (counted in the folder); without one, the turn runs as above.
+- **Open report.** With a report (`proof_report`), the Try step (the dock and the to-do's full-screen view) and
+  the task's details page have **Open report**, and Approve & merge is primary, as with a video. It opens the
+  report full screen (`#proofrep`, over everything, like the full-screen to-do: Esc, ✕ or a phone's back close
+  it), rendered with the dashboard's markdown renderer: its relative media resolve to `GET
+  /api/tasks/<id>/proof/<name>` (`mdRepoUrl` with base `{proof: id}`), a contents list links its `##` sections, and
+  each clip waits with `preload="none"` and no src until it scrolls into view. Without a `proof.mp4`, the card
+  plays the report's first embedded clip (`proof_clip`), captioned with its alt text.
+- **Send back** deletes `proof.mp4`, `proof.txt`, `proof_watch.json` and the `proof/` folder; the next round of
+  review records a new video or writes a new report.
 - **API.** `/api/state` and `GET /api/tasks/<id>` give each task `proof` (true when `runs/<id>/proof.mp4`
-  exists), `proof_note` (the one line, or null), `proof_watch` (the watch list while the video exists, or null) and
-  `review` (the report, or null). `GET /api/tasks/<id>/proof.mp4` serves the file as
-  `video/mp4`, answering `Range` requests with 206 (Safari plays video only that way), and 404 when there is none.
+  exists), `proof_note` (the one line, or null), `proof_watch` (the watch list while the video exists, or null),
+  `proof_report` (true when `runs/<id>/proof/report.md` exists), `proof_clip` (`{name, alt}` of the report's first
+  clip when there is a report and no `proof.mp4`, else null) and `review` (the report, or null).
+  `GET /api/tasks/<id>/proof.mp4` serves the file as `video/mp4`, answering `Range` requests with 206 (Safari plays
+  video only that way), and 404 when there is none. `GET /api/tasks/<id>/proof/<name>` serves `report.md` (at most
+  1 MB) and the folder's pictures and videos (at most 50 MB each, by byte range through the same `send_video`):
+  a flat name only. A name with `/` or `..`, a hidden file, any other type, a missing file or one over its limit
+  is 404.
 
 ## main is the golden version
 
@@ -529,10 +553,11 @@ the uncommitted-files banner, Deploy. `/api/state` gathers them into one list, `
   - **Answer**: a task (not a release or deploy) in needs_input. Why: its question.
   - **Fix**: a task in failed. Why: its error.
   - **Try**: a task in review whose project has a launch step (the same test as `can_play`). The card plays the
-    task's proof video when there is one (`proof`, see [Proof video](#proof-video)), with `proof_note` as its
+    task's proof video when there is one (`proof`, see [Proof video](#proof-video-and-report)), with `proof_note` as its
     caption under it. Then **Approve & merge** is the primary button and **▶ Play this build** a secondary one;
     without a video Play stays primary, and a muted line says `no proof video` (with the reason the task's last
-    `no proof video: …` event gave). **Review**: a task in review whose project has no launch step; you read its
+    `no proof video: …` event gave). With a proof report the card plays the report's first clip when there is no
+    `proof.mp4`, **Open report** opens it full screen, and Approve & merge is primary. **Review**: a task in review whose project has no launch step; you read its
     diff and summary.
   - **Promote**: a release or deploy in needs_input (**waiting on you**), or `dev` ahead of `main` in a project
     with **Promote after merge** off and no release under way. Under Straight to main dev is ahead only until
@@ -873,7 +898,7 @@ stay on the right of the header.
 
   | Verb | Primary | Others |
   |---|---|---|
-  | Try | ▶ Play this build (the task's play). With a proof video (`proof`), the card plays it above the buttons, `proof_note` as a one-line caption under it, and Approve & merge is primary | Approve & merge, Send back…; with a proof video, ▶ Play this build, Send back… |
+  | Try | ▶ Play this build (the task's play). With a proof video (`proof`), the card plays it above the buttons, `proof_note` as a one-line caption under it, and Approve & merge is primary; with a proof report (`proof_report`) too | Approve & merge, Send back…; with a proof video, ▶ Play this build, Send back…; with a proof report, Open report, ▶ Play this build, Send back… |
   | Review | Approve & merge | Open diff (the task's details, files changed), Send back… |
   | Answer | Answer (focuses the message box; sending answers the task) | Details |
   | Fix | Retry | Retry with a note…, Retry after… |
@@ -2036,7 +2061,7 @@ folder under a project's `<worktrees>/` that no longer exists. For what a worktr
   not python3. A grant then covers the daemon, its workers and their builds, and not every Python script.
   The app is rebuilt only when `launcher.c` changes; a rebuild changes its signature, so macOS asks again.
   **Screen Recording** for Claude Ops (System Settings → Privacy & Security → Screen & System Audio Recording)
-  is needed for a native app's [proof video](#proof-video). The daemon only checks it and never asks, so grant it
+  is needed for a native app's [proof video](#proof-video-and-report). The daemon only checks it and never asks, so grant it
   there yourself; without it those videos are skipped.
 - **Workers** run `claude -p --permission-mode auto --permission-prompts none --strict-mcp-config`.
   Anything that would prompt is denied. By default they work only in their worktree: they don't push, and
