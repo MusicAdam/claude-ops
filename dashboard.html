@@ -1439,7 +1439,7 @@ function renderUsage() {
     (u.taper ? `\nTapering: ${u.taper.cap} of ${u.taper.max} workers${u.taper.pace ? (u.taper.ahead > 0 ? " (ahead of pace)" : " (nearing pace)") : ""}` : "") +
     (u.brake ? `\nBrake at ${u.brake}%: no new tasks start at or above it.` : "\nBrake off.");
   put(el, u.windows.map(w => {
-    const cls = state.limit ? "danger" : u.brake && w.pct >= u.brake ? "alert" : "";
+    const cls = state.limit ? "danger" : w.key === "five_hour" && u.brake && w.pct >= u.brake ? "alert" : "";
     const p = w.resets ? usagePace(w, Date.now(), u.brake) : null;
     const tip = `Claude usage, ${w.label} window: ${w.pct}% used` + (w.resets ? `, resets ${w.resets}.` : " (reset since).") +
       (p ? `\n${paceWords(p)}` : "") + tail;

@@ -125,7 +125,9 @@ class Taper(Base):
         opsd.set_setting("usage_taper", "30")
         opsd.set_setting("usage:seven_day", reading(80))
         self.five(10)
-        self.assertIsNone(opsd.usage_info()["taper"])  # the 7-day window keeps only the brake
+        self.assertIsNone(opsd.usage_info()["taper"])  # the 7-day window never tapers
+        opsd.set_setting("usage:seven_day", reading(95))
+        self.assertFalse(opsd.usage_info()["braked"])  # nor brakes
         self.five(80, live=False)
         self.assertIsNone(opsd.usage_info()["taper"])  # its reset has passed: counts as 0
 

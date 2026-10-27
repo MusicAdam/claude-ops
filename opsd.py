@@ -3595,14 +3595,14 @@ def limit_pause(tid, prompt=None):
 # ---------------------------------------------------------------- the usage brake
 # Every Claude stream reports how much of each usage window is used (a rate_limit_event, utilization 0 to 1). The
 # usage is account-wide, so it counts your own Claude use too. The daemon keeps the latest reading per window in
-# settings usage:<window>, and at usage_brake percent (default 85, 0 = off) of either window the scheduler starts no
-# new task until that window resets, which leaves the rest of it for your design chats, chats and answers. Running
+# settings usage:<window>, and at usage_brake percent (default 85, 0 = off) of the 5-hour window the scheduler starts
+# no new task until that window resets (the 7-day window never brakes: it only shows on the meter), which leaves the rest of it for your design chats, chats and answers. Running
 # work carries on, and chats are never held. Below the brake, the usage taper (usage_taper, default 30, 0 = off)
 # starts fewer Claude workers as the 5-hour window fills, on a square-root curve that cuts most of them early, from
 # max_parallel at the taper down to 1 just under the brake (or 100 with the brake off): see usage_taper_cap. The dashboard's 5-hour pace line likewise
 # runs up to the brake. With the taper on, the pace slowdown also starts fewer workers once 5-hour usage comes within
 # PACE_MARGIN points of that pace line: one fewer from PACE_MARGIN points under it, then one fewer per PACE_STEP
-# points more, never below 1 (see usage_pace_cap). The lower of the two caps applies, to the same new starts. The 7-day window has neither: only the brake.
+# points more, never below 1 (see usage_pace_cap). The lower of the two caps applies, to the same new starts. The 7-day window has none of the three.
 
 USAGE_WINDOWS = {"five_hour": ("5-hour", "5h"), "seven_day": ("7-day", "7d")}
 USAGE_LOCK = threading.Lock()
@@ -3700,7 +3700,7 @@ def claude_running(find=None):
 def usage_info(s=None, now=None):
     """The usage windows and the brake, for the scheduler and the dashboard: {brake, windows: [{key, label, short,
     pct, resetsAt, resets, ts}], braked, taper}. A reading whose reset has passed is stale and counts as 0. braked is the
-    window that holds the queue (the one that resets last, when both do), or None. taper is {pct, cap, max, ahead,
+    5-hour window when it is at or above the brake, or None: the 7-day window never brakes. taper is {pct, cap, max, ahead,
     words} while the 5-hour window's effective cap (the lower of the taper cap and the pace cap) is below
     max_parallel, else None. pace is True when the pace cap binds, and then ahead is the signed points ahead of pace
     (negative: under it, since the pace cap starts PACE_MARGIN points before the line); else pace is False and
@@ -3715,8 +3715,7 @@ def usage_info(s=None, now=None):
         pct = round(r["utilization"] * 100, 6) if live else 0  # rounded: 0.29 * 100 is 28.999999999999996
         wins.append({"key": k, "label": label, "short": short, "pct": round(pct), "exact": pct,
                      "resetsAt": r["resetsAt"], "resets": clock(r["resetsAt"]) if live else "", "ts": r["ts"]})
-    over = [w for w in wins if brake and w["exact"] >= brake]
-    braked = max(over, key=lambda w: w["resetsAt"]) if over else None
+    braked = next((w for w in wins if w["key"] == "five_hour" and brake and w["exact"] >= brake), None)
     if braked:
         braked = {**braked, "words": f"Usage at {braked['pct']}% of the {braked['label']} window · starts again "
                                      f"after {braked['resets']}"}

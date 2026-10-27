@@ -1708,7 +1708,7 @@ usage-limit reset", so a big task gets a fresh 5-hour window. The task's `not_be
   window's `resetsAt` plus `LIMIT_GRACE` (60 s), the same minute the queue waits after a limit. The window, in this
   order:
   1. the limit the queue is waiting out (`limit_info()`), if there is one;
-  2. else the window holding the usage brake (`usage_info()["braked"]`), if braked;
+  2. else the 5-hour window, if it holds the usage brake (`usage_info()["braked"]`);
   3. else the live 5-hour reading.
 
   With no live reading at all it is refused: "no usage reading yet: give a time instead". The task's log says what
@@ -1930,7 +1930,7 @@ folder under a project's `<worktrees>/` that no longer exists. For what a worktr
   ahead, **yellow** when it is up to 10 points below (`PACE_WARN` in `dashboard.html`), **green** when it is
   further below. The tooltip adds `Pace 50% · 10 points ahead` (or `behind`, or `on pace` within 1 point). A
   window that has reset shows no line, the default fill and no pace line in the tooltip. The brake and limit
-  colours still show on the chip itself: amber border, background and percent at or above the usage brake, red
+  colours still show on the chip itself: amber border, background and percent on the 5h chip at or above the usage brake, red
   while the queue waits out the usage limit (see Usage limits); the pace colour drives only the fill.
 - **Task ids.** Every task title carries its queue id as **#316**, muted, in front of the title: the History
   list, a project's task list, Today's timeline and Tasks panel, a To-do item about a task (in the list and on its
@@ -2069,14 +2069,15 @@ folder under a project's `<worktrees>/` that no longer exists. For what a worktr
     the settings `usage:five_hour` and `usage:seven_day` (`{utilization, resetsAt, ts}`). A reading whose reset has
     passed is stale and counts as 0.
   - **The setting `usage_brake`** is a percent: default 85, 0 turns the brake off. Set it as **Usage brake** on the
-    Settings tab (`POST /api/settings {"usage_brake": 85}`). While either window is at or above it, the queue starts
+    Settings tab (`POST /api/settings {"usage_brake": 85}`). While the 5-hour window is at or above it, the queue starts
     nothing that starts a Claude session: a new task or release, or one resuming its Claude session. Queued work that
     needs no Claude still starts, since holding it frees no usage: deploys (they only run a command), a release that
     only promotes, and a task resumed at its gate or merge (its `start_at` is not `claude`). A merge or promote that
     hits a conflict may still run a worker to resolve it. Running tasks, gates and merges carry on, and design chats
     and chats are never blocked. Held queued tasks say `Usage at 87% of the 5-hour window · starts again after 3:00 pm`. The
     brake lifts when that window resets or a newer reading is under the brake. You get one notification per window
-    per reset: `Usage at 85% of the 5-hour window: no new tasks until 3:00 pm`.
+    per reset: `Usage at 85% of the 5-hour window: no new tasks until 3:00 pm`. The 7-day window never brakes:
+    it shows on the meter, and only the real limit (above) stops the queue at 100%.
   - **Usage taper.** Below the brake, the queue starts fewer workers as the 5-hour window fills, so it reaches
     the brake more slowly. The setting `usage_taper` is a percent: default 30, 0 turns the taper off. Set it as
     **Taper from** on the Settings tab (`POST /api/settings {"usage_taper": 30}`, clamped to 0..100). Let pct be the
@@ -2109,7 +2110,7 @@ folder under a project's `<worktrees>/` that no longer exists. For what a worktr
 
     With the brake off and `max_parallel` 6, the steps end at 32.8, 41.2, 55.2 and 74.8%, then 1 up to 100. With `max_parallel` 1 the cap is always 1, so
     nothing changes. The rules:
-    - It follows the **5-hour window only**; the 7-day window keeps only the brake. A stale reading counts as 0.
+    - It follows the **5-hour window only**, as the brake does. A stale reading counts as 0.
     - It limits only **new starts of tasks that start a Claude session** (the same ones the brake holds). The
       running Claude workers are the running tasks that are not a deploy or release; a Claude-starting task starts
       only while there are fewer of them than the cap. Deploys, releases that only gate and tasks resuming past

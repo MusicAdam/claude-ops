@@ -88,10 +88,10 @@ class Reset(unittest.TestCase):
              "usage:five_hour": reading(95, NOW + 300)}
         self.assertEqual(self.reset(s), (NOW + 660, "7-day"))
 
-    def test_braked_window_next(self):
+    def test_seven_day_never_brakes(self):
         s = {"usage_brake": "85", "usage:five_hour": reading(50, NOW + 1000),
              "usage:seven_day": reading(90, NOW + 90000)}
-        self.assertEqual(self.reset(s), (NOW + 90060, "7-day"))
+        self.assertEqual(self.reset(s), (NOW + 1060, "5-hour"))
 
     def test_live_five_hour_last(self):
         s = {"usage_brake": "85", "usage:five_hour": reading(30, NOW + 1000),
