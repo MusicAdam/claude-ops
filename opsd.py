@@ -1872,7 +1872,7 @@ def worker_prompt(p, t):
     notes += repo_config_note(p) + peer_brief(p, "task")
     return tpl.format(id=t["id"], title=t["title"], body=t["body"], project=p.title, worktree=t["worktree"],
                       branch=t["branch"], repo=p.repo, dev=p.dev, main=p.main, port=p.port_for(t["id"]),
-                      result=result_path(t), checks=checks, notes=notes)
+                      result=result_path(t), checks=checks, notes=notes, proof_dir=proof_dir(t["id"]))
 
 
 def repo_config_note(p):
@@ -2036,6 +2036,7 @@ def run_claude(p, tid, prompt, proof=False):
         return None
     run_dir = RUNS / str(tid)
     run_dir.mkdir(parents=True, exist_ok=True)
+    proof_dir(tid).mkdir(exist_ok=True)  # $OPS_PROOF_DIR: where the worker may write its proof report
     rp = result_path(t)
     rp.unlink(missing_ok=True)
     turn, kept = prompt, None
@@ -2054,7 +2055,7 @@ def run_claude(p, tid, prompt, proof=False):
            "--output-format", "stream-json", "--verbose",
            "--permission-mode", "auto", "--permission-prompts", "none", "--strict-mcp-config",
            "--no-chrome", "--name", f"{p.name} #{tid}", "--add-dir", str(IMAGES),
-           "--settings", guard_settings(t["worktree"], p)] + (["--add-dir", str(run_dir)] if proof else [])
+           "--settings", guard_settings(t["worktree"], p), "--add-dir", str(run_dir if proof else proof_dir(tid))]
     if t["session_id"]:
         cmd += ["--resume", t["session_id"]]
         model = session_model(t, t["kind"])
@@ -2067,7 +2068,7 @@ def run_claude(p, tid, prompt, proof=False):
         cmd += ["--max-budget-usd", str(RESEARCH_TIERS[research_tier(rs.get("tier"))][1])]
     port = p.port_for(tid)
     env = dict(os.environ, OPS_RESULT=str(rp), OPS_TASK_ID=str(tid), OPS_PORT=str(port), OPS_FROM=f"task:{tid}",
-               OPS_DAEMON=DAEMON_URL, **{k: str(v).format(port=port) for k, v in p.env.items()})
+               OPS_DAEMON=DAEMON_URL, OPS_PROOF_DIR=str(proof_dir(tid)), **{k: str(v).format(port=port) for k, v in p.env.items()})
     upd(tid, phase="recording proof" if proof else "claude working")
     sid = t["session_id"]
     with open(run_dir / "claude.jsonl", "a") as log, open(run_dir / "claude.err", "a") as err:
@@ -2342,6 +2343,8 @@ def failure_detail(wt, g, rc, tail):
 # Try card plays runs/<id>/proof.mp4. One recording at a time, queue-wide (there is one screen), each capped at
 # PROOF_MINUTES. Nothing about it ever blocks: no video, for whatever reason, is an event and the task goes to
 # review as before. Send back deletes the video; the next round records a new one.
+# A worker may instead write a proof report: runs/<id>/proof/report.md ($OPS_PROOF_DIR) with its clips and
+# screenshots next to it, flat. With one, the recording turn is skipped; Send back deletes the folder too.
 
 PROOF_LOCK = threading.Lock()  # one screen: one recording turn at a time
 PROOF_MINUTES = 10
@@ -2357,9 +2360,63 @@ def proof_watch_file(tid):
     return RUNS / str(tid) / "proof_watch.json"
 
 
-def clear_proof(tid):
+def clear_proof(tid, report=False):
+    """Delete the proof video, its note and watch list; with report, the proof folder (its report) as well."""
     for f in (*proof_files(tid), proof_watch_file(tid)):
         f.unlink(missing_ok=True)
+    if report:
+        shutil.rmtree(proof_dir(tid), ignore_errors=True)
+
+
+PROOF_VIDEOS = {".mp4", ".webm"}
+PROOF_MEDIA = PROOF_VIDEOS | {".png", ".jpg", ".jpeg", ".gif", ".webp"}
+
+
+def proof_dir(tid):
+    """A task's proof folder: the worker's report.md and the clips and screenshots it embeds ($OPS_PROOF_DIR)."""
+    return RUNS / str(tid) / "proof"
+
+
+def proof_report(tid):
+    """True when the task's worker wrote a proof report (proof/report.md)."""
+    return (proof_dir(tid) / "report.md").is_file()
+
+
+def proof_report_counts(tid):
+    """(videos, images) in the proof folder."""
+    fs = [f.suffix.lower() for f in proof_dir(tid).iterdir() if f.is_file()] if proof_dir(tid).is_dir() else []
+    return sum(x in PROOF_VIDEOS for x in fs), sum(x in PROOF_MEDIA - PROOF_VIDEOS for x in fs)
+
+
+def proof_clip(tid):
+    """The first video the proof report embeds that is in the folder, as {name, alt}, for the Try card when there
+    is no proof.mp4. None without one."""
+    try:
+        text = (proof_dir(tid) / "report.md").read_text(errors="replace")[:FILE_MAX]
+    except OSError:
+        return None
+    for alt, url in re.findall(r"!\[([^\]]*)\]\(<?([^\s()<>]+)>?\)", text):
+        name = unquote(re.sub(r"^\./", "", url.split("#")[0].split("?")[0]))
+        if Path(name).suffix.lower() in PROOF_VIDEOS and proof_path(tid, name)[0]:
+            return {"name": name, "alt": " ".join(alt.split())[:200]}
+    return None
+
+
+def proof_path(tid, name):
+    """(path, None) for name, a file of the task's proof folder, or (None, why not). Flat names only: no /, no ..,
+    no hidden file; report.md or a picture or video, at most FILE_MAX bytes for text and MEDIA_MAX for media."""
+    if not re.fullmatch(r"[\w][\w.-]*", name or "") or ".." in name:
+        return None, f"Not a proof file name: {name}"
+    ext = Path(name).suffix.lower()
+    if name != "report.md" and ext not in PROOF_MEDIA:
+        return None, f"Not a proof report or media file: {name}"
+    folder = proof_dir(tid)
+    path = folder / name
+    if not path.is_file() or not within(path, folder):
+        return None, f"No such proof file: {name}"
+    if path.stat().st_size > (MEDIA_MAX if ext in PROOF_MEDIA else FILE_MAX):
+        return None, f"Over {50 if ext in PROOF_MEDIA else 1} MB: {name}"
+    return path, None
 
 
 def proof_watch(tid):
@@ -2478,8 +2535,12 @@ def proof_prompt(p, t, granted):
 
 def record_proof(p, tid):
     """The step "recording proof" of a held task: resume its worker to record runs/<id>/proof.mp4. Logs why when
-    there is no video, and never fails the task. Returns early when the task is paused or cancelled."""
+    there is no video, and never fails the task. Returns early when the task is paused or cancelled. Skipped when the
+    worker wrote a proof report: that is the task's proof."""
     clear_proof(tid)
+    if proof_report(tid):
+        videos, images = proof_report_counts(tid)
+        return ev(tid, f"proof report: {videos} videos, {images} images")
     proof_files(tid)[0].parent.mkdir(parents=True, exist_ok=True)
     granted = screen_recording_granted()
     if not granted and not (p.running_cmd or p.stop_cmd):  # not a server-style app: only screencapture can record it
@@ -6279,7 +6340,7 @@ def design(did):
 FILE_TEXT = "text/plain; charset=utf-8"
 FILE_TYPES = {".html": "text/html; charset=utf-8", ".htm": "text/html; charset=utf-8", ".md": FILE_TEXT,
               ".txt": FILE_TEXT, ".json": "application/json", ".csv": FILE_TEXT, ".css": "text/css",
-              ".js": "text/javascript", ".svg": "image/svg+xml", ".png": "image/png", ".jpg": "image/jpeg",
+              ".js": "text/javascript", ".svg": "image/svg+xml", ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
               ".gif": "image/gif", ".webp": "image/webp", ".mp4": "video/mp4", ".webm": "video/webm"}
 
 
@@ -9216,6 +9277,8 @@ def state_payload():
         t["proof"] = proof_files(t["id"])[0].is_file()  # GET /api/tasks/<id>/proof.mp4 plays it
         t["proof_note"] = proof_note(t["id"]) if t["proof"] else None
         t["proof_watch"] = proof_watch(t["id"]) if t["proof"] else None
+        t["proof_report"] = proof_report(t["id"])  # GET /api/tasks/<id>/proof/report.md and its media
+        t["proof_clip"] = proof_clip(t["id"]) if t["proof_report"] and not t["proof"] else None
         t["review"] = review_of(t)
     projects = []
     for p in PROJECTS.values():
@@ -9388,6 +9451,8 @@ class H(BaseHTTPRequestHandler):
             t["proof"] = proof_files(tid)[0].is_file()
             t["proof_note"] = proof_note(tid) if t["proof"] else None
             t["proof_watch"] = proof_watch(tid) if t["proof"] else None
+            t["proof_report"] = proof_report(tid)
+            t["proof_clip"] = proof_clip(tid) if t["proof_report"] and not t["proof"] else None
             t["review"] = review_of(t)
             t["start_words"] = start_words(t) if t["state"] == "queued" else None
             t["chat_from"] = chat_from(t)
@@ -9404,6 +9469,16 @@ class H(BaseHTTPRequestHandler):
         m = re.fullmatch(r"/api/tasks/(\d+)/proof\.mp4", path)
         if m:
             return self.send_video(proof_files(int(m.group(1)))[0])
+        m = re.fullmatch(r"/api/tasks/(\d+)/proof/(.+)", path)  # the proof report and its media; flat names only
+        if m:
+            f, why = proof_path(int(m.group(1)), unquote(m.group(2)))
+            if not f:
+                return self.send(404, {"error": why})
+            ctype, csp = FILE_TYPES.get(f.suffix.lower(), FILE_TEXT), {
+                "Content-Security-Policy": "sandbox allow-scripts allow-forms allow-popups"}
+            if f.suffix.lower() in PROOF_MEDIA:  # by byte range, so a <video> plays and seeks
+                return self.send_video(f, ctype, csp)
+            return self.send(200, f.read_bytes(), ctype, csp)
         m = re.fullmatch(r"/api/designs/(\d+)/files/([\w.-]+)", path)  # a design chat's document; no / in a name
         if m:
             f = CHAT_FILES / m.group(1) / m.group(2)
@@ -9759,7 +9834,7 @@ class H(BaseHTTPRequestHandler):
             if st != "review":
                 raise ValueError(f"task is {st}")
             kill_app(p, t["worktree"])
-            clear_proof(tid)  # it shows the work you sent back; the next review records a new one
+            clear_proof(tid, report=True)  # it shows the work you sent back; the next round makes a new one
             upd(tid, state="queued", rounds=0,
                 next_prompt=f"The user tried your change and wants this changed:\n\n{b['feedback']}\n\n"
                             "Update the work, re-run the checks, commit, and write $OPS_RESULT (with an updated "

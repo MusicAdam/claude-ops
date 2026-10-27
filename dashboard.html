@@ -459,6 +459,16 @@ a[data-task] { color: var(--accent); cursor: pointer; }
 #tdfull { position: fixed; inset: 0; z-index: 9; background: var(--bg); overflow: auto; overscroll-behavior: contain;
           padding: 0 max(16px, env(safe-area-inset-right)) max(16px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left)); }
 body:not(.td) #tdfull { display: none; }
+/* A task's proof report (README Proof video and report): full screen like #tdfull, from any page */
+#proofrep { position: fixed; inset: 0; z-index: 10; background: var(--bg); overflow: auto; overscroll-behavior: contain;
+            padding: 0 max(16px, env(safe-area-inset-right)) max(16px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left)); }
+#proofrep .fin { max-width: 1100px; margin: 0 auto; }
+#proofrep .fhead { display: flex; align-items: center; gap: 8px; position: sticky; top: 0; z-index: 1; background: var(--bg); padding: 10px 0; border-bottom: 1px solid var(--line); }
+#proofrep .fhead .tid { margin-right: 6px; } #proofrep .fhead .k { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#proofrep .prtoc { margin: 10px 0; padding-left: 18px; columns: 2 260px; font-size: 13px; } #proofrep .prtoc a { cursor: pointer; color: var(--accent); }
+#proofrep .rsdoc h2 { scroll-margin-top: 56px; border-top: 1px solid var(--line); padding-top: 12px; }
+#proofrep .rsdoc table { display: block; overflow-x: auto; } #proofrep .rsdoc td, #proofrep .rsdoc th { vertical-align: top; }
+#proofrep .mdvideo, #proofrep .mdimg { max-height: min(640px, 75vh); }
 #tdfull .fin { max-width: 1100px; margin: 0 auto; }
 #tdfull .fhead { display: flex; align-items: center; gap: 8px; position: sticky; top: 0; z-index: 1; background: var(--bg);
                  padding: max(10px, env(safe-area-inset-top)) 0 8px; border-bottom: 1px solid var(--line); }
@@ -848,6 +858,7 @@ details.tdparked .tditem { opacity: .8; }
   <div id="tdgrip" title="Drag to resize · double-click for 320px"></div>
 </div>
 <div id="tdfull" class="hidden" role="dialog" aria-label="To-do, full screen"></div>
+<div id="proofrep" class="hidden" role="dialog" aria-label="Proof report, full screen"></div>
 <div id="tdundo" class="hidden"></div>
 <nav id="tdnav" class="hidden"><button data-pane="todo"><i>☰<span class="badge hidden"></span></i>To-do</button><button data-pane="now"><i>▶</i>Now</button><button data-pane="activity"><i>◷</i>Activity</button></nav>
 <main id="settingsview" class="hidden">
@@ -1067,7 +1078,13 @@ const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;
 // event gave (always: say it even with no event). The src waits in data-src until the video is in view (proofLoad).
 // ?v= is when it was recorded, so a re-recording after Send back is fetched anew, not taken from the cache.
 function proofHtml(t, always) {
-  const last = [...(t.events || [])].reverse().find(e => /^(proof video recorded|no proof video)/.test(e.text));
+  const last = [...(t.events || [])].reverse().find(e => /^(proof video recorded|no proof video|proof report:)/.test(e.text));
+  if (!t.proof && t.proof_clip) {  // a proof report without proof.mp4: its first clip plays on the card
+    const v = last && /^proof report/.test(last.text) ? last.ts : (t.last_event && t.last_event.ts) || t.finished || 0, c = t.proof_clip;
+    return `<figure class="proof"><video data-src="/api/tasks/${t.id}/proof/${encodeURIComponent(c.name)}?v=${v}" preload="none" autoplay muted loop playsinline controls></video><figcaption>${
+      esc(c.alt || c.name)} · the first clip of the proof report</figcaption></figure>`;
+  }
+  if (t.proof_report) return `<div class="proof none">${esc(last && /^proof report/.test(last.text) ? last.text : "proof report")} · Open report to see it</div>`;
   if (t.proof) {
     const v = last && /^proof/.test(last.text) ? last.ts : (t.last_event && t.last_event.ts) || t.finished || 0;
     return `<figure class="proof"><video data-src="/api/tasks/${t.id}/proof.mp4?v=${v}" preload="none" autoplay muted loop playsinline controls></video>${
@@ -1102,6 +1119,60 @@ function proofKeep(box, draw) {
   else if (proofSeen) proofSeen.observe(nu); else nu.src = nu.dataset.src;
   return done;
 }
+// ---- Proof report (README Proof video and report): runs/<id>/proof/report.md full screen, from the Try step's and
+// the task page's Open report. Its relative media resolve to /api/tasks/<id>/proof/ (mdRepoUrl); its clips wait in
+// data-lazy, preload none, until they scroll into view. Esc, ✕ and, on a phone, back ({proofrep: id}) close it.
+const PR = {id: null};
+const prSeen = "IntersectionObserver" in window ? new IntersectionObserver(es => es.forEach(e => {
+  if (!e.isIntersecting) return;
+  const v = e.target; prSeen.unobserve(v); v.preload = "metadata"; v.src = v.dataset.lazy;
+}), {rootMargin: "300px 0px"}) : null;
+async function proofReportOpen(id, title) {
+  if (PR.id === id) return;
+  if (PR.id) proofReportShut();
+  if (phone()) history.pushState({proofrep: id}, "", location.hash);
+  PR.id = id;
+  const box = $("#proofrep"), raw = `/api/tasks/${id}/proof/report.md`;
+  box.innerHTML = `<div class="fin"><div class="fhead"><b>Proof report</b><span class="k">${tid(id)}${esc(title || "")}</span>
+    <a href="${raw}" target="_blank" rel="noopener">Raw</a><button data-px title="Close (Esc)">✕</button></div><div class="muted" style="margin-top:10px">Loading…</div></div>`;
+  box.classList.remove("hidden"); box.scrollTop = 0;
+  box.querySelector("[data-px]").onclick = proofReportClose;
+  let text;
+  try {
+    const r = await fetch(raw, {cache: "no-store"});
+    text = await r.text();
+    if (!r.ok) throw new Error((() => { try { return JSON.parse(text).error; } catch { return `HTTP ${r.status}`; } })());
+  } catch (err) { if (PR.id === id) box.querySelector(".fin > .muted").outerHTML = `<div class="err" style="margin-top:10px">Couldn't open the report: ${esc(err.message)}</div>`; return; }
+  if (PR.id !== id) return;
+  const doc = document.createElement("div");
+  doc.className = "msg rsdoc"; doc.innerHTML = md(text, "pr-", undefined, {proof: id, lazy: true});
+  const heads = [...doc.querySelectorAll("h2[id]")];
+  box.querySelector(".fin > .muted").replaceWith(...(heads.length > 1 ? [Object.assign(document.createElement("ol"), {className: "prtoc",
+    innerHTML: heads.map(h => `<li><a href="#${esc(h.id)}">${esc(h.textContent)}</a></li>`).join("")})] : []), doc);
+  // An #anchor scrolls the report: as a hash it would move the page under it
+  box.querySelectorAll('a[href^="#"]').forEach(a => a.onclick = e => { e.preventDefault();
+    const h = box.querySelector(`[id="${CSS.escape(decodeURIComponent(a.getAttribute("href").slice(1)))}"]`); if (h) h.scrollIntoView({block: "start"}); });
+  box.querySelectorAll("video[data-lazy]").forEach(v => prSeen ? prSeen.observe(v) : (v.src = v.dataset.lazy));
+}
+function proofReportShut() {  // stops its clips downloading, too
+  const box = $("#proofrep");
+  box.querySelectorAll("video").forEach(v => { if (prSeen) prSeen.unobserve(v); v.pause(); v.removeAttribute("src"); v.load(); });
+  box.innerHTML = ""; box.classList.add("hidden"); PR.id = null;
+}
+function proofReportClose() {
+  if (history.state?.proofrep === PR.id) return history.back();  // popstate shuts it
+  proofReportShut();
+}
+// popstate: back from an open report only closes it. True when it did.
+function proofReportBack() {
+  if (!PR.id || history.state?.proofrep === PR.id) return false;
+  proofReportShut(); return true;
+}
+document.addEventListener("keydown", e => {
+  if (e.key !== "Escape" || !PR.id) return;
+  e.preventDefault(); e.stopImmediatePropagation(); proofReportClose();
+}, true);
+// ---- end of Proof report
 const shas = s => String(s || "").split(" ").map(x => x.slice(0, 8)).join(" ");  // one commit per repo in a workspace
 const ago = (t, now) => { if (!t) return ""; const s = Math.max(0, now - t);
   return s < 60 ? `${s|0}s` : s < 3600 ? `${(s/60)|0}m` : s < 86400 ? `${(s/3600).toFixed(1)}h` : `${(s/86400).toFixed(1)}d`; };
@@ -1857,7 +1928,9 @@ async function loadDetail(id, fresh) {
   const t = detail, live = ["running", "gating", "merging"].includes(t.state), links = chatCtx(t.project);
   const btn = (act, label, cls = "") => `<button class="${cls}" data-act="${act}">${label}</button>`;
   let actions = "";
-  if (t.state === "review") actions = (t.can_play ? btn("play", "▶ Try this build", t.proof ? "" : "primary") : "") + btn("approve", "Approve & merge", t.proof ? "primary" : "");
+  const proven = t.proof || t.proof_report;  // with a video or report to watch, Approve & merge leads
+  if (t.state === "review") actions = (t.can_play ? btn("play", "▶ Try this build", proven ? "" : "primary") : "") + btn("approve", "Approve & merge", proven ? "primary" : "")
+    + (t.proof_report ? btn("proofreport", "Open report") : "");
   if (t.start_words) actions += btn("start-now", "▶ Start now", "primary");
   if (["queued", "running", "gating"].includes(t.state)) actions += btn("pause", "❚❚ Pause");
   if (t.state === "paused") actions += btn("resume", "▶ Resume", "primary");
@@ -1923,7 +1996,7 @@ async function loadDetail(id, fresh) {
     const was = same && scrolls.find(s => s[0] === (el.id || el.className));
     el.scrollTop = !was || was[2] ? el.scrollHeight : was[1];
   }
-  document.querySelectorAll("#detail [data-act]").forEach(b => b.onclick = () => act(t.id, b.dataset.act));
+  document.querySelectorAll("#detail [data-act]").forEach(b => b.onclick = () => b.dataset.act === "proofreport" ? proofReportOpen(t.id, t.title) : act(t.id, b.dataset.act));
   box.querySelectorAll("a.origin").forEach(a => a.onclick = () => openOrigin(t.origin));
   document.querySelectorAll("#detail textarea").forEach(el => { el.onfocus = () => typing = true; el.onblur = () => typing = !!el.value; });
   if (ra) {
@@ -2299,10 +2372,15 @@ function mdLocal(u) {
 // In a repo markdown file opened in the file drawer (base: its project and folder), a relative path is that repo's
 // file on dev, served by /api/files. ./ and ../ resolve against the file's folder; a path that climbs out of the
 // repo, and any URL with a scheme, a leading / or ~, or only an #anchor, stays as written.
+// In a proof report (base {proof: <task id>}) a flat name is a file of the task's proof folder (/api/tasks/<id>/proof/).
 function mdRepoUrl(u, base) {
   if (!base || /^([a-z][\w+.-]*:|[#/~])/i.test(u)) return u;
   const [, p, , h = ""] = u.match(/^([^?#]*)(\?[^#]*)?(#.*)?$/), out = [];
   if (!p) return u;
+  if (base.proof != null) {
+    const name = p.replace(/^(\.\/)+/, "").replace(/&amp;/g, "&");
+    return /^[\w][\w.-]*$/.test(name) && !name.includes("..") ? `/api/tasks/${+base.proof}/proof/${encodeURIComponent(name)}${h}` : u;
+  }
   for (const s of (base.dir ? `${base.dir}/${p}` : p).split("/")) {
     if (s === "..") { if (!out.length) return u; out.pop(); }
     else if (s && s !== ".") out.push(s);
@@ -2318,6 +2396,7 @@ function inline(s, ctx = {}) {
   const L = ctx.links, ref = (r, h) => put(lnSpan(r, h));
   // ![alt](clip.mp4) is a video that plays in place; any other ![alt](url) a picture that opens in a new tab
   const img = (alt, url) => { const video = MD_VIDEO.test(url); url = mdRepoUrl(mdLocal(url), ctx.base);
+    if (video && ctx.base && ctx.base.lazy) return put(`<video class="mdvideo" data-lazy="${url}" controls muted playsinline preload="none" title="${alt}"></video>`);
     if (video) return put(`<video class="mdvideo" src="${url}" controls muted playsinline preload="metadata" title="${alt}"></video>`);
     return put(`<a href="${url}" target="_blank" rel="noopener"><img class="mdimg" src="${url}" alt="${alt}" title="${alt}"></a>`); };
   const link = (text, url) => {
@@ -3204,7 +3283,8 @@ function tdActions(it) {
   const g = P(it.project), s = it.source || {}, A = (a, label, o = {}) => ({a, label, ...o});
   switch (it.verb) {
     // With a proof video on the card, watching it comes first: Approve & merge leads and Play moves over
-    case "Try": return tdProof(it) ? [A("approve", "Approve & merge", {primary: 1}), A("play", "▶ Play this build", {title: "Run the task's build from its worktree"}), A("sendback", "Send back…")]
+    case "Try": return tdProof(it) ? [A("approve", "Approve & merge", {primary: 1})].concat(tdProof(it).proof_report ? [A("proofreport", "Open report", {title: "The worker's proof report, full screen: its clips and screenshots, before and after"})] : [],
+        [A("play", "▶ Play this build", {title: "Run the task's build from its worktree"}), A("sendback", "Send back…")])
       : [A("play", "▶ Play this build", {primary: 1, title: "Run the task's build from its worktree"}), A("approve", "Approve & merge"), A("sendback", "Send back…")];
     case "Review": return [A("approve", "Approve & merge", {primary: 1}), A("diff", "Open diff", {title: "The files it changed, in the task's details"}), A("sendback", "Send back…")];
     case "Answer": return [A("answer", "Answer", {primary: 1, title: "Type your answer in the message box below"}), A("details", "Details")];
@@ -3228,8 +3308,8 @@ function tdActions(it) {
   }
   return [];
 }
-// A Try step's task from /api/state when it has a proof video, else null
-const tdProof = it => { const s = it.source || {}, t = it.verb === "Try" && s.kind === "task" && state.tasks.find(x => x.id === s.id); return t && t.proof ? t : null; };
+// A Try step's task from /api/state when it has a proof video or report, else null
+const tdProof = it => { const s = it.source || {}, t = it.verb === "Try" && s.kind === "task" && state.tasks.find(x => x.id === s.id); return t && (t.proof || t.proof_report) ? t : null; };
 // What one Deploy button ships: its own count of commits, as the Projects card's Deploys section says it.
 const tdBehind = d => d.log_unknown ? " (?)" : !d.last && !d.from && !d.since ? " (first deploy)" : d.behind == null ? "" : d.behind ? ` (${d.behind})` : " (up to date)";
 // Play or Stop the project's app from main or dev, as the Projects card's buttons do. None if it can't launch.
@@ -3792,6 +3872,7 @@ async function tdDo(a) {
     try { await fn(); TD.note = note; } catch (e) { TD.msg = e.message; }
     TD.busy = ""; delete $("#tdstep").dataset.html; renderToday(); refresh();
   };
+  if (a === "proofreport") return proofReportOpen(s.id, it.title);
   if (a === "sendback") return tdMode({a: "reject", id: s.id, words: `Sends #${s.id} back to its worker: say what to change.`});
   if (a === "retrynote") return tdMode({a: "retry", id: s.id, words: `Retries #${s.id} with this note to its worker.`});
   if (a === "retryafter") {
@@ -5528,6 +5609,7 @@ $("#rsrepo").onchange = () => api("/api/settings", {research_repo: $("#rsrepo").
   .then(() => { $("#rsrepomsg").textContent = ""; RS.loaded = false; RS.refs = null; refresh(); })
   .catch(e => $("#rsrepomsg").textContent = e.message);
 window.addEventListener("popstate", () => {
+  if (proofReportBack()) return;
   const h = location.hash;
   const away = /^#research(\/|$)/.test(h) || (TABS.includes(h.slice(1)) && h !== "#today") || h === "#queue";
   if (tab === "today" && !away) {  // a step or panel opened on a phone, whatever the hash
