@@ -9636,6 +9636,7 @@ class H(BaseHTTPRequestHandler):
             t["proof_clip"] = proof_clip(tid) if t["proof_report"] and not t["proof"] else None
             t["review"] = review_of(t)
             t["start_words"] = start_words(t) if t["state"] == "queued" else None
+            t["wait"] = wait_reasons([t]).get(tid) if t["state"] == "queued" else None
             t["chat_from"] = chat_from(t)
             t["chat"] = q("SELECT role,text,ts,delivered FROM task_msgs WHERE task_id=? ORDER BY id", (tid,))
             t["chat_live"] = TASK_CHAT_LIVE.get(tid)

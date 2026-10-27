@@ -1984,6 +1984,7 @@ async function loadDetail(id, fresh) {
     ${originLine(t.origin, "Sent by")}
     ${timeLine(t, live)}
     ${t.start_words ? `<div class="muted" style="margin:4px 0">${esc(t.start_words)}</div>` : ""}
+    ${t.state === "queued" && (archivedP(t.project) || t.wait) ? `<div class="muted" style="margin:4px 0">${esc(archivedP(t.project) ? "archived project: restore it to run this" : t.wait)}</div>` : ""}
     <div class="muted mono" style="margin:4px 0">${esc(P(t.project).title)} · ${esc(t.branch || "")}${t.merged ? ` → ${esc(t.kind === "release" || P(t.project).direct_main ? P(t.project).main_branch || "main" : P(t.project).dev_branch || "dev")} ${esc(t.merged_show || shas(t.merged))}` : ""}${t.kind === "release" && t.base && !t.merged ? `checking ${esc(t.base_show || shas(t.base))}` : ""}${t.kind === "deploy" && t.base ? `deploying ${esc(t.base_show || shas(t.base))}` : ""}${t.rounds ? ` · fix rounds: ${t.rounds}` : ""}${t.session_model ? ` · model: ${esc(t.session_model)}` : t.model ? ` · model: ${esc(t.model)} (not started)` : ""}${t.effort ? ` · effort: ${esc(t.effort)}` : ""}</div>
     ${t.question ? `<div class="callout"><b>Question:</b> ${esc(t.question)}</div>
       <textarea id="answer" placeholder="Your answer (drop or paste screenshots to attach them)" style="min-height:70px"></textarea>
