@@ -831,7 +831,8 @@ stay on the right of the header.
     title, its count of open (not parked) to-dos when above 0, and a ● when it has an unread chat (a Read to-do
     from a chat). With one project ticked its one row still shows. Clicking a row opens that project's **home**
     in the centre (TODAY-2): no to-do is selected. The home is kept in this browser (`ops-td-home`) and its row is
-    highlighted. Clicking a to-do clears the home and selects the to-do and its project: the to-do's row has its
+    highlighted. The click also selects the project, which filters the to-dos (see *A project filters the list*
+    below). Clicking a to-do clears the home and selects the to-do and its project: the to-do's row has its
     normal highlight and its project's row a softer one (an accent bar on its left and a light tint), and the
     centre shows that project's header with the step under it (TODAY-2). The project shown always follows the
     selected item, the auto-selected one too; it is the item's own project, not stored. Clicking the selected to-do again, or **Esc** on Today with no
@@ -841,6 +842,25 @@ stay on the right of the header.
     home is open nothing is auto-selected, so a new to-do arriving doesn't move the centre. If the home project
     leaves view (the switcher changes, or it is archived or removed), the home clears and the auto-select
     returns.
+  - **A project filters the list.** Clicking a project row selects that project: its row is highlighted as the
+    selected one, its home opens as above, and the to-do list, the filter chips' counts and **Parked (N)** show only
+    that project's items. The To-do header reads **To-do · <project title> (N) ×**.
+    - Clicking the selected row again, or the **×**, unselects it: the list shows every project in view again
+      (the All view), the home closes, and nothing is auto-selected until you click a to-do. The centre then shows
+      the conversation's project with the line `Pick a to-do`. Clicking another row switches the selection.
+    - Clicking a to-do while filtered works as always (its step opens under the compact header) and the filter
+      stays. When an item leaves the list, the next one selected is the next one in the filtered list. **Esc**, or
+      clicking the selected to-do again, goes to the project's home and keeps the filter.
+    - It filters the left column only, apart from the header's project switcher: the Projects section still lists
+      every project in view, the timeline is unchanged, and **+ Add** starts on the selected project. A project
+      that leaves view (the switcher changes, or it is archived or removed) clears the filter. With one project
+      ticked in the switcher it changes nothing you can see beyond the header label.
+    - The selected project's row keeps the full highlight whether its home or one of its to-dos is shown; the
+      softer highlight (a to-do's project, above) is for a project you have not selected.
+    - The selection is kept in this browser (`ops-td-proj`), apart from the chip filter (`ops-todo-filter`) and the
+      home (`ops-td-home`). Unselecting is not kept: a reload in the All view auto-selects as usual.
+    - On a phone (PHONE-1) the same filter applies to the To-do pane's list, and tapping a project still opens Now
+      on its home.
 - **TODAY-2 Centre: always a chat, with the project and its step on top.** The centre column is always the conversation (see
   *one conversation per project* below): a strip of tabs on top, one per open topic, then the header block (the
   project and, with a to-do selected, its step), then the thread, then the message box. Nothing sits between the
@@ -924,6 +944,35 @@ stay on the right of the header.
     so an up-to-date stage can still be redeployed.
   - A project with no launch step, straight to main and no deploy targets shows no pipeline. On a phone the
     lanes stack, and a lane's chips wrap after an arrow.
+
+  **The recap: Lately and Open.** On a plain home (a project row clicked, no to-do selected) the card has two more
+  sections under the pipeline. They are not in a to-do's compact header, nor on the All clear card. A **▾** at the
+  card's top right (or a click on its title row) folds it to the title, status line and pipeline; **▸** unfolds it.
+  This browser keeps the choice for every project (`ops-td-recap`, `1` folded); it starts unfolded. Unfolded, the
+  card scrolls inside itself past about 40% of the column's height (the to-do case keeps the limits above).
+  - **Lately.** First a digest: 2–3 sentences by Claude on the project's recent work, its themes rather than a
+    list. It is written only when you click **Summarize**, never by itself and never on a poll. Claude (haiku, one
+    turn with no tools, skipped while the usage limit holds) reads the titles and worker summaries of the last 8
+    tasks of the project that finished done, and the titles of its open topics. The digest is saved on the server
+    per project (setting `recap:<project>`, `{text, written, last_task}`), so every device shows it until you ask
+    for a new one. Under it: `written 2h ago · 3 tasks done since` (tasks of the project done since the newest one it
+    read; left out at 0) and **↻**, which writes it again. While it writes, the button reads `Writing…` and is
+    disabled. A failure or the usage limit shows in the card's message line, and the old digest stays. A project
+    with fewer than 2 done tasks has no **Summarize** and no digest. Then the last 5 done tasks, `#id title · age`:
+    a click opens the task panel, as the timeline does (TODAY-3). **All done tasks →** opens the Tasks pinned tab
+    (TODAY-4). Releases and deploys are not counted as tasks here.
+  - **Open.** One list, each row a small chip, a title and a muted fact, in this order: the project's to-dos that
+    are not parked (chip: the verb; a click selects it); its tasks running, checking, merging, needing you, queued
+    or paused (chip: the state; fact: the age, or `after #N` for one waiting on another; a click opens the task
+    panel); its open topics other than the one shown (fact: `● unread`; a click makes it the shown topic, as its
+    tab does); its open OpenSpec changes (fact: done/total; a click opens its chat, as Specs & designs does). At
+    most 8 rows, then **N more** shows the rest. With nothing: `Nothing open.` The ordering and the cap are
+    `tdOpenRows()`, tested in `tests/test_td_recap.py`.
+  - API: `GET /api/projects/<name>/recap` answers `{digest: {text, written, since} | null, can_summarize, done:
+    [{id, title, finished, summary_first_line}], topics: [{ref, title, unread, current}], changes: [{name, sub,
+    title, done, total}]}`; it never calls Claude. `POST /api/projects/<name>/recap` writes the digest (blocking, up
+    to a minute) and answers the same, with `error` when it could not write one (the old digest stays). Open's
+    to-dos and tasks come from `/api/state`.
 
   Errors show in the card's message line. The **All clear** card (empty list, no home) is this card for the conversation's project, with a muted
   line that nothing needs you. The tabs and the conversation under it are unchanged. A message sent from a home
@@ -1178,6 +1227,8 @@ stay on the right of the header.
   chats once when an item has no chat of its own. `GET /api/tasks/<id>` gains `chat_from`, the design chat that
   queued the task or its parent. The conversation reads `GET /api/conversation?project=<name>` with each poll,
   and the current topic (`GET /api/designs/<id>`, or `/api/research/threads/<id>`).
+  A project home reads its recap (`GET /api/projects/<name>/recap`, TODAY-2) when it opens and every 30 seconds
+  while it stays open, not with the 3-second poll.
 - **Layout.** Desktop, 1100px and wider, has the three columns. Narrower windows stack them. Below 700px the
   phone layout below takes over. On desktop, drag the border between the centre and right columns to resize the
   right column: from 240px up to 50% of the view, and never so wide that the centre drops below 420px. This
@@ -1250,7 +1301,8 @@ Below 700px Today is phone-first. The rules:
 
 - **PHONE-1 One column at a time.** A bottom bar switches between **To-do** (with a red count badge), **Now** (the
   tab strip, the header block with the project and the step, the thread and the message box, in that order) and **Activity** (the timeline). The page opens on To-do. Tapping a to-do opens it in
-  Now. The Projects section is at the top of the To-do pane, above the list, and folds as on a computer; tapping a project opens Now on its home
+  Now. The Projects section is at the top of the To-do pane, above the list, and folds as on a computer; tapping a project selects it, which
+  filters the list as on a computer (TODAY-1), and opens Now on its home, with Lately and Open under its **▸**/**▾** (TODAY-2)
   (compact: a title row with **‹ To-do**, and the buttons in one row that scrolls sideways). Task details, and the other timeline panels, open full screen.
 - **HDR-1 Header.** One row, about 40px: the name, the project switcher and **More**. The switcher takes the
   room left on the row, cuts its label short to fit, and opens the same checklist as on a computer. The Today button, the queue
