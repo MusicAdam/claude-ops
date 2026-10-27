@@ -1310,10 +1310,17 @@ Below 700px Today is phone-first. The rules:
   readouts and the pause buttons are left out on Today; the other pages still show them. The usage-limit bar
   still shows when the limit is hit.
 - **HDR-2 Step card.** The step sits in the header block under its project's compact header, above the thread, as on
-  a computer, compact by default: one top row with **‹ To-do**, **Step k of n · project**,
+  a computer, compact by default: one top row with **‹ To-do**, **‹ Step k of n ›**,
   **Details ▾**, **Skip →** (and **Unpark** for a parked item, **Unskip** for a skipped one) and the step's **▾**; then the title; then one row of action buttons
   that scrolls sideways, ending in the step's chat buttons, the note field and **Wait for…** (TODO-6). Folded, it is
-  the top row alone, with the verb and title in place of **Step k of n**. The why and the facts open under **Details ▾**.
+  the top row alone, with the verb and title in place of **Step k of n**, between the same **‹** and **›**. The why and the facts open under **Details ▾**.
+  **›** opens the next to-do and **‹** the previous one, in exactly the order the To-do list shows (the current filter
+  and project applied), without pressing **Skip →**: moving only changes the selection, as tapping that row in the
+  list does. Nothing is skipped, unskipped, parked, marked or reordered, and notes and drafts stay. It never lands on a
+  parked item, and a parked item (opened from Parked) shows no arrows. It doesn't wrap: **›** is disabled on the last
+  item and **‹** on the first. Each arrow taps like a 44px-tall target though it is drawn narrow. So the row still fits a
+  360px-wide phone, the project's name is left out of it (the header above names the project), and so is the word
+  **Step** while **Details ▾** is there (**‹ k of n ›**). On a computer the list sits beside the step, so there are no arrows.
   A Try step's proof video sits under the title at full width; the card scrolls to its buttons (HDR-4).
   The title is cut at two lines; **Details ▾** shows it whole, and a title over about 50 characters brings **Details ▾**
   even when there is no why or facts. A Try step's review report is under **Details ▾** too. After the step's **▾**
@@ -1336,7 +1343,9 @@ Below 700px Today is phone-first. The rules:
   inside what is left, and folds to one line with its **▾**. A long conversation never pushes the composer off the screen.
 - **PHONE-2 Back.** **‹ To-do** returns to the list, and so do **To-do** in the bottom bar and the phone's back
   gesture: opening a step or a project home, or a details panel or a to-do's full-screen view, adds a history entry, and going back closes one level (the panel or the full-screen view, then
-  the step). Switching between Now and Activity adds no more entries, so one back from either reaches To-do. This
+  the step). Switching between Now and Activity adds no more entries, so one back from either reaches To-do. **‹** and
+  **›** on the step card (HDR-2) replace the current entry rather than adding one, so after walking through several
+  to-dos one back still returns to To-do. This
   works whatever the address's hash was when Today opened (`#today`, `#design`, `#chat` or none), and a reload
   starts on To-do with nothing left to go back through. The step card's top row, with **‹ To-do**, stays in view
   however far the card scrolls or the conversation grows.

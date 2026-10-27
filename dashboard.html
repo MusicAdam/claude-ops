@@ -757,6 +757,18 @@ details.tdparked .tditem { opacity: .8; }
   .stepcard .top button { flex: none; padding: 1px 8px; font-size: 13px; white-space: nowrap; }
   .stepcard .top .back, .stepcard .top .skip { border-color: transparent; background: none; color: var(--accent); padding: 2px 4px; }
   .stepcard .top .skip { margin: 0; color: var(--muted); }
+  /* HDR-2: ‹ and › are drawn narrow but tap 36×44px (::after reaches into the gaps and above and below the row). The
+     project's name, already in the header above, makes room for them, and so does "Step " when Details ▾ is there. */
+  .stepcard .top .tdarr { position: relative; width: 28px; height: 28px; padding: 0; justify-content: center; align-items: center;
+                          border-color: transparent; background: none; color: var(--accent); font-size: 22px; line-height: 1; }
+  .stepcard .top .tdarr::after { content: ""; position: absolute; inset: -8px -4px; }
+  .stepcard .top .tdarr:disabled { color: var(--muted); opacity: .35; }
+  .stepcard.tdo .top .k { flex: 0 1 auto; display: flex; align-items: center; overflow: visible; }
+  .stepcard.tdo .top { gap: 4px; }
+  .stepcard .top [data-dets] { border-color: transparent; background: none; color: var(--accent); padding: 2px 4px; }
+  .stepcard.tdo .top .fold, .stepcard.tdo .top .tbtn { padding: 0 3px; }
+  .stepcard .top .k .kt { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  .stepcard .top .k .kp, .stepcard .top:has([data-dets]) .k .ks { display: none; }
   .stepcard h2 { font-size: 15px; line-height: 1.3; margin: 2px 0 0; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
   .stepcard.open h2 { display: block; overflow: visible; }  /* Details ▾ shows the whole title */
   .stepcard h2 .verb { margin-right: 6px; }
@@ -792,6 +804,7 @@ details.tdparked .tditem { opacity: .8; }
   #tdcentre .composer #stopchat { order: 4; }
   #tdcentre .composer :is(#clip, #stopchat) { height: 40px; }
 }
+@media (max-width: 374px) { .stepcard.tdo .top { gap: 2px; } }  /* HDR-2: a 360px phone keeps ‹ k of n › whole beside Details ▾ */
 /* The quick chat (README: TODAY-6): floats over the page with no backdrop, under dialogs (#dlg is 10) */
 #qc { position: fixed; z-index: 9; display: flex; flex-direction: column; background: var(--panel); border: 1px solid var(--line);
       border-radius: 10px; box-shadow: 0 8px 30px rgba(0, 0, 0, .25); overflow: hidden; min-width: 320px; min-height: 300px; }
@@ -3198,6 +3211,13 @@ function tdShownProject(home, item) { return home ? {name: home, how: "sel"} : i
 // A step's ✕: the to-do stays as it is, and its project's home opens (so nothing auto-selects, reloads included)
 function tdAfterClose(it) { return {key: "", home: it.project}; }
 // ---- end of Today's pick rule
+// ---- Today's step arrows, pure (README HDR-2; tests/test_td_neighbour.py runs it in node). The key before (dir -1)
+// or after (dir 1) key in order, the list as shown; null at either end (no wrap) or when key isn't in it (parked).
+function tdNeighbour(order, key, dir) {
+  const i = order.indexOf(key), j = i + dir;
+  return i < 0 || j < 0 || j >= order.length ? null : order[j];
+}
+// ---- end of Today's step arrows
 // ---- Today's project filter and Open list, pure (README TODAY-1, TODAY-2; tests/test_td_recap.py runs them in node).
 // The selected project filters the left column; it clears when the project leaves view.
 function tdProjKeep(proj, viewNames) { return proj && viewNames.includes(proj) ? proj : null; }
@@ -3306,11 +3326,13 @@ function tdLeft(all, shown) {
     }
     if (phone() && el.dataset.key === TD.convKey) TD.over = null;  // back to its own conversation after Topics moved it
     if (again && !phone()) return tdHome(TD.item ? TD.item.project : "");
-    TD.home = null; TD.unpicked = false; TD.key = el.dataset.key; tdSave(); if (TD.pane === "todo") tdGo("now"); else renderToday(); });
+    tdSelect(el.dataset.key); });
   $("#tdleft").querySelectorAll("[data-home]").forEach(el => el.onclick = () => tdProjPick(el.dataset.home));
   if ($("#tdleft [data-projx]")) $("#tdleft [data-projx]").onclick = e => { e.preventDefault(); e.stopPropagation(); tdProjPick(TD.proj); };
   $("#tdleft").querySelectorAll("[data-topics]").forEach(b => b.onclick = () => tdTopics(b.dataset.topics));
 }
+// Select a to-do as a list tap does. From the step's ‹ › (HDR-2) the pane is already Now, so no history entry is added.
+function tdSelect(key) { TD.home = null; TD.unpicked = false; TD.key = key; tdSave(); if (TD.pane === "todo") tdGo("now"); else renderToday(); }
 // The Projects section (README TODAY-1): a row per project in view, in state.projects' order, with its open to-dos
 // and a ● for an unread chat. A click opens the project's home in the centre, with no step.
 function tdProjects() {
@@ -3437,12 +3459,13 @@ function tdStep(it, shown) {
   if (!it) { put($("#tdtodo"), ""); $("#tdtodo").dataset.key = ""; return; }
   if (TD.fold) {
     const html = `<div class="stepcard tdo folded"><div class="top"><button class="ph back" data-back title="Back to the list">‹ To-do</button>
-      <span class="ft" title="${esc(it.title)}">${verbPill(it)} ${tdTid(it)}${esc(it.title)}</span>
+      ${tdArrow(it, shown, -1)}<span class="ft" title="${esc(it.title)}">${verbPill(it)} ${tdTid(it)}${esc(it.title)}</span>${tdArrow(it, shown, 1)}
       <button class="fold" data-fold title="Show the step">▸</button>${tdTopBtns(it)}</div></div>`;
     if (!put($("#tdtodo"), html)) return;
     $("#tdtodo").dataset.key = it.key;
     $("#tdtodo [data-back]").onclick = () => tdGo("todo");
     $("#tdtodo [data-fold]").onclick = () => { TD.fold = false; tdSave(); renderToday(); };
+    tdArrowWire(it, shown);
     tdTopWire(it);
     return;
   }
@@ -3460,7 +3483,7 @@ function tdStep(it, shown) {
   const noteIn = `<input class="tdnote" data-tdnote data-fld="note" maxlength="300" placeholder="Note to self, e.g. wait for #249" value="${esc(note)}" title="Saves as you type">`;
   const unpark = cls => (it.parked || it.skipped) ? `<button class="${cls}" data-unpark title="Back into the list at its normal place">${it.parked ? "Unpark" : "Unskip"}</button>` : "";
   const html = `<div class="stepcard tdo${TD.dets ? " open" : ""}"><div class="top"><button class="ph back" data-back title="Back to the list">‹ To-do</button>
-    <div class="k">${it.parked ? `Parked ${ago(it.parked.since, state.now)}` : `Step ${shown.indexOf(it) + 1} of ${shown.length}`} · ${esc(P(it.project).title)}</div>
+    <div class="k">${tdArrow(it, shown, -1)}<span class="kt">${it.parked ? `Parked ${ago(it.parked.since, state.now)}` : `<span class="ks">Step </span>${shown.indexOf(it) + 1} of ${shown.length}`}<span class="kp"> · ${esc(P(it.project).title)}</span></span>${tdArrow(it, shown, 1)}</div>
     ${dets ? `<button class="ph" data-dets aria-expanded="${TD.dets}">Details ${TD.dets ? "▴" : "▾"}</button>` : ""}
     ${unpark("ph skip")}<button class="ph skip" data-skip title="${esc(skipTip)}">Skip →</button>
     <button class="fold" data-fold title="Fold the step to one line">▾</button>${tdTopBtns(it)}</div>
@@ -3499,12 +3522,27 @@ function tdStep(it, shown) {
   $("#tdtodo").querySelectorAll("[data-ta]").forEach(b => b.onclick = () => tdDo(b.dataset.ta));
   $("#tdtodo").querySelectorAll("[data-files]").forEach(a => a.onclick = () => tdOpenTask(+a.dataset.files, true));
   $("#tdtodo").querySelectorAll("[data-skip]").forEach(b => b.onclick = tdSkip);
+  tdArrowWire(it, shown);
   $("#tdtodo").querySelectorAll("[data-tdproj]").forEach(a => a.onclick = () => tdDo("projects"));
   $("#tdtodo [data-back]").onclick = () => tdGo("todo");
   $("#tdtodo [data-fold]").onclick = () => { TD.fold = true; tdSave(); renderToday(); };
   if ($("#tdtodo [data-dets]")) $("#tdtodo [data-dets]").onclick = () => { TD.dets = !TD.dets; renderToday(); };
   tdTopWire(it);
   if ($("#tdtodo [data-udiff]")) $("#tdtodo [data-udiff]").ontoggle = e => { TD.udiff = e.target.open; };
+}
+// A phone's ‹ and › around Step k of n (README HDR-2): the previous or next to-do in the list as shown, selected as a
+// list tap selects it. None for a parked item; disabled at either end.
+function tdArrow(it, shown, dir) {
+  if (it.parked) return "";
+  const to = tdNeighbour(shown.map(x => x.key), it.key, dir), n = to ? shown.find(x => x.key === to) : null;
+  return `<button class="ph tdarr" data-nav="${dir}" ${to ? "" : "disabled"} aria-label="${dir < 0 ? "Previous" : "Next"} to-do"
+    title="${n ? `${dir < 0 ? "Previous" : "Next"}: ${esc(n.title)}` : dir < 0 ? "This is the first to-do" : "This is the last to-do"}">${dir < 0 ? "‹" : "›"}</button>`;
+}
+function tdArrowWire(it, shown) {
+  $("#tdtodo").querySelectorAll("[data-nav]").forEach(b => b.onclick = () => {
+    const to = tdNeighbour(shown.map(x => x.key), it.key, +b.dataset.nav);
+    if (to) tdSelect(to);
+  });
 }
 // The step's top row ends in ⤢ (the full-screen view) and, for a to-do with no topic, ✕ (README TODAY-2, the header block).
 const tdTopBtns = it => `<button class="tbtn" data-full title="Open full screen">⤢</button>`
