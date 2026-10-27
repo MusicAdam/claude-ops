@@ -77,7 +77,7 @@ build, the queue first records a short video of what the task changed, and the T
   it), and stop the app (the `[app] stop` command, or by pid; never by pattern). A web app is recorded with
   headless Playwright (`record_video_dir`, converted with ffmpeg); a native app with `screencapture -v -V <secs>`,
   limited to its window (`-l <window id>`) or display. The worker reports one line, what the video shows, in
-  `$OPS_RESULT` (`{"status": "done", "proof": "..."}`) or in `runs/<id>/proof.txt`. The turn may write in
+  `$OPS_RESULT` (`{"status": "done", "proof": "...", "watch": [...]}`) or in `runs/<id>/proof.txt`. The turn may write in
   `runs/<id>`; it changes no tracked file. If it commits anyway, the queue gates the branch again.
 - **One at a time.** A queue-wide lock admits one recording turn at a time (there is one screen); a task waiting
   for it shows the phase "waiting to record proof". Each turn is capped at 10 minutes, then stopped.
@@ -90,9 +90,20 @@ build, the queue first records a short video of what the task changed, and the T
 - **Messages.** The recording turn takes no messages. One you send meanwhile waits; after recording the queue
   resumes the worker with it, as for a message sent during the gate. With a message already waiting when the
   step starts, nothing is recorded: the worker gets the message, and the next pass records.
-- **Send back** deletes `proof.mp4` and `proof.txt`; the next round of review records a new video.
+- **The review report.** A worker's `done` result may carry `review`, required when the task is held for review or
+  fixes a bug (`worker_prompt.md`): `{"fixed": "what was wrong and what the change does", "before": "the
+  behaviour before (for a bug: the steps and what went wrong)", "after": "the behaviour now", "check": ["a
+  concrete check", ...]}`. It is stored on the task (`tasks.review`, JSON; a later round's replaces it, and a
+  `review` that is empty clears it). The recording prompt quotes it and asks for a video that shows each check in
+  turn, and for `"watch": ["0:05 tap Nearby — the list shows Chicago players", ...]` beside `proof`: what to check
+  in the video, with rough timestamps. `watch` is saved in `runs/<id>/proof_watch.json`. The Try step (under
+  **Details ▾**), a to-do's full-screen view and the task's details page show the report as **What was fixed**,
+  **Before**, **Now** and **Check in the video** (the watch list, else the checks; **Check** with no video). A
+  task without one shows as before.
+- **Send back** deletes `proof.mp4`, `proof.txt` and `proof_watch.json`; the next round of review records a new video.
 - **API.** `/api/state` and `GET /api/tasks/<id>` give each task `proof` (true when `runs/<id>/proof.mp4`
-  exists) and `proof_note` (the one line, or null). `GET /api/tasks/<id>/proof.mp4` serves the file as
+  exists), `proof_note` (the one line, or null), `proof_watch` (the watch list while the video exists, or null) and
+  `review` (the report, or null). `GET /api/tasks/<id>/proof.mp4` serves the file as
   `video/mp4`, answering `Range` requests with 206 (Safari plays video only that way), and 404 when there is none.
 
 ## main is the golden version
@@ -581,7 +592,7 @@ the uncommitted-files banner, Deploy. `/api/state` gathers them into one list, `
   `review` (Try, Review, Agree, Read), `only_me` (Do). The list runs unblock, ship, review, only_me, oldest first
   within a group.
 - **TODO-5 Follow-up tasks.** A worker's result is `{"status": "done" | "needs_input" | "failed" | "split",
-  "summary", "question"?, "tasks"?, "todos"?, "followups"?}`. `followups` is a list of `{title, body}`, the
+  "summary", "question"?, "tasks"?, "todos"?, "followups"?, "reports"?, "review"?}` (`review`: see *Proof video*, the review report). `followups` is a list of `{title, body}`, the
   shape of split tasks, for steps a task can do once this one has merged (running a command this task adds,
   say). It is read only with status `done`; on any other status it is ignored. Each item is queued as a task in
   the same project with `parent` and `depends_on` set to this task, so it starts only after this task merges.
@@ -771,6 +782,24 @@ stay on the right of the header.
   (`ops-td-dock` in localStorage, `1` folded), for every item. The dock scrolls inside itself when it is taller than
   about half the column, so the thread always keeps room.
 
+  After **▾** the top row has **⤢** ("Open full screen") and, for a to-do with no topic (the dock offers **＋ Add to
+  this chat**), **✕** ("Close: keep it on your list"). Both show folded or not, on a computer and a phone.
+  - **✕** deselects the to-do and changes nothing about it: it is not skipped, parked or closed, and stays on the
+    list. The centre shows the conversation, on the same tab, with no dock and no home card, and nothing is
+    auto-selected (kept in this browser as `ops-td-none`, the project whose conversation stays) until you click a
+    to-do or a project. Its 📎 chip, if attached, stays attached; the chip's own ✕ takes it off. Selecting the to-do
+    again brings the dock back. On a phone ✕ is **‹ To-do** (PHONE-2). A to-do with a topic has no ✕.
+  - **⤢** opens the to-do over the whole window (`#tdfull`; on a phone full screen, as task details are). **Esc**,
+    the **✕** in its header and a phone's back gesture close it; on a phone it is one history entry. It shows what
+    the dock cuts short: the whole title, the why, the key facts, the proof video as large as the window allows,
+    every action button (the dock's endpoints), the chat buttons, **Wait for…**, **Skip for now →** and the note.
+    A button that carries on elsewhere (Send back, Answer, attach, a task's details, Wait for…) closes the view
+    first. When the to-do is about a task (its source is a task, its subject is `task:<id>`, or it is parked
+    waiting on tasks: the first), the view loads `GET /api/tasks/<id>` once on open, saying `Loading…` and then the
+    task, or an error line: its number, title, state and phase, the gate result, the review report (see Proof
+    video), the worker summary, the brief, the files changed, the follow-ups and to-dos it raised, and **Open the
+    full task page →**. The view closes by itself when its to-do leaves the list.
+
   The step: **Step k of n** (k within the filter) · project,
   the title, the why, and key facts. For a task: its number, the gate result, how many files it changed, and how
   long ago it was built. One primary button, a few secondary ones, and **Skip for now →**. Every button calls an
@@ -788,7 +817,9 @@ stay on the right of the header.
   the buttons). Its one-line note is the caption. The video loads only once it is in view (`preload="none"`
   until then), from `GET /api/tasks/<id>/proof.mp4?v=<when it was recorded>`, so a new recording after Send back
   is fetched fresh. A poll's redraw keeps it playing. A held task's details page (the review state) shows the
-  same video above the feedback box, and there too Approve is primary when a video exists.
+  same video above the feedback box, and there too Approve is primary when a video exists. The task's review
+  report (Proof video) shows in a Try step's details and, on the details page, between the video and the feedback
+  box.
 
   The centre shows either a step (in the dock) or a project **home**. The home is a slim card above the thread,
   under the tab strip: the project title, one muted
@@ -1135,7 +1166,12 @@ Below 700px Today is phone-first. The rules:
   the top row alone, with the verb and title in place of **Step k of n**. The why and the facts open under **Details ▾**.
   A Try step's proof video sits under the title at full width; the card scrolls to its buttons (HDR-4).
   The title is cut at two lines; **Details ▾** shows it whole, and a title over about 50 characters brings **Details ▾**
-  even when there is no why or facts.
+  even when there is no why or facts. A Try step's review report is under **Details ▾** too. After the dock's **▾**
+  come **⤢** and, for a to-do with no topic, **✕** (TODAY-2), small enough that the top row still fits a phone;
+  **✕** goes back to the list as **‹ To-do** does. **⤢**'s view covers the whole screen, the bottom bar and the
+  header included, inside the safe-area insets; it scrolls as one page, its header with **✕** stays at the top, its
+  buttons wrap instead of scrolling sideways, the report's labels sit above their text, and the video is full
+  width. The phone's back gesture closes it (PHONE-2).
 - **Sending a message.** In the Today composer, the Design and Chat tabs' message box, and a task page's ask or
   steer box, **Enter** sends, **Shift+Enter** or **Alt/Option+Enter** adds a line, and **⌘/Ctrl+Enter** also sends.
   Enter never sends while an input method (IME) is composing. On a touch screen **Enter** adds a line and you send
@@ -1149,7 +1185,7 @@ Below 700px Today is phone-first. The rules:
 - **HDR-4 Room to talk.** While a step is open the thread gets at least half the pane; the dock scrolls inside
   what is left, and folds to one line with its **▾**. A long conversation never pushes the composer off the screen.
 - **PHONE-2 Back.** **‹ To-do** returns to the list, and so do **To-do** in the bottom bar and the phone's back
-  gesture: opening a step or a project home, or a details panel, adds a history entry, and going back closes one level (the panel, then
+  gesture: opening a step or a project home, or a details panel or a to-do's full-screen view, adds a history entry, and going back closes one level (the panel or the full-screen view, then
   the step). Switching between Now and Activity adds no more entries, so one back from either reaches To-do. This
   works whatever the address's hash was when Today opened (`#today`, `#design`, `#chat` or none), and a reload
   starts on To-do with nothing left to go back through. The step card's top row, with **‹ To-do**, stays in view

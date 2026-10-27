@@ -91,8 +91,8 @@ class HeldPipeline(Base):
         opsd.bootstrap(self.p)
         self.addCleanup(lambda: (self.toml.unlink(), opsd.load_projects()))
 
-    def run_held(self, record):
-        """record(tid): what the recording turn does; returns its result."""
+    def run_held(self, record, result=None):
+        """record(tid): what the recording turn does; returns its result. result: the worker's own result."""
         tid = opsd.add_task(self.p.name, "body", f"task {len(self.ids)}", hold=True)
         self.ids.append(tid)
         opsd.upd(tid, state="running")
@@ -105,7 +105,7 @@ class HeldPipeline(Base):
             wt = Path(opsd.task(tid)["worktree"])
             (wt / "a.txt").write_text("b\n")
             git(wt, "commit", "-q", "-am", "edit")
-            return {"status": "done", "summary": "edited"}
+            return result or {"status": "done", "summary": "edited"}
         real_upd = opsd.upd
 
         def upd(tid_, **kw):
@@ -128,6 +128,29 @@ class HeldPipeline(Base):
         self.assertIn("proof video recorded: the menu opens with the new item", events(tid))
         self.assertEqual(opsd.proof_note(tid), "the menu opens with the new item")
         self.assertEqual(git(self.repo, "show", "dev:a.txt"), "a")  # held: nothing merged
+
+    def test_review_report_and_watch_list_are_stored(self):
+        review = {"fixed": "The list was empty", "before": "Tap Nearby: nothing", "after": "Tap Nearby: players",
+                  "check": ["Tap Nearby", "  ", 7]}
+        prompts = []
+
+        def proof(tid):
+            opsd.proof_files(tid)[0].write_bytes(MP4)
+            return {"status": "done", "proof": "Nearby works", "watch": ["0:05 tap Nearby — the list shows players"]}
+        real = opsd.proof_prompt
+        with mock.patch.object(opsd, "proof_prompt", side_effect=lambda *a: prompts.append(real(*a)) or prompts[-1]):
+            tid, _, _ = self.run_held(proof, {"status": "done", "summary": "edited", "review": review})
+        self.assertEqual(opsd.review_of(opsd.task(tid)), {"fixed": "The list was empty", "before": "Tap Nearby: nothing",
+                                                          "after": "Tap Nearby: players", "check": ["Tap Nearby", "7"]})
+        self.assertIn("- What was fixed: The list was empty", prompts[0])  # the recording turn is told the report
+        self.assertIn("- Check: Tap Nearby", prompts[0])
+        self.assertIn('"watch"', prompts[0])
+        self.assertEqual(opsd.proof_watch(tid), ["0:05 tap Nearby — the list shows players"])
+
+    def test_no_review_no_watch(self):
+        tid, _, _ = self.run_held(lambda tid: opsd.proof_files(tid)[0].write_bytes(MP4) and {"status": "done"})
+        self.assertIsNone(opsd.review_of(opsd.task(tid)))
+        self.assertIsNone(opsd.proof_watch(tid))
 
     def test_failed_recording_still_reaches_review(self):
         tid, _, _ = self.run_held(lambda tid: {"status": "skipped", "summary": "no Playwright or ffmpeg here"})
@@ -288,11 +311,17 @@ class Api(Base):
         video.parent.mkdir(parents=True, exist_ok=True)
         video.write_bytes(MP4)
         note.write_text("it shows the thing\n")
+        opsd.proof_watch_file(with_video).write_text(json.dumps(["0:03 the menu opens"]))
+        opsd.upd(with_video, review=json.dumps({"fixed": "it was red", "check": ["it is blue"]}))
         tasks = {t["id"]: t for t in opsd.state_payload()["tasks"]}
+        self.assertEqual(tasks[with_video]["proof_watch"], ["0:03 the menu opens"])
+        self.assertEqual(tasks[with_video]["review"], {"fixed": "it was red", "check": ["it is blue"]})
+        self.assertEqual((tasks[without]["proof_watch"], tasks[without]["review"]), (None, None))
         self.assertEqual((tasks[with_video]["proof"], tasks[with_video]["proof_note"]), (True, "it shows the thing"))
         self.assertEqual((tasks[without]["proof"], tasks[without]["proof_note"]), (False, None))
         code, _, data = self.call("GET", f"/api/tasks/{with_video}")
-        self.assertEqual((code, json.loads(data)["proof"]), (200, True))
+        d = json.loads(data)
+        self.assertEqual((code, d["proof"], d["proof_watch"], d["review"]["fixed"]), (200, True, ["0:03 the menu opens"], "it was red"))
 
     def test_send_back_removes_the_proof(self):
         tid = self.bare_task(state="review")
@@ -300,10 +329,11 @@ class Api(Base):
         video.parent.mkdir(parents=True, exist_ok=True)
         video.write_bytes(MP4)
         note.write_text("x\n")
+        opsd.proof_watch_file(tid).write_text('["0:01 x"]')
         code, _, data = self.call("POST", f"/api/tasks/{tid}/reject", body={"feedback": "make it blue"})
         self.assertEqual(code, 200, data)
         self.assertEqual(opsd.task(tid)["state"], "queued")
-        self.assertFalse(video.exists() or note.exists())
+        self.assertFalse(video.exists() or note.exists() or opsd.proof_watch_file(tid).exists())
 
 
 if __name__ == "__main__":

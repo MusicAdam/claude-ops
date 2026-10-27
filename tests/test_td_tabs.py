@@ -119,7 +119,7 @@ class Wiring(unittest.TestCase):
     def test_selection_clears_mode_and_another_items_chip(self):
         js = self.body("function tdChanged(")
         self.assertIn("TD.mode = null;", js)
-        self.assertIn("if (!it || !TD.chip || TD.chip.key !== it.key) TD.chip = null;", js)
+        self.assertIn("if (it ? !TD.chip || TD.chip.key !== it.key : !TD.none) TD.chip = null;", js)
 
     def test_buttons_that_attach(self):
         js = self.body("async function tdDo(")

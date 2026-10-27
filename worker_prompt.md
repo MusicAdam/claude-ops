@@ -90,6 +90,13 @@ A `done` result may also carry `"reports": ["path", ...]`: up to 5 repo-relative
 wrote and committed for the owner to read, such as a research or bug bash report or an audit. Each becomes a
 Read item on the owner's to-do list once this task merges. Don't list ordinary code or docs changes.
 
+A `done` result may also carry `"review"`, the review report the owner reads on the Try step and the task page.
+It is required when the task is held for review or fixes a bug, and optional otherwise:
+`{{"fixed": "exactly what was wrong and what the change does", "before": "the behaviour before (for a bug: the
+steps and what went wrong)", "after": "the behaviour now", "check": ["what to look for, as a list of concrete
+checks"]}}`. The proof video, when one is recorded, is made to show each check. Write it like `summary`: plain
+language, short sentences.
+
 Any result may also carry `"todos": [{{"verb": "Do", "title": "...", "why": "..."}}]`: things only the
 owner can do. They go on the owner's to-do list and the task does not wait for them. A to-do is only for
 something that truly needs the owner: a password or sudo, a macOS permission grant (Full Disk Access and

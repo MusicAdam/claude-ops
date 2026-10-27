@@ -52,7 +52,7 @@ class StepTitle(unittest.TestCase):
         self.assertIn("display: block", rule(TODAY, ".stepcard.open h2"))
 
     def test_long_title_alone_brings_details(self):
-        self.assertIn("const dets = !!(it.why || facts || it.title.length > 50)", page)
+        self.assertIn("const dets = !!(it.why || facts || rv || it.title.length > 50)", page)
         self.assertIn('${dets ? `<button class="ph" data-dets', page)
 
     def test_sticky_top_row_covers_only_the_card_padding(self):
