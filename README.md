@@ -1980,6 +1980,7 @@ folder under a project's `<worktrees>/` that no longer exists. For what a worktr
   being checked or merged shows its step and how long it has run (`gate 2/3: test · for 1m`). A
   queued task says why it hasn't started: a free slot, the task it runs after, a paused project or
   queue. Tasks that need you show the question or error; finished ones show the summary.
+  The task's detail pane shows the same wait reason in full.
 - **Parallelism.** "Parallel" on the Settings tab is the global limit (default 3; setting `max_parallel`). Workers
   use subagents for parallel parts inside a task. One larger task beats several: it has one worktree, one
   start-up, one gate run and one merge. A worker splits its task (with "after" ordering) only when parts must
