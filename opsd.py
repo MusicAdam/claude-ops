@@ -13,7 +13,8 @@
                                        a recurring job: queue that task on that timetable (README: Recurring jobs);
                                        --research T0|T1|T2 makes it a research job whose question is the text
   opsd.py schedule edit ID [--title T] [--every E] [--body TEXT | --body-file PATH|-] [--hold|--no-hold] ...
-                                       change schedule ID: only the fields given, the rest stay as they are
+                                       change schedule ID: only the fields given, the rest stay as they are;
+                                       --after-schedule ID|none (add or edit): its task waits on schedule ID's task
   opsd.py deploy -p NAME TARGET [--version same|patch|minor|major|X.Y.Z] [--note TEXT]   deploy a [[deploy]] target
   opsd.py send NAME [--design|--chat] [--title T] [--hold] [--model M] [--effort E] "text..."
                                        from a session the queue started: a task (or chat) in another project
@@ -1118,8 +1119,11 @@ def init_db():
     q("""CREATE TABLE IF NOT EXISTS schedules (id INTEGER PRIMARY KEY, project TEXT, title TEXT, body TEXT,
         every TEXT, next_at REAL, paused INTEGER DEFAULT 0, last_task INTEGER, created REAL, model TEXT, effort TEXT,
         hold INTEGER DEFAULT 0, priority INTEGER DEFAULT 0)""")  # recurring jobs: see ## Recurring jobs
-    if "research" not in {r["name"] for r in q("PRAGMA table_info(schedules)")}:  # a recurring research job's tier
+    scols = {r["name"] for r in q("PRAGMA table_info(schedules)")}
+    if "research" not in scols:  # a recurring research job's tier
         q("ALTER TABLE schedules ADD COLUMN research TEXT")
+    if "after_schedule" not in scols:  # the schedule whose last task this one's task waits on (SCHED-1)
+        q("ALTER TABLE schedules ADD COLUMN after_schedule INTEGER")
     q("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)")
     q("CREATE TABLE IF NOT EXISTS session_costs (session_id TEXT PRIMARY KEY, total REAL)")  # see cost_added
     for k, v in {"max_parallel": "3", "paused": "0", "model": "", "usage_brake": "85", "usage_taper": "30", "model:release": "sonnet",
@@ -3885,7 +3889,7 @@ def schedule(sid):
 def schedule_fields(b, old=None):
     """The schedules row a create or edit body makes, checked: a known project, a title or body, a valid every."""
     s = dict(old or {})
-    for k in ("project", "title", "body", "every", "model", "effort", "hold", "priority", "research"):
+    for k in ("project", "title", "body", "every", "model", "effort", "hold", "priority", "research", "after_schedule"):
         if k in b:
             s[k] = b[k]
     proj(s.get("project") or "")
@@ -3897,15 +3901,42 @@ def schedule_fields(b, old=None):
     s["model"], s["effort"] = model_name(s.get("model")), effort_name(s.get("effort"))
     s["hold"], s["priority"] = int(bool(s.get("hold"))), int(s.get("priority") or 0)
     s["research"] = research_tier(s["research"]) if s.get("research") else None  # its body is the question (RES-6)
+    if "after_schedule" not in b and s.get("after_schedule") and not schedule(s["after_schedule"]):
+        s["after_schedule"] = None  # it pointed at a deleted schedule: that is none
+    s["after_schedule"] = after_schedule_id(s.get("after_schedule"), s.get("id"))
     return s
+
+
+def after_schedule_id(v, sid=None):
+    """An after_schedule value (12, "#12", "none", "" or None) as a schedule id or None, checked (SCHED-1): it must
+    exist, and following after_schedule from it must not come back to schedule sid."""
+    v = str(v if v is not None else "").strip().lstrip("#").lower()
+    if v in ("", "none", "null", "0"):
+        return None
+    if not v.isdigit():
+        raise ValueError(f"after_schedule {v!r} is not a schedule id")
+    a = int(v)
+    if sid is not None and a == sid:
+        raise ValueError(f"schedule #{sid} can't wait on itself")
+    if not schedule(a):
+        raise ValueError(f"after_schedule: no schedule #{a}")
+    seen, cur = {a}, schedule(a)["after_schedule"]
+    while cur and sid is not None:
+        if cur == sid:
+            raise ValueError(f"schedule #{a} already waits on #{sid}: after_schedule #{a} would make a cycle")
+        if cur in seen:
+            break
+        seen.add(cur)
+        cur = (schedule(cur) or {}).get("after_schedule")
+    return a
 
 
 def add_schedule(b, now=None):
     s = schedule_fields(b)
     return q("INSERT INTO schedules (project, title, body, every, next_at, paused, created, model, effort, hold, "
-             "priority, research) VALUES (?,?,?,?,?,0,?,?,?,?,?,?)",
+             "priority, research, after_schedule) VALUES (?,?,?,?,?,0,?,?,?,?,?,?,?)",
              (s["project"], s["title"], s["body"], s["every"], next_slot(s["every"], now or time.time()),
-              time.time(), s["model"], s["effort"], s["hold"], s["priority"], s["research"]))
+              time.time(), s["model"], s["effort"], s["hold"], s["priority"], s["research"], s["after_schedule"]))
 
 
 def edit_schedule(sid, b, now=None):
@@ -3915,22 +3946,31 @@ def edit_schedule(sid, b, now=None):
     s = schedule_fields(b, old)
     nxt = next_slot(s["every"], now or time.time()) if s["every"] != old["every"] else old["next_at"]
     q("UPDATE schedules SET project=?, title=?, body=?, every=?, next_at=?, model=?, effort=?, hold=?, priority=?, "
-      "research=? WHERE id=?", (s["project"], s["title"], s["body"], s["every"], nxt, s["model"], s["effort"],
-                                s["hold"], s["priority"], s["research"], sid))
+      "research=?, after_schedule=? WHERE id=?", (s["project"], s["title"], s["body"], s["every"], nxt, s["model"],
+                                                  s["effort"], s["hold"], s["priority"], s["research"],
+                                                  s["after_schedule"], sid))
 
 
 def queue_scheduled(s, why):
     """Queue schedule s's task, as /api/tasks would, and make it the schedule's last task. A recurring research job
-    builds a fresh research brief each time, with a dated slug (RES-6)."""
+    builds a fresh research brief each time, with a dated slug (RES-6). With after_schedule, the task waits on that
+    schedule's last task while it is open, as `--after` does (SCHED-1)."""
     origin = {"ref": f"schedule:{s['id']}", "kind": "schedule", "id": s["id"], "project": s["project"],
               "title": s["title"]}
+    dep, note = None, ""
+    a = schedule(s["after_schedule"]) if s.get("after_schedule") else None  # a deleted one counts as none
+    last = task(a["last_task"]) if a and a["last_task"] else None
+    if last and last["state"] not in ENDED:
+        dep, note = last["id"], f"; waits on #{last['id']}, schedule #{a['id']}'s task"
+    elif last and last["state"] != "done":
+        note = f"; schedule #{a['id']}'s last task #{last['id']} {last['state']}, so it runs anyway"
     if s.get("research"):
         tid = queue_research(s["project"], s["body"] or s["title"], s["research"], s["hold"], priority=s["priority"],
-                             model=s["model"], effort=s["effort"], origin=origin, dated=True)["id"]
+                             model=s["model"], effort=s["effort"], origin=origin, dated=True, depends_on=dep)["id"]
     else:
-        tid = add_task(s["project"], s["body"] or s["title"], s["title"], s["priority"], s["hold"], model=s["model"],
-                       effort=s["effort"], origin=origin)
-    ev(tid, f"queued by schedule #{s['id']} ({s['every']}): {why}")
+        tid = add_task(s["project"], s["body"] or s["title"], s["title"], s["priority"], s["hold"], depends_on=dep,
+                       model=s["model"], effort=s["effort"], origin=origin)
+    ev(tid, f"queued by schedule #{s['id']} ({s['every']}): {why}{note}")
     q("UPDATE schedules SET last_task=? WHERE id=?", (tid, s["id"]))
     return tid
 
@@ -3942,7 +3982,14 @@ def run_schedules(now=None):
         return []
     now = now or time.time()
     ids = []
-    for s in q("SELECT * FROM schedules WHERE paused=0 AND next_at<=? ORDER BY next_at, id", (now,)):
+    release_schedule_waits()
+    due = q("SELECT * FROM schedules WHERE paused=0 AND next_at<=? ORDER BY next_at, id", (now,))
+    by_id = {s["id"]: s for s in due}
+
+    def depth(s, n=0):  # how many due schedules s waits behind: those queue first, so it waits on their fresh task
+        a = by_id.get(s["after_schedule"])
+        return depth(a, n + 1) if a and n < len(by_id) else n
+    for s in sorted(due, key=depth):
         try:
             nxt = next_slot(s["every"], now)
         except ValueError:  # a row edited by hand: park it rather than fail every pass
@@ -3963,9 +4010,21 @@ def run_schedules(now=None):
     return ids
 
 
+def release_schedule_waits():
+    """A schedule's task that waits on another schedule's task stops waiting when that one fails or is cancelled
+    (SCHED-1): a broken scout doesn't hold the job after it. A plain --after wait keeps waiting."""
+    for r in q("SELECT t.id, d.id AS dep, d.state AS dep_state, s.after_schedule FROM schedules s "
+               "JOIN tasks t ON t.id = s.last_task JOIN tasks d ON d.id = t.depends_on "
+               "WHERE s.after_schedule IS NOT NULL AND t.state='queued' AND d.state IN ('failed','cancelled')"):
+        q("UPDATE tasks SET depends_on=NULL WHERE id=?", (r["id"],))
+        ev(r["id"], f"no longer waits on #{r['dep']} (schedule #{r['after_schedule']}'s task, {r['dep_state']}): "
+                    "runs anyway")
+
+
 def schedules_view():
-    return q("SELECT s.*, t.state AS last_state, t.title AS last_title FROM schedules s "
-             "LEFT JOIN tasks t ON t.id = s.last_task ORDER BY s.project, s.next_at")
+    return q("SELECT s.*, t.state AS last_state, t.title AS last_title, a.title AS after_title FROM schedules s "
+             "LEFT JOIN tasks t ON t.id = s.last_task LEFT JOIN schedules a ON a.id = s.after_schedule "
+             "ORDER BY s.project, s.next_at")
 
 
 SCHEDULE_BLOCK = re.compile(r"```schedule[ \t]*\n(.*?)^[ \t]*```[ \t]*$", re.S | re.M)
@@ -4117,7 +4176,7 @@ commit the report well before that. Don't run the project's build or app; the ga
 
 
 def queue_research(project, question, tier="T1", hold=False, priority=0, model=None, effort=None, origin=None,
-                   dated=False, not_before=None):
+                   dated=False, not_before=None, depends_on=None):
     """Queue a research task in project (RES-2). Returns {id, slug, path}."""
     p = proj(project)
     question = (question or "").strip()
@@ -4127,7 +4186,7 @@ def queue_research(project, question, tier="T1", hold=False, priority=0, model=N
     slug = research_slug(p, question, dated)
     path = report_rel(p, slug)
     tid = add_task(project, research_brief(question, tier, path), f"Research: {title_of(question)}"[:120], priority,
-                   hold, model=model, effort=effort, origin=origin,
+                   hold, depends_on=depends_on, model=model, effort=effort, origin=origin,
                    not_before=not_before, research={"question": question, "tier": tier, "slug": slug, "path": path})
     ev(tid, f"research at {tier}: writes {path}")
     return {"id": tid, "slug": slug, "path": path}
@@ -7659,7 +7718,8 @@ PROJECT_CHAT_PROMPT = ("You are talking with the owner through the claude-ops da
                        "message lists this chat's open Agree items with their todo:N ids. "
                        "When the owner asks for work that repeats (\"every Monday, check the dependencies\"), add a "
                        "fenced block with the language `schedule` holding a JSON list of {project, title, body, every, "
-                       "hold?, model?, effort?}; every is local time: 'day HH:MM', 'weekday HH:MM', 'mon HH:MM' (any of "
+                       "hold?, model?, effort?, after_schedule?}; after_schedule is another schedule's id whose current "
+                       "task each run waits on; every is local time: 'day HH:MM', 'weekday HH:MM', 'mon HH:MM' (any of "
                        "mon..sun, or 'mon,thu HH:MM') or 'hour'. Each slot queues a task with that body for an "
                        "unattended worker, so the body must stand alone. "
                        "This chat is one topic of the project's conversation on the dashboard, titled from its first "
@@ -9423,6 +9483,7 @@ class H(BaseHTTPRequestHandler):
                 return {"id": queue_scheduled(s, "Run now")}
             if act == "delete":
                 q("DELETE FROM schedules WHERE id=?", (sid,))
+                q("UPDATE schedules SET after_schedule=NULL WHERE after_schedule=?", (sid,))  # waits on nothing now
             else:  # resume from the next slot after now: a long pause doesn't run at once
                 q("UPDATE schedules SET paused=?, next_at=? WHERE id=?",
                   (int(act == "pause"), s["next_at"] if act == "pause" else next_slot(s["every"], time.time()), sid))
@@ -9771,7 +9832,8 @@ def add_request(project, words):
     return "/api/tasks", {"project": project, "body": text, **opts}
 
 
-SCHEDULE_OPTS = ("--title", "--every", "--body", "--body-file", "--model", "--effort", "--priority", "--research")
+SCHEDULE_OPTS = ("--title", "--every", "--body", "--body-file", "--model", "--effort", "--priority", "--research",
+                 "--after-schedule")
 
 
 def schedule_request(args):
@@ -9793,7 +9855,7 @@ def schedule_request(args):
     while rest:
         a = rest.pop(0)
         if a in SCHEDULE_OPTS and rest:
-            opts[a[2:]] = rest.pop(0)
+            opts[a[2:].replace("-", "_") if a == "--after-schedule" else a[2:]] = rest.pop(0)
         elif a in ("--hold", "--no-hold"):
             opts["hold"] = a == "--hold"
         else:
