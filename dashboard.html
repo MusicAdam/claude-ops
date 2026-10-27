@@ -533,7 +533,8 @@ body:not(.td) #tdfull { display: none; }
 #tdmenu .tdend { display: grid; grid-template-columns: 1fr auto; gap: 0 8px; align-items: center; padding: 4px 0; border-bottom: 1px solid var(--line); }
 #tdmenu .tdend a { cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 #tdmenu .tdend .sub { grid-row: 2; font-size: 11px; color: var(--muted); }
-#tdmenu .tdend button { grid-row: 1 / 3; grid-column: 2; font-size: 11px; padding: 1px 8px; }
+#tdmenu .tdend .acts { grid-row: 1 / 3; grid-column: 2; display: flex; gap: 4px; align-items: center; }
+#tdmenu .tdend button { font-size: 11px; padding: 1px 8px; } #tdmenu .tdend .onlist { font-size: 11px; color: var(--muted); }
 #tdmenu .endread { margin: 8px 0 0; gap: 6px; } #tdmenu .endread :is(button, select) { font-size: 11px; padding: 1px 8px; }
 #tdsec { flex: 1; min-height: 0; overflow: auto; padding-bottom: 16px; }
 /* A pinned section shows in place of the thread and the message box; the header block stays */
@@ -4123,7 +4124,9 @@ function tdStrip() {
   const plainPending = !!cv && cv.topic === null && !cv.title && !cv.subject;
   const menu = !TD.menu ? "" : `<div id="tdmenu"><div class="k">Ended (${ended.length})</div>${ended.map(t =>
       `<div class="tdend"><a data-reopento="${id(t)}" title="Reopen it and show it">${esc(t.title || "Untitled")}</a><span class="sub">${esc(modeWord(t.mode))} · ended ${ago(t.ended, now)} ago</span>
-        <button data-reopen="${id(t)}" title="Put it back in the strip">Reopen</button></div>`).join("") || `<div class="muted">No ended topics.</div>`}
+        <span class="acts">${tdReminded(project, t.id) ? `<span class="onlist" title="A reminder of it is on your to-do list">On your list</span>`
+          : `<button data-remind="${id(t)}" title="Put it on your to-do list as a reminder; it stays ended until you pick the item">Remind me</button>`}
+        <button data-reopen="${id(t)}" title="Put it back in the strip">Reopen</button></span></div>`).join("") || `<div class="muted">No ended topics.</div>`}
     <div class="row endread"><button id="endread" title="Ends every topic here you have read, that Claude isn't replying in, other than the one shown, whose last activity is older than that">End read topics older than</button>
       <select id="enddays">${[1, 7, 30, 90].map(n => `<option value="${n}" ${n === days ? "selected" : ""}>${n} day${n === 1 ? "" : "s"}</option>`).join("")}</select></div></div>`;
   const html = `<div class="tdstripin"><div class="tdscroll"><div class="tdtabs">${tabs.map(tab).join("")}
@@ -4149,6 +4152,11 @@ function tdStrip() {
   act("[data-tabx]", "end", b => ({ref: ref(b.dataset.tabx)}));
   act("[data-reopen]", "reopen", b => ({ref: ref(b.dataset.reopen)}));
   act("#endread", "end-read", () => ({days: +$("#enddays").value}));
+  el.querySelectorAll("[data-remind]").forEach(b => b.onclick = async e => {  // the menu stays open: the row turns On your list
+    e.stopPropagation(); if (!mine()) return;
+    b.disabled = true;
+    try { await tdRemind(project, ref(b.dataset.remind)); } catch (err) { b.disabled = false; $("#chatmsg").textContent = err.message; }
+  });
   el.querySelectorAll("[data-reopento]").forEach(a => a.onclick = () => {
     if (!mine()) return;
     const r = ref(a.dataset.reopento), top = topicOf(r);
@@ -4181,6 +4189,15 @@ async function convAct(what, body) {
   } catch (e) { $("#chatmsg").textContent = e.message; }
   chatKey = ""; refresh(); await refreshDesign();
 }
+// Remind me (TODO-2): a Do on your to-do list linked to an ended topic, which stays ended until you pick the item.
+// The list is refreshed at once, so the item shows and the Ended row reads On your list.
+const TD_REMIND_WHY = "Pick up this chat";
+const tdReminded = (project, ref) => (state.todos || []).some(x => /^todo:/.test(x.key) && x.project === project
+  && x.why === TD_REMIND_WHY && x.source && x.source.kind === "chat" && String(x.source.id) === String(ref));
+async function tdRemind(project, ref) {
+  await api("/api/todos/remind", {project, ref});
+  await refresh();
+}
 // Undo, for a few seconds after an end from Today (End topic, End on a row, the step's End topic): reopens the topic,
 // and makes it the current one again when it was and the conversation shown is still that project's new topic (the
 // next to-do may have opened its own). A newer end replaces the offer.
@@ -4188,8 +4205,13 @@ let tdUndoT = 0;
 function tdUndoOffer(project, ref, title, cur) {
   const el = $("#tdundo");
   clearTimeout(tdUndoT);
-  el.innerHTML = `<span>Ended “${esc(title || "Untitled")}”</span><button id="tdundob">Undo</button>`;
+  el.innerHTML = `<span>Ended “${esc(title || "Untitled")}”</span><button id="tdremindb" title="Put it on your to-do list as a reminder; it stays ended">Remind me</button><button id="tdundob">Undo</button>`;
   el.classList.remove("hidden");
+  $("#tdremindb").onclick = async e => {
+    const b = e.currentTarget; b.disabled = true;
+    try { await tdRemind(project, ref); b.outerHTML = `<span class="muted">On your list</span>`; }
+    catch (err) { b.disabled = false; $("#chatmsg").textContent = err.message; }
+  };
   $("#tdundob").onclick = async () => {
     clearTimeout(tdUndoT); el.classList.add("hidden");
     try {
