@@ -1071,7 +1071,8 @@ def init_db():
                       ("research", "TEXT"),  # a research run: {question, tier, slug, path, read} as JSON (RES-1)
                       ("reports", "TEXT"),  # reports its done result listed: [{path, read}] as JSON (RES-10)
                       ("not_before", "REAL"),  # it starts no earlier than this epoch (README: Start later)
-                      ("not_before_why", "TEXT")):  # the window when not_before is "after the next reset", e.g. 5-hour
+                      ("not_before_why", "TEXT"),
+                      ("review", "TEXT")):  # a done result's review report {fixed, before, after, check}, as JSON  # the window when not_before is "after the next reset", e.g. 5-hour
         if col not in cols:
             q(f"ALTER TABLE tasks ADD COLUMN {col} {decl}")
     q("CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY, task_id INTEGER, ts REAL, text TEXT)")
@@ -2351,9 +2352,53 @@ def proof_files(tid):
     return RUNS / str(tid) / "proof.mp4", RUNS / str(tid) / "proof.txt"
 
 
+def proof_watch_file(tid):
+    """What to check in the proof video, as a JSON list of lines (the recording turn's "watch")."""
+    return RUNS / str(tid) / "proof_watch.json"
+
+
 def clear_proof(tid):
-    for f in proof_files(tid):
+    for f in (*proof_files(tid), proof_watch_file(tid)):
         f.unlink(missing_ok=True)
+
+
+def proof_watch(tid):
+    """The proof video's watch list (["0:05 tap Nearby — …", …]), or None when there is no video or no list."""
+    if not proof_files(tid)[0].is_file():
+        return None
+    try:
+        w = json.loads(proof_watch_file(tid).read_text())
+    except (OSError, ValueError):
+        return None
+    return clean_lines(w) or None
+
+
+def clean_lines(x, n=12, width=300):
+    """A list of non-empty one-line strings, at most n of them, each cut to width; a lone string counts as one."""
+    xs = [x] if isinstance(x, str) else x if isinstance(x, list) else []
+    return [" ".join(str(v).split())[:width] for v in xs if isinstance(v, (str, int, float)) and str(v).strip()][:n]
+
+
+REVIEW_KEYS = ("fixed", "before", "after")
+
+
+def clean_review(r):
+    """A done result's "review" as {fixed, before, after, check} (README: the review report): strings cut to 2000,
+    check a list of lines. None when nothing is in it."""
+    if not isinstance(r, dict):
+        return None
+    out = {k: str(r[k]).strip()[:2000] for k in REVIEW_KEYS if isinstance(r.get(k), str) and r[k].strip()}
+    if check := clean_lines(r.get("check")):
+        out["check"] = check
+    return out or None
+
+
+def review_of(t):
+    """A task's stored review report as a dict, or None."""
+    try:
+        return clean_review(json.loads(t["review"])) if t and t.get("review") else None
+    except ValueError:
+        return None
 
 
 def proof_note(tid):
@@ -2388,6 +2433,13 @@ def is_mp4(path):
 
 def proof_prompt(p, t, granted):
     video = proof_files(t["id"])[0]
+    r = review_of(t) or {}
+    said = "".join(f"- {label}: {r[k]}\n" for k, label in (("fixed", "What was fixed"), ("before", "Before"),
+                                                            ("after", "Now")) if r.get(k))
+    said += "".join(f"- Check: {c}\n" for c in r.get("check", []))
+    report = (("Your review report for this task says:\n\n" + said + "\nRecord so that each of these is visible in the "
+               "video, in that order: show the change doing what \"Now\" says, and every check.\n\n") if said else
+              "Record so that the owner can see the change do what it should, one thing at a time.\n\n")
     if p.stop_cmd:
         stop = f"run the project's stop command in the worktree: `{p.stop_cmd}`"
     elif p.process:
@@ -2402,6 +2454,7 @@ def proof_prompt(p, t, granted):
     return (f"The queue checked your work on task #{t['id']} ({t['title']}). It is held for the owner to review "
             "before it merges. First, record a short video that shows the behaviour this task targets, so the owner "
             "can watch it instead of launching the build.\n\n"
+            + report +
             "This turn only records: change no tracked file and commit nothing. Keep scratch files (scripts, raw "
             f"recordings) in `{video.parent}`, not in the worktree.\n\n"
             f"1. Launch the build from this worktree with the project's launch command: `{p.launch}`. It is already "
@@ -2415,7 +2468,10 @@ def proof_prompt(p, t, granted):
             "- Use whatever is installed. If neither way works, don't install anything large: skip, and say why.\n"
             f"4. Stop the app: {stop}. Never `pkill`, `killall` or any pattern.\n"
             f"5. As your last action, write JSON to $OPS_RESULT ({result_path(t)}):\n"
-            '- Recorded: `{"status": "done", "proof": "<one line: what the video shows>"}`\n'
+            '- Recorded: `{"status": "done", "proof": "<one line: what the video shows>", "watch": ["0:05 tap Nearby — '
+            'the list shows Chicago players", ...]}`\n'
+            "  `proof` is the caption. `watch` lists what to check in the video, in order, one short line each, with "
+            "a rough timestamp where you can. Plain language, short sentences.\n"
             '- Not recorded: `{"status": "skipped", "summary": "<why, in one line>"}`\n\n'
             f"You have {PROOF_MINUTES} minutes; the queue stops this turn then.")
 
@@ -2448,6 +2504,8 @@ def record_proof(p, tid):
     if res.get("status") in ("done", None) and video.is_file() and is_mp4(video):  # None: saved it, wrote no result
         line = (str(res.get("proof") or "").strip() or proof_note(tid) or "").splitlines()
         note.write_text((line[0][:300] if line else "") + "\n")
+        if watch := clean_lines(res.get("watch")):
+            proof_watch_file(tid).write_text(json.dumps(watch))
         return ev(tid, "proof video recorded" + (f": {line[0][:200]}" if line else ""))
     if not res:
         why = "the worker stopped without writing a result"
@@ -2540,6 +2598,8 @@ def _pipeline(p, tid):
                 return fail(p, tid, "worker stopped without writing a result.\n" + err)
             status = res.get("status")
             upd(tid, summary=res.get("summary") or task(tid)["summary"])
+            if "review" in res:  # the review report, for the Try step and the task page; a later round's replaces it
+                upd(tid, review=json.dumps(rv) if (rv := clean_review(res["review"])) else None)
             if res.get("todos"):  # what only you can do, for your to-do list; the task goes on regardless
                 if said := todo_add(p.name, res["todos"], "task", tid):
                     ev(tid, "to-dos: " + said)
@@ -9126,7 +9186,7 @@ def todos_list(tasks, projects, last, now=None, notes=True):
 def state_payload():
     tasks = q("SELECT id,project,title,state,phase,priority,hold,depends_on,parent,created,started,"
               "finished,cost,rounds,summary,question,error,merged,branch,kind,auto_release,origin,paused_by,start_at,"
-              "model,session_model,effort,research,reports,not_before,not_before_why FROM tasks "
+              "model,session_model,effort,research,reports,not_before,not_before_why,review FROM tasks "
               "ORDER BY id DESC LIMIT 500")
     # What each task is doing right now, for the status line under it in the list.
     # Per listed task, one index lookup (events_task): a GROUP BY over every event scanned the whole table.
@@ -9151,6 +9211,8 @@ def state_payload():
         t["reports"] = reports_of(t) or None
         t["proof"] = proof_files(t["id"])[0].is_file()  # GET /api/tasks/<id>/proof.mp4 plays it
         t["proof_note"] = proof_note(t["id"]) if t["proof"] else None
+        t["proof_watch"] = proof_watch(t["id"]) if t["proof"] else None
+        t["review"] = review_of(t)
     projects = []
     for p in PROJECTS.values():
         try:
@@ -9319,6 +9381,8 @@ class H(BaseHTTPRequestHandler):
             t["can_play"] = bool(p and p.launch and t["state"] == "review")
             t["proof"] = proof_files(tid)[0].is_file()
             t["proof_note"] = proof_note(tid) if t["proof"] else None
+            t["proof_watch"] = proof_watch(tid) if t["proof"] else None
+            t["review"] = review_of(t)
             t["start_words"] = start_words(t) if t["state"] == "queued" else None
             t["chat_from"] = chat_from(t)
             t["chat"] = q("SELECT role,text,ts,delivered FROM task_msgs WHERE task_id=? ORDER BY id", (tid,))
@@ -9689,7 +9753,8 @@ class H(BaseHTTPRequestHandler):
             clear_proof(tid)  # it shows the work you sent back; the next review records a new one
             upd(tid, state="queued", rounds=0,
                 next_prompt=f"The user tried your change and wants this changed:\n\n{b['feedback']}\n\n"
-                            "Update the work, re-run the checks, commit, and write $OPS_RESULT.")
+                            "Update the work, re-run the checks, commit, and write $OPS_RESULT (with an updated "
+                            "`review`).")
             ev(tid, "changes requested: " + b["feedback"][:200])
         elif action == "play":
             if not p or not t["worktree"]:
