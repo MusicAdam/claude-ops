@@ -966,7 +966,8 @@ stay on the right of the header.
     or paused (chip: the state; fact: the age, or `after #N` for one waiting on another; a click opens the task
     panel); its open topics other than the one shown (fact: `● unread`; a click makes it the shown topic, as its
     tab does); its open OpenSpec changes (fact: done/total; a click opens its chat, as Specs & designs does). At
-    most 8 rows, then **N more** shows the rest. With nothing: `Nothing open.` The ordering and the cap are
+    most 8 rows, then **N more** shows the rest. A task or topic that has its own to-do on the list shows once, as
+    the to-do. With nothing: `Nothing open.` The ordering and the cap are
     `tdOpenRows()`, tested in `tests/test_td_recap.py`.
   - API: `GET /api/projects/<name>/recap` answers `{digest: {text, written, since} | null, can_summarize, done:
     [{id, title, finished, summary_first_line}], topics: [{ref, title, unread, current}], changes: [{name, sub,

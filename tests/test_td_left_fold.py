@@ -24,7 +24,7 @@ class LeftColumn(unittest.TestCase):
 
     def test_sections_fold_with_count(self):
         self.assertRegex(fn("tdLeft"), r'<details class="tdfold tdtodo" \$\{TD\.todoOpen \? "open" : ""\}><summary>'
-                                       r'To-do <span class="cnt">\(\$\{shown\.length\}\)')
+                                       r'To-do\$\{pg \? .*?\} <span class="cnt">\(\$\{shown\.length\}\)')
         self.assertRegex(fn("tdProjects"), r'<details class="tdfold tdprojs" \$\{TD\.projsOpen \? "open" : ""\}>'
                                            r'<summary>Projects <span class="cnt">')
         self.assertIn("details.tdfold[open] > summary .cnt { display: none; }", page)
