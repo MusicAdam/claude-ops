@@ -598,7 +598,8 @@ details.tdparked .tditem { opacity: .8; }
                       background: var(--panel); padding: 8px 10px; margin-bottom: 6px; }
 .stepcard .tdwaitbox { margin: 10px 0 0; }
 .tdaddf .tdwaitbox { margin: 0; padding: 6px 8px; background: var(--bg); }
-.tdaddf input, .tdwaitbox input[data-wother] { font-size: 13px; padding: 4px 8px; }
+.tdaddf input, .tdwaitbox input[data-wother], .tdwaitbox input[data-wat] { font-size: 13px; padding: 4px 8px; }
+.tdwaitbox input[data-wat] { flex: 1; min-width: 120px; }
 .tdwaitbox .wlist { max-height: 11em; overflow: auto; display: flex; flex-direction: column; gap: 3px; font-size: 13px; }
 .tdwaitbox label { display: flex; gap: 6px; align-items: baseline; cursor: pointer; min-width: 0; }
 .tdwaitbox label .wt { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
@@ -3243,7 +3244,7 @@ function tdStep(it, shown) {
     ${it.closes ? `<div class="closes">${esc(it.closes)}</div>` : ""}
     ${it.verb === "Ship" && P(it.project).deploys && P(it.project).deploys.length ? tdShipLog(P(it.project)) : ""}
     <div class="row">${acts.map(b => `<button data-ta="${esc(b.a)}" class="${b.primary ? "primary" : ""}" ${busy || b.disabled ? "disabled" : ""} title="${esc(b.title || "")}">${esc(b.label)}</button>`).join("")}
-      ${tdBondHtml(it)}${noteIn}<button class="tdwaitb" data-waitfor title="Park it until tasks you pick merge or are released">Wait for…</button>${unpark("tdunpark")}<button class="skip" data-skip title="${esc(skipTip)}">Skip for now →</button></div>
+      ${tdBondHtml(it)}${noteIn}<button class="tdwaitb" data-waitfor title="Park it until tasks you pick merge or are released, or until a time">Wait for…</button>${unpark("tdunpark")}<button class="skip" data-skip title="${esc(skipTip)}">Skip for now →</button></div>
     ${TD.wait && TD.wait.key === it.key ? tdWaitBox(it.project, TD.wait, `<button class="primary" data-wgo>Wait</button><button data-wx>Cancel</button>`) : ""}
     ${raHere ? raBox(RA) : ""}
     ${TD.msg || playErr ? `<div class="err" style="margin-top:8px;white-space:pre-wrap">${esc(TD.msg || playErr)}</div>` : TD.note ? `<div class="muted" style="margin-top:8px">${esc(TD.note)}</div>` : ""}</div>`;
@@ -3436,22 +3437,41 @@ async function tdUnpark() {
   const x = tdItem(it.key); if (x) { delete x.parked; delete x.skipped; }
   renderToday(); refresh();
 }
-// Wait for… (README TODO-6): park an item until tasks merge or are released. One chooser serves a step and + Add.
+// ---- Wait for…, pure (tests/test_todo_wake_at.py runs it in node)
+// Wait for… (README TODO-6): park an item until tasks merge or are released, or until a time. One chooser serves a
+// step and + Add.
 const TD_WAIT_STATES = ["queued", "running", "gating", "merging", "review"];
-const tdWaiting = w => (w.wake_tasks || []).length  // HTML: each id is a tid()
-  ? `Waiting on ${w.wake_tasks.map(n => tid(+n)).join(", ")} to ${w.wake_on === "released" ? "release" : "merge"}` : "";
+const p2 = n => String(n).padStart(2, "0");
+const tdDay = d => `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())}`, tdHm = d => `${p2(d.getHours())}:${p2(d.getMinutes())}`;
+// As the server's start_clock: 15:01 today, Tue 09:00 within the coming week, else 2026-11-03 09:00
+function tdClock(ts) {
+  const d = new Date(ts * 1000), now = new Date(), days = Math.round((new Date(tdDay(d)) - new Date(tdDay(now))) / 864e5);
+  return days === 0 ? tdHm(d) : days > 0 && days < 7 ? `${d.toLocaleDateString("en-GB", {weekday: "short"})} ${tdHm(d)}` : `${tdDay(d)} ${tdHm(d)}`;
+}
+const tdWaiting = w => {  // HTML: each id is a tid()
+  const ids = w.wake_tasks || [], at = w.wake_at ? tdClock(w.wake_at) : "";
+  if (!ids.length) return at ? `Hidden until ${at}` : "";
+  const on = `Waiting on ${ids.map(n => tid(+n)).join(", ")} to ${w.wake_on === "released" ? "release" : "merge"}`;
+  return at ? `${on}, not before ${at}` : on;
+};
+// Hide until: the quick picks, each the text it puts in the time box (a form Start later takes)
+const tdWaitPicks = () => [["Later today", tdHm(new Date(Date.now() + 3 * 3600e3))], ["Tomorrow 09:00", "tomorrow 09:00"], ["Mon 09:00", "mon 09:00"]];
 const tdWaitTasks = project => state.tasks.filter(t => t.project === project && TD_WAIT_STATES.includes(t.state)).sort((a, b) => a.id - b.id);
 const tdWaitIds = w => [...new Set([...w.ids, ...(w.other.match(/\d+/g) || []).map(Number)])];
 // A chooser's state, with the tasks of cur (an item's parked) ticked: the listed ones as boxes, the rest typed
 function tdWaitNew(project, cur) {
   const listed = new Set(tdWaitTasks(project).map(t => t.id)), ids = (cur && cur.wake_tasks) || [];
-  return {ids: ids.filter(n => listed.has(n)), other: ids.filter(n => !listed.has(n)).join(", "), until: (cur && cur.wake_on) || "merged"};
+  const at = cur && cur.wake_at ? new Date(cur.wake_at * 1000) : null;
+  return {ids: ids.filter(n => listed.has(n)), other: ids.filter(n => !listed.has(n)).join(", "), until: (cur && cur.wake_on) || "merged",
+          at: at ? `${tdDay(at)} ${tdHm(at)}` : ""};
 }
 function tdWaitBox(project, w, go) {
   const ts = tdWaitTasks(project), g = P(project), rel = !g.direct_main;
   if (!rel) w.until = "merged";  // straight to main: a merge is the release
   return `<div class="tdwaitbox">
-    <div class="whead">Park this item until tasks finish. It comes back when they do.</div>
+    <div class="whead">Park this item until tasks finish or a time comes. It comes back when they do.</div>
+    <div class="wrow"><span class="muted">Hide until:</span><span class="seg">${tdWaitPicks().map(([l, v]) => `<button data-wpick="${esc(v)}" class="${(w.at || "").trim().toLowerCase() === v ? "on" : ""}">${l}</button>`).join("")}</span>
+      <input data-wat data-fld="wat" placeholder="e.g. tue 09:00" title="09:00 (today, or tomorrow once passed), tue 09:00, tomorrow 09:00 or 2026-10-28 09:00; empty for no time" value="${esc(w.at || "")}"></div>
     ${ts.length ? `<div class="wlist">${ts.map(t => `<label title="${esc(t.title)}"><input type="checkbox" data-wt="${t.id}" ${w.ids.includes(t.id) ? "checked" : ""}>
       <span class="mono">#${t.id}</span><span class="wt">${esc(t.title)}</span><span class="muted">${esc(t.state)}</span></label>`).join("")}</div>
       <div class="muted">Or type other task ids:</div>`
@@ -3460,10 +3480,13 @@ function tdWaitBox(project, w, go) {
     <div class="wrow">${rel ? `<span class="muted">Come back when they're:</span><span class="seg"><button data-wuntil="merged" class="${w.until === "merged" ? "on" : ""}" title="Once each is merged into ${esc(g.dev_branch || "dev")}">Merged</button><button data-wuntil="released" class="${w.until === "released" ? "on" : ""}" title="Once each is on ${esc(g.main_branch || "main")}">Released</button></span>`
       : `<span class="muted">Comes back when these merge.</span>`}${go}</div></div>`;
 }
+// ---- end of Wait for…, pure
 function tdWaitWire(box, w) {
   if (!box) return;
   box.querySelectorAll("[data-wt]").forEach(c => c.onchange = () => { const n = +c.dataset.wt; w.ids = c.checked ? [...w.ids, n] : w.ids.filter(x => x !== n); });
   box.querySelectorAll("[data-wother]").forEach(i => i.oninput = () => { w.other = i.value; });
+  box.querySelectorAll("[data-wat]").forEach(i => i.oninput = () => { w.at = i.value; });
+  box.querySelectorAll("[data-wpick]").forEach(b => b.onclick = () => { w.at = w.at === b.dataset.wpick ? "" : b.dataset.wpick; renderToday(); });
   box.querySelectorAll("[data-wuntil]").forEach(b => b.onclick = () => { w.until = b.dataset.wuntil; renderToday(); });
 }
 // Retry after… (README TODAY-1): retry a failed or cancelled task so it waits (its depends_on) until another task
@@ -3509,12 +3532,12 @@ async function tdRaGo() {
 }
 async function tdWaitGo() {
   const it = TD.item, w = TD.wait; if (!it || !w || w.key !== it.key) return;
-  const ids = tdWaitIds(w);
-  if (!ids.length) { TD.msg = "Tick a task, or type its id."; return renderToday(); }
+  const ids = tdWaitIds(w), at = (w.at || "").trim() || null;
+  if (!ids.length && !at) { TD.msg = "Pick a time, tick a task, or type its id."; return renderToday(); }
   const i = TD.order.indexOf(it.key), next = it.parked ? null : TD.order[i + 1] || TD.order[0];
   try {
-    const r = await api("/api/todos/wait", {key: it.key, tasks: ids, until: w.until}), x = tdItem(it.key);
-    if (x) { x.parked = {since: (x.parked && x.parked.since) || Date.now() / 1000, wake_tasks: r.wake_tasks, wake_on: r.wake_on, wake_task: r.wake_tasks[0]}; delete x.skipped; }
+    const r = await api("/api/todos/wait", {key: it.key, tasks: ids, until: w.until, at}), x = tdItem(it.key);
+    if (x) { x.parked = {since: (x.parked && x.parked.since) || Date.now() / 1000, wake_tasks: r.wake_tasks, wake_on: r.wake_on, wake_at: r.wake_at, wake_task: r.wake_tasks[0]}; delete x.skipped; }
   } catch (e) { TD.msg = e.message; return renderToday(); }
   TD.wait = null; TD.msg = "";
   TD.key = next && next !== it.key ? next : it.parked ? it.key : "";
@@ -3522,7 +3545,7 @@ async function tdWaitGo() {
 }
 async function tdWaitClear() {
   const it = TD.item; if (!it) return;
-  try { await api("/api/todos/wait", {key: it.key, tasks: []}); } catch (e) { TD.msg = e.message; return renderToday(); }
+  try { await api("/api/todos/wait", {key: it.key, tasks: [], at: null}); } catch (e) { TD.msg = e.message; return renderToday(); }
   const x = tdItem(it.key); if (x) { delete x.parked; delete x.skipped; }
   TD.wait = null; renderToday(); refresh();
 }
@@ -3536,7 +3559,7 @@ function tdAddForm() {
     <input data-fld="addtitle" data-addf="title" maxlength="200" placeholder="What you need to do" value="${esc(a.title)}">
     <input data-fld="addwhy" data-addf="why" maxlength="400" placeholder="Why (optional)" value="${esc(a.why)}">
     <div class="wrow">${pf ? "" : `<select data-addproj title="The project it belongs to">${projs.map(g => `<option value="${esc(g.name)}" ${g.name === a.project ? "selected" : ""}>${esc(g.title)}</option>`).join("")}</select>`}
-      <span class="seg"><button data-addwait class="${a.wait ? "on" : ""}" title="${a.wait ? "Add it to the list now instead" : "Park it until tasks you pick merge or are released"}">Wait for…</button></span></div>
+      <span class="seg"><button data-addwait class="${a.wait ? "on" : ""}" title="${a.wait ? "Add it to the list now instead" : "Park it until tasks you pick merge or are released, or until a time"}">Wait for…</button></span></div>
     ${a.wait ? tdWaitBox(a.project, a.wait, "") : ""}
     <div class="wrow"><button class="primary" data-addgo ${a.busy ? "disabled" : ""}>Add</button><button data-addx>Cancel</button></div>
     ${a.msg ? `<div class="err">${esc(a.msg)}</div>` : ""}</div>`;
@@ -3551,7 +3574,7 @@ function tdAddWire(root) {
     i.onkeydown = e => { if (e.key === "Enter" && !e.isComposing) { e.preventDefault(); tdAddGo(); } else if (e.key === "Escape") { TD.add = null; renderToday(); } };
   });
   if (root.querySelector("[data-addproj]")) root.querySelector("[data-addproj]").onchange = e => {
-    a.project = e.target.value; if (a.wait) a.wait = {...tdWaitNew(a.project), until: a.wait.until}; renderToday(); };
+    a.project = e.target.value; if (a.wait) a.wait = {...tdWaitNew(a.project), until: a.wait.until, at: a.wait.at}; renderToday(); };
   root.querySelector("[data-addwait]").onclick = () => { a.wait = a.wait ? null : tdWaitNew(a.project); renderToday(); };
   tdWaitWire(root.querySelector(".tdaddf .tdwaitbox"), a.wait);
   root.querySelector("[data-addgo]").onclick = tdAddGo;
@@ -3559,12 +3582,12 @@ function tdAddWire(root) {
 }
 async function tdAddGo() {
   const a = TD.add; if (!a || a.busy) return;
-  const ids = a.wait ? tdWaitIds(a.wait) : [];
-  a.msg = !a.title.trim() ? "Give it a title." : a.wait && !ids.length ? "Tick a task to wait for, or turn Wait for off." : "";
+  const ids = a.wait ? tdWaitIds(a.wait) : [], at = a.wait ? a.wait.at.trim() || null : null;
+  a.msg = !a.title.trim() ? "Give it a title." : a.wait && !ids.length && !at ? "Pick a time or tick a task to wait for, or turn Wait for off." : "";
   if (a.msg) return renderToday();
   a.busy = true; renderToday();
   try {
-    await api("/api/todos", {project: a.project, title: a.title, why: a.why, ...(ids.length ? {wait: {tasks: ids, until: a.wait.until}} : {})});
+    await api("/api/todos", {project: a.project, title: a.title, why: a.why, ...(ids.length || at ? {wait: {tasks: ids, until: a.wait.until, at}} : {})});
     TD.add = null;
   } catch (e) { a.msg = e.message; a.busy = false; }
   renderToday(); refresh();

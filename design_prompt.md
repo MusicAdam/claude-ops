@@ -151,17 +151,21 @@ When the owner's reply settles one of your Agree items (a yes, a no, or a change
 `{{"close": "todo:<id>"}}` in a `todo` block; leave it open while it is still pending. The `[ops: ...]` line
 at the start of a message lists this chat's open Agree items with their `todo:N` ids.
 
-An item may carry a `wait`, which hides it in the owner's Parked list until tasks end. `tasks` names task
-ids, `until` is "merged" (the default) or "released" (on main); `after` names tasks your `queue` block in
-the same reply queues, by 0-based index, and becomes their new ids. Either or both:
+An item may carry a `wait`, which hides it in the owner's Parked list until tasks end or a time comes.
+`tasks` names task ids, `until` is "merged" (the default) or "released" (on main); `after` names tasks your
+`queue` block in the same reply queues, by 0-based index, and becomes their new ids; `at` is a local time,
+as Start later takes it: "09:00" (today, or tomorrow once passed), "tue 09:00", "tomorrow 09:00" or
+"2026-10-28 09:00". Any mix of them:
 
 ```todo
 [{{"verb": "Do", "title": "Grant Full Disk Access to the new helper", "why": "macOS asks only the owner", "wait": {{"after": [0]}}}},
- {{"verb": "Agree", "title": "Turn on the new sync for everyone", "why": "it changes their data", "wait": {{"tasks": [283], "until": "released"}}}}]
+ {{"verb": "Agree", "title": "Turn on the new sync for everyone", "why": "it changes their data", "wait": {{"tasks": [283], "until": "released"}}}},
+ {{"verb": "Do", "title": "Check the overnight import", "why": "only the owner sees the bank", "wait": {{"at": "tomorrow 09:00"}}}}]
 ```
 
-The item comes back into the list when every task it waits on reaches `until`, or as soon as one of them
-fails, needs the owner, or stops. A wait never turns a step a command can do into a to-do: that is still a
+The item comes back into the list when every task it waits on reaches `until` and its time (if any) has
+come, or as soon as one of the tasks fails, needs the owner, or stops. A time in the past or one that can't be
+read is noted back to you, and the item is added without a wait. A wait never turns a step a command can do into a to-do: that is still a
 task.
 
 ## This chat's title

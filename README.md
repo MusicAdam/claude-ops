@@ -551,10 +551,11 @@ the uncommitted-files banner, Deploy. `/api/state` gathers them into one list, `
   the block only on a line of its own, so three backticks inside a JSON string are content. Three ways in:
   - A design or project chat reply with a fenced block in the language `todo`, holding a JSON list of
     `{"verb": "Do" | "Agree", "title", "why", "wait"?}`. The block is taken out of the reply you see, as a
-    `queue` block is. The item's source is that chat. `wait` parks the new item until tasks end (TODO-6):
-    `{"tasks": [283], "until": "merged" | "released"}`, and/or `{"after": [0]}`, 0-based indices into the tasks
-    the same reply's `queue` block queued, which become their new ids. A task id that isn't there, or an index
-    out of range, is noted back to Claude as a skipped wait, and the item is still added, unparked.
+    `queue` block is. The item's source is that chat. `wait` parks the new item until tasks end or a time
+    comes (TODO-6): `{"tasks": [283], "until": "merged" | "released"}`, and/or `{"after": [0]}`, 0-based indices
+    into the tasks the same reply's `queue` block queued, which become their new ids, and/or `{"at": "tue 09:00"}`,
+    a local time in the forms Start later takes. A task id that isn't there, an index out of range, or a time
+    that is past or unreadable, is noted back to Claude as a skipped wait, and the item is still added, unparked.
   - A research chat turn's reply with the same block (see [Research chats add to-dos](#legacy-research-runs-in-the-research-repo)).
     It goes to the claude-ops project the research project links to (`repo`), else to the project whose
     checkout is the research repo. Its source is kind `research`, id `r:<thread>` (Today shows it as a chat and
@@ -607,23 +608,28 @@ person or a model reads it, a stored to-do's id is written `todo:12`, so it can'
 the dashboard (see Task ids), the notes after a `todo` block (`added to-do todo:12`, `closed to-do todo:12`,
 `no open to-do todo:12 in <project>`, `to-do todo:12 in <project> already has that title`), and the design,
 project and research chat prompts, which say `#N` is a task and `todo:N` a to-do. Every item also has `note` (your note to self, `""`
-when none); a parked item has `parked: {since, wake_tasks, wake_on, wake_task}` (`wake_task` is the first of
+when none); a parked item has `parked: {since, wake_tasks, wake_on, wake_at, wake_task}` (`wake_at` the epoch it
+may wake at, or null; `wake_task` is the first of
 `wake_tasks`, or null, kept for one release for older dashboards) and a skipped one
 `skipped: <ts>` (TODO-6).
 
 - **TODO-6 Notes and parking.** Notes live in the table `todo_notes (key, note, parked, skipped, wake_tasks,
-  wake_on, wake_set, updated)`, keyed by the item's `key`. It works for any item, derived or stored.
+  wake_on, wake_at, wake_set, updated)`, keyed by the item's `key`. It works for any item, derived or stored.
   - **A wait** is a set of tasks, `wake_tasks` (a JSON list of ids), and a target, `wake_on`: `merged` (the
-    default) or `released`. A database from before wait sets has a `wake_task` column; each row with one gets
-    `wake_tasks` `[N]` on start.
+    default) or `released`, and/or a time, `wake_at` (epoch): hide the item until then. A wait may have tasks,
+    a time, or both. A database from before wait sets has a `wake_task` column; each row with one gets
+    `wake_tasks` `[N]` on start. One from before timed waits gets the `wake_at` column, empty.
   - `POST /api/todos/note {key, note}` saves the note. When no explicit wait is set (`wake_set` 0) it also
     re-reads the wait from the note: its first `#(\d+)` or `task (\d+)` (any case) gives `wake_tasks` `[N]`
     until merged, else none. A wait set by the picker or by Claude (`wake_set` 1) is never changed by a note
     edit. Editing a parked item's note keeps it parked; clearing it does not unpark it.
-  - `POST /api/todos/wait {key, tasks: [ids], until}` sets an explicit wait and parks the item (the **Wait
+  - `POST /api/todos/wait {key, tasks: [ids], until, at}` sets an explicit wait and parks the item (the **Wait
     for…** chooser, TODAY-2). `until` is `merged` or `released` (default `merged`). An unknown task id is a 400
     that names it. `released` when every listed task's project is straight to main (`direct_main`) is accepted
-    and stored as `merged`: there, merged is released. `tasks: []` clears the wait and unparks the item.
+    and stored as `merged`: there, merged is released. `at` is a local time, as Start later takes it: `09:00`
+    (today, or tomorrow once passed), `tue 09:00`, `tomorrow 09:00`, `2026-10-28 09:00`, or null for none. A time
+    in the past, or one it can't read, is a 400 that says so. `tasks: []` and `at: null` together clear the wait
+    and unpark the item. `POST /api/todos` takes the same `at` in its `wait`.
   - `POST /api/todos/skip {key}`: with a non-empty note or an explicit wait it parks the item (`parked` = now);
     otherwise it skips it (`skipped` = now). A skip lasts until local midnight.
   - `POST /api/todos/unpark {key}` clears `parked` and `skipped`; it is also how a skip is undone (the **Unskip** button).
@@ -631,15 +637,18 @@ when none); a parked item has `parked: {since, wake_tasks, wake_on, wake_task}` 
     carry `parked` for the dashboard to group.
   - **Auto-wake.** On each state build, a parked item with a wait wakes (is unparked and not skipped) when
     either:
-    - every listed task has reached the target. `merged`: the task is done (with a merge; a task done with no
+    - its time has come (now >= `wake_at`, or it has none) and every listed task has reached the target. A
+      time-only wait wakes once its time comes; with tasks too, both must be met. `merged`: the task is done (with a merge; a task done with no
       code to merge counts too). `released`: also, every commit in its `merged` is an ancestor of its project's
       `main`. In a straight-to-main project merged counts as released. A task that is merged but not yet
       released keeps a `released` wait parked.
     - any listed task stops short: failed, needs you (needs_input), in review, paused, cancelled, or deleted.
+      This wakes it at once, even before its time.
 
     On wake, one entry per task is added to its note: ` · #283 merged, #284 failed`, with the word for each
     task: merged or released (the target reached), done (done with nothing merged), failed, needs you, in
-    review, paused, cancelled, gone (deleted), or the state of one still under way (queued, running…). A note
+    review, paused, cancelled, gone (deleted), or the state of one still under way (queued, running…). A
+    time-only wait adds ` · woke at Tue 09:00` (the time as Start later shows it). A note
     with no task number and no explicit wait never wakes; it stays parked until you unpark it.
   - **The released check** reads `main`'s tip from the project facts the state build already has, so it adds
     no `git rev-parse`. Per project it keeps which merge commits `main` contains, against that tip: while
@@ -725,7 +734,8 @@ stay on the right of the header.
     and goes to a folded **Parked (N)** section at the bottom. Both are kept on the server (TODO-6), so
     every device agrees. A parked row shows its verb, title, project, the note and `parked 4d` (its age since
     parking). A parked item with a wait says so on its row: `Waiting on #283, #284 to merge` (or `to
-    release`). An item with a note shows the note on its row, muted and cut with an ellipsis.
+    release`); a timed one `Hidden until Tue 09:00`, or with tasks too `Waiting on #283 to merge, not before
+    Tue 09:00`. An item with a note shows the note on its row, muted and cut with an ellipsis.
   - **+ Add** sits at the top of the list, under the filter chips. It opens a small form:
     a title, an optional why, and the project: the switcher's when one is ticked, else a select of the projects
     in view (every project, or the ticked ones).
@@ -808,14 +818,19 @@ stay on the right of the header.
   or the All clear card carries no to-do: there is nothing to attach.
 
   Every step also has **Wait for…** beside Skip. It opens a small chooser under the step. A header line says
-  what it does: `Park this item until tasks finish. It comes back when they do.` Under it come the item's
+  what it does: `Park this item until tasks finish or a time comes. It comes back when they do.` First comes
+  `Hide until:` with quick picks, **Later today** (now + 3 hours), **Tomorrow 09:00** and **Mon 09:00**, and a
+  box for any time Start later takes (`e.g. tue 09:00`); a pick fills the box, and an empty box means no time.
+  Under it come the item's
   project's tasks that are queued, running, gating, merging or in review (id and title, a checkbox each), then
   `Or type other task ids:` and a box for them (`e.g. 283, 290`). With no such task the list is replaced by one
   line, `Nothing of <Project> to wait on. Type a task id:`, above the box. Last comes `Come back when they're:`
   and a **Merged / Released** toggle. A straight-to-main project has no toggle, only the muted text
-  `Comes back when these merge.`, since a merge is the release there. **Wait** calls `POST /api/todos/wait` and the item goes to Parked. A parked item with a wait
-  reads `Waiting on #283, #284 to merge` (or `to release`) at the top of its step, with **Clear**, which sends
-  `tasks: []` and so unparks it. The chooser opens with the item's current wait ticked.
+  `Comes back when these merge.`, since a merge is the release there. **Wait** calls `POST /api/todos/wait`
+  with the ticked tasks and the time, and the item goes to Parked; a wait needs a task or a time. A parked item
+  with a wait reads `Waiting on #283, #284 to merge` (or `to release`), `Hidden until Tue 09:00`, or `Waiting on
+  #283 to merge, not before Tue 09:00` at the top of its step, with **Clear**, which sends `tasks: []` and
+  `at: null` and so unparks it. The chooser opens with the item's current wait ticked and its time filled in.
 
   | Verb | Primary | Others |
   |---|---|---|
