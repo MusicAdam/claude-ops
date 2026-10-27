@@ -1083,12 +1083,15 @@ def init_db():
     q("""CREATE TABLE IF NOT EXISTS todos (id INTEGER PRIMARY KEY, project TEXT, verb TEXT, title TEXT, why TEXT,
         source_kind TEXT, source_id INTEGER, created REAL, closed REAL)""")  # what Claude asks of you (see To-dos)
     q("""CREATE TABLE IF NOT EXISTS todo_notes (key TEXT PRIMARY KEY, note TEXT, parked REAL, skipped REAL,
-        wake_tasks TEXT, wake_on TEXT DEFAULT 'merged', wake_set INTEGER DEFAULT 0, updated REAL, topic TEXT)""")
-    # your note on a to-do, its skip or park, the tasks a parked one waits on (TODO-6), and its topic (TODAY-2 bond)
+        wake_tasks TEXT, wake_on TEXT DEFAULT 'merged', wake_set INTEGER DEFAULT 0, updated REAL, topic TEXT,
+        wake_at REAL)""")
+    # your note on a to-do, its skip or park, the tasks and time a parked one waits for (TODO-6), and its topic
+    # (TODAY-2 bond)
     ncols = {r["name"] for r in q("PRAGMA table_info(todo_notes)")}
     for col, decl in (("wake_tasks", "TEXT"), ("wake_on", "TEXT DEFAULT 'merged'"),  # databases from before wait sets
                       ("wake_set", "INTEGER DEFAULT 0"),  # 1: set by the picker or Claude, not read from the note
-                      ("topic", "TEXT")):  # and before a to-do's bond: the topic ref it was first sent to
+                      ("topic", "TEXT"),  # and before a to-do's bond: the topic ref it was first sent to
+                      ("wake_at", "REAL")):  # and before timed waits: hide until this epoch
         if col not in ncols:
             q(f"ALTER TABLE todo_notes ADD COLUMN {col} {decl}")
             if col == "wake_tasks" and "wake_task" in ncols:  # one task becomes a set of one
@@ -7644,8 +7647,9 @@ PROJECT_CHAT_PROMPT = ("You are talking with the owner through the claude-ops da
                        "a decision (you proposed something and wait for their yes). Add one to their to-do list with "
                        "a fenced block in the language `todo` holding a JSON list of "
                        '{"verb": "Do" or "Agree", "title", "why", "wait"?}; wait, {"tasks": [283], "until": '
-                       '"merged" or "released"}, keeps it out of their list until those tasks get there, or one fails '
-                       'or stops. A step that a command or code change can do is '
+                       '"merged" or "released", "at": "tue 09:00"} (tasks, at, or both; at is local time as '
+                       "Start later takes it), keeps it out of their list until those tasks get there and that time comes, or "
+                       'until a task fails or stops. A step that a command or code change can do is '
                        "never a to-do, even setup that must wait for a task to merge: do it, or queue it as a task. "
                        'Close an '
                        'item that is settled with {"close": "todo:<id>"} in a `todo` block. #N means a task and '
@@ -8564,7 +8568,7 @@ def todo_add(project, items, kind, sid, queued=None):
             tid = q("INSERT INTO todos (project, verb, title, why, source_kind, source_id, created) VALUES "
                     "(?,?,?,?,?,?,?)", (project, it["verb"], title, str(it.get("why") or ""), kind, sid, time.time()))
             added.append(tid)
-            if wait and wait[0]:
+            if wait and (wait[0] or wait[2]):
                 todo_wait_set(f"todo:{tid}", *wait)
     notes = ([f"added to-do {', '.join(f'todo:{i}' for i in added)}"] if added else []) + \
             ([f"closed to-do {', '.join(f'todo:{i}' for i in closed)}"] if closed else []) + \
@@ -8582,12 +8586,13 @@ def todo_id(v):
 
 
 def todo_wait_from(wait, queued=None):
-    """An item's wait, {"tasks": [ids], "until", "after": [indices into queued]}, as (ids, until); None for none.
-    Raises ValueError for a task id that isn't there or an index out of range."""
+    """An item's wait, {"tasks": [ids], "until", "after": [indices into queued], "at": "tue 09:00"}, as
+    (ids, until, wake_at); None for none. Raises ValueError for a task id that isn't there, an index out of range,
+    or a time that is past or unreadable."""
     if not wait:
         return None
     if not isinstance(wait, dict):
-        raise ValueError("wait is an object: tasks, until, after")
+        raise ValueError("wait is an object: tasks, until, after, at")
     tasks = wait.get("tasks") or []
     tasks = list(tasks) if isinstance(tasks, list) else [tasks]
     after = wait.get("after") or []
@@ -8598,7 +8603,7 @@ def todo_wait_from(wait, queued=None):
             raise ValueError(f"after {i!r} is not a task the queue block queued (0 to {len(queued) - 1})"
                              if queued else f"after {i!r}: the reply queued no tasks")
         tasks.append(queued[i])
-    return todo_wait_check(tasks, wait.get("until"))
+    return todo_wait_check(tasks, wait.get("until"), wait.get("at"))
 
 
 def todo_own(b):
@@ -8610,12 +8615,13 @@ def todo_own(b):
         raise ValueError("a to-do needs a title")
     if r := q("SELECT id FROM todos WHERE project=? AND title=? AND closed IS NULL", (project, title), one=True):
         raise ValueError(f"to-do todo:{r['id']} in {project} already has that title")
-    wait = todo_wait_from(b.get("wait"))  # before the insert: a bad task id adds nothing
+    wait = todo_wait_from(b.get("wait"))  # before the insert: a bad task id or time adds nothing
     tid = q("INSERT INTO todos (project, verb, title, why, source_kind, source_id, created) VALUES (?,?,?,?,?,?,?)",
             (project, "Do", title, str(b.get("why") or "").strip(), "owner", None, time.time()))
-    if wait and wait[0]:
+    parked = bool(wait and (wait[0] or wait[2]))
+    if parked:
         todo_wait_set(f"todo:{tid}", *wait)
-    return {"id": tid, "key": f"todo:{tid}", "parked": bool(wait and wait[0])}
+    return {"id": tid, "key": f"todo:{tid}", "parked": parked}
 
 
 def todo_done(tid, project=None):
@@ -8676,9 +8682,23 @@ def todo_key(key):
     return str(key)
 
 
-def todo_wait_check(tasks, until=None):
-    """A wait from the picker, Claude or POST /api/todos: (task ids, until). Raises ValueError naming a task id
-    that isn't there. until "released" on tasks all in straight-to-main projects is stored as merged (TODO-6)."""
+def todo_wake_at(at, now=None):
+    """A wait's time, as Start later reads it (start_time, without "reset"): its epoch, or None for none. ValueError
+    for a time in the past or one it can't read."""
+    if at is None or (isinstance(at, str) and not at.strip()):
+        return None
+    if isinstance(at, str) and at.strip().lower() == "reset":
+        raise ValueError(f"at is a time, not reset: use {START_FORMS}")
+    try:
+        return start_time(at, now)[0]
+    except ValueError as e:
+        raise ValueError("at" + str(e).removeprefix("start")) from None
+
+
+def todo_wait_check(tasks, until=None, at=None, now=None):
+    """A wait from the picker, Claude or POST /api/todos: (task ids, until, wake_at). Raises ValueError naming a
+    task id that isn't there, or for a bad time (todo_wake_at). until "released" on tasks all in straight-to-main
+    projects is stored as merged (TODO-6)."""
     until = until or "merged"
     if until not in TODO_UNTIL:
         raise ValueError(f"until is merged or released, not {until!r}")
@@ -8696,29 +8716,29 @@ def todo_wait_check(tasks, until=None):
         raise ValueError(f"no task {', '.join(f'#{n}' for n in missing)}")
     if until == "released" and ids and all(getattr(PROJECTS.get(rows[n]), "direct_main", False) for n in ids):
         until = "merged"  # straight to main: a merge moves main, so merged is released
-    return ids, until
+    return ids, until, todo_wake_at(at, now)
 
 
-def todo_wait_set(key, ids, until, now=None):
-    """Store an explicit wait and park the item; no ids clears the wait and unparks it."""
+def todo_wait_set(key, ids, until, wake_at=None, now=None):
+    """Store an explicit wait and park the item; no ids and no time clears the wait and unparks it."""
     now = now or time.time()
-    if not ids:
-        q("UPDATE todo_notes SET wake_tasks=NULL, wake_on='merged', wake_set=0, parked=NULL, skipped=NULL, "
-          "updated=? WHERE key=?", (now, key))
+    if not ids and not wake_at:
+        q("UPDATE todo_notes SET wake_tasks=NULL, wake_on='merged', wake_at=NULL, wake_set=0, parked=NULL, "
+          "skipped=NULL, updated=? WHERE key=?", (now, key))
         q("DELETE FROM todo_notes WHERE key=? AND note='' AND topic IS NULL", (key,))
         return {"parked": False}
-    q("INSERT INTO todo_notes (key, note, parked, wake_tasks, wake_on, wake_set, updated) VALUES (?,'',?,?,?,1,?) "
-      "ON CONFLICT(key) DO UPDATE SET parked=COALESCE(parked, excluded.parked), skipped=NULL, "
-      "wake_tasks=excluded.wake_tasks, wake_on=excluded.wake_on, wake_set=1, updated=excluded.updated",
-      (key, now, json.dumps(ids), until, now))
-    return {"parked": True, "wake_tasks": ids, "wake_on": until}
+    q("INSERT INTO todo_notes (key, note, parked, wake_tasks, wake_on, wake_at, wake_set, updated) "
+      "VALUES (?,'',?,?,?,?,1,?) ON CONFLICT(key) DO UPDATE SET parked=COALESCE(parked, excluded.parked), "
+      "skipped=NULL, wake_tasks=excluded.wake_tasks, wake_on=excluded.wake_on, wake_at=excluded.wake_at, "
+      "wake_set=1, updated=excluded.updated", (key, now, json.dumps(ids), until, wake_at, now))
+    return {"parked": True, "wake_tasks": ids, "wake_on": until, "wake_at": wake_at}
 
 
-def todo_wait(key, tasks, until=None):
-    """Wait for… (POST /api/todos/wait): park the item until tasks reach until; tasks [] clears it (TODO-6)."""
+def todo_wait(key, tasks, until=None, at=None):
+    """Wait for… (POST /api/todos/wait): park the item until tasks reach until and the time at comes; tasks []
+    and no at clears it (TODO-6)."""
     key = todo_key(key)
-    ids, until = todo_wait_check(tasks or [], until)
-    return todo_wait_set(key, ids, until)
+    return todo_wait_set(key, *todo_wait_check(tasks or [], until, at))
 
 
 def todo_note(key, note):
@@ -8787,12 +8807,15 @@ def todo_in_main(name, main, shas):
     return {s for s in shas if known.get(s)}
 
 
-def todo_wake(r, info, facts_of):
+def todo_wake(r, info, facts_of, now=None):
     """Whether a parked row's wait is over, and the words for its note: None while it waits, else
-    "#283 merged, #284 failed". info: task id -> {state, merged, project}, None for one deleted."""
+    "#283 merged, #284 failed" or "woke at Tue 09:00". Tasks and a time: both must be met, but a task that stops
+    short wakes it at once. info: task id -> {state, merged, project}, None for one deleted."""
     ids, until = todo_wake_tasks(r), r["wake_on"] if r["wake_on"] in TODO_UNTIL else "merged"
-    if not ids:
+    at = r["wake_at"]
+    if not ids and not at:
         return None
+    now = time.time() if now is None else now
     words, short, waiting = [], False, False
     for n in ids:
         t = info.get(n)
@@ -8815,7 +8838,17 @@ def todo_wake(r, info, facts_of):
         else:
             waiting = True
             words.append(f"#{n} {st}")
-    return ", ".join(words) if short or not waiting else None
+    if short:
+        return ", ".join(words)
+    if waiting or (at and now < at):
+        return None
+    return " · ".join(w for w in (", ".join(words), at and f"woke at {todo_clock(at)}") if w)
+
+
+def todo_clock(ts):
+    """A wait's time in a note: Tue 09:00, or 2026-11-03 09:00 when it is a week or more away from now."""
+    near = abs(ts - time.time()) < 6.5 * 86400
+    return time.strftime("%a %H:%M" if near else "%Y-%m-%d %H:%M", time.localtime(ts))
 
 
 def todo_notes_apply(out, tasks, projects, now):
@@ -8839,7 +8872,7 @@ def todo_notes_apply(out, tasks, projects, now):
                 q("DELETE FROM todo_notes WHERE key=?", (k,))
             rows.pop(k)
             continue
-        if r["parked"] and (said := todo_wake(r, info, facts_of)):
+        if r["parked"] and (said := todo_wake(r, info, facts_of, now)):
             note = f"{r['note'] or ''} · {said}".strip(" ·")
             q("UPDATE todo_notes SET note=?, parked=NULL, skipped=NULL, updated=? WHERE key=?", (note, now, k))
             r = rows[k] = {**r, "note": note, "parked": None, "skipped": None}
@@ -8855,6 +8888,7 @@ def todo_notes_apply(out, tasks, projects, now):
             ids = todo_wake_tasks(r)
             parked.append({**x, "parked": {"since": r["parked"], "wake_tasks": ids,
                                            "wake_on": r["wake_on"] if r["wake_on"] in TODO_UNTIL else "merged",
+                                           "wake_at": r["wake_at"],
                                            "wake_task": ids[0] if ids else None}})  # wake_task: for one release
         elif r.get("skipped"):
             skipped.append({**x, "skipped": r["skipped"]})
@@ -9352,7 +9386,7 @@ class H(BaseHTTPRequestHandler):
         if path == "/api/todos":  # your own (TODO-2)
             return todo_own(b)
         if path == "/api/todos/wait":  # TODO-6
-            return todo_wait(b["key"], b.get("tasks"), b.get("until"))
+            return todo_wait(b["key"], b.get("tasks"), b.get("until"), b.get("at"))
         if path == "/api/todos/note":  # TODO-6
             return todo_note(b["key"], b.get("note"))
         if path == "/api/todos/skip":

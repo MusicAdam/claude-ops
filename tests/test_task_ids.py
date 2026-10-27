@@ -23,7 +23,7 @@ const verbPill = x => `<span class="verb">${x.verb}</span>`, TD = {key: ""};
 let state = {now: 100, tasks: [{id: 316, project: "p", title: "Show ids", state: "queued", priority: 0, created: 1, kind: "task"},
                                {id: 7, project: "p", title: "Done one", state: "done", priority: 0, created: 1, kind: "task", finished: 2}]};
 const code = [grab("const tid = (id", "`;"), grab("function put(el, html) {", "\n}\n"), grab("function renderList() {", "\n}\n"),
-              grab("const tdTid = x =>", ";\n"), grab("const tdWaiting = w =>", ": \"\";"), grab("const tdRow = x =>", "</div>`;")];
+              grab("const tdTid = x =>", ";\n"), grab("const p2 = n =>", "\n};"), grab("const tdRow = x =>", "</div>`;")];
 eval(code.join("\n").replace(/^const (\w+) =/gm, "globalThis.$1 ="));  // so the arrows outlive eval's own scope
 out.tid = tid(316);
 renderList(); out.list = list.innerHTML;

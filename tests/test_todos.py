@@ -360,7 +360,7 @@ class Todos(unittest.TestCase):
         key = self.parked_key()
         a, b = self.task("web", "running"), self.task("web", "running")
         self.assertEqual(opsd.todo_wait(key, [a, f"#{b}"], "merged"), {"parked": True, "wake_tasks": [a, b],
-                                                                       "wake_on": "merged"})
+                                                                       "wake_on": "merged", "wake_at": None})
         opsd.upd(a, state="done", merged="aaa")
         got = self.keyed()[key]
         self.assertEqual(got["parked"]["wake_tasks"], [a, b])  # a merged, b still running: still parked
@@ -505,6 +505,73 @@ class Todos(unittest.TestCase):
         self.assertEqual(self.keyed()[got["key"]]["parked"]["wake_tasks"], [a])
         self.assertTrue(opsd.todo_done(got["id"]))  # Done closes it
 
+
+    # Timed waits: hide an item until a time, alone or with tasks (TODO-6)
+    def later(self, days=2):
+        """A local time string days ahead, and its epoch (minutes only, as Start later reads it)."""
+        text = time.strftime("%Y-%m-%d %H:%M", time.localtime(time.time() + days * 86400))
+        return text, time.mktime(time.strptime(text, "%Y-%m-%d %H:%M"))
+
+    def test_time_only_wait(self):
+        key = self.parked_key()
+        text, at = self.later()
+        got = opsd.todo_wait(key, [], None, text)
+        self.assertEqual((got["parked"], got["wake_tasks"], got["wake_at"]), (True, [], at))
+        self.assertEqual(self.keyed(now=at - 60)[key]["parked"]["wake_at"], at)  # before its time: still parked
+        item = self.keyed(now=at + 60)[key]
+        self.assertNotIn("parked", item)
+        self.assertEqual(item["note"], f"woke at {time.strftime('%a %H:%M', time.localtime(at))}")
+
+    def test_tasks_and_time(self):
+        text, at = self.later()
+        k1, k2, k3 = self.parked_key(), self.parked_key(), self.parked_key()
+        a, b, c = self.task("web", "running"), self.task("web", "running"), self.task("web", "running")
+        for k, t in ((k1, a), (k2, b), (k3, c)):
+            opsd.todo_wait(k, [t], "merged", text)
+        opsd.upd(a, state="done", merged="abc")  # merged before the time: stays parked
+        self.assertIn("parked", self.keyed(now=at - 60)[k1])
+        self.assertIn("parked", self.keyed(now=at + 60)[k2])  # time passed, task still running: stays parked
+        got = self.keyed(now=at + 60)[k1]  # both met: wakes
+        self.assertNotIn("parked", got)
+        self.assertEqual(got["note"], f"#{a} merged · woke at {time.strftime('%a %H:%M', time.localtime(at))}")
+        opsd.upd(c, state="failed")  # stopped short: wakes at once, before the time
+        got = self.keyed(now=at - 3600)[k3]
+        self.assertEqual((got.get("parked"), got["note"]), (None, f"#{c} failed"))
+
+    def test_wait_endpoint_time(self):
+        key = self.parked_key()
+        for bad, says in (("2020-01-01 09:00", "in the past"), ("someday", "is not a time"), ("reset", "not reset")):
+            with self.assertRaisesRegex(ValueError, says):
+                self.route("/api/todos/wait", {"key": key, "tasks": [], "at": bad})
+        self.assertNotIn("parked", self.keyed()[key])
+        got = self.route("/api/todos/wait", {"key": key, "tasks": [], "at": "tomorrow 09:00"})
+        self.assertTrue(got["parked"])
+        self.assertEqual(time.localtime(self.keyed()[key]["parked"]["wake_at"])[3:5], (9, 0))
+        self.route("/api/todos/wait", {"key": key, "tasks": [], "at": None})  # both cleared: unparked
+        self.assertNotIn("parked", self.keyed()[key])
+        self.assertIsNone(opsd.q("SELECT * FROM todo_notes WHERE key=?", (key,), one=True))
+
+    def test_todo_block_wait_at(self):
+        p = FakeProject("web")
+        text, at = self.later()
+        _, note = opsd.todos_from_reply(p, '```todo\n[{"verb": "Do", "title": "Snooze", "wait": {"at": "%s"}}]\n```'
+                                        % text, 7, [])
+        self.assertNotIn("wait on", note)
+        r = opsd.q("SELECT id FROM todos WHERE title='Snooze'", one=True)
+        self.assertEqual(self.keyed()[f"todo:{r['id']}"]["parked"]["wake_at"], at)
+        _, note = opsd.todos_from_reply(p, '```todo\n[{"verb": "Do", "title": "Bad time", "wait": {"at": "2020-01-01 '
+                                        '09:00"}}]\n```', 7, [])
+        self.assertIn("the wait on 'Bad time'", note)
+        self.assertIn("in the past", note)
+        bad = opsd.q("SELECT id FROM todos WHERE title='Bad time'", one=True)["id"]
+        self.assertNotIn("parked", self.keyed()[f"todo:{bad}"])  # added all the same, unparked
+
+    def test_owner_todo_at(self):
+        got = self.route("/api/todos", {"project": "web", "title": "Snoozed",
+                                        "wait": {"tasks": [], "at": self.later()[0]}})
+        self.assertTrue(got["parked"])
+        with self.assertRaisesRegex(ValueError, "in the past"):
+            self.route("/api/todos", {"project": "web", "title": "Old", "wait": {"at": "2020-01-01 09:00"}})
 
 class AgreeStaysOpenOnSay(unittest.TestCase):
     """TODO-3: your message may be about something else, so sending one leaves the chat's Agree items open; Claude
