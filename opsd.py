@@ -6893,6 +6893,7 @@ def topic_end(project, ref):
     else:
         q("UPDATE designs SET ended=?, seen=?, queued='[]' WHERE id=?", (now, now, t["id"]))
         stop(DESIGN_PROCS.get(t["id"]))
+    todo_remind_close(project, t["id"])
     try:
         c = json.loads(setting(f"conv:{project}") or "{}")
     except ValueError:
@@ -8809,6 +8810,40 @@ def todo_own(b):
     return {"id": tid, "key": f"todo:{tid}", "parked": parked}
 
 
+REMIND_WHY = "Pick up this chat"  # a reminder's why, which also tells it from the chat's other stored to-dos
+
+
+def todo_remind(b):
+    """Remind me (POST /api/todos/remind {project, ref}): put a topic, usually an ended one, back on your list as a Do
+    linked to it, without reopening it (TODO-2). Picking the to-do reopens it, as its chat is its topic (TODAY-2). One
+    per topic: while one is open, another call adds nothing and returns it, matched on the source, not the title."""
+    project, ref = str(b.get("project") or ""), b.get("ref")
+    if project not in PROJECTS:
+        raise ValueError(f"no project {project!r}" if project else "pick a project")
+    if ref is None or not str(ref).strip():
+        raise ValueError("pick a topic")
+    t = topic_ref(project, str(ref).strip())
+    if r := todo_remind_open(project, t["id"]):
+        return {"id": r["id"], "key": f"todo:{r['id']}", "added": False}
+    research_ = t["mode"] == "research"
+    title = (t["title"] or "").strip() or ("Untitled" if research_ else f"Chat #{t['id']}")
+    tid = q("INSERT INTO todos (project, verb, title, why, source_kind, source_id, created) VALUES (?,?,?,?,?,?,?)",
+            (project, "Do", title[:80], REMIND_WHY, "research" if research_ else "design", t["id"], time.time()))
+    return {"id": tid, "key": f"todo:{tid}", "added": True}
+
+
+def todo_remind_open(project, ref):
+    """The open reminder of topic ref (a chat id or "r:<thread>") in project, or None."""
+    return q("SELECT id FROM todos WHERE project=? AND source_kind IN ('design','research') AND source_id=? AND why=? "
+             "AND closed IS NULL ORDER BY id LIMIT 1", (project, ref, REMIND_WHY), one=True)
+
+
+def todo_remind_close(project, ref):
+    """Ending a topic closes its reminder: you are done with it (TODO-3)."""
+    q("UPDATE todos SET closed=? WHERE project=? AND source_kind IN ('design','research') AND source_id=? AND why=? "
+      "AND closed IS NULL", (time.time(), project, ref, REMIND_WHY))
+
+
 def todo_done(tid, project=None):
     """Close a stored to-do (Done, or {"close": id} from Claude). True when it was open."""
     return bool(q("UPDATE todos SET closed=? WHERE id=? AND closed IS NULL" + (" AND project=?" if project else "")
@@ -9230,7 +9265,12 @@ def todos_list(tasks, projects, last, now=None, notes=True):
     # Every chat you haven't ended waits on you once Claude is done replying: read its new reply, or answer it or
     # end it. An ended chat is done: a reply that lands in it later doesn't bring it back (topics() agrees), nor does
     # a dashboard that still lists it opening it (conv_open reopens only what the caller saw ended).
+    # A chat with an open reminder (Remind me) is on the list once, as that Do: no Read item while it is open.
+    reminded = {r["source_id"] for r in q("SELECT source_id FROM todos WHERE closed IS NULL AND source_kind='design' "
+                                          "AND why=?", (REMIND_WHY,))}
     for d in q(f"SELECT * FROM (SELECT {CHAT_COLS} FROM designs WHERE ended IS NULL) WHERE state!='thinking'"):
+        if d["id"] in reminded:
+            continue
         unread = (d["replied"] or 0) > (d["seen"] or 0)
         out.append(todo_item(f"chat:{d['id']}:read", "Read", d["project"], d["title"] or f"Chat #{d['id']}",
                              "Claude replied" if unread else "Open: reply, or end it when you are done",
@@ -9593,6 +9633,8 @@ class H(BaseHTTPRequestHandler):
             return {"ok": True}
         if path == "/api/todos":  # your own (TODO-2)
             return todo_own(b)
+        if path == "/api/todos/remind":  # {project, ref}: Remind me on an ended topic (TODO-2)
+            return todo_remind(b)
         if path == "/api/todos/wait":  # TODO-6
             return todo_wait(b["key"], b.get("tasks"), b.get("until"), b.get("at"))
         if path == "/api/todos/note":  # TODO-6
@@ -9761,6 +9803,7 @@ class H(BaseHTTPRequestHandler):
             elif m.group(2) == "end":  # off the list of chats waiting for you; a reply in progress stops
                 q("UPDATE designs SET ended=?, seen=?, queued='[]' WHERE id=?", (time.time(), time.time(), did))
                 stop(DESIGN_PROCS.get(did))
+                todo_remind_close(d["project"], did)
             elif m.group(2) == "reopen":  # with ended, only what you saw ended (compare-and-set, as conv_open)
                 if "ended" in b and d["ended"] and b["ended"] != d["ended"]:
                     raise ValueError("it ended again after this list was drawn: pick it again")

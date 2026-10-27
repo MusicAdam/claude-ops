@@ -574,11 +574,13 @@ the uncommitted-files banner, Deploy. `/api/state` gathers them into one list, `
     with a note when it is cut, an untracked file shown as a diff against nothing. The card reads these from
     `GET /api/projects/<name>/uncommitted`, read only (git status and diff without an index lock, file reads):
     `{repos: [{repo, files: [{path, status, added, removed, binary, mtime}], more}], diff, diff_lines, cut}`.
-  - **Read**: a design or project chat with a reply you haven't opened, as ● on its tab marks it.
+  - **Read**: a design or project chat with a reply you haven't opened, as ● on its tab marks it. A chat with an
+    open reminder (TODO-2, **Remind me**) shows no Read item: it is on the list once, as that **Do**. Once the
+    reminder closes, the Read item shows as it normally would.
   - **Read** (a report): a research task merged into `dev` whose report you haven't marked read, or a report any
     merged task listed in its result (see [Research](#research), RES-5 and RES-10). Opening the report leaves it on
     the list: a report you looked at may still need a decision. Only **Mark read** closes it.
-- **TODO-2 Two kinds Claude adds, and your own.** **Do**: something that truly needs you: a password or sudo, a macOS
+- **TODO-2 Two kinds Claude adds, your own, and reminders.** **Do**: something that truly needs you: a password or sudo, a macOS
   permission grant (Full Disk Access and the like), an API key or account you must create. **Agree**: a
   decision; Claude proposed something and waits for your yes. A step that a command or code change can do is
   never a to-do, even setup that has to wait for a task to merge: a chat queues it as a task, a worker as a
@@ -602,11 +604,22 @@ the uncommitted-files banner, Deploy. `/api/state` gathers them into one list, `
     a **Do** with `source_kind` `owner` and no source id. `wait` is `{tasks, until}`, as above; with it the item
     is created parked. An unknown project, an empty title or an unknown task id is a 400 that says so, and
     nothing is added.
+  - A reminder: `POST /api/todos/remind {project, ref}` (**Remind me** on a row under **Ended (N)**, or in the Undo
+    box after an end, TODAY-2). `ref` is a topic ref as the Ended list has it: a chat id, or `r:<thread>` for a
+    research topic. It stores a **Do** titled with the topic's title (`Chat #<id>` or `Untitled` when it has none),
+    cut to 80 characters, why `Pick up this chat`, `source_kind` `design` for a chat or `research` for
+    `r:<thread>`, and source id the ref, as the chat's own to-dos have. The topic stays ended: picking the to-do
+    reopens it, as its chat is its topic (TODAY-2, a to-do's topic, with `topic_ended`). One per topic: while the
+    topic has an open stored item with that source and that why, a second call adds nothing and returns the
+    open one's id (`{id, key, added: false}`). It matches on the source, not the title, so a renamed chat isn't
+    reminded twice. An unknown project or ref is a 400 that says so.
 
   Every item but your own links to its source. An open item with the same project and title is not added
   twice: Claude's is skipped quietly, yours is a 400.
 - **TODO-3 Closing.** Derived items close by themselves. A stored item closes with
-  `POST /api/todos/<id>/done` (your Done button), or when Claude writes `{"close": <id>}` in a `todo` block. The
+  `POST /api/todos/<id>/done` (your Done button), or when Claude writes `{"close": <id>}` in a `todo` block. A
+  reminder (TODO-2) also closes when its topic is ended again (`POST /api/conversation/end`, the end-read sweep, or
+  `POST /api/designs/<id>/end`): ending it means you are done with it. The
   id is the integer `12` or the string `"todo:12"`; anything else is noted back as not an id and closes nothing.
   Sending a message in the chat (or research topic) that added an Agree doesn't close it: the message may be about
   something else. Claude closes it when your reply settles it (a yes, a no, or a changed plan), and leaves it open
@@ -966,7 +979,8 @@ stay on the right of the header.
       header block stays. Picking a topic tab goes back to the thread. The tab you pick is kept in this browser
       (`ops-td-sec`). There is no separate Conversation tab: any topic tab is the conversation.
     - **▾** at the right end of the strip opens a small menu: **Ended (N)**, the ended topics newest first, each
-      with **Reopen** (clicking its title reopens it too and selects it), and **End read topics older than N days**.
+      with **Remind me** and **Reopen** (clicking its title reopens it too and selects it), and **End read topics
+      older than N days**.
   - **The thread.** The current topic's messages, under a divider line `<date> · <topic title> · <mode>`. A project
     home's card shows between the strip and the thread when a home is open (TODAY-2 home). Sending a message into an
     ended topic resumes it, as sending to an ended chat does.
@@ -983,14 +997,18 @@ stay on the right of the header.
       anyway, the view shows why and reloads the conversation.
     - **End read topics older than N days** (1, 7, 30 or 90), in the ▾ menu, ends every open topic you have read,
       that Claude isn't replying in, other than the current one, whose last activity is older than that.
-    - **Ended (N)**, in the ▾ menu, lists ended topics with **Reopen**. Opening one, or sending it a message,
-      reopens it too. The ▾ shows the count when there are any: **▾ 2**. On a phone, see PHONE-5.
+    - **Ended (N)**, in the ▾ menu, lists ended topics with **Remind me** and **Reopen**. Opening one, or sending it a
+      message, reopens it too. **Remind me** puts the topic on your to-do list as a **Do** and leaves it ended
+      (TODO-2): the list refreshes at once, the strip doesn't change, and the menu stays open. A row whose topic has
+      an open reminder shows muted **On your list** in place of the button. Picking the to-do reopens the topic and
+      selects its tab. The ▾ shows the count when there are any: **▾ 2**. On a phone, see PHONE-5.
     - **Undo.** For 8 seconds after an end from Today (a tab's **×**, or **End topic** on the step), a box says
-      **Ended "<title>"** with **Undo**: at the bottom of the screen, or under the header on a
+      **Ended "<title>"** with **Remind me** and **Undo**: at the bottom of the screen, or under the header on a
       phone. Undo reopens the topic (`/reopen`), and makes it the current topic again when it was and the
       conversation shown is still that project's new topic; if something else has been picked since, the ended one
       just goes back into the strip. The end's other effects stay: its queued messages are gone, a stopped
-      reply stays stopped, and its replies count as read. A newer end replaces the box. The quick chat's × has no Undo.
+      reply stays stopped, and its replies count as read. **Remind me** puts the ended topic on your to-do list, as on an
+      Ended row, and turns into **On your list**. A newer end replaces the box. The quick chat's × has no Undo.
     - **Opening reopens only what you saw ended (compare-and-set).** Every open of a chat or topic from the
       dashboard (`POST /api/conversation` with `how: chat|topic`: a tab, a row under Ended, a to-do's topic, a link
       to a chat) sends `ended`, the value it last saw for that topic: `null`, or when it ended. An ended topic
@@ -1004,6 +1022,7 @@ stay on the right of the header.
       `ended` (the CLI, older callers) reopens as before. No time windows.
     - With no current topic kept, the view picks the latest open topic, else starts a new one.
     - API: `POST /api/conversation/end` and `/reopen` with `{project, ref}`, and `/end-read` with `{project, days}`.
+      Remind me: `POST /api/todos/remind {project, ref}` (TODO-2).
       Each answers with the conversation, as `GET /api/conversation` does.
   - **One kind of topic.** Every new topic is plan & design: a design chat. You don't pick a mode first; you ask
     Claude. It queues tasks, starts research (it queues a research task, see RES-2) and, when you ask for a change
