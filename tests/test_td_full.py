@@ -1,4 +1,4 @@
-"""dashboard.html: the dock's ✕ and ⤢ and the review report (README TODAY-2 the dock, HDR-2, Proof video). Runs the
+"""dashboard.html: the step's ✕ and ⤢ and the review report (README TODAY-2 the header block, HDR-2, Proof video). Runs the
 page's own pure helpers in node (skipped without node): tdCanClose (✕ only for a to-do with no topic), tdTaskOf (the
 task a full-screen view loads) and reviewHtml. The wiring is checked statically. Run from the repo root:
 /opt/homebrew/bin/python3 -m unittest discover -s tests -q"""
@@ -10,7 +10,7 @@ from pathlib import Path
 
 PAGE = Path(__file__).resolve().parent.parent / "dashboard.html"
 page = PAGE.read_text()
-DOCK = ("// ---- the tab strip and the dock, pure", "// ---- end of the tab strip and the dock, pure")
+STEP = ("// ---- the tab strip and the step, pure", "// ---- end of the tab strip and the step, pure")
 PROOF = ("// ---- Proof video, pure", "// ---- end of Proof video")
 RUN = r"""
 const h = require("fs").readFileSync(process.argv[1], "utf8"), a = JSON.parse(process.argv[3]);
@@ -28,7 +28,7 @@ CV = {"project": "ops", "topic": 2, "topics": []}
 @unittest.skipUnless(shutil.which("node"), "needs node")
 class Pure(unittest.TestCase):
     def js(self, *cases):
-        out = subprocess.run(["node", "-e", RUN, str(PAGE), json.dumps(cases), json.dumps([DOCK, PROOF])],
+        out = subprocess.run(["node", "-e", RUN, str(PAGE), json.dumps(cases), json.dumps([STEP, PROOF])],
                              capture_output=True, text=True, check=True).stdout
         return json.loads(out)
 
@@ -60,7 +60,7 @@ class Pure(unittest.TestCase):
 
 
 class Wiring(unittest.TestCase):
-    def test_dock_buttons_and_full_view(self):
+    def test_step_buttons_and_full_view(self):
         self.assertIn('data-close title="Close: keep it on your list">✕', page)
         self.assertIn('data-full title="Open full screen">⤢', page)
         self.assertIn('<div id="tdfull"', page)
