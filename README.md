@@ -1452,17 +1452,30 @@ gets a worktree, the gate and a merge like one you queued by hand, and says **Se
 - **Where to see it.** The **Schedules** page (`#schedules`, linked from Settings) lists each schedule with its next
   run and its last task, with Run now, Pause/Resume, Edit (title, body, every) and Delete.
 - **From a chat.** A design or project chat can create one when you ask for something that repeats, with a fenced
-  `schedule` block holding a JSON list of `{project, title, body, every, hold?, model?, effort?}`. The daemon
+  `schedule` block holding a JSON list of `{project, title, body, every, hold?, model?, effort?, after_schedule?}`. The daemon
   creates them and strips the block from the reply, as it does a `queue` block; the next message tells Claude
   what it made, or why one was refused.
 - **Editing from a session.** The guard keeps every session the queue starts off the dashboard's API (it pauses
   and cancels tasks), so a chat or worker changes a schedule with `opsd.py schedule edit ID`, never `curl`.
   `--body-file PATH` (or `-` for stdin) takes a long body; fields you leave out keep their values, and `next_at`
   moves only when `--every` changes. The design brief names the command, and the guard's refusal points to it.
+- **SCHED-1 Wait for another schedule.** A schedule's `after_schedule` names another schedule (its id, or null).
+  When it fires, its task waits on that schedule's current last task the way a `--after <task id>` task does
+  (`depends_on`): it starts only once that task merges. So a nightly job can follow the daily scout instead of
+  racing it.
+  - If that last task has already ended (merged, failed or cancelled), or there is none, the task queues with no
+    wait. A failed or cancelled one doesn't block it: the task's log says it ran anyway.
+  - When both are due in the same pass, the scheduler queues the one waited on first, so the other waits on the
+    fresh task. Its own no-pile-up rule still applies.
+  - A schedule can't wait on itself, and a cycle (A after B, B after A, or longer) is refused with a 400 on create
+    and edit. One that points at a deleted schedule waits on nothing.
+  - Set it with `opsd.py schedule add ... --after-schedule ID`, `schedule edit ID --after-schedule ID|none`,
+    `after_schedule` in a chat's `schedule` block or the API, or the Edit form on the Schedules page, whose row
+    shows "after #A title". Only one schedule can be waited on.
 
 API: `/api/state` has `schedules` (each with `next_at`, `paused`, `last_task` and `last_state`).
 `POST /api/schedules` creates one; `POST /api/schedules/<id>` edits it (any of project, title, body, every,
-hold, priority, model, effort); `POST /api/schedules/<id>/run`, `/pause`, `/resume` and `/delete` do the rest.
+hold, priority, model, effort, after_schedule); `POST /api/schedules/<id>/run`, `/pause`, `/resume` and `/delete` do the rest.
 
 A recurring research job is a schedule with `research` set: see RES-6. The research repo's old daily job becomes one once the research repo is a project (RES-7).
 

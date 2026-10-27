@@ -174,6 +174,109 @@ class DueSkipMissed(Fixture, InZone):
             opsd.edit_schedule(self.sid, {"every": "sometimes"})
 
 
+class AfterSchedule(Fixture, InZone):
+    """SCHED-1: a schedule whose task waits on another schedule's last task."""
+    def setUp(self):
+        Fixture.setUp(self)
+        InZone.setUp(self)
+        now = local(2026, 3, 4, 12)
+        self.a = opsd.add_schedule({"project": "sched", "title": "Scout", "every": "day 01:00"}, now=now)
+        self.s = opsd.add_schedule({"project": "sched", "title": "Ideas", "every": "day 01:00",
+                                    "after_schedule": self.a}, now=now)
+
+    def events(self, tid):
+        return " | ".join(e["text"] for e in opsd.q("SELECT text FROM events WHERE task_id=?", (tid,)))
+
+    def test_both_due_the_one_waited_on_queues_first(self):
+        # S has the lower id here, so the plain next_at, id order would queue it first
+        opsd.q("UPDATE schedules SET after_schedule=NULL WHERE id=?", (self.s,))
+        opsd.q("UPDATE schedules SET after_schedule=? WHERE id=?", (self.s, self.a))
+        ids = opsd.run_schedules(now=local(2026, 3, 5, 1))
+        first, second = opsd.schedule(self.s)["last_task"], opsd.schedule(self.a)["last_task"]
+        self.assertEqual(ids, [first, second])
+        self.assertEqual(opsd.task(second)["depends_on"], first)
+        self.assertIn(f"waits on #{first}", self.events(second))
+
+    def test_waits_until_that_task_merges(self):
+        ids = opsd.run_schedules(now=local(2026, 3, 5, 1))
+        ta, ts = opsd.schedule(self.a)["last_task"], opsd.schedule(self.s)["last_task"]
+        self.assertEqual(ids, [ta, ts])
+        self.assertEqual(opsd.task(ts)["depends_on"], ta)
+        why = opsd.wait_reasons(opsd.q("SELECT * FROM tasks"))
+        self.assertIn(f"waiting for #{ta}", why.get(ts, ""))
+        opsd.upd(ta, state="done")
+        self.assertNotIn(f"waiting for #{ta}", opsd.wait_reasons(opsd.q("SELECT * FROM tasks")).get(ts, ""))
+
+    def test_ended_last_task_means_no_wait(self):
+        for state, note in (("done", None), ("failed", "runs anyway"), ("cancelled", "runs anyway")):
+            ta = opsd.queue_scheduled(opsd.schedule(self.a), "Run now")
+            opsd.upd(ta, state=state)
+            ts = opsd.queue_scheduled(opsd.schedule(self.s), "Run now")
+            self.assertIsNone(opsd.task(ts)["depends_on"], state)
+            if note:
+                self.assertIn(note, self.events(ts))
+            opsd.upd(ts, state="done")
+
+    def test_no_last_task_or_deleted_schedule_means_no_wait(self):
+        self.assertIsNone(opsd.task(opsd.queue_scheduled(opsd.schedule(self.s), "Run now"))["depends_on"])
+        opsd.queue_scheduled(opsd.schedule(self.a), "Run now")
+        opsd.q("DELETE FROM schedules WHERE id=?", (self.a,))  # by hand: the API also clears after_schedule
+        self.assertIsNone(opsd.task(opsd.queue_scheduled(opsd.schedule(self.s), "Run now"))["depends_on"])
+        opsd.edit_schedule(self.s, {"title": "Ideas 2"})  # a dangling after_schedule is dropped, not refused
+        self.assertIsNone(opsd.schedule(self.s)["after_schedule"])
+
+    def test_a_later_failure_releases_the_wait(self):
+        opsd.run_schedules(now=local(2026, 3, 5, 1))
+        ta, ts = opsd.schedule(self.a)["last_task"], opsd.schedule(self.s)["last_task"]
+        opsd.upd(ta, state="failed")
+        opsd.run_schedules(now=local(2026, 3, 5, 2))
+        self.assertIsNone(opsd.task(ts)["depends_on"])
+        self.assertIn("runs anyway", self.events(ts))
+
+    def test_self_and_cycles_are_refused(self):
+        with self.assertRaises(ValueError):
+            opsd.edit_schedule(self.s, {"after_schedule": self.s})
+        with self.assertRaises(ValueError):
+            opsd.edit_schedule(self.a, {"after_schedule": self.s})  # S already waits on A
+        c = opsd.add_schedule({"project": "sched", "title": "C", "every": "hour", "after_schedule": self.s})
+        with self.assertRaises(ValueError):
+            opsd.edit_schedule(self.a, {"after_schedule": c})  # A <- S <- C <- A
+        with self.assertRaises(ValueError):
+            opsd.add_schedule({"project": "sched", "title": "D", "every": "hour", "after_schedule": 9999})
+        self.assertIsNone(opsd.schedule(self.a)["after_schedule"])
+
+    def test_edit_sets_and_clears_it(self):
+        opsd.edit_schedule(self.s, {"after_schedule": "none"})
+        self.assertIsNone(opsd.schedule(self.s)["after_schedule"])
+        opsd.edit_schedule(self.s, {"after_schedule": f"#{self.a}"})
+        self.assertEqual(opsd.schedule(self.s)["after_schedule"], self.a)
+        view = {v["id"]: v for v in opsd.schedules_view()}[self.s]
+        self.assertEqual(view["after_title"], "Scout")
+
+    def test_api_delete_clears_it(self):
+        h = opsd.H.__new__(opsd.H)
+        h.route(f"/api/schedules/{self.a}/delete", {})
+        self.assertIsNone(opsd.schedule(self.s)["after_schedule"])
+
+    def test_cli_and_reply_block(self):
+        self.assertEqual(opsd.schedule_request(["add", "-p", "sched", "--every", "day 02:00", "--after-schedule", "1",
+                                                "Ideas"]),
+                         ("/api/schedules", {"project": "sched", "every": "day 02:00", "after_schedule": "1",
+                                             "title": "Ideas"}))
+        self.assertEqual(opsd.schedule_request(["edit", "7", "--after-schedule", "none"]),
+                         ("/api/schedules/7", {"after_schedule": "none"}))
+        h = opsd.H.__new__(opsd.H)
+        h.route(*opsd.schedule_request(["edit", str(self.s), "--after-schedule", "none"]))
+        self.assertIsNone(opsd.schedule(self.s)["after_schedule"])
+        h.route(*opsd.schedule_request(["edit", str(self.s), "--after-schedule", str(self.a)]))
+        self.assertEqual(opsd.schedule(self.s)["after_schedule"], self.a)
+        reply = f'Ok.\n```schedule\n[{{"title": "Later", "every": "day 03:00", "after_schedule": {self.a}}}]\n```'
+        out, note = opsd.schedules_from_reply(opsd.PROJECTS["sched"], reply, 1)
+        self.assertEqual(out, "Ok.")
+        self.assertEqual(opsd.q("SELECT after_schedule FROM schedules WHERE title='Later'", one=True)["after_schedule"],
+                         self.a)
+
+
 class Api(Fixture):
     def test_routes(self):
         h = opsd.H.__new__(opsd.H)

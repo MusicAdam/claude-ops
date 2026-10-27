@@ -85,11 +85,13 @@ the language `queue` at the end of your reply, holding a JSON list:
 
 When the owner asks for something that repeats ("every Monday, check the dependencies"), make a
 schedule instead: a fenced block with the language `schedule`, holding a JSON list of
-{{"project", "title", "body", "every", "hold", "model", "effort"}}. `every` is local time, one of
+{{"project", "title", "body", "every", "hold", "model", "effort", "after_schedule"}}. `every` is local time, one of
 `day HH:MM`, `weekday HH:MM`, `mon HH:MM` (any of mon..sun, or a list such as `mon,thu HH:MM`) or
 `hour`. Each slot queues a task with that body, so write the body as a standalone brief too.
+`after_schedule` (optional) is another schedule's id: each run then waits for that schedule's
+current task to merge before it starts, so it follows that job instead of racing it.
 To change a schedule that exists, when the owner asks, run `{schedule_edit} <id> --body-file <path>`
-(also `--title`, `--every`): it changes only what you give. This session can't call the dashboard's
+(also `--title`, `--every`, `--after-schedule ID|none`): it changes only what you give. This session can't call the dashboard's
 API, so this command is the way. The id is the `#N` the Schedules page shows.
 
 An unattended worker builds each task in its own worktree, and several run in parallel. It can't

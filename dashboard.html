@@ -2184,7 +2184,7 @@ function renderSchedules() {
     <div><b>${esc(s.title)}</b> ${pf ? "" : `<span class="ptag">${esc(P(s.project).title)}</span>`} <code>${esc(s.every)}</code>${s.paused ? ' <span class="badge s-paused">paused</span>' : ""}${s.hold ? ' <span class="ptag">hold</span>' : ""}</div>
     <div class="sub">${s.paused ? "Paused" : `Next ${esc(when(s.next_at))}`} · ${s.last_task
       ? `last task <a data-task="${s.last_task}">#${s.last_task}</a> <span class="s-${esc(s.last_state || "")}">${esc(LABEL[s.last_state] || s.last_state || "gone")}</span>`
-      : "no task yet"}</div>
+      : "no task yet"}${s.after_schedule ? ` · <span title="Each run waits for this schedule's current task to merge">after #${s.after_schedule} ${esc(s.after_title || "")}</span>` : ""}</div>
     <div><button data-act="run" title="Queue its task now. The next run stays as it is.">Run now</button>
       <button data-act="${s.paused ? "resume" : "pause"}">${s.paused ? "Resume" : "Pause"}</button>
       <button data-act="edit">Edit</button> <button data-act="delete">Delete</button></div></div>`).join("")
@@ -2199,14 +2199,16 @@ $("#schedlist").onclick = async e => {
   if (act === "edit") {
     schedEdit = id;
     row.innerHTML = `<input class="et" value="${esc(s.title)}"><input class="ee" value="${esc(s.every)}" placeholder="mon 09:00">
-      <textarea class="eb">${esc(s.body)}</textarea><button data-act="save" class="primary">Save</button> <button data-act="cancel">Cancel</button> <span class="err"></span>`;
+      <textarea class="eb">${esc(s.body)}</textarea>
+      <label title="Each run waits for that schedule's current task to merge, so it follows it instead of racing it">After <select class="ea"><option value="">no other schedule</option>${(state.schedules || []).filter(x => x.id !== id).map(x => `<option value="${x.id}"${x.id === s.after_schedule ? " selected" : ""}>#${x.id} ${esc(x.title)}</option>`).join("")}</select></label>
+      <button data-act="save" class="primary">Save</button> <button data-act="cancel">Cancel</button> <span class="err"></span>`;
     return;
   }
   if (act === "cancel") { schedEdit = null; $("#schedlist").dataset.html = ""; renderSchedules(); return; }
   if (act === "delete" && !confirm(`Delete the schedule “${s.title}”? Tasks it queued stay.`)) return;
   try {
     if (act === "save") {
-      await api(`/api/schedules/${id}`, {title: row.querySelector(".et").value, every: row.querySelector(".ee").value, body: row.querySelector(".eb").value});
+      await api(`/api/schedules/${id}`, {title: row.querySelector(".et").value, every: row.querySelector(".ee").value, body: row.querySelector(".eb").value, after_schedule: row.querySelector(".ea").value || null});
       schedEdit = null; $("#schedlist").dataset.html = "";
     } else await api(`/api/schedules/${id}/${act}`, {});
     refresh();
