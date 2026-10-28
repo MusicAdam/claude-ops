@@ -4,14 +4,23 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Claude Ops</title>
+<script>
+try { const t = localStorage.getItem("ops-theme"); if (t === "dark") document.documentElement.dataset.theme = t; } catch {}
+</script>
 <style>
 :root {
   color-scheme: dark;
-  /* Solarized dark (Ethan Schoonover), always. --muted is base0, not base00: base00 is under 3:1 on --panel. */
+  /* Solarized dark (Ethan Schoonover), the default theme. --muted is base0, not base00: base00 is under 3:1 on --panel. */
   --bg: #002b36; --panel: #073642; --ink: #93a1a1; --muted: #839496; --line: #1a5565;
   --accent: #268bd2; --ok: #859900; --warn: #b58900; --bad: #dc322f; --chip: #04323e;
   --on-accent: #fdf6e3;
   --mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+/* Plain neutral dark (GitHub-style), chosen in Settings > Appearance. --muted on --panel is above 3:1. */
+:root[data-theme="dark"] {
+  --bg: #0d1117; --panel: #161b22; --ink: #c9d1d9; --muted: #8b949e; --line: #30363d;
+  --accent: #2f81f7; --ok: #3fb950; --warn: #d29922; --bad: #f85149; --chip: #1c2128;
+  --on-accent: #ffffff;
 }
 * { box-sizing: border-box; }
 body { margin: 0; background: var(--bg); color: var(--ink);
@@ -952,6 +961,13 @@ details.tdparked .tditem { opacity: .8; }
     <div class="card settings">
       <h2>Spent</h2>
       <div id="spent"></div>
+    </div>
+    <div class="card settings">
+      <h2>Appearance</h2>
+      <label><span>Theme</span><select id="theme">
+          <option value="solarized">Solarized dark</option>
+          <option value="dark">Dark</option></select>
+        <span class="why">How the dashboard looks in this browser. Saved here only: other devices keep their own.</span></label>
     </div>
     <div class="card settings dangerzone">
       <h2>Danger zone</h2>
@@ -5946,6 +5962,17 @@ $("#hdr").addEventListener("click", e => {
   if (tab !== "research") showTab("research");
   rsShow("run");
 });
+// Theme: client-only. "ops-theme" in localStorage; the head script applies it before first paint.
+{
+  let t = "solarized";
+  try { if (localStorage.getItem("ops-theme") === "dark") t = "dark"; } catch {}
+  $("#theme").value = t;
+  $("#theme").onchange = () => {
+    const v = $("#theme").value === "dark" ? "dark" : "solarized";
+    if (v === "dark") document.documentElement.dataset.theme = "dark"; else delete document.documentElement.dataset.theme;
+    try { localStorage.setItem("ops-theme", v); } catch {}
+  };
+}
 $("#rsrepo").onchange = () => api("/api/settings", {research_repo: $("#rsrepo").value.trim()})
   .then(() => { $("#rsrepomsg").textContent = ""; RS.loaded = false; RS.refs = null; refresh(); })
   .catch(e => $("#rsrepomsg").textContent = e.message);
