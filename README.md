@@ -1994,7 +1994,8 @@ folder under a project's `<worktrees>/` that no longer exists. A worktree itself
   `tid()` in `dashboard.html` draws every one, so the format stays the same; `data-copyid` holds the exact text a
   click copies. `tests/test_task_ids.py` checks it.
 - **Settings tab.** Parallel, Promote wait, Usage brake, Taper from, Model, Effort and the model per kind of work, each
-  with what it does written next to it, and **Spent**: what Claude has cost, priced at API rates. Last, the
+  with what it does written next to it, **Appearance** (Theme: Solarized dark, the default, or Dark; kept per browser in
+  localStorage `ops-theme`, no server setting; `tests/test_theme.py`), and **Spent**: what Claude has cost, priced at API rates. Last, the
   **Danger zone** card holds **Restart claude-ops** (`POST /api/restart`): the same as `opsctl restart`, at once,
   without waiting for deploys or idle tasks. Every click gets an answer on the button itself:
   - **First click:** the same button, not a new one, reads "Click again to restart" and names any running deploy
