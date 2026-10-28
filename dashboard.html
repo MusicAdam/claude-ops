@@ -328,6 +328,8 @@ a[data-task] { color: var(--accent); cursor: pointer; }
 .sched input, .sched textarea { width: 100%; box-sizing: border-box; margin: 2px 0 6px; }
 .sched textarea { min-height: 80px; } #schednew { display: grid; grid-template-columns: auto 1fr 150px; gap: 6px; }
 #schednew textarea { grid-column: 1 / -1; min-height: 60px; }
+.card.dangerzone { border-color: var(--bad); } .card.dangerzone h2 { color: var(--bad); }
+#restart { margin-bottom: 8px; } #restart .err, #restart .muted { margin-left: 8px; }
 #spent .big { font-size: 22px; font-weight: 600; font-variant-numeric: tabular-nums; }
 #spent table { border-collapse: collapse; margin-top: 8px; font-variant-numeric: tabular-nums; }
 #spent td { padding: 2px 16px 2px 0; } #spent td:last-child { text-align: right; }
@@ -946,6 +948,11 @@ details.tdparked .tditem { opacity: .8; }
       <h2>Spent</h2>
       <div id="spent"></div>
     </div>
+    <div class="card settings dangerzone">
+      <h2>Danger zone</h2>
+      <div id="restart"></div>
+      <div class="muted">Stops and starts the background service (<code>opsctl restart</code>). Running tasks pause and resume on their own. A running deploy is cut off and fails.</div>
+    </div>
   </section>
 </main>
 <main id="schedulesview" class="hidden">
@@ -1274,9 +1281,10 @@ function single(fn) {
 
 async function loadState() {
   let s;
-  try { s = await api("/api/state"); } catch (e) { $("#hdr").innerHTML = `<span class="err">${esc(e.message)}</span>`; return; }
+  try { s = await api("/api/state"); } catch (e) { $("#hdr").innerHTML = `<span class="err">${esc(e.message)}</span>`; renderRestart(); return; }
   // Bound but still loading projects: keep what we last drew, and say why nothing moves.
-  if (s.starting) { $("#hdr").innerHTML = `<span class="err">claude-ops is starting up…</span>`; return; }
+  if (s.starting) { $("#hdr").innerHTML = `<span class="err">claude-ops is starting up…</span>`; renderRestart(); return; }
+  if (RESTART.at && s.pid !== RESTART.pid) RESTART.at = 0;  // the new daemon answers: the button comes back
   state = s;
   tdDropGone(s);
   render();
@@ -1284,6 +1292,38 @@ async function loadState() {
   if (tab === "today") refreshDesign.poll();  // the conversation under the step
 }
 const refresh = single(loadState);
+
+// Settings' Danger zone: Restart claude-ops. The first click asks again (for about 5 s, or until the pointer
+// leaves); the second runs `opsctl restart` at once. Then "Restarting…" until a daemon with a new pid answers.
+const RESTART = {confirm: false, timer: 0, at: 0, pid: 0, err: ""};
+function renderRestart() {
+  const el = $("#restart");
+  if (RESTART.at) {
+    const late = Date.now() - RESTART.at > 60000;
+    put(el, late ? `<span class="err">No answer: see ~/.claude-ops/restart.log and <code>opsctl log</code></span>`
+                 : `<span class="muted">Restarting…</span>`);
+    return;
+  }
+  const deploys = (state && state.running_deploys) || [];
+  const warn = RESTART.confirm && deploys.length
+    ? `${deploys.length === 1 ? "deploy" : "deploys"} ${deploys.map(id => "#" + id).join(", ")} will fail` : "";
+  if (!put(el, `<button class="danger" id="restartbtn">${RESTART.confirm ? "Click again to restart" : "Restart claude-ops"}</button>`
+      + (warn ? `<span class="err">${esc(warn)}</span>` : "") + (RESTART.err ? `<span class="err">${esc(RESTART.err)}</span>` : ""))) return;
+  const b = $("#restartbtn");
+  const reset = () => { clearTimeout(RESTART.timer); if (RESTART.confirm) { RESTART.confirm = false; renderRestart(); } };
+  b.onmouseleave = b.onblur = reset;
+  b.onclick = async () => {
+    RESTART.err = "";
+    if (!RESTART.confirm) {
+      RESTART.confirm = true; RESTART.timer = setTimeout(reset, 5000); renderRestart(); return;
+    }
+    clearTimeout(RESTART.timer); RESTART.confirm = false; b.disabled = true;
+    try { await api("/api/restart", {}); }
+    catch (e) { RESTART.err = e.message; renderRestart(); return; }
+    RESTART.at = Date.now(); RESTART.pid = state && state.pid;
+    renderRestart();
+  };
+}
 
 // Draw everything from the state we have. A click that changes the view calls this at once, then refresh.
 function render() {
@@ -1294,6 +1334,7 @@ function render() {
   const st = sel && state.tasks.find(t => t.id === sel);
   if (st && !inView(st.project)) clearSelection();
   renderProjects(); renderHeader(); renderMains(); renderList(); renderSchedules(); renderToday();
+  renderRestart();
   qcRender();
   $("#tab-research").classList.toggle("hidden", !state.research);
   if (tab === "research") { if (state.research) { rsLock(); refreshResearch.poll(); } else rsRender(); }

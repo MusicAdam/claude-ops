@@ -3471,19 +3471,36 @@ def restart_if_idle():
     return True
 
 
+def spawn_restart(log, **env):
+    """Run `opsctl restart` in a session of its own, so stopping this daemon's launchd job spares it. If the new
+    daemon doesn't answer, opsctl says so in log."""
+    log.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.Popen([str(CODE / "opsctl"), "restart"], cwd=CODE, env=dict(os.environ, OPS_DATA=str(DATA), **env),
+                     start_new_session=True, stdin=subprocess.DEVNULL,
+                     stdout=open(log, "a"), stderr=subprocess.STDOUT)
+
+
 def restart_self(tid):
     """main of claude-ops itself just moved: run `opsctl restart` to load the new code. Running tasks pause and
-    the new daemon resumes them. It runs in a session of its own, so stopping this daemon's launchd job spares it."""
+    the new daemon resumes them."""
     if not is_service():
         ev(tid, "not restarting claude-ops: this daemon is not the launchd service, and opsctl restart "
                 "would restart that one")
         return
     ev(tid, "restarting claude-ops to load the new code; running tasks pause and resume")
-    (RUNS / str(tid)).mkdir(parents=True, exist_ok=True)
-    subprocess.Popen([str(CODE / "opsctl"), "restart"], cwd=CODE,  # if the new daemon doesn't answer, it logs that here
-                     env=dict(os.environ, OPS_DATA=str(DATA), OPS_RESTART_TASK=str(tid)),
-                     start_new_session=True, stdin=subprocess.DEVNULL,
-                     stdout=open(RUNS / str(tid) / "restart.log", "a"), stderr=subprocess.STDOUT)
+    spawn_restart(RUNS / str(tid) / "restart.log", OPS_RESTART_TASK=str(tid))
+
+
+def restart_now():
+    """The Restart button in Settings' Danger zone: `opsctl restart` at once, like typing it. It doesn't wait for
+    deploys or idle tasks: running tasks pause and resume, and a running deploy is cut off and fails."""
+    if not is_service():
+        raise ValueError("not the launchd service; opsctl restart would restart that one")
+    deploys = running_deploys()
+    print("restarting claude-ops: you clicked Restart in Settings' Danger zone"
+          + (f"; {deploy_words(deploys)} will fail" if deploys else ""), flush=True)
+    spawn_restart(DATA / "restart.log")
+    return {"ok": True}
 
 
 # ---------------------------------------------------------------- the Claude usage limit
@@ -9494,6 +9511,8 @@ def state_payload():
         "settings": {k: s.get(k, "") for k in SETTING_KEYS},
         "limit": limit_info(s), "usage": usage_info(s),
         "active": len(THREADS), "data_dir": str(DATA),
+        "pid": os.getpid(),  # the Restart button waits for a new one
+        "running_deploys": [t["id"] for t in running_deploys()],  # what the Restart button would cut off
         "research": research.state(),  # its own count: research runs take no task slot
         "design_cost": (q("SELECT SUM(cost) AS c FROM designs", one=True) or {}).get("c") or 0,
         "chats": chat_counts(), "todos": todos_list(tasks, projects, last), "schedules": schedules_view()}
@@ -9887,6 +9906,8 @@ class H(BaseHTTPRequestHandler):
             return pause_all()
         if path == "/api/resume-all":
             return resume_all()
+        if path == "/api/restart":  # Settings' Danger zone: restart at once
+            return restart_now()
         if path == "/api/limit/clear":  # Try now: stop waiting out the usage limit
             return limit_clear("you clicked Try now")
         if path == "/api/projects/reload":

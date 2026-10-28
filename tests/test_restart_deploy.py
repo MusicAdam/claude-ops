@@ -215,5 +215,50 @@ class NewDeploysWait(Base):
         self.assertEqual(opsd.task(other)["state"], "queued")
 
 
+class RestartButton(unittest.TestCase):
+    """POST /api/restart, Settings' Danger zone: `opsctl restart` at once, only on the launchd service. restart_self
+    shares its spawn and keeps its own log and OPS_RESTART_TASK."""
+
+    def setUp(self):
+        opsd.init_db()
+        self.spawned = []
+        popen, service = subprocess.Popen, opsd.is_service
+        subprocess.Popen = lambda *a, **k: self.spawned.append((a, k))
+        self.addCleanup(lambda: (setattr(subprocess, "Popen", popen), setattr(opsd, "is_service", service)))
+
+    def route(self, path, body=None):
+        return opsd.H.__new__(opsd.H).route(path, body or {})
+
+    def test_refuses_off_the_service(self):
+        opsd.is_service = lambda: False
+        with self.assertRaisesRegex(ValueError, "not the launchd service"):
+            self.route("/api/restart")
+        self.assertEqual(self.spawned, [])
+
+    def test_spawns_opsctl_restart(self):
+        opsd.is_service = lambda: True
+        self.assertEqual(self.route("/api/restart"), {"ok": True})
+        (a, k), = self.spawned
+        self.assertEqual(a[0], [str(opsd.CODE / "opsctl"), "restart"])
+        self.assertTrue(k["start_new_session"])
+        self.assertIs(k["stdin"], subprocess.DEVNULL)
+        self.assertEqual(k["stdout"].name, str(opsd.DATA / "restart.log"))
+        self.assertEqual(k["env"]["OPS_DATA"], str(opsd.DATA))
+        self.assertNotIn("OPS_RESTART_TASK", k["env"])
+        k["stdout"].close()
+
+    def test_restart_self_keeps_its_task_log(self):
+        opsd.is_service = lambda: True
+        tid = new_task("x")
+        self.addCleanup(lambda: opsd.q("DELETE FROM tasks WHERE id=?", (tid,)))
+        opsd.restart_self(tid)
+        (a, k), = self.spawned
+        self.assertEqual(a[0], [str(opsd.CODE / "opsctl"), "restart"])
+        self.assertTrue(k["start_new_session"])
+        self.assertEqual(k["stdout"].name, str(opsd.RUNS / str(tid) / "restart.log"))
+        self.assertEqual(k["env"]["OPS_RESTART_TASK"], str(tid))
+        k["stdout"].close()
+
+
 if __name__ == "__main__":
     unittest.main()
