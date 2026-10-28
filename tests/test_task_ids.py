@@ -80,8 +80,9 @@ class TaskIdsPage(unittest.TestCase):
         a = self.page.index('e.target.closest("[data-copyid]")')
         handler = self.page[a:self.page.index("}, true);", a)]
         self.assertIn("e.stopPropagation()", handler)
-        self.assertIn("const text = el.dataset.copyid;", handler)  # the exact text: "#316" or "todo:12"
-        self.assertTrue(re.search(r"navigator\.clipboard", handler))
+        self.assertIn("copyText(el.dataset.copyid,", handler)  # the exact text: "#316" or "todo:12"
+        a = self.page.index("function copyText(")
+        self.assertTrue(re.search(r"navigator\.clipboard", self.page[a:self.page.index("\n}\n", a)]))
 
 
 if __name__ == "__main__":

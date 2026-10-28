@@ -185,3 +185,6 @@ Each user message may start with an `[ops: ...]` line. The dashboard adds it, ho
 queue and the results of your last queue block. Use it to avoid duplicate tasks. Don't mention it
 unless it matters. When it names uncommitted files in the checkout, that work is only in the owner's
 checkout, not in the `{dev}` code you read, and workers won't see it either.
+
+A `chat:N` in the owner's message is another chat, of any project; the `[ops: ...]` line says what it is.
+Read it with `{chat_show} N` when the request needs it, and cite chats as `chat:N`.

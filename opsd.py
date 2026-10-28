@@ -22,6 +22,7 @@
   opsd.py archive-project NAME         take a project off the queue: its config moves to projects/archived/
   opsd.py unarchive-project NAME       bring an archived project back, as it was
   opsd.py event TASK_ID TEXT           add a line to a task's log, without the daemon (opsctl, when a restart fails)
+  opsd.py chat show ID [--last K]      print any project's chat, from the db: a header, then its messages in full
   opsd.py guard --daemon PID [--root DIR]   PreToolUse hook: refuse Bash commands that stop processes the session did not start
 
 Per project (paths come from ~/.claude-ops/projects/<name>.toml):
@@ -6521,16 +6522,24 @@ def file_section(text, sec):
     return max((h for h in heads if h and (sec == h or sec.startswith(h + " "))), key=len, default=None)
 
 
-def link_check(project, refs, heads=None):
-    """{ref: None if its target exists, else why not} for refs of the forms task:<id>, file:<repo path>[:<line>]
-    [§<heading>], spec:[<sub>/]<change>, image:<name> and design:<chat id>/<name>. heads gets, for each file ref
-    with a § that exists, the heading it found, so the page can end the link there."""
+def link_check(project, refs, heads=None, chats=None):
+    """{ref: None if its target exists, else why not} for refs of the forms task:<id>, chat:<id>, file:<repo
+    path>[:<line>][§<heading>], spec:[<sub>/]<change>, image:<name> and design:<chat id>/<name>. heads gets, for each
+    file ref with a § that exists, the heading it found, so the page can end the link there; chats gets each chat
+    ref's {title, project}, for its tooltip and to open it."""
     p = PROJECTS.get(project or "")
     out, heads = {}, {} if heads is None else heads
+    chats = {} if chats is None else chats
     for ref in list(dict.fromkeys(refs or []))[:500]:
         kind, _, val = str(ref).partition(":")
         if kind == "task":
             out[ref] = None if val.isdigit() and task(int(val)) else f"No task #{val}"
+        elif kind == "chat":  # any project's chat, as a task: not the message's project
+            d = q("SELECT title,project FROM designs WHERE id=?", (int(val),), one=True) if val.isdigit() else None
+            out[ref] = None if d and d["project"] in PROJECTS else \
+                f"Chat {val} is in {d['project']}, which is archived" if d else f"No chat {val}"
+            if d:
+                chats[ref] = {"title": d["title"] or "Untitled", "project": d["project"]}
         elif kind == "image":
             ok = re.fullmatch(r"[\w-]+\.\w+", val) and (IMAGES / val).is_file()
             out[ref] = None if ok else f"Picture not found: {val}"
@@ -6620,9 +6629,9 @@ def send_queued(did):
     threading.Thread(target=design_turn, args=(did, "\n\n".join(waiting[:n])), daemon=True).start()
 
 
-def ops_note(p, did, extra=""):
-    """Context the dashboard adds to each user message: the queue, and what happened since the last one
-    (what the last queue block did, edits saved to dev, tasks queued with the buttons)."""
+def ops_note(p, did, extra="", text=""):
+    """Context the dashboard adds to each user message: the queue, what happened since the last one
+    (what the last queue block did, edits saved to dev, tasks queued with the buttons), and the chats text names."""
     live = q("SELECT id,state,title FROM tasks WHERE project=? AND state NOT IN ('done','cancelled') ORDER BY id",
              (p.name,))
     parts = ["queue: " + ("; ".join(f"#{t['id']} {t['state']} {t['title']}" for t in live[:25]) or "empty"),
@@ -6633,8 +6642,81 @@ def ops_note(p, did, extra=""):
         parts.append("checkout: " + "; ".join(
             f"{u['count']} uncommitted {files(u['count'])} in {u['repo']} (not on {p.dev}"
             + (f"; oldest {day(u['oldest'])}" if u["oldest"] else "") + ")" for u in dirty))
-    parts += news(did) + agree_open(did) + ([extra] if extra else [])
+    parts += news(did) + agree_open(did) + ([extra] if extra else []) + chat_mentions(text)
     return "[ops: " + " | ".join(parts) + "]\n\n"
+
+
+def chat_said(did, text):
+    """The [ops: ...] items a project chat's message gets: word from a project it sent something to, and the chats
+    text names (a design chat gets these in ops_note)."""
+    return news(did) + agree_open(did) + chat_mentions(text)
+
+
+CHAT_REF = re.compile(r"(?<![\w/:.#&-])chat:(\d+)(?![\w-])")  # chat:42 as a word of its own (README: LINK-8)
+
+
+def chat_kind(d):
+    return "OpenSpec change" if d["spec"] or d["spec_draft"] else \
+        "project chat" if d["kind"] == "project" else "design chat"
+
+
+def chat_mentions(text):
+    """One [ops: ...] item per chat:N in the owner's message, outside fenced code and URLs: what that chat is and
+    how to read it. Its transcript is never pasted."""
+    keep, fence = [], None
+    for line in (text or "").split("\n"):
+        m = re.match(r" {0,3}(`{3,}|~{3,})", line)
+        if fence is None and m:
+            fence = m[1]
+        elif fence is not None:
+            if re.fullmatch(rf" {{0,3}}{re.escape(fence[0])}{{{len(fence)},}}\s*", line):
+                fence = None
+        else:
+            keep.append(re.sub(r"https?://\S+", " ", line))
+    out = []
+    for n in dict.fromkeys(CHAT_REF.findall("\n".join(keep))):
+        d = q("SELECT id,project,title,kind,spec,spec_draft,updated,(SELECT COUNT(*) FROM design_msgs m "
+              "WHERE m.design_id=designs.id) AS n FROM designs WHERE id=?", (int(n),), one=True)
+        out.append(f"chat:{n}: no such chat" if not d else
+                   f"chat:{n} is \"{d['title'] or 'Untitled'}\" ({d['project']}, {chat_kind(d)}, {d['n']} message"
+                   f"{'' if d['n'] == 1 else 's'}, last active {day(d['updated'] or 0)}): read it with "
+                   f"`{OPSD_CMD} chat show {n}`")
+    return out
+
+
+def topic_search(text="", project="", exclude=None, limit=10):
+    """GET /api/topics/search: the chats of every project that isn't archived whose title has each word of text, or
+    whose id starts with it, for the message box's @ picker: project's first, open before ended, then newest
+    activity, at most limit."""
+    text = (text or "").strip().lower()
+    words, num = text.split(), text.removeprefix("chat:")
+    out = []
+    for d in q("SELECT id,project,title,kind,spec,spec_draft,updated,ended FROM designs "
+               "ORDER BY updated DESC, id DESC"):
+        title = (d["title"] or "Untitled").lower()
+        if d["project"] in PROJECTS and d["id"] != exclude and (
+                all(w in title for w in words) or (num.isdigit() and str(d["id"]).startswith(num))):
+            out.append({"id": d["id"], "title": d["title"] or "Untitled", "project": d["project"],
+                        "kind": chat_kind(d), "ended": d["ended"], "last": d["updated"] or 0})
+    out.sort(key=lambda t: (t["project"] != project, bool(t["ended"]), -t["last"]))
+    return out[:max(0, min(limit, 50))]
+
+
+def chat_show(did, last=None):
+    """opsd.py chat show: a chat's header line, then its messages oldest first (only the last `last` with it), each
+    labelled and dated, in full. None when there is no such chat."""
+    d = q("SELECT * FROM designs WHERE id=?", (did,), one=True)
+    if not d:
+        return None
+    msgs = q("SELECT role,text,ts FROM design_msgs WHERE design_id=? ORDER BY id", (did,))
+    if last is not None:
+        msgs = msgs[len(msgs) - last:] if last < len(msgs) else msgs
+    when = lambda ts: time.strftime("%Y-%m-%d %H:%M", time.localtime(ts or 0))  # noqa: E731
+    who = {"user": "The owner", "assistant": "Claude", "ops": "The dashboard"}
+    head = (f"chat:{did} · {d['project']} · {chat_kind(d)} · \"{d['title'] or 'Untitled'}\" · {d['state']} · "
+            + (f"ended {when(d['ended'])}" if d["ended"] else "open") + f" · created {when(d['created'])}")
+    return "\n\n".join([head] + [f"--- {who.get(m['role'], m['role'])} · {when(m['ts'])}\n{m['text'] or ''}"
+                                 for m in msgs]) + "\n"
 
 
 def news(did):
@@ -6653,6 +6735,7 @@ def design_system_prompt(p, d=None, cwd=None):
                                                          files=CHAT_FILES / str(did), did=did, checkout=p.repo,
                                                          research=f"{OPSD_CMD} add -p {shlex.quote(p.name)} --research",
                                                          schedule_edit=f"{OPSD_CMD} schedule edit",
+                                                         chat_show=f"{OPSD_CMD} chat show",
                                                          notes=notes + peer_brief(p, "design"))
     if d and d["spec"]:
         out += "\n" + (CODE / "spec_prompt.md").read_text().format(change=d["spec"], path=SPEC_DIR / d["spec"],
@@ -7234,7 +7317,7 @@ def design_turn(did, text, fresh_why=None):
     if handoff and not slash:
         text = handoff + "\n\n## Now\n\n" + text
     if chat:  # your own settings apply, like the CLI; auto mode stands in for prompts
-        said = news(did) + agree_open(did)  # word from a project it sent something to; a design chat gets it in ops_note
+        said = chat_said(did, orig)  # word from a project it sent something to; a design chat gets it in ops_note
         mcp, missing = mcp_servers(p)
         if missing and not d["session_id"]:  # once per session, as that is when servers load
             q("INSERT INTO design_msgs (design_id, role, text, ts) VALUES (?,?,?,?)",
@@ -7244,6 +7327,7 @@ def design_turn(did, text, fresh_why=None):
         system += (f"\n\nTo queue a task in {p.name} itself, for an unattended worker in its own worktree, run "
                    f"`{SEND_CMD} {p.name} --title \"...\" \"<a brief that stands alone>\"`. Do it when the owner "
                    "asks or agrees.")
+        system += CHAT_REF_RULE
         if handoff and slash:
             system += "\n\n" + handoff
         cmd = [CLAUDE, "-p", ("[ops: " + " | ".join(said) + "]\n\n" if said else "") + with_images(text),
@@ -7253,7 +7337,7 @@ def design_turn(did, text, fresh_why=None):
                "--name", f"{p.name} chat #{did}", "--settings", guard_settings(None, p, chat=True),
                "--append-system-prompt", system]
     else:
-        note, system = ops_note(p, did, extra), design_system_prompt(p, d, cwd)
+        note, system = ops_note(p, did, extra, orig), design_system_prompt(p, d, cwd)
         if slash:
             system = system.rstrip() + "\n\n## Dashboard note for this turn\n\n" + note.strip()
             system += "\n\n" + handoff if handoff else ""
@@ -8081,6 +8165,9 @@ def task_chat_turn(tid, text):
 
 OPSD_CMD = f"{shlex.quote(sys.executable)} {shlex.quote(str(CODE / 'opsd.py'))}"
 SEND_CMD = f"{OPSD_CMD} send"
+CHAT_REF_RULE = (f"\n\nA `chat:N` in the owner's message is another chat, of any project; the `[ops: ...]` line says "
+                 f"what it is. Read it with `{OPSD_CMD} chat show N` when the request needs it, and cite chats as "
+                 "`chat:N`.")
 PEER_KINDS = {"task": "task", "design": "design chat", "chat": "chat"}  # what `send` starts -> words
 PEER_HOPS = 3  # a send passed on this many times is refused, so two projects can't keep each other busy
 PEER_MAX = 10  # sends one task or chat may make
@@ -9747,6 +9834,10 @@ class H(BaseHTTPRequestHandler):
         if path == "/api/designs/quick":  # the quick chat's Recent list (README: TODAY-6)
             limit = parse_qs(urlparse(self.path).query).get("limit", ["10"])[0]
             return self.send(200, quick_topics(int(limit) if limit.isdigit() else 10))
+        if path == "/api/topics/search":  # the message box's @ picker (README: LINK-8)
+            a = {k: v[0] for k, v in parse_qs(urlparse(self.path).query).items()}
+            ex = a.get("exclude", "")
+            return self.send(200, topic_search(a.get("q", ""), a.get("project", ""), int(ex) if ex.isdigit() else None))
         if path == "/api/openspec":  # open changes, the repos that use OpenSpec and those that don't, and drafts
             out = {"changes": [], "repos": [], "bare": [], "cli": bool(shutil.which("openspec")),
                    "drafts": q("SELECT id,project,title,spec_sub AS sub,state FROM designs WHERE spec_draft=1 "
@@ -9828,8 +9919,8 @@ class H(BaseHTTPRequestHandler):
         if path == "/api/todos/unpark":
             return todo_unpark(b["key"])
         if path == "/api/links/check":  # which of a chat message's link targets exist (README: Links in chats)
-            heads = {}
-            return {"refs": link_check(b.get("project"), b.get("refs"), heads), "heads": heads}
+            heads, chats = {}, {}
+            return {"refs": link_check(b.get("project"), b.get("refs"), heads, chats), "heads": heads, "chats": chats}
         if path == "/api/tasks":
             if not (b.get("body") or "").strip():
                 raise ValueError("describe the task")
@@ -10261,6 +10352,13 @@ if __name__ == "__main__":
         guard(args)
     elif cmd == "event" and len(args) == 2 and args[0].isdigit():  # straight into the db: the daemon may be down
         q("INSERT INTO events (task_id, ts, text) VALUES (?,?,?)", (int(args[0]), time.time(), args[1]))
+    elif cmd == "chat" and args[:1] == ["show"] and len(args) in (2, 4) and args[1].isdigit() and (
+            len(args) == 2 or (args[2] == "--last" and args[3].isdigit())):  # straight from the db, as event
+        out = chat_show(int(args[1]), int(args[3]) if len(args) == 4 else None)
+        if out is None:
+            print(f"no chat {args[1]}", file=sys.stderr)
+            sys.exit(1)
+        sys.stdout.write(out)
     elif cmd in ("pause-all", "resume-all"):
         post(f"/api/{cmd}", {})
     elif cmd == "add-project" and args:
