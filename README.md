@@ -5,6 +5,24 @@ chat that queues it for you. Headless Claude workers do the work in parallel, ea
 worktree. A gate (your test commands) guards every merge into the dev branch. The main branch is
 the golden version: it changes only when you promote.
 
+[![Queue a task on the dashboard and watch it go from queued to working to done](docs/media/queue-a-task.gif)](docs/media/queue-a-task.mp4)
+
+*Queue a task: a worker picks it up, the gate passes, and it merges into dev. Click a clip to open its mp4.*
+
+| | |
+|---|---|
+| [![Today view](docs/media/today.png)](docs/media/today.png)<br>**Today**: what needs you, one step at a time, with what is running and scheduled beside it. | [![Try step with a proof video](docs/media/try-proof.png)](docs/media/try-proof.png)<br>**Try**: a held task's proof video and review report, before it merges. |
+| [![Design chat whose reply queued two tasks](docs/media/design-chat.png)](docs/media/design-chat.png)<br>**Design chat**: talk an idea through; the reply queues the tasks. | [![Tasks list with a running task's activity](docs/media/tasks.png)](docs/media/tasks.png)<br>**Tasks**: the New task form, every task by state, and a worker's live steps. |
+| [![A finished task's details](docs/media/task-details.png)](docs/media/task-details.png)<br>**A task's page**: what was fixed, the summary, the files it changed and its log. | [![Projects page](docs/media/projects.png)](docs/media/projects.png)<br>**Projects**: branches, Play, Promote, and each project's tasks. |
+| [![Approve a held task and merge it](docs/media/approve-and-merge.gif)](docs/media/approve-and-merge.mp4)<br>**Approve & merge** from the Try step. | [![A design chat reply queues a task](docs/media/design-chat-queues-tasks.gif)](docs/media/design-chat-queues-tasks.mp4)<br>**A chat reply queues a task**, waiting on the one it builds on. |
+
+<img src="docs/media/phone-today.png" alt="Today on a phone" width="195" align="right">
+
+The pictures come from a made-up project, `recipe-box`, in a throwaway queue with canned workers: see
+[Demo media](#demo-media) to make them again. The dashboard works on a phone too ([Today on a
+phone](#today-on-a-phone)).
+<br clear="right">
+
 ## Use it
 
 ```bash
@@ -2307,6 +2325,7 @@ Nothing claude-ops runs may stop, signal or quit a process it did not start.
 | `spec_prompt.md` | added to a design chat's brief when it is about an OpenSpec change |
 | `spec_new_prompt.md` | added instead while a chat from **New change** has no change yet |
 | `dashboard.html` | the page |
+| `scripts/demo.sh`, `scripts/demo_seed.py`, `scripts/demo_capture.py` | the README's screenshots and clips (see [Demo media](#demo-media)) |
 | `~/.claude-ops/projects/*.toml` | one config per project |
 | `~/.claude-ops/ops.db` | SQLite: tasks, events, settings, design chats |
 | `~/.claude-ops/runs/<id>/` | `claude.jsonl` (full transcript), `claude.err`, `gate.log`; a deploy's `deploy.log`, `note.txt` |
@@ -2344,3 +2363,35 @@ uid and `-n` as extra patterns. It then kills every process whose command line c
 Chrome's helpers (Claude in Chrome goes down with them), Spotify, Steam, Unity, every claude-ops
 worker and the live daemon. `lsof -ti :PORT` lists clients as well as the server, so piping it to
 `kill` also kills Chrome when a tab has that dashboard open.
+
+### Demo media
+
+The screenshots and clips at the top of this README live in `docs/media/`. `scripts/demo.sh` makes all of them
+again, for when the dashboard changes, and needs no manual steps:
+
+```bash
+scripts/demo.sh           # writes docs/media/*.png, *.mp4 and *.gif, then stops the demo and removes its temp folder
+scripts/demo.sh --keep    # the same, then leaves the demo running and prints its URL to browse (Ctrl-C ends it)
+```
+
+- **Needs** Playwright for Python with Chromium, and `ffmpeg`. Only these scripts use Playwright, never `opsd.py`.
+  If it is missing, the script prints the install command, a venv under `~/.cache/claude-ops-demo`, and exits 1.
+  `DEMO_PYTHON` picks the Python that has Playwright; `PYTHON` the one (3.11+) that runs the daemon.
+- **It never touches `~/.claude-ops`** or your projects. Everything runs in one temp folder: a fake `HOME`
+  with the sample repo `~/dev/recipe-box` (a small stdlib Python CLI with tests and a `[[gate]]`) and the
+  daemon's data (`OPS_DATA`), on a free port (`OPS_PORT`). The repo is registered with `opsd.py add-project`.
+- **No model calls, no tokens.** `OPS_CLAUDE` points at a stub (`scripts/demo_seed.py stub`) that plays canned
+  worker and chat turns in the stream-json format the daemon reads. The tasks go through the real pipeline:
+  worktree, gate, merge, hold and proof video. The seed waits for each task to settle, so every run gives the same
+  queue: merged tasks with summaries, one running, one on Try with a proof video, one waiting for your answer,
+  queued tasks waiting on others, a design chat whose reply queued two tasks, a to-do and a schedule.
+- **A fixed clock.** The seed moves every timestamp onto a fixed timeline, and commits carry a fixed date. The
+  browser's clock is frozen at Friday 13 March 2026, 10:30 UTC. Each `/api` response has its times moved by the
+  same offset, and its temp paths shown as `~/…`. So a rerun changes only what the UI changed. Nothing in
+  `opsd.py` or `dashboard.html` exists for the demo.
+- **Output:** screenshots at 1440x900 and scale 2, quantised to 256 colours to stay under 400 KB each; one
+  phone shot at 390x844. Each clip is recorded at 1280x800, then saved as an H.264 `.mp4` and a looping 960 px,
+  12 fps `.gif` under 5 MB. GitHub does not play an mp4 stored in the repo, so the README shows the GIF and links it
+  to the mp4.
+- `tests/test_demo_seed.py` runs only the seed step, without Playwright, and checks the project and task mix in
+  `/api/state`.
