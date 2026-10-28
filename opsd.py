@@ -4210,9 +4210,9 @@ def schedules_from_reply(p, reply, did):
 
 RESEARCH_DIR = "docs/research"
 # tier -> (minutes per worker turn, --max-budget-usd, what the tier means): research.py's TIME_LIMIT_MIN and RUN_SIZES
-RESEARCH_TIERS = {"T0": (5, 1, "a quick answer: a handful of searches, no subagents"),
-                  "T1": (15, 3, "a normal run: enough sources to be confident, no parallel workers unless needed"),
-                  "T2": (40, 10, "a deep run: broad sources, parallel workers allowed")}
+RESEARCH_TIERS = {"T0": (10, 2, "a quick answer: a handful of searches, no subagents"),
+                  "T1": (30, 6, "a normal run: enough sources to be confident, no parallel workers unless needed"),
+                  "T2": (80, 20, "a deep run: broad sources, parallel workers allowed")}
 SLUG_STOP = {"a", "an", "the", "is", "are", "of", "for", "to", "in", "on", "and", "or", "what", "whats", "how", "does",
              "do", "anyone", "there", "any", "can", "i", "we", "it", "its", "be", "with", "by", "should", "my", "me",
              "this", "that", "who", "which", "into"}  # research.make_slug's
