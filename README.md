@@ -256,7 +256,8 @@ main (see below).
   doesn't count), and the release or merge says so in its log (`claude-ops restarts to load the new code once
   deploy #259 finishes`). Meanwhile no new deploy starts: it says `waiting for claude-ops to restart`. A
   Promote waits for nothing else: other tasks keep starting, and pause and resume across the restart. A
-  manual `opsctl restart` or `stop` doesn't wait.
+  manual `opsctl restart` or `stop` doesn't wait, and neither does the **Restart claude-ops** button in the
+  Settings tab's Danger zone.
 - The daemon opens its port first, then loads projects and resumes tasks. Until then the dashboard says
   "claude-ops is starting up" and refuses actions. `opsctl start` and `restart` wait up to 30 s for it to
   answer, and print the end of `opsd.log` if it doesn't. A new main worktree gets its `[worktree]` setup on
@@ -1942,7 +1943,16 @@ folder under a project's `<worktrees>/` that no longer exists. For what a worktr
   `tid()` in `dashboard.html` draws every one, so the format stays the same; `data-copyid` holds the exact text a
   click copies. `tests/test_task_ids.py` checks it.
 - **Settings tab.** Parallel, Promote wait, Usage brake, Taper from, Model, Effort and the model per kind of work, each
-  with what it does written next to it, and **Spent**: what Claude has cost, priced at API rates.
+  with what it does written next to it, and **Spent**: what Claude has cost, priced at API rates. Last, the
+  **Danger zone** card holds **Restart claude-ops** (`POST /api/restart`): the same as `opsctl restart`, at once,
+  without waiting for deploys or idle tasks. Click it twice: the first click turns it into "Click again to restart"
+  and names any running deploy that will fail (`deploy #259 will fail`); moving away or waiting 5 s resets it.
+  The daemon logs `restarting claude-ops: you clicked Restart in Settings' Danger zone` to `opsd.log` and runs
+  `opsctl restart` in a session of its own, logging to `DATA/restart.log`. The card then shows "Restarting…"
+  until a daemon with a new pid answers, or "No answer: see ~/.claude-ops/restart.log and `opsctl log`" after
+  60 s. Only the launchd service restarts: a scratch daemon (a test's or a worker's) refuses with "not the
+  launchd service; opsctl restart would restart that one". Sessions can't click it: the guard blocks the live
+  port, and `opsctl restart` itself.
 - **Analyze tab.** Run times and costs of the tasks created in the last day, 7 days, 30 days or all time, for
   the projects ticked in the header or every project (`GET /api/analyze?period=1|7|30|all&project=<name>[,<name>…]`,
   a comma-separated list; empty means every project). The scope line reads `· A, B only`, and the per-project
@@ -2146,8 +2156,8 @@ folder under a project's `<worktrees>/` that no longer exists. For what a worktr
     and pace**) runs up to the brake for the 5-hour window, so it says whether usage is on track to reach the brake,
     not 100%, when the window resets: at brake 85, halfway through the window the pace is 42.5%. With the brake off
     the 5-hour line runs up to 100%, and the 7-day line always does.
-- **Restarts.** Whenever the daemon stops (`./opsctl restart` or `stop`, a promote of claude-ops, launchd, a
-  `kill`), it pauses every running task the same way, lets a merge finish, and exits. The next daemon resumes
+- **Restarts.** Whenever the daemon stops (`./opsctl restart` or `stop`, the Settings tab's **Restart
+  claude-ops** button, a promote of claude-ops, launchd, a `kill`), it pauses every running task the same way, lets a merge finish, and exits. The next daemon resumes
   those tasks on its own, each in the same Claude session (or a fresh one after a long wait: see **Fresh
   sessions**); tasks you paused stay paused, and so do tasks the usage limit paused, until it resets. Nothing about a restart is saved that could hold the
   queue: if the daemon crashes instead, the next one requeues whatever was running.
