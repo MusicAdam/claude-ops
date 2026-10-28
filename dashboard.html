@@ -1289,7 +1289,9 @@ async function loadState() {
   try { s = await api("/api/state"); } catch (e) { $("#hdr").innerHTML = `<span class="err">${esc(e.message)}</span>`; renderRestart(); return; }
   // Bound but still loading projects: keep what we last drew, and say why nothing moves.
   if (s.starting) { $("#hdr").innerHTML = `<span class="err">claude-ops is starting up…</span>`; renderRestart(); return; }
-  if (RESTART.at && s.pid !== RESTART.pid) RESTART.at = 0;  // the new daemon answers: the button comes back
+  if (RESTART.at && s.pid !== RESTART.pid) {  // the new daemon answers: "Restarted ✓", then the button comes back
+    RESTART.at = 0; RESTART.ok = Date.now(); setTimeout(renderRestart, 5100);
+  }
   state = s;
   tdDropGone(s);
   render();
@@ -1299,35 +1301,46 @@ async function loadState() {
 const refresh = single(loadState);
 
 // Settings' Danger zone: Restart claude-ops. The first click asks again (for about 5 s, or until the pointer
-// leaves); the second runs `opsctl restart` at once. Then "Restarting…" until a daemon with a new pid answers.
-const RESTART = {confirm: false, timer: 0, at: 0, pid: 0, err: ""};
-function renderRestart() {
-  const el = $("#restart");
-  if (RESTART.at) {
-    const late = Date.now() - RESTART.at > 60000;
-    put(el, late ? `<span class="err">No answer: see ~/.claude-ops/restart.log and <code>opsctl log</code></span>`
-                 : `<span class="muted">Restarting…</span>`);
-    return;
-  }
-  const deploys = (state && state.running_deploys) || [];
-  const warn = RESTART.confirm && deploys.length
+// leaves); the second runs `opsctl restart` at once. Then "Restarting…" until a daemon with a new pid answers,
+// and "Restarted ✓" for 5 s. The button is built once and only relabelled: rebuilding it on the first click
+// removed the focused button, Chrome fired blur on it, and that reset the confirm before you could click again.
+const RESTART = {confirm: false, timer: 0, sending: false, at: 0, pid: 0, ok: 0, err: ""};
+// What the restart area shows for R at time now: the button's label, whether it is disabled, and the note's html.
+function restartView(R, deploys, now) {
+  if (R.sending || (R.at && now - R.at <= 60000)) return {label: "Restarting…", disabled: true, note: ""};
+  if (R.at) return {label: "Restart claude-ops", disabled: false,
+                    note: `<span class="err">No answer: see ~/.claude-ops/restart.log and <code>opsctl log</code></span>`};
+  if (R.ok && now - R.ok < 5000) return {label: "Restarted ✓", disabled: true, note: ""};
+  const warn = R.confirm && deploys.length
     ? `${deploys.length === 1 ? "deploy" : "deploys"} ${deploys.map(id => "#" + id).join(", ")} will fail` : "";
-  if (!put(el, `<button class="danger" id="restartbtn">${RESTART.confirm ? "Click again to restart" : "Restart claude-ops"}</button>`
-      + (warn ? `<span class="err">${esc(warn)}</span>` : "") + (RESTART.err ? `<span class="err">${esc(RESTART.err)}</span>` : ""))) return;
-  const b = $("#restartbtn");
-  const reset = () => { clearTimeout(RESTART.timer); if (RESTART.confirm) { RESTART.confirm = false; renderRestart(); } };
-  b.onmouseleave = b.onblur = reset;
-  b.onclick = async () => {
-    RESTART.err = "";
-    if (!RESTART.confirm) {
-      RESTART.confirm = true; RESTART.timer = setTimeout(reset, 5000); renderRestart(); return;
-    }
-    clearTimeout(RESTART.timer); RESTART.confirm = false; b.disabled = true;
-    try { await api("/api/restart", {}); }
-    catch (e) { RESTART.err = e.message; renderRestart(); return; }
-    RESTART.at = Date.now(); RESTART.pid = state && state.pid;
-    renderRestart();
-  };
+  return {label: R.confirm ? "Click again to restart" : "Restart claude-ops", disabled: false,
+          note: (warn ? `<span class="err">${esc(warn)}</span>` : "") + (R.err ? `<span class="err">${esc(R.err)}</span>` : "")};
+}
+function renderRestart() {
+  if (put($("#restart"), `<button class="danger" id="restartbtn"></button><span id="restartnote"></span>`)) {
+    const b = $("#restartbtn");
+    const reset = () => { clearTimeout(RESTART.timer); if (RESTART.confirm) { RESTART.confirm = false; renderRestart(); } };
+    b.onmouseleave = b.onblur = reset;
+    b.onclick = async () => {
+      if (RESTART.sending || (RESTART.at && Date.now() - RESTART.at <= 60000)) return;
+      RESTART.err = ""; RESTART.ok = 0; RESTART.at = 0;
+      if (!RESTART.confirm) {
+        RESTART.confirm = true; RESTART.timer = setTimeout(reset, 5000); renderRestart(); return;
+      }
+      clearTimeout(RESTART.timer); RESTART.confirm = false; RESTART.sending = true;
+      renderRestart();  // "Restarting…" now, not when the request returns
+      try { await api("/api/restart", {}); RESTART.at = Date.now(); RESTART.pid = state && state.pid; }
+      catch (e) { RESTART.err = e.message; }
+      RESTART.sending = false;
+      renderRestart();
+    };
+  }
+  // Relabel in place: the button keeps focus and its listeners, and an unchanged view touches nothing.
+  const v = restartView(RESTART, (state && state.running_deploys) || [], Date.now());
+  const b = $("#restartbtn"), note = $("#restartnote");
+  if (b.textContent !== v.label) b.textContent = v.label;
+  if (b.disabled !== v.disabled) b.disabled = v.disabled;
+  if (note.innerHTML !== v.note) note.innerHTML = v.note;
 }
 
 // Draw everything from the state we have. A click that changes the view calls this at once, then refresh.
