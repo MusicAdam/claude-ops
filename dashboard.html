@@ -173,6 +173,18 @@ ul.clog { max-height: 220px; }
 #slash .sl.on { background: var(--chip); }
 #slash .sl code { font: 12px var(--mono); color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 #slash .muted { padding: 4px 8px; font-size: 12px; }
+/* @ in a message box: chats to reference, beside the box */
+#atpick { position: fixed; max-height: 40vh; overflow: auto; z-index: 50; background: var(--panel); border: 1px solid var(--line);
+          border-radius: 8px; padding: 4px; box-shadow: 0 6px 20px rgba(0, 0, 0, .15); font-size: 13px; }
+#atpick .sl { display: flex; gap: 8px; align-items: baseline; padding: 6px 8px; border-radius: 6px; cursor: pointer; }
+#atpick .sl.on { background: var(--chip); }
+#atpick .sl b { font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; flex: 1; }
+#atpick .sl.ended b { color: var(--muted); }
+#atpick .sl .muted { font-size: 12px; white-space: nowrap; }
+#atpick .sl code { font: 12px var(--mono); color: var(--muted); white-space: nowrap; }
+#toast { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); z-index: 60; padding: 6px 14px; border-radius: 99px;
+         background: var(--accent); color: var(--on-accent); font-size: 13px; opacity: 0; pointer-events: none; transition: opacity .2s; }
+#toast.on { opacity: 1; }
 .mdimg, .mdvideo { display: block; max-width: 100%; max-height: 480px; margin: 6px 0; border-radius: 6px; border: 1px solid var(--line); }
 .ref.bad { color: var(--muted); cursor: help; }
 .fdhead { position: sticky; top: -16px; margin: -16px -16px 12px; padding: 12px 16px; background: var(--panel); border-bottom: 1px solid var(--line); z-index: 1; }
@@ -556,7 +568,8 @@ body:not(.td) #tdfull { display: none; }
           padding: 8px 10px; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; box-shadow: 0 6px 20px rgba(0, 0, 0, .3); }
 #tdmenu .k { font-size: 12px; color: var(--muted); margin-bottom: 4px; }
 #tdmenu .tdend { display: grid; grid-template-columns: 1fr auto; gap: 0 8px; align-items: center; padding: 4px 0; border-bottom: 1px solid var(--line); }
-#tdmenu .tdend a { cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#tdmenu .tdend a, #tdmenu .tdend .tt { cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#tdmenu .tdend .tt { cursor: default; } #tdmenu .tdend + .k { margin-top: 8px; }
 #tdmenu .tdend .sub { grid-row: 2; font-size: 11px; color: var(--muted); }
 #tdmenu .tdend .acts { grid-row: 1 / 3; grid-column: 2; display: flex; gap: 4px; align-items: center; }
 #tdmenu .tdend button { font-size: 11px; padding: 1px 8px; } #tdmenu .tdend .onlist { font-size: 11px; color: var(--muted); }
@@ -1793,15 +1806,26 @@ document.addEventListener("click", e => {
   const el = e.target.closest && e.target.closest("[data-copyid]");
   if (!el) return;
   e.preventDefault(); e.stopPropagation();
-  const text = el.dataset.copyid;
-  const done = () => { el.classList.add("copied"); clearTimeout(el._copied); el._copied = setTimeout(() => el.classList.remove("copied"), 1200); };
+  copyText(el.dataset.copyid, () => { el.classList.add("copied"); clearTimeout(el._copied); el._copied = setTimeout(() => el.classList.remove("copied"), 1200); });
+}, true);
+function copyText(text, done) {
   const fallback = () => {  // no async clipboard on plain http from another machine
     const ta = document.createElement("textarea"); ta.value = text; ta.style.position = "fixed"; ta.style.opacity = "0";
     document.body.append(ta); ta.select();
     try { if (document.execCommand("copy")) done(); } finally { ta.remove(); }
   };
   if (navigator.clipboard && window.isSecureContext) navigator.clipboard.writeText(text).then(done, fallback); else fallback();
-}, true);
+}
+// A short note at the bottom of the window, such as "Copied", gone after a moment
+let toastT = 0;
+function toast(text) {
+  let el = $("#toast");
+  if (!el) { el = Object.assign(document.createElement("div"), {id: "toast"}); el.setAttribute("role", "status"); document.body.append(el); }
+  el.textContent = text; el.classList.add("on");
+  clearTimeout(toastT); toastT = setTimeout(() => el.classList.remove("on"), 1500);
+}
+// Copy reference: what you paste in another chat to point at a topic (README: LINK-8)
+const chatRefText = t => `chat:${t.id} (${t.title || "Untitled"})`;
 // A task link (a deploy's #id) anywhere on the page opens that task on the Tasks tab; in the dialog it closes the dialog first.
 document.addEventListener("click", e => {
   const a = e.target.closest && e.target.closest("a[data-task], .ptask[data-task]");
@@ -1816,6 +1840,75 @@ function openTask(id) {
 }
 // Chat boxes send on Enter, like the Claude Code CLI. Shift or Alt+Enter adds a line; Cmd/Ctrl+Enter always sends.
 // Never mid-IME-composition. On touch screens (no Shift on the keyboard) Enter adds a line and the ↑/Send button sends.
+// ---- @ in a message box (README: LINK-8): a list of chats, and picking one puts its chat:N in the box.
+// The @ word the caret is at the end of: {start (the @), q (what follows it)}, or null. @ starts a word, and a space
+// ends it, so "a@b" and "@ " open nothing.
+function atWord(v, caret) {
+  const m = v.slice(0, caret).match(/(^|[\s([{"'“‘])@([^\s@]*)$/);
+  return m ? {start: caret - m[2].length - 1, q: m[2]} : null;
+}
+// The box's text with that @ word replaced by chat:N and a space, and where the caret goes
+function atInsert(v, caret, w, id) {
+  const put = `chat:${id} `;
+  return {value: v.slice(0, w.start) + put + v.slice(caret), caret: w.start + put.length};
+}
+// The boxes it serves, each with the project whose chats come first and the chat it writes to (left out of the list)
+const AT_BOXES = {
+  say: () => ({project: convProject(), exclude: TD.cv ? TD.cv.topic : null}),
+  qcsay: () => { const t = qcTab() || {}; return {project: t.project || "", exclude: t.did}; },
+  ask: () => ({project: ((state && state.tasks.find(x => x.id === sel)) || {}).project || "", exclude: null}),
+};
+const AT = {ta: null, word: null, items: [], k: 0, seq: 0, timer: 0};
+function atEl() {
+  let el = $("#atpick");
+  if (!el) { el = Object.assign(document.createElement("div"), {id: "atpick", className: "hidden"}); el.setAttribute("role", "listbox"); document.body.append(el); }
+  return el;
+}
+function atClose() { AT.ta = AT.word = null; AT.items = []; clearTimeout(AT.timer); AT.seq++; atEl().classList.add("hidden"); }
+// After each keystroke in a box: the @ word at the caret, and the chats matching it from /api/topics/search
+function atUpdate(ta) {
+  const w = ta.selectionStart === ta.selectionEnd ? atWord(ta.value, ta.selectionStart) : null;
+  if (!w) return atClose();
+  AT.ta = ta; AT.word = w;
+  clearTimeout(AT.timer);
+  const seq = ++AT.seq, {project, exclude} = AT_BOXES[ta.id]();
+  AT.timer = setTimeout(async () => {
+    let items;
+    try { items = await api(`/api/topics/search?q=${encodeURIComponent(w.q)}&project=${encodeURIComponent(project || "")}`
+                            + (typeof exclude === "number" ? `&exclude=${exclude}` : "")); } catch { items = []; }
+    if (seq !== AT.seq || AT.ta !== ta) return;  // typed on since
+    AT.items = items; AT.k = 0; atRender();
+  }, 100);
+}
+function atRender() {
+  const el = atEl(), ta = AT.ta;
+  if (!ta || !AT.items.length || !ta.isConnected) { el.classList.add("hidden"); return; }  // no match: the text stays as typed
+  el.innerHTML = AT.items.map((t, k) => `<div class="sl${k === AT.k ? " on" : ""}${t.ended ? " ended" : ""}" role="option" data-k="${k}">`
+    + `<b>${esc(t.title)}</b><span class="muted">${esc(P(t.project).title)}${t.ended ? " · ended" : ""}</span><code>chat:${t.id}</code></div>`).join("");
+  el.querySelectorAll("[data-k]").forEach(r => { r.onmousedown = e => e.preventDefault(); r.onclick = () => atPick(+r.dataset.k); });
+  const b = ta.getBoundingClientRect(), up = b.top > window.innerHeight - b.bottom;
+  Object.assign(el.style, {left: `${Math.max(4, b.left)}px`, width: `${Math.min(b.width, 520)}px`,
+    top: up ? "" : `${b.bottom + 4}px`, bottom: up ? `${window.innerHeight - b.top + 4}px` : ""});
+  el.classList.remove("hidden");
+  el.querySelector(".on")?.scrollIntoView({block: "nearest"});
+}
+function atPick(k) {
+  const t = AT.items[k], ta = AT.ta, w = AT.word; if (!t || !ta || !w) return;
+  const r = atInsert(ta.value, ta.selectionStart, w, t.id);
+  ta.value = r.value; ta.focus(); ta.setSelectionRange(r.caret, r.caret);
+  atClose();
+  ta.dispatchEvent(new Event("input", {bubbles: true}));  // its draft and size follow, as when you type
+}
+document.addEventListener("input", e => { if (e.target.id in AT_BOXES) atUpdate(e.target); });
+document.addEventListener("focusout", e => { if (e.target === AT.ta) setTimeout(() => { if (document.activeElement !== AT.ta) atClose(); }, 150); });
+// Capture phase: the list's keys never reach the box's own Enter-sends
+document.addEventListener("keydown", e => {
+  if (!AT.ta || e.target !== AT.ta || atEl().classList.contains("hidden") || e.metaKey || e.ctrlKey || e.altKey || e.isComposing) return;
+  const n = AT.items.length, stop = () => { e.preventDefault(); e.stopImmediatePropagation(); };
+  if (e.key === "ArrowDown" || e.key === "ArrowUp") { stop(); AT.k = (AT.k + (e.key === "ArrowDown" ? 1 : n - 1)) % n; atRender(); }
+  else if ((e.key === "Enter" && !e.shiftKey) || e.key === "Tab") { stop(); atPick(AT.k); }
+  else if (e.key === "Escape") { stop(); atClose(); }
+}, true);
 function sendKey(e) {
   if (e.key !== "Enter" || e.isComposing || e.keyCode === 229) return false;
   if (e.metaKey || e.ctrlKey) return true;
@@ -2513,12 +2606,13 @@ function inline(s, ctx = {}) {
        });
   if (L) s = s.replace(lnPathRe(), (m, pre, p) => (r = lnRef(p, L, "text")) ? pre + ref(r, p) : m)
     .replace(/(^|[^\w&#/])#(\d+)(?![\w-])/g, (m, pre, n) => pre + ref({ref: `task:${n}`, href: "#tasks"}, `#${n}`))
+    .replace(/(^|[^\w&#/:.-])chat:(\d+)(?![\w-])/g, (m, pre, n) => pre + ref({ref: `chat:${n}`, href: "#today"}, `chat:${n}`))
     .replace(lnPlaceRe(), (m, pre, k) => pre + put(`<a href="${APP_PLACES[k]}" data-place>${k}</a>`));
   s = mdEmph(s);
   while (s.includes("\u0000")) s = s.replace(/\u0000(\d+)\u0000/g, (m, n) => keep[n]);
   return s;
 }
-// ---- Links in chats (README: Links in chats, LINK-1..7). A chat message's references become links once the daemon
+// ---- Links in chats (README: Links in chats, LINK-1..8). A chat message's references become links once the daemon
 // says their target exists: inline() wraps each in <span class="ref" data-ref>, and chatLinks checks them all in one
 // request and turns each into a link, or greys it with ⚠ and the reason. A reference is never a link that fails.
 // Places in the app a message may name, and the route each opens. Longer names win over shorter ones.
@@ -2541,6 +2635,7 @@ const lnPathRe = () => new RegExp(`(^|[\\s(\\[{,;*>'“‘]|&quot;)((?:~\\/|\\/)
 // (so state.tasks stays code), and when there is no such file it stays as written (Node.js) rather than ⚠.
 function lnRef(p, L, mode) {
   let m, u = mdLocal(p);
+  if ((m = p.match(/^chat:(\d+)$/))) return {ref: `chat:${m[1]}`, href: "#today"};
   if ((m = u.match(/^\/api\/images\/([\w-]+\.\w+)$/))) return {ref: `image:${m[1]}`, href: u, img: LN_IMG.test(u) ? "mdimg" : ""};
   if ((m = u.match(/^\/api\/designs\/(\d+)\/files\/([\w.-]+)$/) || p.match(/^(?:\S*\/)?designs\/(\d+)\/([\w.-]+)$/)
       || (L.files && L.files.includes(p) && [p, L.did, p])))
@@ -2687,7 +2782,8 @@ function chatLinks(el, project) {
   const need = [...new Set(els.map(e => e.dataset.ref))].filter(r => !known(LN_SEEN.get(key(r))));
   if (need.length) {
     const ask = api("/api/links/check", {project, refs: need}).then(j => {
-      for (const r of need) LN_SEEN.set(key(r), {why: r in j.refs ? j.refs[r] : "Not checked", head: (j.heads || {})[r], at: Date.now()}); })
+      for (const r of need) LN_SEEN.set(key(r), {why: r in j.refs ? j.refs[r] : "Not checked", head: (j.heads || {})[r],
+                                                 chat: (j.chats || {})[r], at: Date.now()}); })
       .catch(() => { for (const r of need) LN_SEEN.delete(key(r)); });  // daemon away: they stay plain text
     for (const r of need) LN_SEEN.set(key(r), ask);
   }
@@ -2695,7 +2791,7 @@ function chatLinks(el, project) {
     for (const e of els) { const v = LN_SEEN.get(key(e.dataset.ref)); if (v && !(v instanceof Promise) && e.isConnected) lnApply(e, v, project); }
   });
 }
-function lnApply(e, {why, head}, project) {
+function lnApply(e, {why, head, chat}, project) {
   const d = e.dataset;
   // "README.md § Design mode for details": the link ends with the heading the daemon found, the rest is the sentence's
   const run = head && e.childNodes.length === 1 && e.firstChild.nodeType === 3 && e.textContent.match(/^([^§]*§\s*)(.*)$/);
@@ -2705,12 +2801,14 @@ function lnApply(e, {why, head}, project) {
   if (why) { e.className = "ref bad"; e.title = why; delete d.ref; e.prepend("⚠ "); return; }
   const a = Object.assign(document.createElement("a"), {href: d.href, className: "ref"});
   a.dataset.ref = d.ref; a.dataset.project = project;
-  if (!/^(task|spec):/.test(d.ref)) { a.target = "_blank"; a.rel = "noopener"; }
+  // A chat opens in its own project, and its tooltip is its title and project
+  if (chat) { a.dataset.project = chat.project; a.title = `${chat.title} · ${P(chat.project).title}`; }
+  if (!/^(task|spec|chat):/.test(d.ref)) { a.target = "_blank"; a.rel = "noopener"; }
   if (d.img) a.append(Object.assign(document.createElement("img"), {className: d.img, src: d.href, alt: e.textContent, title: e.textContent}));
   else a.append(...e.childNodes);
   e.replaceWith(a);
 }
-// A click on a checked reference: a task opens its details, a repo file the file drawer, an OpenSpec path its change,
+// A click on a checked reference: a task opens its details, a chat (chat:N) its topic, a repo file the file drawer, an OpenSpec path its change,
 // and a place its tab. Pictures and design documents open in a new tab, as does any link with ⌘ or Ctrl held.
 document.addEventListener("click", e => {
   const a = e.target.closest && e.target.closest("a[data-ref], a[data-place]");
@@ -2719,6 +2817,7 @@ document.addEventListener("click", e => {
   if ("place" in a.dataset) { e.preventDefault(); rsCloseDoc(); goPlace(a.getAttribute("href")); }
   else if (r.startsWith("task:")) { e.preventDefault(); rsCloseDoc(); openTask(+val); }
   else if (r.startsWith("spec:")) { e.preventDefault(); rsCloseDoc(); openSpecLink(a.dataset.project, val); }
+  else if (r.startsWith("chat:")) { e.preventDefault(); rsCloseDoc(); openTopic(a.dataset.project, +val); }
   else if (r.startsWith("file:") && !a.querySelector("img")) { e.preventDefault(); openRepoFile(a.dataset.project, val); }
 });
 function goPlace(route) {
@@ -4411,17 +4510,22 @@ function tdStrip() {
       + `</div>`;
   };
   const plainPending = !!cv && cv.topic === null && !cv.title && !cv.subject;
-  const menu = !TD.menu ? "" : `<div id="tdmenu"><div class="k">Ended (${ended.length})</div>${ended.map(t =>
+  // Copy reference, for each chat (not a research thread): its tab's row here, and its Ended row
+  const copyB = t => typeof t.id === "number" ? `<button data-copyref="${id(t)}" title="Copy ${esc(chatRefText(t))}, to point at it from another chat">Copy reference</button>` : "";
+  const opened = cv ? tabs.filter(t => !t.pending && typeof t.id === "number") : [];
+  const menu = !TD.menu ? "" : `<div id="tdmenu">${opened.length ? `<div class="k">Topics (${opened.length})</div>${opened.map(t =>
+      `<div class="tdend"><span class="tt">${esc(t.title || "Untitled")}</span><span class="sub">chat:${id(t)}</span><span class="acts">${copyB(t)}</span></div>`).join("")}` : ""}
+    <div class="k">Ended (${ended.length})</div>${ended.map(t =>
       `<div class="tdend"><a data-reopento="${id(t)}" title="Reopen it and show it">${esc(t.title || "Untitled")}</a><span class="sub">${esc(modeWord(t.mode))} · ended ${ago(t.ended, now)} ago</span>
         <span class="acts">${tdReminded(project, t.id) ? `<span class="onlist" title="A reminder of it is on your to-do list">On your list</span>`
           : `<button data-remind="${id(t)}" title="Put it on your to-do list as a reminder; it stays ended until you pick the item">Remind me</button>`}
-        <button data-reopen="${id(t)}" title="Put it back in the strip">Reopen</button></span></div>`).join("") || `<div class="muted">No ended topics.</div>`}
+        <button data-reopen="${id(t)}" title="Put it back in the strip">Reopen</button>${copyB(t)}</span></div>`).join("") || `<div class="muted">No ended topics.</div>`}
     <div class="row endread"><button id="endread" title="Ends every topic here you have read, that Claude isn't replying in, other than the one shown, whose last activity is older than that">End read topics older than</button>
       <select id="enddays">${[1, 7, 30, 90].map(n => `<option value="${n}" ${n === days ? "selected" : ""}>${n} day${n === 1 ? "" : "s"}</option>`).join("")}</select></div></div>`;
   const html = `<div class="tdstripin"><div class="tdscroll"><div class="tdtabs">${tabs.map(tab).join("")}
       <button class="tdplus" id="tdnew" ${!cv || plainPending ? "disabled" : ""} title="New topic: your next message starts it">+</button></div>
     <div class="tdpins">${TD_SECS.map(([k, l]) => `<button class="tdpin${TD.sec === k ? " on" : ""}" data-sec="${k}">${l}</button>`).join("")}</div></div>
-    <button id="tdmenub" class="tdpin" aria-haspopup="true" aria-expanded="${TD.menu}" title="Ended topics, and End read topics">▾${ended.length ? ` ${ended.length}` : ""}</button></div>${menu}`;
+    <button id="tdmenub" class="tdpin" aria-haspopup="true" aria-expanded="${TD.menu}" title="Copy a topic's reference, Ended topics, and End read topics">▾${ended.length ? ` ${ended.length}` : ""}</button></div>${menu}`;
   const sc = el.querySelector(".tdtabs"), ph = el.querySelector(".tdscroll"), x = sc ? sc.scrollLeft : 0, px = ph ? ph.scrollLeft : 0;
   if (!put(el, html)) return;
   el.querySelector(".tdtabs").scrollLeft = x; el.querySelector(".tdscroll").scrollLeft = px;
@@ -4441,6 +4545,11 @@ function tdStrip() {
   act("[data-tabx]", "end", b => ({ref: ref(b.dataset.tabx)}));
   act("[data-reopen]", "reopen", b => ({ref: ref(b.dataset.reopen)}));
   act("#endread", "end-read", () => ({days: +$("#enddays").value}));
+  el.querySelectorAll("[data-copyref]").forEach(b => b.onclick = e => {  // the menu stays open, to copy another
+    e.stopPropagation();
+    const t = cv && cv.topics.find(x => String(x.id) === b.dataset.copyref);
+    if (t) copyText(chatRefText(t), () => toast("Copied"));
+  });
   el.querySelectorAll("[data-remind]").forEach(b => b.onclick = async e => {  // the menu stays open: the row turns On your list
     e.stopPropagation(); if (!mine()) return;
     b.disabled = true;

@@ -38,6 +38,7 @@ phone](#today-on-a-phone)).
 ./opsd.py schedule add -p myrepo --every 'mon 09:00' "Check dependencies"   # a recurring job (see Recurring jobs)
 ./opsd.py deploy -p myrepo "store test" --version patch --note "Fixes the crash"   # see Deploys
 ./opsd.py send myrepo --design "How does the save format work?"   # what a worker or chat runs to ask a peer project
+./opsd.py chat show 42 [--last K]    # print chat 42 (any project's) from the db, daemon or not: a header, then each message in full
 ./opsd.py archive-project myrepo     # take it off the queue; unarchive-project brings it back (see Archiving)
 ```
 
@@ -450,6 +451,11 @@ When it has read the code a task touches, the brief ends with **Where to look**:
 default and uses several only when order or release truly needs them (see Parallelism). A worker that splits
 its task writes the same section.
 
+When your message names another chat as `chat:N` (see [LINK-8](#links-in-chats)), its `[ops: ...]` line (a
+project chat's too) gets one item per chat: `chat:42 is "<title>" (<project>, <kind>, <n> messages, last active
+<day>): read it with `<python> <opsd.py> chat show 42``, or `chat:42: no such chat`. The chat's transcript is
+never pasted; Claude reads it with `chat show` when your request needs it, and cites chats as `chat:N`.
+
 ### OpenSpec changes
 
 If a project uses [OpenSpec](https://github.com/Fission-AI/OpenSpec), the Today view's **Specs & designs**
@@ -821,9 +827,26 @@ link. A reference whose target is missing is never a link that fails on click. T
   `Not on dev: docs/x.md` or `No task #9999`, and is not clickable. A plain word that only looks like a file
   name (Node.js) stays plain text when there is no such file. For `README.md § Design mode for details` the
   daemon also returns the heading it found, so the link ends at "Design mode".
-- **LINK-7 Tests.** `tests/test_chat_links.py` has one test per kind (image, task, repo file, file with `§`,
+- **LINK-7 Tests.** `tests/test_chat_links.py` has one test per kind (image, task, chat, repo file, file with `§`,
   OpenSpec path, design file, app place, URL with trailing punctuation), one for a missing target, and one for
-  `/api/files` refusing a path outside the worktree.
+  `/api/files` refusing a path outside the worktree. For chats it also checks that link_check returns the title
+  and project, the `[ops: ...]` items for a referenced and a missing chat (none without a reference), the @
+  picker's word and insert logic (run in node), `/api/topics/search`'s order, and `opsd.py chat show` (header,
+  messages oldest first, `--last`, exit 1 for an unknown id).
+- **LINK-8 Chats.** `chat:42` (`chat:` and digits, as a word of its own, not in fenced code or a URL; a code span
+  of only `chat:42` too) is a chat of any kind (design, project, OpenSpec change) in any project. The link text
+  stays `chat:42`, its tooltip is the chat's title and project, and a click opens it as the current topic in the
+  Today view, adding its project to the project filter when it is out of view. link_check's `chat:<id>` kind
+  doesn't depend on the message's project, and returns `{title, project}` in a `chats` side map; a missing one
+  greys as `No chat 42`. Research threads are not covered.
+  - **Copy reference.** The strip's ▾ menu lists the open topics, and each, like each row under Ended, has
+    **Copy reference**: it copies `chat:42 (<title>)` and shows a short "Copied" note.
+  - **@ picker.** In the Today message box, the quick chat's and a task's chat box, `@` at the start of a word
+    opens a list of chats from `GET /api/topics/search?q=&project=&exclude=`: the current project's first, open
+    before ended, newest activity first, at most 10, without the chat you are typing in. Each row shows the
+    title, the project and `chat:N`. What you type after `@` filters by title words or id, case-insensitive.
+    ↑/↓ move, Enter or Tab inserts, Esc closes, a click or tap inserts. Inserting replaces `@<typed>` with
+    `chat:N ` (with a space). `@` followed by a space, or no match, inserts nothing.
 
 Text in fenced code and inside a longer code span is never linked. A code span that is only a file path (as
 Claude usually writes one) links as that file.
