@@ -1996,12 +1996,21 @@ folder under a project's `<worktrees>/` that no longer exists. A worktree itself
 - **Settings tab.** Parallel, Promote wait, Usage brake, Taper from, Model, Effort and the model per kind of work, each
   with what it does written next to it, and **Spent**: what Claude has cost, priced at API rates. Last, the
   **Danger zone** card holds **Restart claude-ops** (`POST /api/restart`): the same as `opsctl restart`, at once,
-  without waiting for deploys or idle tasks. Click it twice: the first click turns it into "Click again to restart"
-  and names any running deploy that will fail (`deploy #259 will fail`); moving away or waiting 5 s resets it.
+  without waiting for deploys or idle tasks. Every click gets an answer on the button itself:
+  - **First click:** the same button, not a new one, reads "Click again to restart" and names any running deploy
+    that will fail (`deploy #259 will fail`). It stays that way for 5 s, or until the pointer leaves or the button
+    loses focus. The 3 s state refresh doesn't reset it.
+  - **Second click:** the button reads "Restarting…" and is disabled at once, before `/api/restart` answers.
+  - **The request fails:** the error shows next to the button, and the button comes back.
+  - **Restarting:** "Restarting…" stays while the daemon is down, though the header shows an error then.
+  - **A daemon with a new pid answers:** "Restarted ✓" for about 5 s, then the normal button.
+  - **No new pid after 60 s:** "No answer: see ~/.claude-ops/restart.log and `opsctl log`", with the button back.
+
+  The page keeps the button element across these states and changes only its label, so focus and its listeners
+  survive: rebuilding it on the first click fired blur on the removed button, which undid the confirm at once.
+  `restartView()` in `dashboard.html` picks the state; `tests/test_restart_button.py` checks it.
   The daemon logs `restarting claude-ops: you clicked Restart in Settings' Danger zone` to `opsd.log` and runs
-  `opsctl restart` in a session of its own, logging to `DATA/restart.log`. The card then shows "Restarting…"
-  until a daemon with a new pid answers, or "No answer: see ~/.claude-ops/restart.log and `opsctl log`" after
-  60 s. Only the launchd service restarts: a scratch daemon (a test's or a worker's) refuses with "not the
+  `opsctl restart` in a session of its own, logging to `DATA/restart.log`. Only the launchd service restarts: a scratch daemon (a test's or a worker's) refuses with "not the
   launchd service; opsctl restart would restart that one". Sessions can't click it: the guard blocks the live
   port, and `opsctl restart` itself.
 - **Analyze tab.** Run times and costs of the tasks created in the last day, 7 days, 30 days or all time, for
