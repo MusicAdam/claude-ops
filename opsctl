@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# opsctl start|stop|restart|pause|resume|status|log|open  — manage the claude-ops background service (launchd)
+# opsctl start|stop|restart|pause|resume|status|log|open|python  — manage the claude-ops background service (launchd)
 # stop and restart pause every running task first; the next daemon resumes them (tasks you paused stay paused)
+# python prints the Python opsctl chose (OPS_PYTHON, else Homebrew's, else python3 on PATH) and checks its version
 # pause stops every running task now (each resumes from where it was); resume puts them back in the queue
 set -euo pipefail
 OPS="$(cd "$(dirname "$0")" && pwd)"
@@ -8,6 +9,18 @@ LABEL=com.claude-ops
 DATA="${OPS_DATA:-$HOME/.claude-ops}"; mkdir -p "$DATA"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 SVC="gui/$(id -u)/$LABEL"
+PYMIN=3.11   # opsd.py imports tomllib
+pick_python() {  # $OPS_PYTHON, else Homebrew (Apple Silicon, then Intel), else python3 on PATH; always an absolute path
+  local c
+  if [ -n "${OPS_PYTHON:-}" ]; then c="$OPS_PYTHON"
+  elif [ -x /opt/homebrew/bin/python3 ]; then c=/opt/homebrew/bin/python3
+  elif [ -x /usr/local/bin/python3 ]; then c=/usr/local/bin/python3
+  else c="$(command -v python3 || true)"; fi
+  case "$c" in */*|"") ;; *) c="$(command -v "$c" || echo "$c")" ;; esac
+  case "$c" in /*|"") ;; *) c="$(cd "$(dirname "$c")" 2>/dev/null && pwd)/$(basename "$c")" ;; esac
+  PY="$c"
+}
+pick_python
 APP="$DATA/Claude Ops.app"   # launchd starts the daemon through this, so macOS privacy prompts name "Claude Ops"
 BIN="$APP/Contents/MacOS/claude-ops"
 build_app() {  # only when missing or launcher.c changed: a rebuild changes the signature and macOS asks again
@@ -28,6 +41,19 @@ IP
   codesign -s - -f --identifier "$LABEL" "$APP"
   echo "built $APP"
 }
+check_python() {  # opsd.py needs $PYMIN or newer; say what we found and how to fix it
+  local v=""
+  [ -n "$PY" ] && [ -x "$PY" ] && v="$("$PY" -c 'import sys; print("%d.%d.%d" % sys.version_info[:3])' 2>/dev/null || true)"
+  if [ -z "$v" ]; then
+    fail "opsctl: no usable Python found${PY:+ (tried $PY)}. claude-ops needs Python $PYMIN or newer: install Homebrew Python (brew install python) or set OPS_PYTHON to a python3 path."
+  fi
+  "$PY" -c "import sys; sys.exit(0 if sys.version_info >= tuple(map(int, '$PYMIN'.split('.'))) else 1)" ||
+    fail "opsctl: $PY is Python $v, but claude-ops needs $PYMIN or newer. Install Homebrew Python (brew install python) or set OPS_PYTHON to a newer python3."
+  PYPATH=""
+  case ":$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:" in
+    *":$(dirname "$PY"):"*) ;; *) PYPATH="$(dirname "$PY"):" ;; esac
+}
+PYPATH=""
 write_plist() {
   mkdir -p "$(dirname "$PLIST")"
   cat > "$PLIST" <<PL
@@ -36,11 +62,11 @@ write_plist() {
 <plist version="1.0"><dict>
   <key>Label</key><string>$LABEL</string>
   <key>ProgramArguments</key><array>
-    <string>$BIN</string><string>/opt/homebrew/bin/python3</string><string>$OPS/opsd.py</string><string>serve</string></array>
+    <string>$BIN</string><string>$PY</string><string>$OPS/opsd.py</string><string>serve</string></array>
   <key>AssociatedBundleIdentifiers</key><string>$LABEL</string>
   <key>WorkingDirectory</key><string>$OPS</string>
   <key>EnvironmentVariables</key><dict>
-    <key>PATH</key><string>$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>PATH</key><string>$PYPATH$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
     <key>HOME</key><string>$HOME</string></dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
@@ -56,7 +82,7 @@ URL=http://127.0.0.1:8788
 fail() {  # say why start failed; a restart the queue ran (restart_self) also logs it on its task
   echo "$1" >&2
   if [ -n "${OPS_RESTART_TASK:-}" ]; then
-    OPS_DATA="$DATA" /opt/homebrew/bin/python3 "$OPS/opsd.py" event "$OPS_RESTART_TASK" \
+    OPS_DATA="$DATA" "$PY" "$OPS/opsd.py" event "$OPS_RESTART_TASK" \
       "claude-ops restart failed: $1 See $DATA/runs/$OPS_RESTART_TASK/restart.log and opsctl log." || true
   fi
   exit 1
@@ -81,7 +107,7 @@ case "${1:-status}" in  # start, stop and restart act on the one launchd service
     fi ;;
 esac
 case "${1:-status}" in
-  start)   build_app; write_plist
+  start)   check_python; build_app; write_plist
            if launchctl print "$SVC" >/dev/null 2>&1; then launchctl kickstart "$SVC"
            else  # bootstrap fails while a stopped job is still unloading; retry rather than leave it down
              for i in $(seq 10); do launchctl bootstrap "gui/$(id -u)" "$PLIST" 2>/dev/null && break
@@ -92,8 +118,9 @@ case "${1:-status}" in
            # it pauses its tasks before it exits (opsd.py shutdown); launchd lists the job until it has
            for _ in $(seq 70); do launchctl print "$SVC" >/dev/null 2>&1 || break; sleep 1; done
            echo stopped ;;
-  restart) "$0" stop; "$0" start ;;
-  pause|resume) OPS_DATA="$DATA" /opt/homebrew/bin/python3 "$OPS/opsd.py" "$1-all" ;;
+  restart) check_python; "$0" stop; "$0" start ;;
+  python)  check_python; echo "$PY ($("$PY" -V 2>&1))" ;;
+  pause|resume) OPS_DATA="$DATA" "$PY" "$OPS/opsd.py" "$1-all" ;;
   status)  launchctl print "$SVC" 2>/dev/null | grep -E '^\s*(state|pid|last exit code)' || echo "not running" ;;
   log)     tail -n 100 -f "$DATA/opsd.log" ;;
   open)    open "$URL" ;;

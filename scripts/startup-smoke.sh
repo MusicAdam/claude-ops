@@ -4,7 +4,7 @@
 # daemon must answer /api/state within 5 s, and be done loading (no "starting") within 15 s, as no setup or
 # build belongs in startup. Run from the repo root: scripts/startup-smoke.sh
 set -u
-PY="${PYTHON:-/opt/homebrew/bin/python3}"
+PY="${PYTHON:-$([ -x /opt/homebrew/bin/python3 ] && echo /opt/homebrew/bin/python3 || command -v python3)}"
 here="$(cd "$(dirname "$0")/.." && pwd)"
 d="$(mktemp -d)"
 port=$((47000 + RANDOM % 800))
