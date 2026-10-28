@@ -1,5 +1,5 @@
 """[worktree] clone entries in an existing worktree: a folder is a warm cache, cloned once; a file follows the owner's
-checkout, so a stale copy (the .xcode.env.local that broke swish deploys, #437) can't outlive the fix. Stdlib only.
+checkout, so a stale copy (the .xcode.env.local that broke app deploys, #437) can't outlive the fix. Stdlib only.
 Run from the repo root: /opt/homebrew/bin/python3 -m unittest discover -s tests -q"""
 import os
 import sys

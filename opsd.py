@@ -66,7 +66,8 @@ DAEMON_URL = f"http://{'127.0.0.1' if HOST in ('', '0.0.0.0', '::') else HOST}:{
 CLAUDE = os.environ.get("OPS_CLAUDE") or shutil.which("claude") or str(HOME / ".local/bin/claude")
 MAX_FIX_ROUNDS = 3  # times a worker is sent back after a conflict or failed gate
 # A worker's next turn starts a fresh session, with a handoff note, instead of resuming one whose
-# prompt cache has expired (it lasts an hour) or whose context makes every call dear. docs/usage-analysis.md Q2, Q3.
+# prompt cache has expired (it lasts an hour) or whose context makes every call dear. Measured on the owner's own usage: a cold turn costs about
+# $0.80 and a fresh worker start-up about $0.53, so a handoff note is cheaper.
 # A chat's next turn does the same above FRESH_ABOVE (see chat_stale). Every call rereads the whole context, so cache
 # reads are most of the tokens used: a 90k limit about halves the dearest calls for the price of a ~10k-token note.
 FRESH_AFTER = 55 * 60  # seconds since the session's last call
@@ -6057,7 +6058,7 @@ def target_facts(p, t, main, s):
     try:
         revs = deploy_input(p, t, main)
     except ValueError as e:
-        out["blocked"] = str(e)  # "Deploy swish test first."
+        out["blocked"] = str(e)  # "Deploy app test first."
         return out
     pairs = [(r, sha) for r, sha in p.pairs(revs) if r in t.parts(p)]
     subject = " · ".join((f"{r.name}: " if r.sub and not t.repo else "") + r.git("log", "-1", "--format=%s", sha)
@@ -8116,7 +8117,7 @@ def origin_of(ref):
 
 
 def origin_words(o):
-    """"claude-ops task #12", "diskgame design chat #3"."""
+    """"claude-ops task #12", "game design chat #3"."""
     p = PROJECTS.get(o["project"])
     what = {"design": "design chat", "project": "chat"}.get(o["kind"], o["kind"])  # or task, release, deploy
     return f"{p.title if p else o['project']} {what} #{o['id']}"
@@ -8574,8 +8575,8 @@ WAIT_EVENTS = {"needs your input": "your answer", "needs you:": "your answer", "
                "hit the Claude usage limit": "the usage limit", "paused: usage limit": "the usage limit",
                "paused": "a pause"}  # the task sits idle from one of these to its next event
 COLD_GAP = 3600  # the prompt cache lives an hour: a turn that starts later writes its whole context again
-COLD_COST = 0.80  # extra $ per cold turn: $11.48 over 14 misses in docs/usage-analysis.md (Q2)
-STARTUP_COST = 0.53  # $ a fresh worker spends before its first edit, median (docs/usage-analysis.md Q1)
+COLD_COST = 0.80  # extra $ per cold turn: $11.48 over 14 misses (measured on the owner's own usage)
+STARTUP_COST = 0.53  # $ a fresh worker spends before its first edit, median (measured on the owner's own usage)
 SONNET_SHARE = 0.5  # Sonnet 5.5 costs half of Opus 5.5 per token ($2/$10 against $4/$20; cache reads are equal)
 
 
