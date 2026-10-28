@@ -12,6 +12,7 @@ the golden version: it changes only when you promote.
 ./opsctl open                        # dashboard: http://127.0.0.1:8788  (…/#today, …/#tasks, …/#projects open those pages)
 ./opsctl status | log | stop | restart   # stop and restart pause running tasks; the next start resumes them
 ./opsctl pause | resume              # pause every running task now / resume every paused one
+./opsctl python                      # which Python opsctl uses: $OPS_PYTHON, else Homebrew's, else python3 on PATH (3.11+)
 ./opsd.py add-project ~/dev/myrepo   # or "+ Project" on the dashboard
 ./opsd.py add -p myrepo "Fix the crash when the save file is empty"
 ./opsd.py add -p myrepo --model sonnet "Rename the config key"   # its worker runs on Sonnet (see Models)
@@ -31,6 +32,29 @@ projects and writes a starter config. It also takes a workspace: a folder that i
 several (see [Workspaces](#workspaces)). The project goes [Straight to main](#main-is-the-golden-version);
 the config has a comment on how to opt out. Read it, adjust it, then click **Reload projects** (or
 `./opsctl restart`).
+
+## Set up on a new Mac
+
+1. **Requirements.** macOS, with:
+   - Python 3.11 or newer (`opsd.py` uses `tomllib`). Homebrew's works. `opsctl` picks `$OPS_PYTHON`, then
+     `/opt/homebrew/bin/python3`, then `/usr/local/bin/python3`, then `python3` on your PATH. If none is new enough,
+     `opsctl` start and restart say which one they found and stop; install Homebrew Python or set `OPS_PYTHON`.
+     `./opsctl python` shows the choice.
+   - The Xcode command line tools (`xcode-select --install`): `clang` and `codesign` build `Claude Ops.app`.
+   - The `claude` CLI, installed and logged in, and `git`.
+   - `gh`, if a project's gate or deploy uses it. `ffmpeg`, only for proof videos of web apps.
+2. **Install and start.** `git clone https://github.com/MusicAdam/claude-ops.git ~/dev/claude-ops`, then
+   `cd ~/dev/claude-ops`, `./opsctl start` and `./opsctl open`.
+3. **Add projects.** `./opsd.py add-project <path>` or **+ Project** on the dashboard. Check the starter toml, then
+   click **Reload projects**.
+4. **macOS permissions.** Grant **Full Disk Access** to Claude Ops, and **Screen Recording** for proof videos.
+   The text is under **macOS permissions** in Other details, below.
+5. **Research tasks** call the `/research` skill, which the tk toolkit installs (`~/dev/tk`, `./install.sh`).
+   Without it, normal tasks still work and research tasks fail.
+6. **Each Mac has its own queue.** `~/.claude-ops` (`ops.db`, project tomls, runs) belongs to one machine and is not
+   synced. To update claude-ops: `git pull` in the checkout, then `./opsctl restart`.
+7. **Workers run unattended with no permission prompts** (`--permission-mode auto`). On a work machine, check your
+   employer's policy first.
 
 ## Flow (per project)
 
@@ -2281,7 +2305,7 @@ Nothing claude-ops runs may stop, signal or quit a process it did not start.
 | `~/.claude-ops/opsd.pid` | the running daemon's pid |
 | `~/.claude-ops/research-backup/` | copies of the research state files, one folder per daemon start, newest 10 |
 
-Env overrides: `OPS_DAEMON` (where `opsd.py send` goes), `OPS_PORT` (8788), `OPS_HOST` (127.0.0.1), `OPS_DATA` (~/.claude-ops),
+Env overrides: `OPS_PYTHON` (the Python `opsctl` runs the daemon with), `OPS_DAEMON` (where `opsd.py send` goes), `OPS_PORT` (8788), `OPS_HOST` (127.0.0.1), `OPS_DATA` (~/.claude-ops),
 `OPS_ALLOWED_HOSTS` (extra host names the API answers, comma-separated), `OPS_RESEARCH_OLD_PORT` (8787, the old
 research server's port that makes research read-only while it answers).
 The API answers only requests addressed to `127.0.0.1`, `localhost`, `OPS_HOST` or a `*.ts.net` name, so a
