@@ -979,10 +979,20 @@ stay on the right of the header.
     lanes stack, and a lane's chips wrap after an arrow.
 
   **The recap: Lately and Open.** On a plain home (a project row clicked, no to-do selected) the card has two more
-  sections under the pipeline. They are not in a to-do's compact header, nor on the All clear card. A **▾** at the
-  card's top right (or a click on its title row) folds it to the title, status line and pipeline; **▸** unfolds it.
-  This browser keeps the choice for every project (`ops-td-recap`, `1` folded); it starts unfolded. Unfolded, the
-  card scrolls inside itself past about 40% of the column's height (the to-do case keeps the limits above).
+  sections under the pipeline. They are not in a to-do's compact header, nor on the All clear card. The card has
+  three fold levels:
+  - **open:** everything: the `Project` kicker, title, status line, pipeline, error line, Lately and Open.
+  - **half:** the kicker, title, status line, pipeline and error line, without Lately and Open.
+  - **closed:** one line with tight padding, like a section header: the title and the chevron. No kicker, status
+    line, pipeline, recap or error line, so the thread gets almost all the room. On a phone `‹ To-do` stays on it.
+
+  One chevron at the card's top right steps through them, and a click on the title row does the same: open (**▾**,
+  "Fold to the project and its pipeline") goes to half; half (**▾**, "Fold to just the project name") goes to
+  closed; closed (**▸**, "Show the project") goes back to the level it was closed from. This browser keeps the level
+  for every project in `ops-td-recap`: `open`, `half`, or `closed:<level>` (closed, and the level it returns to). It
+  starts open. An older value migrates: `1` reads as half, `0` or blank as open. Open, the card scrolls inside
+  itself past about 40% of the column's height (`#tdhomebox.recap`; the other levels and the to-do case keep the
+  limits above). A to-do's compact project header has no fold and is unaffected.
   - **Lately.** First a digest: 2–3 sentences by Claude on the project's recent work, its themes rather than a
     list. It is written only when you click **Summarize**, never by itself and never on a poll. Claude (haiku, one
     turn with no tools, skipped while the usage limit holds) reads the titles and worker summaries of the last 8

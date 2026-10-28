@@ -14,7 +14,7 @@ START, END = "// ---- Today's project filter and Open list, pure", "// ---- end 
 RUN = r"""
 const h = require("fs").readFileSync(process.argv[1], "utf8");
 eval(h.slice(h.indexOf(process.argv[3]), h.indexOf(process.argv[4])));
-const fns = {tdProjKeep, tdByProj, tdProjClick, tdOpenRows};
+const fns = {tdProjKeep, tdByProj, tdProjClick, tdOpenRows, tdFoldRead, tdFoldWrite, tdFoldNext, tdHomeCard};
 console.log(JSON.stringify(JSON.parse(process.argv[2]).map(a => fns[a[0]](...a.slice(1)))));
 """
 
@@ -86,6 +86,61 @@ class OpenList(unittest.TestCase):
         [o] = self.run_js(["tdOpenRows", "p", [], [], {"topics": [], "changes": []}, 8, False])
         self.assertEqual(o, {"rows": [], "more": 0})
 
+
+@unittest.skipUnless(shutil.which("node"), "needs node")
+class FoldLevels(unittest.TestCase):
+    """A plain home card's three fold levels (README TODAY-2)."""
+    run_js = ProjFilter.run_js
+    PARTS = {"title": "Proj", "status": "1 to-do", "pipe": '<div class="pipe">PIPE</div>',
+             "err": '<div class="err">ERR</div>', "recap": '<div class="recapbox">RECAP</div>'}
+
+    def test_cycle_returns_to_the_level_closed_came_from(self):
+        f, seen = {"level": "open", "back": "half"}, []
+        for _ in range(4):
+            [f] = self.run_js(["tdFoldNext", f])
+            seen.append((f["level"], self.run_js(["tdFoldWrite", f])[0]))
+        self.assertEqual(seen, [("half", "half"), ("closed", "closed:half"), ("half", "half"), ("closed", "closed:half")])
+        self.assertEqual(self.run_js(["tdFoldNext", {"level": "closed", "back": "open"}]), [{"level": "open", "back": "open"}])
+
+    def test_read_and_migrate(self):
+        self.assertEqual([f["level"] for f in self.run_js(
+            ["tdFoldRead", "1"], ["tdFoldRead", "0"], ["tdFoldRead", ""], ["tdFoldRead", None],
+            ["tdFoldRead", "open"], ["tdFoldRead", "half"], ["tdFoldRead", "closed:open"], ["tdFoldRead", "closed"])],
+            ["half", "open", "open", "open", "open", "half", "closed", "closed"])
+        self.assertEqual(self.run_js(["tdFoldRead", "closed:open"], ["tdFoldRead", "closed:half"], ["tdFoldRead", "closed"]),
+                         [{"level": "closed", "back": "open"}, {"level": "closed", "back": "half"},
+                          {"level": "closed", "back": "half"}])
+
+    def test_what_each_level_shows(self):
+        o, h, c = self.run_js(*[["tdHomeCard", lv, self.PARTS] for lv in ("open", "half", "closed")])
+        for part in ("Project", "1 to-do", "PIPE", "ERR", "RECAP"):
+            self.assertIn(part, o)
+        for part in ("Project", "1 to-do", "PIPE", "ERR"):
+            self.assertIn(part, h)
+        self.assertNotIn("RECAP", h)
+        for part in ("Project", "1 to-do", "PIPE", "ERR", "RECAP", "hst", 'class="k"'):
+            self.assertNotIn(part, c)
+        self.assertIn("Proj", c)
+        self.assertIn("tdrecap closed", c)
+        self.assertIn("data-back", c)  # ‹ To-do stays usable on a phone
+        for html, sym, exp, tip in ((o, "▾", "true", "Fold to the project and its pipeline"),
+                                    (h, "▾", "true", "Fold to just the project name"), (c, "▸", "false", "Show the project")):
+            self.assertIn(f'aria-expanded="{exp}" title="{tip}">{sym}</button>', html)
+            self.assertEqual(html.count("data-recapfold"), 2)  # the chevron and the title row
+
+
+class TodoHeaderUnchanged(unittest.TestCase):
+    """With a to-do selected the compact project header has no fold, and only open keeps the 40% scroll limit."""
+    COMPACT = """const html = it ? `<div class="stepcard tdproj"><div class="ptitle"><h2><span>${esc(g.title)}</span></h2>
+    <span class="muted hst">${esc(tdHomeStatus(g))}</span></div>
+    ${tdPipeline(g, busy, true)}
+    ${herr ? `<div class="err" style="margin-top:8px;white-space:pre-wrap">${esc(herr)}</div>` : ""}</div>`
+  : recap ? tdHomeCard("""
+
+    def test_compact_header(self):
+        page = PAGE.read_text()
+        self.assertIn(self.COMPACT, page)
+        self.assertIn('classList.toggle("recap", !!recap && lv === "open")', page)
 
 if __name__ == "__main__":
     unittest.main()

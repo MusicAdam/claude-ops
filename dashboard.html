@@ -459,6 +459,10 @@ a[data-task] { color: var(--accent); cursor: pointer; }
 .stepcard.tdrecap .top .k { flex: 1; min-width: 0; }
 .stepcard.tdrecap .fold { flex: none; margin-left: auto; padding: 0 6px; background: none; border-color: transparent; color: var(--muted); }
 .stepcard.tdrecap h2.rcfold { cursor: pointer; }
+/* Closed: just the project name on one line, like a section header */
+#tdhomebox .stepcard.tdrecap.closed { padding: 4px 16px; }
+.stepcard.tdrecap.closed h2.rcfold { flex: 1; min-width: 0; margin: 0; font-size: 15px; }
+.stepcard.tdrecap.closed h2.rcfold span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .recapbox { margin-top: 10px; border-top: 1px solid var(--line); padding-top: 6px; font-size: 13px; }
 .recapbox .rh { font-size: 11px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: 8px 0 4px; }
 .recapbox .dg { margin: 0 0 2px; line-height: 1.45; }
@@ -740,6 +744,7 @@ details.tdparked .tditem { opacity: .8; }
      #msgs scrolls; the header block (the project and the step) shrinks and scrolls inside what is left. */
   #tdhomebox { flex: 0 1 auto; min-height: 44px; max-height: 40%; overflow: auto; margin-bottom: 6px; }
   #tdhomebox .stepcard.tdo, #tdhomebox .stepcard.tdproj { padding: 6px 10px 8px; }
+  #tdhomebox .stepcard.tdrecap.closed { padding: 4px 10px; }
   #tdcentre #chat { flex: 1 1 0; min-height: 0; }
   #tdcentre #msgs { flex: 1 1 50%; min-height: 0; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; }
   /* PHONE-5: the topic tabs and the pinned ones scroll sideways in one row; ▾ stays at the right, its menu full width */
@@ -3150,7 +3155,7 @@ const TD = {key: "", home: null, filter: "all", drafts: {}, noteTimer: null, par
             wait: null, add: null,  // the open Wait for… chooser {key, ids, other, until}, and the + Add form
             qt: null,  // the open Queue as task box {key, body, busy} (README TODO-7)
             closed: null, full: null, ft: null, fullNext: null,  // the to-do ✕ just closed (its chip stays), the full-screen view
-            proj: null, unpicked: false, recapFold: false, rc: null};  // the selected project (the list's filter), unpicked: the All view with nothing picked; the home's recap
+            proj: null, unpicked: false, recapFold: {level: "open", back: "half"}, rc: null};  // the selected project (the list's filter), unpicked: the All view with nothing picked; the home card's fold level and the level closed returns to; the home's recap
 try {
   TD.key = localStorage.getItem("ops-todo") || "";
   TD.home = localStorage.getItem("ops-td-home") || null;
@@ -3161,7 +3166,7 @@ try {
   TD.todoOpen = localStorage.getItem("ops-td-todo-open") !== "0";
   TD.fold = localStorage.getItem("ops-td-dock") === "1";
   TD.proj = localStorage.getItem("ops-td-proj") || null;
-  TD.recapFold = localStorage.getItem("ops-td-recap") === "1";
+  TD.recapFold = tdFoldRead(localStorage.getItem("ops-td-recap"));
 } catch {}
 const TD_FILTERS = [["all", "All"], ["review", "Review"], ["unblock", "Unblock"], ["ship", "Ship"], ["only_me", "Only me"]];
 const SEND_WORDS = {answer: "Send answer", reject: "Send back", retry: "Retry", queue: "Queue task"};
@@ -3171,7 +3176,7 @@ const tdSave = () => { try { localStorage.setItem("ops-todo", TD.key); localStor
   localStorage.setItem("ops-td-sec", TD.sec); localStorage.setItem("ops-td-projs-open", TD.projsOpen ? "1" : "0");
   localStorage.setItem("ops-td-todo-open", TD.todoOpen ? "1" : "0"); localStorage.setItem("ops-td-dock", TD.fold ? "1" : "0");
   localStorage.setItem("ops-td-lanes", TD.lanes ? "1" : "0"); localStorage.setItem("ops-td-proj", TD.proj || "");
-  localStorage.setItem("ops-td-recap", TD.recapFold ? "1" : "0"); localStorage.removeItem("ops-skip"); localStorage.removeItem("ops-td-none"); } catch {} };
+  localStorage.setItem("ops-td-recap", tdFoldWrite(TD.recapFold)); localStorage.removeItem("ops-skip"); localStorage.removeItem("ops-td-none"); } catch {} };
 // The right column's width, set by dragging #tdgrip; desktop only (the narrower layouts stack the columns).
 const TD_WIDE = matchMedia("(min-width: 1100px)");
 let tdRight = 0;  // px, or 0 for the default 320px
@@ -3284,6 +3289,35 @@ function tdOpenRows(project, todos, tasks, recap, cap, all) {
   for (const c of r.changes || []) rows.push({kind: "change", chip: "change", title: c.title || c.name, fact: c.total ? `${c.done}/${c.total}` : "", since: null, act: {spec: c.name, sub: c.sub || ""}});
   const n = all ? rows.length : Math.min(cap, rows.length);
   return {rows: rows.slice(0, n), more: rows.length - n};
+}
+// A plain home card's fold level: open (everything), half (title, status, pipeline), closed (just the title). One
+// chevron steps open → half → closed → back to the level closed came from. Stored as open, half or closed:<back>;
+// the old boolean's 1 reads as half, 0 or blank as open.
+function tdFoldRead(raw) {
+  const [lv, back] = String(raw || "").split(":");
+  if (lv === "closed") return {level: "closed", back: back === "open" ? "open" : "half"};
+  return {level: lv === "1" || lv === "half" ? "half" : "open", back: "half"};
+}
+function tdFoldWrite(f) { return f.level === "closed" ? "closed:" + f.back : f.level; }
+function tdFoldNext(f) {
+  return f.level === "closed" ? {level: f.back, back: f.back} : {level: f.level === "open" ? "half" : "closed", back: f.level};
+}
+// The plain home card at a fold level; p holds its parts as HTML: title, status, pipe, err, recap (used only open).
+const TD_FOLD = {open: ["▾", "Fold to the project and its pipeline", true], half: ["▾", "Fold to just the project name", true],
+                 closed: ["▸", "Show the project", false]};
+function tdHomeCard(level, p) {
+  const [sym, tip, open] = TD_FOLD[level] || TD_FOLD.open;
+  const back = `<button class="ph back" data-back title="Back to the list">‹ To-do</button>`;
+  const fold = `<button class="fold" data-recapfold aria-expanded="${open}" title="${tip}">${sym}</button>`;
+  const title = `<h2 data-recapfold class="rcfold"><span>${p.title}</span></h2>`;
+  if (level === "closed") return `<div class="stepcard tdrecap closed"><div class="top">${back}${title}${fold}</div></div>`;
+  return `<div class="stepcard tdrecap"><div class="top">${back}
+    <div class="k">Project</div>${fold}</div>
+    ${title}
+    <div class="muted hst">${p.status}</div>
+    ${p.pipe}
+    ${p.err}
+    ${level === "open" ? p.recap : ""}</div>`;
 }
 // ---- end of Today's project filter
 function tdPick(shown) {
@@ -3765,7 +3799,7 @@ function tdHead(it) {
   const playErr = pl && pl.error && !pl.phase ? `${pl.stop ? "Stop" : "Play"} ${pl.where === "dev" ? g.dev_branch : g.main_branch} failed: ${pl.error}` : "";
   const clear = !TD.home && !tdAll().length ? " Nothing needs you right now." : "";
   // The step shows TD.msg, and its own Play's error; the header says only what the step doesn't
-  const recap = !it && TD.home === name;  // a plain home: Lately and Open (README TODAY-2)
+  const recap = !it && TD.home === name, lv = TD.recapFold.level;  // a plain home: Lately and Open, at its fold level (README TODAY-2)
   if (recap) tdRecapLoad(name);
   const rcErr = recap && TD.rc && TD.rc.project === name ? TD.rc.err : "";
   const herr = it ? (playErr && !tdActions(it).some(b => /^(play|stop):/.test(b.a)) ? playErr : "") : [TD.msg || playErr, rcErr].filter(Boolean).join("\n");
@@ -3773,15 +3807,15 @@ function tdHead(it) {
     <span class="muted hst">${esc(tdHomeStatus(g))}</span></div>
     ${tdPipeline(g, busy, true)}
     ${herr ? `<div class="err" style="margin-top:8px;white-space:pre-wrap">${esc(herr)}</div>` : ""}</div>`
-  : `<div class="stepcard${recap ? " tdrecap" : ""}"><div class="top"><button class="ph back" data-back title="Back to the list">‹ To-do</button>
-    <div class="k">${TD.home ? "Project" : tdAll().length ? "Pick a to-do" : "All clear"}</div>${recap ? `<button class="fold" data-recapfold aria-expanded="${!TD.recapFold}"
-      title="${TD.recapFold ? "Show Lately and Open" : "Fold to the project and its pipeline"}">${TD.recapFold ? "▸" : "▾"}</button>` : ""}</div>
-    <h2 ${recap ? `data-recapfold class="rcfold"` : ""}><span>${esc(g.title)}</span></h2>
+  : recap ? tdHomeCard(lv, {title: esc(g.title), status: esc(tdHomeStatus(g)), pipe: lv === "closed" ? "" : tdPipeline(g, busy),
+      err: herr ? `<div class="err" style="margin-top:8px;white-space:pre-wrap">${esc(herr)}</div>` : "", recap: lv === "open" ? tdRecap(name) : ""})
+  : `<div class="stepcard"><div class="top"><button class="ph back" data-back title="Back to the list">‹ To-do</button>
+    <div class="k">${TD.home ? "Project" : tdAll().length ? "Pick a to-do" : "All clear"}</div></div>
+    <h2><span>${esc(g.title)}</span></h2>
     <div class="muted hst">${esc(tdHomeStatus(g))}${clear ? " · nothing needs you" : ""}</div>
     ${tdPipeline(g, busy)}
-    ${herr ? `<div class="err" style="margin-top:8px;white-space:pre-wrap">${esc(herr)}</div>` : ""}
-    ${recap && !TD.recapFold ? tdRecap(name) : ""}</div>`;
-  $("#tdhomebox").classList.toggle("recap", !!recap && !TD.recapFold);
+    ${herr ? `<div class="err" style="margin-top:8px;white-space:pre-wrap">${esc(herr)}</div>` : ""}</div>`;
+  $("#tdhomebox").classList.toggle("recap", !!recap && lv === "open");
   if (!put($("#tdhead"), html)) return;
   tdRecapWire(name);
   if ($("#tdhead [data-back]")) $("#tdhead [data-back]").onclick = () => tdGo("todo");
@@ -3836,7 +3870,7 @@ function tdRecap(project) {
 }
 function tdRecapWire(project) {
   const h = $("#tdhead"), rc = TD.rc && TD.rc.project === project ? TD.rc : null;
-  h.querySelectorAll("[data-recapfold]").forEach(el => el.onclick = () => { TD.recapFold = !TD.recapFold; tdSave(); renderToday(); });
+  h.querySelectorAll("[data-recapfold]").forEach(el => el.onclick = () => { TD.recapFold = tdFoldNext(TD.recapFold); tdSave(); renderToday(); });
   h.querySelectorAll("[data-rcsum]").forEach(b => b.onclick = () => tdSummarize(project));
   h.querySelectorAll("[data-rctask]").forEach(el => el.onclick = () => tdOpenTask(+el.dataset.rctask));
   if (h.querySelector("[data-rcall]")) h.querySelector("[data-rcall]").onclick = () => { TD.sec = "tasks"; tdSave(); tdSections(); };
