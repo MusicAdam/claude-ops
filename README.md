@@ -1436,9 +1436,9 @@ Research is ordinary queue work in the project it is about. A report lives in th
   default: not there, and not `briefs/`, `reports/`, `topics/` or `watchlist.md`. The report starts with a `# `
   heading and a one-paragraph answer (the Research section's title and summary), then the findings with a source for
   each claim and a `## Sources` list. The worker commits that one file and touches nothing else.
-- **RES-4 Time and size follow the tier.** T0 5, T1 15, T2 40 minutes per worker turn: a research task's worker is
-  stopped at its tier's limit and the task fails with `stopped at the T1 time limit (15 min)`, so Retry is one click.
-  Its size cap is `--max-budget-usd` 1, 3 or 10 (API-equivalent dollars, as the old runs used).
+- **RES-4 Time and size follow the tier.** T0 10, T1 30, T2 80 minutes per worker turn: a research task's worker is
+  stopped at its tier's limit and the task fails with `stopped at the T1 time limit (30 min)`, so Retry is one click.
+  Its size cap is `--max-budget-usd` 2, 6 or 20 (API-equivalent dollars, as the old runs used).
 - **RES-5 Read when it merges.** A research task that is done and merged, and whose report you haven't marked read,
   is a **Read** to-do (`task:<id>:report`, with `report: {path}`); so is each unread report a task listed (RES-10).
   Opening the report marks nothing, from any view: the step's **Open report**, the Research section, or a link to
@@ -1501,7 +1501,7 @@ and `chat`. `file` serves only `.md` files inside the research repo.
   `reports/` and `sources/registry.md`. Every state JSON file is written atomically (a temp file in the same
   folder, fsync, `os.replace`). The repo's old to-do list is not touched (RES-8 is retired).
 - **Runs and chats are as before.** No worktree, gate or merge: `claude -p` in the research repo with the
-  old flags, tools (minus `bin/todo`), prompts, run sizes ($1/$3/$10) and time limits (T0 5, T1 15, T2 40, chat 15 minutes), in
+  old flags, tools (minus `bin/todo`), prompts, run sizes ($2/$6/$20) and time limits (T0 10, T1 30, T2 80, chat 30 minutes), in
   their own process group.
 - **Research chats add to-dos.** A chat is told the design chats' to-do rule and block format (`todo_rule()`),
   naming the claude-ops project its to-dos go to: the one its research project links to (`repo`), else the one

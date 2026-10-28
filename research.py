@@ -50,11 +50,11 @@ CHROME_READ_TOOLS = [
 # a run once its token use, priced at API rates, passes the cap. So these are run
 # sizes in API-equivalent dollars: they guard the plan's 5-hour and weekly usage
 # allowance, not money.
-RUN_SIZES = {"small": 1, "normal": 3, "large": 10}
+RUN_SIZES = {"small": 2, "normal": 6, "large": 20}
 TIER_SIZE = {"T0": "small", "T1": "normal", "T2": "large"}
 CHAT_SIZE = "normal"
 # Wall-clock limit in minutes. Catches stuck runs the size cap misses.
-TIME_LIMIT_MIN = {"T0": 5, "T1": 15, "T2": 40, "chat": 15}
+TIME_LIMIT_MIN = {"T0": 10, "T1": 30, "T2": 80, "chat": 30}
 WATCHDOG_SECONDS = 30
 START_SLACK = 5  # seconds a run's process start may differ from its job's 'started', for the pid to count as its own
 BACKUPS_KEPT = 10
@@ -799,7 +799,7 @@ def spawn(job: dict, prompt: str, resume: str | None = None, add_dir: Path | Non
     started = datetime.now()
     job["started"] = started.isoformat(timespec="seconds")
     job["pid_start"] = lstart(proc.pid)
-    job["deadline"] = (started + timedelta(minutes=TIME_LIMIT_MIN.get(job["tier"], 15))).isoformat(timespec="seconds")
+    job["deadline"] = (started + timedelta(minutes=TIME_LIMIT_MIN.get(job["tier"], 30))).isoformat(timespec="seconds")
     with lock:
         jobs = load_jobs()
         jobs.append(job)

@@ -150,11 +150,11 @@ class ResearchTasks(unittest.TestCase):
         self.assertIn("Commit only that file", body)
         self.assertIn("Touch nothing else", body)
         self.assertIn("## Sources", body)
-        self.assertIn("stopped after 40 minutes", body)
+        self.assertIn("stopped after 80 minutes", body)
         self.assertIn("tier T2", body)
 
     def test_tiers_and_refusals(self):
-        self.assertIn("stopped after 5 minutes", opsd.task(opsd.queue_research("web", "q one", "t0")["id"])["body"])
+        self.assertIn("stopped after 10 minutes", opsd.task(opsd.queue_research("web", "q one", "t0")["id"])["body"])
         self.assertEqual(opsd.research_of(opsd.task(opsd.queue_research("web", "q two", None)["id"]))["tier"], "T1")
         with self.assertRaises(ValueError):
             opsd.queue_research("web", "q", "T3")

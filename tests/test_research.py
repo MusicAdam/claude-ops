@@ -159,7 +159,7 @@ class Research(unittest.TestCase):
     def add_job(self, **job):
         jobs = self.file("logs/dashboard/jobs.json")
         job = {"kind": "question", "slug": "live-run", "question": "Live?", "tier": "T1", "model": "default",
-               "size": "normal", "budget": 3, "notes": "", **job}
+               "size": "normal", "budget": 6, "notes": "", **job}
         jobs.append(job)
         (self.repo / "logs/dashboard/jobs.json").write_text(json.dumps(jobs, indent=2))
         return job
@@ -409,10 +409,10 @@ class Research(unittest.TestCase):
     def test_dispatch_spawns_like_the_old_server(self):
         code, job = self.post("/api/research/dispatch", {"question": "Is DAW music worth it?", "tier": "T2"})
         self.assertEqual(code, 200, job)
-        self.assertEqual((job["slug"], job["size"], job["budget"]), ("daw-music-worth", "large", 10))
+        self.assertEqual((job["slug"], job["size"], job["budget"]), ("daw-music-worth", "large", 20))
         self.wait_done(job["id"])
         args = (SCRATCH / "args").read_text().split("\n")
-        self.assertEqual(args[args.index("--max-budget-usd") + 1], "10")
+        self.assertEqual(args[args.index("--max-budget-usd") + 1], "20")
         self.assertEqual(args[args.index("--permission-mode") + 1], "dontAsk")
         self.assertIn("--chrome", args)
         self.assertFalse([a for a in args if "bin/todo" in a])
@@ -421,7 +421,7 @@ class Research(unittest.TestCase):
         saved = next(j for j in self.file("logs/dashboard/jobs.json") if j["id"] == job["id"])
         self.assertTrue(saved["pid_start"])
         started = datetime.fromisoformat(saved["started"])
-        self.assertEqual(datetime.fromisoformat(saved["deadline"]) - started, timedelta(minutes=40))
+        self.assertEqual(datetime.fromisoformat(saved["deadline"]) - started, timedelta(minutes=80))
         self.assertEqual(self.get(f"/api/research/jobs/{job['id']}")[1]["status"], "done")
 
     def test_chat_resumes_its_session(self):
