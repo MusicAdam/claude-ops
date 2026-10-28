@@ -321,14 +321,14 @@ main (see below).
 ## Deploys
 
 A project can list deploy targets: a store test build, a store release, a backend's prod deploy. claude-ops knows
-nothing about stores or servers. Each target is a shell command of the project's own (`bin/swish release`), and the
+nothing about stores or servers. Each target is a shell command of the project's own (`bin/app release`), and the
 daemon runs it for you.
 
 ```toml
 [[deploy]]
-name = "swish test"                 # required, unique in the project
-repo = "ballup-swish"               # workspace only: the repo it deploys; it runs in that folder
-run = "bin/swish build && bin/swish upload"   # required; non-zero exit fails the deploy
+name = "app test"                 # required, unique in the project
+repo = "shop-app"               # workspace only: the repo it deploys; it runs in that folder
+run = "bin/app build && bin/app upload"   # required; non-zero exit fails the deploy
 note = "What's new"                 # optional: then a note is required, passed as OPS_NOTE and OPS_NOTE_FILE;
                                     # the Deploy dialog drafts it from the changelog for you to approve
 version = "node -p \"require('./package.json').version\""   # optional: prints the current version, X.Y[.Z]
@@ -336,10 +336,10 @@ release_tag = "v{version}"          # optional, needs version: the tag that mark
 build_tags = "build/*/{version}+*"  # optional, needs version: the tags its builds leave
 
 [[deploy]]
-name = "swish distribute"
-repo = "ballup-swish"
-from = "swish test"                 # deploys what "swish test" last deployed, not main
-run = "bin/swish release"
+name = "app distribute"
+repo = "shop-app"
+from = "app test"                 # deploys what "app test" last deployed, not main
+run = "bin/app release"
 ```
 
 - **Only on your click.** A deploy starts only from the dashboard, `POST /api/deploys`, or
@@ -368,7 +368,7 @@ run = "bin/swish release"
     text. `opsd.py deploy` drafts nothing and still needs `--note`.
   - `POST /api/deploys/draft {project, target}` answers `{note, source}`: `source` is `"model"`, `"titles"`, or
     `null` with an empty note when there is no changelog.
-- **Like a release, it goes ahead of other work.** Its title reads `Deploy swish test → 3.5.0`. The task page shows
+- **Like a release, it goes ahead of other work.** Its title reads `Deploy app test → 3.5.0`. The task page shows
   its step, its events and `deploy.log`. You get notified when it needs you, fails or succeeds.
 - **One at a time.** A project runs one deploy at a time; a later click queues behind it. A release and a deploy of the
   same project never run at once: the one that waits says `waiting for deploy #N` or `waiting for release #N`.
@@ -377,12 +377,12 @@ run = "bin/swish release"
 - **The deploy worktree.** Each project has one, `<worktrees>/deploy`, made on first use like a task worktree
   (workspace files, the clone list, setup). Before each deploy every repo in it is put at the commit to deploy
   (`git checkout --force --detach`, then `git reset --hard`). It is **never cleaned**: untracked and ignored files
-  stay, because a later target uploads what an earlier one built (swish's release uploads the builds its test build
+  stay, because a later target uploads what an earlier one built (app's release uploads the builds its test build
   left in `ios/build` and `android/app/build`). Setup runs again when the commit changed since the last setup, and
   after a failed deploy, so a Retry starts over with setup too. Its clone files follow your checkout (see below).
 - **Which commit.** main, in every repo. A target with `from` deploys the commit that target last deployed
   successfully, in its repo (other repos sit at main); before that target's first deploy it refuses with
-  "Deploy swish test first."
+  "Deploy app test first."
 - **Versions.** A target with `version` runs it in its folder at the commit to deploy. You pick:
   - **same**: the current version. Refused once `release_tag` for it exists: the App Store closes a version once
     approved.
@@ -691,7 +691,7 @@ the uncommitted-files banner, Deploy. `/api/state` gathers them into one list, `
   behind the task is skipped. Each body stands alone, like a split task: goal, exact steps, acceptance.
 
 Each item is `{key, verb, group, project, title, why, since, est_min, closes, source: {kind, id}}`. `key` stays the same
-across polls (`task:231:review`, `chat:42:read`, `project:diskgame:commit`, `todo:7`, `task:240:report`).
+across polls (`task:231:review`, `chat:42:read`, `project:game:commit`, `todo:7`, `task:240:report`).
 `since` is when the state began, as near as the queue knows: a task's last event, a chat's last reply, the oldest uncommitted file, the
 oldest commit not yet promoted or deployed. `est_min` is a guess at minutes: Answer 2, Fix 5, Try 5, Review 3,
 Agree 2, Read 3, Promote 1, Ship 2, Commit 2, Do 5. `closes` is one plain sentence on how the item leaves the
@@ -982,7 +982,7 @@ stay on the right of the header.
     (pulsing, a link to the release) while a release is open, or **✓ in sync**.
   - Below it, one **lane** per deploy chain. A lane starts at a `[[deploy]]` target with no `from` (or a `from`
     that names no target, or a loop of them) and follows the targets whose `from` names the stage before, joined
-    by arrows: for ballup-monorepo **swish** test → distribute, **dunk** prod, **web** preview → prod. A second
+    by arrows: for shop **app** test → distribute, **api** prod, **web** preview → prod. A second
     target with the same `from` starts a lane of its own, after its parent's, led by `<parent> →`. Lanes of one
     repo sit together, in config order. A lane's label is the first word all its target names share, cut off each
     stage's name ("test", "distribute"); with no shared word the label is the repo and stages keep their names.
@@ -1443,7 +1443,7 @@ settings and `CLAUDE.md`. Each chat keeps one Claude session across messages, un
 - **MCP servers.** A project chat loads only the MCP servers named in the project's `chat_mcp` list, none by
   default. Every server's tool definitions ride on every call, so each one you add makes every reply dearer.
   Name servers you defined with `claude mcp add` in any scope (user, local, or the repo's `.mcp.json`):
-  `chat_mcp = ["ballup-app"]` in `~/.claude-ops/projects/<name>.toml`. claude.ai connectors (Gmail, Google
+  `chat_mcp = ["shop-app"]` in `~/.claude-ops/projects/<name>.toml`. claude.ai connectors (Gmail, Google
   Sheets, Docs …) never load in a project chat: the chat runs with `--strict-mcp-config`, which drops them, and
   only claude.ai can define them. A name with no definition is skipped, and the chat says so.
 
@@ -1593,7 +1593,7 @@ and `chat`. `file` serves only `.md` files inside the research repo.
 - **The brake.** While the usage brake holds the queue, dispatch refuses a new run with a 409 that gives the
   brake's words. Chats are never held.
 - **Linked code project.** A research project in `projects.json` may carry `repo`: the id of a claude-ops
-  project (a name `opsd.py send` accepts, such as `plugins`, `ballup-monorepo` or `claude-ops`). Without it, or
+  project (a name `opsd.py send` accepts, such as `plugins`, `shop` or `claude-ops`). Without it, or
   with it empty, the project stands alone; nothing is migrated. Each research project links to at most one code
   project, and several can link to the same one. Create and update (`/projects`, `/projects/<id>`) take `repo`;
   `""` or null clears it, and an id that isn't a configured claude-ops project is refused with a 400 that names it.
@@ -1660,7 +1660,7 @@ opsd.py send <project> --chat "<message>"     # a project chat there, in its che
 - **Context comes along.** The message starts with a line naming the sender, its title and where it works (its
   worktree and branch, or the folder a chat runs in), so the other session can read its files. The sender is told
   to make the message stand alone, like a design chat's task brief.
-- **Word comes back.** The sender's task logs "Sent task #71 to diskgame", and later how it ended: done with its
+- **Word comes back.** The sender's task logs "Sent task #71 to game", and later how it ended: done with its
   summary, failed, cancelled, or waiting on you. A sent chat's first reply goes back too. In a chat that sent
   something these show as notes, and Claude reads them with your next message.
 - **Waiting on a task.** `--after <task id>` (`333` or `#333`) gives the new task `depends_on`, the same wait as
@@ -1785,14 +1785,14 @@ API: `POST /api/tasks` takes `not_before`: a time string as above, `"reset"`, or
 
 ## Workspaces
 
-A workspace is a folder of separate git repos that work together, such as `~/dev/ballup-monorepo` with a
-backend (`ballup-dunk/`) and an app (`ballup-swish/`). Its config lists them: `repos = ["ballup-dunk",
-"ballup-swish"]`. `add-project` writes that list when the folder is not a git repo itself, along with each
-repo's setup and tests, run from its folder (`cd ballup-dunk && poetry run pytest -q tests/unit`), and the
+A workspace is a folder of separate git repos that work together, such as `~/dev/shop` with a
+backend (`shop-api/`) and an app (`shop-app/`). Its config lists them: `repos = ["shop-api",
+"shop-app"]`. `add-project` writes that list when the folder is not a git repo itself, along with each
+repo's setup and tests, run from its folder (`cd shop-api && poetry run pytest -q tests/unit`), and the
 gitignored `.env` files each repo has, to clone into new worktrees.
 
 - **Branches per repo.** Each repo gets its own `dev`, `task/<id>-<slug>` branches and `main`. The repos'
-  checkouts stay where they are (`<repo>/ballup-dunk`, …).
+  checkouts stay where they are (`<repo>/shop-api`, …).
 - **Worktrees.** A task's worktree is a folder holding a copy of the workspace's own files (`CLAUDE.md`,
   `docs/`, `.claude/`) and one git worktree per repo. Edits to those copied files are not kept: change the
   workspace's own files in its folder yourself, or make the folder a repo (below).
@@ -1800,13 +1800,13 @@ gitignored `.env` files each repo has, to clone into new worktrees.
   worktree root. It merges each repo the task committed to; a repo with no commits is left alone.
 - **Promote.** A release snapshots `dev` in every repo and checks them together. Each checkout is handled
   as in a plain project, uncommitted changes included. `main` moves in all repos or in none.
-- Commits show as one id per repo, such as `ballup-dunk 1a2b3c4d, ballup-swish 5e6f7a8b`.
+- Commits show as one id per repo, such as `shop-api 1a2b3c4d, shop-app 5e6f7a8b`.
 
 ### The workspace folder as a repo (`"."`)
 
 Without it, a task can never change the workspace's own files (`CLAUDE.md`, `docs/`, `.claude/`, `bin/`,
 `.gitignore`, `openspec/`): they are copies. To let tasks change them, make the workspace folder a git repo of
-its own and list it as `"."`: `repos = ["ballup-dunk", "ballup-swish", "."]`.
+its own and list it as `"."`: `repos = ["shop-api", "shop-app", "."]`.
 
 - **Set it up** with `./opsd.py adopt-workspace-root -p NAME`. In your checkout it runs `git init` in the folder
   if needed (on `main_branch`), adds `/<repo>/` to `.gitignore` for each repo folder not yet ignored, commits the
@@ -1820,7 +1820,7 @@ its own and list it as `"."`: `repos = ["ballup-dunk", "ballup-swish", "."]`.
   one more repo everywhere else: it is rebased, gated, merged into its `dev` only when the task committed to it,
   promoted (or sent straight to main) with the others, checked out for deploys, and included in Send to dev and
   in carrying your uncommitted changes over. Its commit shows under the workspace's folder name, such as
-  `ballup-monorepo 1a2b3c4d, ballup-dunk 5e6f7a8b`. The worker brief says the root is a repo and edits to its
+  `shop 1a2b3c4d, shop-api 5e6f7a8b`. The worker brief says the root is a repo and edits to its
   files must be committed there.
 - **Old records.** Commits are recorded in `repos` order, which is why `"."` goes last: releases and deploys
   recorded before it still match their repos. A deploy target with `from` asks you to deploy its source
@@ -1848,7 +1848,7 @@ plain project, the root repo (`"."` in `repos`) for a workspace. A workspace wit
   use (after a restart with no last good one, the home toml alone). The error shows on the project's card and in
   the daemon log. Fix it on main and it loads by itself.
 - **A repo not cloned yet.** If `repos` in the file names a folder your checkout lacks (a task added
-  `ballup-web`), the card says "ballup-web/ is not cloned", the last good config stays in use, and the queue
+  `shop-web`), the card says "shop-web/ is not cloned", the last good config stays in use, and the queue
   holds that project's queued tasks. Clone it into the workspace folder yourself (nothing clones it for you);
   the daemon sees it within 10 seconds and goes on.
 - **Workers know.** A project with the file gets a section in each worker brief saying where it is, that a
@@ -1961,10 +1961,9 @@ each removal the same way (`janitor removed worktree …`). A half-removed folde
 has nothing to keep, so it goes.
 
 The janitor also removes Xcode's build cache of a worktree that is gone (`sweep_derived_data`). Xcode keeps one
-`~/Library/Developer/Xcode/DerivedData/<name>-<hash>` per workspace path, about 3.5 GB for ballup's iOS app, and
+`~/Library/Developer/Xcode/DerivedData/<name>-<hash>` per workspace path, about 3.5 GB for a large iOS app, and
 nothing uses it once that worktree is removed. It only removes an entry whose `info.plist` `WorkspacePath` is in a
-folder under a project's `<worktrees>/` that no longer exists. For what a worktree really costs on disk, see
-[docs/worktree-disk-cost.md](docs/worktree-disk-cost.md).
+folder under a project's `<worktrees>/` that no longer exists. A worktree itself costs little on disk: git shares the history, so the cost is its build output.
 
 ## Other details
 
@@ -2013,8 +2012,7 @@ folder under a project's `<worktrees>/` that no longer exists. For what a worktr
   outcome; what the fix rounds fixed; the dearest and slowest tasks; and **How to improve**: plain rules over the
   same data (fix rounds, Opus on releases, turns that started after the 1-hour cache expired, failed and cancelled
   spend, tiny tasks, queue waits, high effort), each with a rough saving. Run time leaves out the time a task
-  waited on your answer or review, a pause or the usage limit. The rules' constants come from
-  `docs/usage-analysis.md`.
+  waited on your answer or review, a pause or the usage limit. The rules' constants come from measuring the owner's own usage.
 - **Tasks tab.** New task and the task list are on the left; the task page is on the right. The project
   switcher in the header filters the list; with two or more ticked, each row shows its project. Clicking a task
   opens it on the right and focuses its project, and new tasks default to that project (when it is in view).
@@ -2227,7 +2225,7 @@ folder under a project's `<worktrees>/` that no longer exists. For what a worktr
   10k tokens, cutting the diff stat first. The task log says "started a fresh session: last call 3 h ago (cache
   expired)" or "…: context 120k". Each task keeps `last_call` and `ctx_tokens` from its worker's stream (Ask the
   worker updates them too). The thresholds are `FRESH_AFTER` and `FRESH_ABOVE` in `opsd.py`, from
-  `docs/usage-analysis.md` Q2 and Q3, with the context limit lowered from 155k to 90k later, as cache reads were
+  measured usage (cold-cache turns and big contexts cost most), with the context limit lowered from 155k to 90k later, as cache reads were
   most of all tokens used. Ask the worker always resumes; chats start over on context only (see Chat mode).
 - **Talk to a working worker.** While a task is queued, working or being checked, the task page has
   a "Talk to the worker" box. A message goes straight to the running worker, which reads it after its
@@ -2342,7 +2340,7 @@ web page can't reach it by re-pointing its own domain at 127.0.0.1 (DNS rebindin
 Keep the host on 127.0.0.1: the API can start work on your machine. For phone access, use Tailscale
 rather than binding to your LAN. It is served tailnet-only on its own HTTPS port (443 is taken by
 another dashboard): `tailscale serve --bg --https=8443 http://127.0.0.1:8788`, then open
-https://adams-mac-mini.pintail-bramble.ts.net:8443. Undo with `tailscale serve --https=8443 off`.
+https://<your-mac>.<your-tailnet>.ts.net:8443. Undo with `tailscale serve --https=8443 off`.
 
 ## Testing claude-ops itself
 

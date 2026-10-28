@@ -109,12 +109,12 @@ class QuickChatTabs(unittest.TestCase):
         self.assertEqual(run(*(["qcUnread", c] for c in cases)), [True, False, False, False, False])
 
     def test_pill(self):
-        titles = {"ops": "Claude Ops", "game": "Disk Game"}
+        titles = {"ops": "Claude Ops", "game": "Game"}
         read, unread = {"project": "game", "d": topic("user", "assistant"), "seen": 2}, \
             {"project": "ops", "d": topic("user", "assistant"), "seen": 1}
         self.assertEqual(run(["qcPill", [read], titles], ["qcPill", [unread], titles],
                              ["qcPill", [read, read, read], titles], ["qcPill", [read, unread], titles]),
-                         [{"label": "Disk Game", "dot": False}, {"label": "Claude Ops", "dot": True},
+                         [{"label": "Game", "dot": False}, {"label": "Claude Ops", "dot": True},
                           {"label": "3 chats", "dot": False}, {"label": "2 chats", "dot": True}])
 
 
