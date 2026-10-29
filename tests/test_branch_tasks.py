@@ -81,7 +81,7 @@ if a[:2] == ["pr", "view"]:
                       "statusCheckRollup": pr["checks"], "mergeable": "MERGEABLE", "url": pr["url"],
                       "author": {"login": "me"}, "reviews": pr.get("reviews", []),
                       "reviewRequests": [{"login": x} for x in pr.get("requests", [])],
-                      "baseRefName": pr.get("base") or "main"}))
+                      "baseRefName": pr.get("base") or "main", "reviewDecision": pr.get("decision", "")}))
 elif a[:2] == ["pr", "merge"]:
     if pr.get("merge_error"):
         print(pr["merge_error"], file=sys.stderr)
@@ -156,7 +156,8 @@ class Base(unittest.TestCase):
             opsd.q(f"DELETE FROM events WHERE task_id IN ({','.join('?' * len(self.ids))})", self.ids)
         for tid in self.ids:
             shutil.rmtree(opsd.RUNS / str(tid), ignore_errors=True)
-            opsd.set_setting(f"prmergeall:{tid}", "")
+            opsd.set_setting(f"prready:{tid}", "")
+            opsd.set_setting(f"prreadystep:{tid}", "")
             opsd.set_setting(f"prreviewers:{tid}", "")
         self.toml.unlink()
         opsd.load_projects()
@@ -550,8 +551,8 @@ def iso(ts=None):
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ts or time.time()))
 
 
-class Reviews(Base):
-    """The review round after Open PR: the bot review, the worker addressing comments, then human reviewers."""
+class ReviewBase(Base):
+    """A plain project with a GitHub origin, and helpers to post reviews and threads on the fake GitHub."""
 
     def setUp(self):
         super().setUp()
@@ -584,6 +585,10 @@ class Reviews(Base):
 
     def stage(self, tid):
         return opsd.pr_view_rows(opsd.task(tid), opsd.pr_rows(tid))[0]["review"]
+
+
+class Reviews(ReviewBase):
+    """The review round after Open PR: the bot review, the worker addressing comments, then human reviewers."""
 
     def test_bot_review_then_address_then_humans(self):
         tid = self.opened("feat/rv", 'pr_reviewers = ["alice", "org/team"]\n')
@@ -788,6 +793,232 @@ class Reviews(Base):
                          (["copilot-pull-request-reviewer[bot]"], 30, []))
 
 
+class MergeWhenReady(ReviewBase):
+    """Merge when ready: the queue fixes red CI, addresses later comments and merges each PR once green and approved."""
+
+    def decide(self, n, decision, slug="r"):
+        self.load()
+        self.state["prs"][f"o/{slug}#{n}"]["decision"] = decision
+        self.save()
+
+    def ready(self, tid, on=True):
+        opsd.pr_action(self.p, opsd.task(tid), "pr-ready", {"on": 1 if on else 0})
+
+    def merges(self):
+        return [c for c in self.calls() if c[:2] == ["pr", "merge"]]
+
+    def test_off_by_default_nothing_automatic(self):
+        tid = self.opened("feat/off", 'pr_bot_reviewers = []\npr_reviewers = ["alice"]\n')
+        self.assertFalse(opsd.ready_on(tid))
+        self.checks("r", 1, "FAILURE")
+        opsd.pr_poll()
+        t = self.step(tid)
+        self.assertEqual((t["state"], t["phase"]), ("needs_input", opsd.PR_RED))  # waits for your Fix CI
+        self.assertNotIn("Merge when ready", t["question"])
+        self.checks("r", 1, "SUCCESS")
+        self.decide(1, "APPROVED")
+        self.thread("r", 1, "TH_X", ("alice", "Rename it"))
+        opsd.pr_poll()
+        t = self.step(tid)
+        self.assertEqual((t["state"], t["phase"]), ("pr", "ready to merge: #1"))  # no address round, no merge
+        opsd.pr_poll()
+        self.assertEqual(opsd.task(tid)["state"], "pr")
+        self.assertEqual(self.merges(), [])
+        self.assertIsNone(opsd.ready_words(self.p, opsd.task(tid), opsd.pr_rows(tid)))
+
+    def test_red_ci_fixes_itself_in_the_same_session_and_gives_up_after_3(self):
+        tid = self.opened("feat/fx", 'pr_bot_reviewers = []\npr_reviewers = ["alice"]\n')
+        opsd.upd(tid, session_id="sess-1")
+        self.ready(tid)
+        self.step(tid)
+        for n in (1, 2, 3):
+            self.checks("r", 1, "SUCCESS", "FAILURE")
+            opsd.pr_poll()
+            t = self.step(tid)
+            self.assertEqual((t["state"], t["start_at"], t["session_id"]), ("queued", "claude", "sess-1"), t["question"])
+            self.assertIn("log line 299", t["next_prompt"])  # fix_ci_prompt, as the Fix CI button
+            self.assertIn(f"Merge when ready: fixing CI on #1 (round {n} of 3)", self.events(tid))
+            self.assertEqual(opsd.ready_words(self.p, t, opsd.pr_rows(tid)), f"fixing CI on #1 (round {n} of 3)")
+            seen = []
+            t = self.run_task(tid, {"c.txt": f"fix {n}\n"}, seen)
+            self.assertIn("log line 299", seen[0])
+            self.assertEqual((t["state"], t["session_id"]), ("pr", "sess-1"), t["question"] or t["error"])
+        self.checks("r", 1, "FAILURE")
+        opsd.pr_poll()
+        t = self.step(tid)
+        self.assertEqual((t["state"], t["phase"]), ("needs_input", opsd.PR_RED))
+        self.assertTrue(t["question"].startswith("Merge when ready gave up: CI still red after 3 fixes"), t["question"])
+        self.assertEqual(opsd.pr_rows(tid)[0]["auto_fixes"], 3)
+        self.no_force()
+
+    def test_new_review_comment_triggers_an_address_round(self):
+        tid = self.opened("feat/ad", 'pr_bot_reviewers = []\npr_reviewers = ["alice"]\n')
+        self.assertEqual(self.stage(tid), "awaiting human review")
+        self.ready(tid)
+        t = self.step(tid)  # no checks: green; alice is asked and hasn't reviewed
+        self.assertEqual((t["state"], t["phase"]), ("pr", "Merge when ready: waiting for approval on #1"))
+        opsd.pr_poll()
+        self.assertEqual(opsd.task(tid)["state"], "pr")  # nothing new: no step
+        self.thread("r", 1, "TH_A", ("alice", "Split this function"))
+        opsd.pr_poll()
+        t = self.step(tid)
+        self.assertEqual((t["state"], t["start_at"]), ("queued", "claude"), t["question"])
+        self.assertIn("TH_A", t["next_prompt"])
+        self.assertIn("Merge when ready: addressing comments on #1 (round 1 of 3)", self.events(tid))
+        t = self.run_task(tid, {"c.txt": "split\n"})
+        self.assertEqual(t["state"], "pr", t["question"] or t["error"])
+        self.assertEqual(self.stage(tid), "awaiting human review")  # asked again
+        self.load()["prs"]["o/r#1"]["threads"][0]["isResolved"] = True
+        self.save()
+        opsd.pr_poll()  # the push's CI: green
+        self.step(tid)
+        opsd.pr_poll()
+        self.assertEqual(opsd.task(tid)["state"], "pr")  # resolved: nothing to do
+        for n in (2, 3):  # a new comment each time: rounds 2 and 3, then it gives up
+            self.thread("r", 1, f"TH_{n}", ("alice", f"And this {n}"))
+            opsd.pr_poll()
+            self.step(tid)
+            self.assertIn(f"Merge when ready: addressing comments on #1 (round {n} of 3)", self.events(tid))
+            self.run_task(tid, {"c.txt": f"round {n}\n"})
+            self.load()["prs"]["o/r#1"]["threads"][-1]["isResolved"] = True
+            self.save()
+        self.thread("r", 1, "TH_4", ("alice", "One more"))
+        opsd.pr_poll()
+        t = self.step(tid)
+        self.assertEqual((t["state"], t["phase"]), ("needs_input", opsd.PR_LEFT))
+        self.assertIn("Merge when ready gave up: comments left after 3 rounds on #1", t["question"])
+        self.assertEqual(self.merges(), [])
+
+    def test_no_merge_while_review_is_required_or_changes_are_requested(self):
+        tid = self.opened("feat/rq", 'pr_bot_reviewers = []\npr_reviewers = ["alice"]\n')
+        self.ready(tid)
+        self.step(tid)
+        for decision, words in (("REVIEW_REQUIRED", "waiting for approval on #1"),
+                                ("CHANGES_REQUESTED", "changes requested on #1")):
+            self.decide(1, decision)
+            self.load()["prs"]["o/r#1"]["requests"] = []  # alice reviewed: no longer requested
+            self.save()
+            opsd.pr_poll()
+            t = opsd.task(tid)
+            if t["state"] == "queued":
+                t = self.step(tid)
+            self.assertEqual((t["state"], t["phase"]), ("pr", f"Merge when ready: {words}"))
+            self.assertEqual(self.merges(), [])
+        self.decide(1, "APPROVED")
+        opsd.pr_poll()
+        t = self.step(tid)
+        self.assertEqual(t["state"], "done", t["question"] or t["error"])
+        self.assertEqual(self.merges(), [["pr", "merge", "1", "--squash", "--delete-branch", "-R", "o/r"]])
+        self.assertIn("Merge when ready: merging #1, green and approved", self.events(tid))
+        self.assertFalse(opsd.ready_on(tid))  # done: the switch is cleared
+
+    def test_review_required_and_nobody_to_ask_needs_you(self):
+        tid = self.opened("feat/nr", "pr_bot_review_timeout = 1\n")
+        self.ready(tid)
+        self.decide(1, "REVIEW_REQUIRED")
+        opsd.q("UPDATE prs SET review_since=? WHERE task_id=?", (time.time() - 61, tid))
+        opsd.pr_poll()
+        t = self.step(tid)
+        self.assertEqual((t["state"], t["phase"]), ("needs_input", opsd.PR_PICK_PHASE))
+        self.assertEqual(self.merges(), [])
+
+    def test_empty_review_decision_skips_the_human_stage_and_merges(self):
+        tid = self.opened("feat/em", "pr_bot_reviewers = []\n")  # no reviewers: Pick reviewers without the switch
+        self.assertEqual(opsd.task(tid)["phase"], opsd.PR_PICK_PHASE)
+        self.ready(tid)  # turning it on goes on from there
+        t = self.step(tid)
+        self.assertEqual(t["state"], "pr", t["question"])
+        self.assertIn("Merge when ready: #1 needs no review on GitHub: no reviewers to ask", self.events(tid))
+        opsd.pr_poll()  # no checks: green, and GitHub requires no review
+        t = self.step(tid)
+        self.assertEqual(t["state"], "done", t["question"] or t["error"])
+        self.assertEqual(len(self.merges()), 1)
+
+    def test_comments_left_block_the_merge(self):
+        tid = self.opened("feat/cl", 'pr_bot_reviewers = []\npr_reviewers = ["alice"]\n')
+        self.ready(tid)
+        self.step(tid)
+        self.decide(1, "APPROVED")
+        self.thread("r", 1, "TH_L", ("alice", "Nit"))
+        opsd.pr_poll()
+        t = self.step(tid)  # approved and green, but a comment is left: it is addressed first
+        self.assertEqual((t["state"], t["start_at"]), ("queued", "claude"))
+        self.assertEqual(self.merges(), [])
+
+    def test_failed_merge_needs_you_with_ghs_message(self):
+        tid = self.opened("feat/fm", "pr_bot_reviewers = []\n")
+        self.ready(tid)
+        self.step(tid)
+        self.load()["prs"]["o/r#1"]["merge_error"] = "Pull request is not mergeable: the merge commit cannot be cleanly created"
+        self.save()
+        opsd.pr_poll()
+        t = self.step(tid)
+        self.assertEqual((t["state"], t["phase"]), ("needs_input", opsd.PR_NO_MERGE))
+        self.assertIn("cannot be cleanly created", t["question"])
+        self.no_force()
+
+    def test_unticking_stops_further_steps(self):
+        tid = self.opened("feat/un", 'pr_bot_reviewers = []\npr_reviewers = ["alice"]\n')
+        self.ready(tid)
+        self.step(tid)
+        self.checks("r", 1, "FAILURE")
+        opsd.pr_poll()
+        t = self.step(tid)
+        self.assertEqual((t["state"], t["start_at"]), ("queued", "claude"))  # an automatic Fix CI
+        self.ready(tid, False)  # off while it waits to run: it still runs
+        self.assertIn("Merge when ready off: no more automatic steps (one already running finishes)", self.events(tid))
+        t = self.run_task(tid, {"c.txt": "fixed\n"})
+        self.assertEqual(t["state"], "pr", t["question"] or t["error"])
+        self.checks("r", 1, "FAILURE")
+        opsd.pr_poll()
+        t = self.step(tid)
+        self.assertEqual((t["state"], t["phase"]), ("needs_input", opsd.PR_RED))  # no second automatic round
+        self.assertNotIn("Merge when ready", t["question"])
+        self.checks("r", 1, "SUCCESS")
+        self.decide(1, "APPROVED")
+        opsd.pr_poll()
+        self.assertEqual(self.step(tid)["phase"], "ready to merge: #1")
+        self.assertEqual(self.merges(), [])
+
+    def test_on_before_any_pr_is_open(self):
+        self.project("pr_bot_reviewers = []\n")
+        tid = self.add(target="feat/early")
+        self.run_task(tid, {"c.txt": "x\n"})
+        self.ready(tid)
+        self.assertTrue(opsd.ready_on(tid))
+        self.assertEqual(opsd.task(tid)["state"], "on_branch")  # nothing opens by itself
+        self.assertEqual(opsd.ready_words(self.p, opsd.task(tid), opsd.pr_rows(tid)), "on: it starts once the PRs open")
+        opsd.pr_action(self.p, opsd.task(tid), "pr-open", {})
+        self.step(tid)
+        opsd.pr_poll()
+        self.assertEqual(self.step(tid)["state"], "done")
+
+    def test_stale_session_is_resumed_while_it_is_on(self):
+        tid = self.opened("feat/st", 'pr_bot_reviewers = []\npr_reviewers = ["alice"]\n')
+        opsd.upd(tid, session_id="sess-old", last_call=time.time() - opsd.FRESH_AFTER - 60, ctx_tokens=1000)
+        self.assertIn("cache expired", opsd.stale_or_ready(opsd.task(tid))[1])  # off: a fresh session
+        self.ready(tid)
+        self.assertIsNone(opsd.stale_or_ready(opsd.task(tid)))
+        self.assertTrue(any(e.startswith("Merge when ready: resumed the same session anyway (last call")
+                            for e in self.events(tid)))
+        real, seen = opsd.subprocess.Popen, []
+
+        class Started(Exception):
+            pass
+
+        def popen(cmd, *a, **k):  # stop run_claude at the claude process, with its command line
+            if cmd and cmd[0] == "caffeinate":
+                seen.append(cmd)
+                raise Started
+            return real(cmd, *a, **k)
+        with mock.patch.object(opsd.subprocess, "Popen", side_effect=popen), \
+                mock.patch.object(opsd, "limited", return_value=False):
+            with self.assertRaises(Started):
+                opsd.run_claude(self.p, tid, "fix it")
+        self.assertEqual(seen[0][seen[0].index("--resume") + 1], "sess-old")
+        self.assertEqual(opsd.task(tid)["session_id"], "sess-old")
+
+
 class Workspace(Base):
     """ballup-monorepo's shape: a backend and an app, PRs in pr_order, and a root repo with no origin."""
 
@@ -841,8 +1072,13 @@ class Workspace(Base):
         self.assertEqual(view["swish"]["merge_why"], "an earlier PR in pr_order has not merged")
         with self.assertRaises(ValueError):
             opsd.pr_action(self.p, t, "pr-merge", {"repo": "swish"})
-        # Merge all: dunk now, swish once dunk has landed
+        # Merge all (now Merge when ready): dunk now, swish once dunk has landed
+        opsd.q("UPDATE prs SET review_since=? WHERE task_id=?", (time.time() - 3600, tid))  # no bot review came
         opsd.pr_action(self.p, t, "pr-merge-all", {})
+        self.assertTrue(opsd.ready_on(tid))
+        self.step(tid)  # past the review round: GitHub requires no review, nobody to ask
+        self.assertEqual([x["review"] for x in opsd.pr_rows(tid)], ["human", "human"])
+        opsd.pr_poll()
         t = self.step(tid)  # swish is green: it merges once dunk has landed, in the same step
         self.assertEqual(t["state"], "done", t["question"] or t["error"])
         self.assertEqual([x["state"] for x in opsd.pr_rows(tid)], ["MERGED", "MERGED"])
@@ -868,6 +1104,27 @@ class Workspace(Base):
         t = self.step(tid)
         self.assertIn("out of pr_order", opsd.pr_rows(tid)[1]["warning"])
         self.assertEqual(t["state"], "pr")
+
+    def test_merge_when_ready_merges_in_pr_order(self):
+        self.project('pr_order = ["dunk", "swish"]\npr_bot_reviewers = []\ndirect_main = false\n',
+                     repos=[".", "dunk", "swish"])
+        tid = self.add(target="feat/mwr")
+        self.run_task(tid, {"dunk/api.txt": "api\n", "swish/app.txt": "app\n"})
+        opsd.pr_action(self.p, opsd.task(tid), "pr-ready", {"on": 1})
+        opsd.pr_action(self.p, opsd.task(tid), "pr-open", {})
+        t = self.step(tid)
+        self.assertEqual(t["phase"], "Merge when ready: waiting for CI on dunk #1")
+        self.checks("dunk", 1, "SUCCESS")
+        opsd.pr_poll()
+        t = self.step(tid)  # dunk merges; then swish opens
+        self.assertEqual([x["state"] for x in opsd.pr_rows(tid)], ["MERGED", "OPEN"])
+        self.assertEqual(t["phase"], "Merge when ready: waiting for CI on swish #2")
+        opsd.pr_poll()  # swish: no checks, green
+        t = self.step(tid)
+        self.assertEqual(t["state"], "done", t["question"] or t["error"])
+        self.assertEqual([(c[-1], c[2]) for c in self.calls() if c[:2] == ["pr", "merge"]],
+                         [("o/dunk", "1"), ("o/swish", "2")])
+        self.no_force()
 
 
 if __name__ == "__main__":

@@ -454,7 +454,8 @@ You click **Open PR** on the task (or run `opsd.py pr open <id>`).
 - **CI:** `green` once every check succeeded or was skipped (no checks counts as green), `red` on any failure,
   else `pending`. A PR the queue just opened or pushed to stays `pending` until the next poll: GitHub registers
   its checks a little after the push, and reading at once would see none (green) or the last push's.
-- **CI red:** the task needs you, listing the failing checks, and later PRs in the order don't open. **Fix CI**
+- **CI red:** the task needs you, listing the failing checks, and later PRs in the order don't open (with
+  [Merge when ready](#merge-when-ready) on, Fix CI runs by itself instead). **Fix CI**
   resumes the worker with the failed logs (`gh run view <run> --log-failed`, the last 200 lines). It commits, the
   gate runs, then the queue pushes (no rebase, no force). If CI turns green again by itself (a re-run, a push from
   GitHub), the task goes back to watching.
@@ -498,17 +499,17 @@ while a PR's CI is red the task needs you (Fix CI), and the round goes on once i
    Changes requested). Then the queue asks the reviewers again. Merging stays as it is.
 
 A PR opened before the review round existed skips it. A message to the task still passes on comments by hand.
+With **Merge when ready** on (below), stage 3 doesn't stop on nobody to ask when GitHub requires no review, and
+later comments are addressed by themselves.
 
 ### Merging
 
 Both ways work:
 
 - **On GitHub:** the poll sees `MERGED` and records it.
-- **Merge** (a button per PR, and `opsd.py pr merge <id>`): shown when the PR's CI is green and every earlier PR in
-  `pr_order` has merged. It runs `gh pr merge <n> --<method> --delete-branch`, `method` from the repo-level toml
-  key `pr_merge` (`squash`, `merge` or `rebase`; default `squash`). **Merge all** merges them in order, each once
-  the one before it has landed and its own CI is green. A failed merge (review required, conflicts) shows gh's
-  message on the card.
+- **Merge** (a button per PR): shown when the PR's CI is green and every earlier PR in `pr_order` has merged. It
+  runs `gh pr merge <n> --<method> --delete-branch`, `method` from the repo-level toml key `pr_merge` (`squash`,
+  `merge` or `rebase`; default `squash`). A failed merge (review required, conflicts) shows gh's message on the card.
 - A PR merged out of order on GitHub is recorded, with a warning on the card.
 - **Retargeted on GitHub.** Each poll reads the PR's `baseRefName`. If you change a PR's base on GitHub, the queue
   records the new base, logs it, and uses it from then on (the card's `PRs against`, the after-merge step).
@@ -526,8 +527,37 @@ Both ways work:
 - `after`/`depends_on` on a branch task waits until all its PRs have merged (the task is done). The one exception is
   a task on the same branch, which waits only until the earlier one is `on branch`.
 
-Out of scope: reading or updating Jira tickets, a second bot review round after addressing, auto-merge, PRs others
-open, and any force-push or rebase after the first push.
+#### Merge when ready
+
+A switch per branch task, off by default: the **Merge when ready** checkbox on the task page's PR list, or
+`opsd.py pr ready <id> on|off` (`opsd.py pr merge <id>` is `pr ready <id> on`). It takes the task's PRs to merged
+with nothing from you. You may turn it on before any PR is open: it applies as they open. It replaces Merge all.
+
+- **The loop is the 2-minute poll.** No Claude process waits. Each step that needs the worker resumes the task's
+  own session, so it keeps its context across fixes. While the switch is on, a session whose cache expired or whose
+  context grew large is resumed anyway (not started fresh); the event log says what a fresh one would have saved.
+- **CI red:** Fix CI runs by itself, as if you clicked it. At most 3 rounds per PR; then the task needs you with
+  `Merge when ready gave up: CI still red after 3 fixes`.
+- **Review round:** the bot stage and the addressing stage run as above. After them, while the PR is open, each new
+  unresolved review thread or Changes requested review starts Address comments by itself. At most 3 such rounds per
+  PR; then the task needs you (`Merge when ready gave up: comments left after 3 rounds`); Address comments or an
+  answer goes on.
+- **Nobody to ask for a review** (stage 3 with no `pr_reviewers` and nobody requested on GitHub): when the PR's
+  `reviewDecision` is empty (GitHub requires no review), the human stage is skipped. When GitHub requires a review,
+  the task needs you, as without the switch.
+- **A PR merges** (`gh pr merge`, as the Merge button) once all of these hold: it is open; its CI is green; every
+  earlier PR in `pr_order` has merged; its review round is past the bot and addressing stages, with nothing left to
+  address; and it is approved. Approved means `reviewDecision` is `APPROVED`, or it is empty and no requested reviewer
+  is still pending. `REVIEW_REQUIRED` and `CHANGES_REQUESTED` never merge.
+- **A failed merge** (a conflict, branch protection) needs you with gh's message (phase `can't merge`): fix it on
+  GitHub, then Retry. The queue never rebases or force-pushes.
+- **Unticking** stops further automatic steps. Work already running (a Fix CI turn, say) finishes.
+- **In words:** while it is on, the PR list says where it stands: `Merge when ready: waiting for CI on #12`,
+  `fixing CI on #12 (round 1 of 3)`, `addressing comments on #12 (round 2 of 3)`, `waiting for approval on #12`,
+  `merging #12`. The task's phase says the same, and each automatic step logs an event.
+
+Out of scope: reading or updating Jira tickets, a second bot review round after addressing, PRs others open, and any
+force-push or rebase after the first push.
 
 ### Every task as a PR (`flow = "pr"`)
 

@@ -1288,7 +1288,8 @@ const LABEL = {queued:"queued", running:"working", gating:"checking", merging:"m
 const isBranchTask = t => !!(t && (t.jira || t.target));
 const PR_FIX = {"CI failed": ["fix-ci", "Fix CI"], "PR closed": ["pr-retry", "Retry"],
                 "can't open PRs": ["pr-open", "Retry"], "main can't follow origin": ["pr-open", "Retry"],
-                "pick reviewers": ["pr-open", "Retry"]};
+                "pick reviewers": ["pr-open", "Retry"], "comments left": ["pr-address", "Address comments"],
+                "can't merge": ["pr-open", "Retry"]};
 // The task's next PR step as [action, label]: Open PR on its branch, or what a PR problem that needs you asks for
 const prStep = t => t.state === "on_branch" ? ["pr-open", "Open PR"]
   : t.state === "needs_input" && isBranchTask(t) ? PR_FIX[t.phase] || null : null;
@@ -1297,11 +1298,11 @@ const PR_STEP_TIP = {"pr-open": "Push the branch and open a pull request against
                      "pr-retry": "Reopen the closed pull request and keep watching it",
                      "pr-address": "Resume the worker with the PRs' unresolved review comments; it fixes what is right, replies on each thread, the gate runs, the queue pushes and asks the reviewers again"};
 // Address comments: the review round's addressing again, for comments that came after it
-const prAddress = t => isBranchTask(t) && (t.state === "pr" || (t.state === "needs_input" && t.phase === "pick reviewers"))
+const prAddress = t => isBranchTask(t) && (t.state === "pr" || (t.state === "needs_input" && ["pick reviewers", "comments left"].includes(t.phase)))
   && (prsOf(t) || []).some(x => x.state === "OPEN" && x.number);
 // A message to the task resumes its worker on the branch; the gate runs and the queue pushes to its open PRs
 const prMsg = t => isBranchTask(t) && (["on_branch", "pr"].includes(t.state)
-  || (t.state === "needs_input" && ["CI failed", "PR closed"].includes(t.phase)));
+  || (t.state === "needs_input" && ["CI failed", "PR closed", "comments left", "can't merge"].includes(t.phase)));
 // GET /api/tasks/<id> has no prs: the list's copy of the task has them
 const prsOf = t => t.prs !== undefined ? t.prs : ((state && state.tasks.find(x => x.id === t.id)) || {}).prs || null;
 // ---- the PR news's pure helper
@@ -1374,10 +1375,14 @@ const branchTag = t => isBranchTask(t) ? `<span class="btag" title="Works on thi
 const prsShort = prs => (prs || []).map(x => `${x.name ? x.name + " " : ""}${x.number ? "#" + x.number : "waiting"}${
   x.state === "OPEN" ? ` CI ${x.ci}${x.review ? ", " + x.review : ""}` : x.state === "waiting" ? "" : " " + String(x.state).toLowerCase()}`).join(" · ");
 // The PR list on the task page: one row per PR, with its Merge button (enabled when the daemon says it may go),
-// gh's last merge error and any warning under it, and Merge all when two or more haven't merged.
+// gh's last merge error and any warning under it, and the Merge when ready switch with where it stands. With
+// buttons, a branch task with no PR yet shows the switch alone: it applies as the PRs open.
 function prsHtml(t, prs, buttons) {
-  if (!prs || !prs.length) return "";
-  const can = ["pr", "needs_input"].includes(t.state), left = prs.filter(x => x.state !== "MERGED");
+  const lt = (state && t.id && state.tasks.find(x => x.id === t.id)) || t;  // the list's copy has pr_ready
+  const ended = ["done", "failed", "cancelled"].includes(t.state);
+  const ready = lt.pr_ready ? `<div class="prnote">Merge when ready: ${esc(lt.pr_ready_words || "on")}</div>` : "";
+  const sw = buttons && !ended ? `<div class="row"><label title="Fix red CI, address new review comments and merge each PR in pr_order once its CI is green and it is approved, with nothing from you"><input type="checkbox" data-act="pr-ready" ${lt.pr_ready ? "checked" : ""}> Merge when ready</label></div>` : "";
+  if (!prs || !prs.length) return buttons && isBranchTask(t) && !ended ? `<div class="prs">${sw}${ready}</div>` : "";
   const stCls = {MERGED: "s-done", CLOSED: "err", OPEN: ""};
   const rows = prs.map(x => {
     const opened = x.state !== "waiting" && x.number;
@@ -1392,8 +1397,7 @@ function prsHtml(t, prs, buttons) {
     return `<div class="prrow">${x.name ? `<b>${esc(x.name)}</b>` : ""}${num}${x.base ? `<span class="muted mono" title="The branch this PR goes against on GitHub">→ ${esc(x.base)}</span>` : ""}${ci}${opened ? `<span class="${stCls[x.state] || ""}">${esc(x.state)}</span>` : ""}<span class="grow muted">${when}</span>${merge}</div>`
       + (x.error ? `<div class="prnote err">${esc(x.error)}</div>` : "") + (x.warning ? `<div class="prnote s-review">⚠ ${esc(x.warning)}</div>` : "");
   }).join("");
-  const all = buttons && left.length >= 2 ? `<div class="row"><button data-act="pr-merge-all" ${can && prs.some(x => x.state === "OPEN") ? "" : "disabled"} title="Merge them in order, each once the one before it has landed and its own CI is green">Merge all</button></div>` : "";
-  return `<div class="prs"><div class="muted">Pull request${prs.length === 1 ? "" : "s"}</div>${rows}${all}</div>`;
+  return `<div class="prs"><div class="muted">Pull request${prs.length === 1 ? "" : "s"}</div>${rows}${sw}${ready}</div>`;
 }
 
 async function api(path, body) {
@@ -2438,6 +2442,7 @@ async function act(id, a, pr) {
   if (a === "answer") { body.answer = $("#answer").value.trim(); if (!body.answer) return; }
   if (a === "reject") { body.feedback = $("#feedback").value.trim(); if (!body.feedback) return; }
   if (a === "release") body.on = $("#detail [data-act=release]").checked ? 1 : 0;
+  if (a === "pr-ready") body.on = $("#detail [data-act=pr-ready]").checked ? 1 : 0;
   if (a === "ask" || a === "steer") { body.text = $("#ask").value.trim(); if (!body.text) return; }
   if (a === "pr-merge") body.pr = +pr;
   if (a === "cancel" && !document.getElementById("actmsg").dataset.armed) {
