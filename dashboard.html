@@ -1475,10 +1475,10 @@ function renderProjects() {
 function syncRelease() {
   const name = pf || $("#tproj").value, on = !!P(name).auto_release, k = `${name}:${on}`, el = $("#autorel");
   if (el.dataset.k !== k) { el.checked = on; el.dataset.k = k; }
-  el.parentElement.classList.toggle("hidden", !!P(name).direct_main);  // its merges move main themselves
+  el.parentElement.classList.toggle("hidden", !!P(name).direct_main || prFlow(P(name)));  // main moves by itself
   // Warn, don't block: work only in your checkout is not in what a worker starts from.
   const n = dirtyCount(P(name)), w = $("#dirtywarn");
-  w.textContent = n ? `Workers start from dev and won't see your ${n} uncommitted ${n === 1 ? "file" : "files"}.` : "";
+  w.textContent = n ? `Workers start from ${prFlow(P(name)) ? "origin/" + (P(name).main_branch || "main") : "dev"} and won't see your ${n} uncommitted ${n === 1 ? "file" : "files"}.` : "";
   w.classList.toggle("hidden", !n);
 }
 $("#tproj").addEventListener("change", syncRelease);
@@ -1633,18 +1633,28 @@ function projStats(g) {
     n(["merging"]) ? `<span class="s-running">${n(["merging"])} merging</span>` : "",
     qd ? `${qd} queued` : "",
     g.deploy_open ? `<span class="s-running">deploy #${g.deploy_open}</span>` : "",
-    g.senddev_open ? `<span class="s-running">sending to ${esc(g.dev_branch)} #${g.senddev_open}</span>` : "",
+    g.senddev_open ? `<span class="s-running">sending to ${prFlow(g) ? "a PR" : esc(g.dev_branch)} #${g.senddev_open}</span>` : "",
     (g.senddev_pending || []).length ? `<span class="s-review" title="Sent to ${esc(g.dev_branch)} from your checkout; Promote brings it back">sent work to promote</span>` : "",
     busy ? `<span class="s-running">release #${r.id}</span>` : r && r.state === "failed" ? `<span class="err">release failed</span>` : "",
-    !g.error && g.ahead.length ? `${g.ahead.length} to promote` : "",
+    prFlow(g) ? (branchOpenWords(g) ? `<span title="flow = &quot;pr&quot;: every task goes through a branch and PR">${branchOpenWords(g)}</span>` : "")
+      : !g.error && g.ahead.length ? `${g.ahead.length} to promote` : "",
     !g.error && g.has_app && (!g.has_build || (g.stale && g.built)) ? `<span class="s-review">needs build</span>` : "",
     g.running ? `<span class="s-running">running: ${esc(g.main_branch)}</span>` : "",
     g.dev_running ? `<span class="s-running">running: ${esc(g.dev_branch)}</span>` : "",
     g.play && g.play.phase ? `<span class="s-running">${esc(g.play.phase)}</span>` : "",
-    g.direct_main ? `<span title="direct_main is on: a task that passes its gate moves ${esc(g.main_branch)} at once, with no release">straight to ${esc(g.main_branch)}</span>`
+    prFlow(g) ? `<span title="flow = &quot;pr&quot;: every task goes through a branch and PR; no Promote">PRs only</span>`
+      : g.direct_main ? `<span title="direct_main is on: a task that passes its gate moves ${esc(g.main_branch)} at once, with no release">straight to ${esc(g.main_branch)}</span>`
       : g.auto_release ? `<span title="New tasks are promoted after they merge">auto promote</span>` : "",
     dirtyCount(g) ? `<span class="s-review" title="Files in your checkout that are not on ${esc(g.dev_branch)}">${files(dirtyCount(g))} uncommitted</span>` : "",
   ].filter(Boolean).join(" · ") || (g.error ? "" : "idle");
+}
+// flow = "pr": every task is a branch task, so there is no dev → main and no Promote; the header counts open ones.
+function prFlow(g) { return !!g && g.flow === "pr"; }
+function branchOpenWords(g) {
+  const b = g.branch_open || {}, out = [];
+  if (b.tasks) out.push(`${b.tasks} open branch task${b.tasks === 1 ? "" : "s"}`);
+  if (b.prs) out.push(`${b.prs} PR${b.prs === 1 ? "" : "s"} open`);
+  return out.join(" · ");
 }
 function projBody(g) {
   if (g.error) return `<div class="err">${esc(g.error)}</div><div class="row">${archiveBtn(g)}</div>${archiveAskHtml(g)}`;
@@ -1654,22 +1664,26 @@ function projBody(g) {
     : r.state === "failed" ? `<span class="err">Release #${r.id} failed: ${esc((r.error || "").split("\n")[0])}</span>` : "");
   const promotable = g.ahead.length || (g.has_app && (!g.has_build || g.stale));
   const where = (b, sha, run) => `<span class="nw">${esc(b)} <span class="mono">${esc(sha)}</span>${run ? ' · <span class="s-running">running</span>' : ""}</span>`;
-  // Release: main and dev, what Promote would bring, and the buttons that act on them.
+  const pr = prFlow(g);
+  // Release: main and dev, what Promote would bring, and the buttons that act on them. flow = "pr": main and the
+  // open branch tasks instead, with no Promote.
   return configHtml(g) + dirtyHtml(g) + sentHtml(g) + `<div class="sect"><h3>Release</h3>` +
-    `<div>${where(g.main_branch + " (golden)", g.main, g.running)} · ${where(g.dev_branch, g.dev, g.dev_running)} · ${g.ahead.length ? `<span class="s-review nw">${nCommits(g.ahead.length)} to promote</span>` : `<span class="nw">nothing to promote</span>`}</div>` +
-    (g.has_app && g.stale && g.built ? `<div class="s-review">The build is of ${esc(g.built)}, older than ${esc(g.main_branch)}. Promote to rebuild.</div>` : "") +
-    (g.has_app && !g.has_build ? `<div class="s-review">Not built yet. Promote to build it.</div>` : "") +
+    (pr ? `<div>${where(g.main_branch + " (golden)", g.main, g.running)} · <span class="nw">${branchOpenWords(g) || "no open branch tasks"}</span></div>`
+      + `<div class="muted">Every task goes through a branch and a PR against ${esc(g.main_branch)} (flow = "pr"). ${esc(g.main_branch)} moves when a PR merges; ${esc(g.dev_branch)} follows it.</div>`
+      : `<div>${where(g.main_branch + " (golden)", g.main, g.running)} · ${where(g.dev_branch, g.dev, g.dev_running)} · ${g.ahead.length ? `<span class="s-review nw">${nCommits(g.ahead.length)} to promote</span>` : `<span class="nw">nothing to promote</span>`}</div>`) +
+    (!pr && g.has_app && g.stale && g.built ? `<div class="s-review">The build is of ${esc(g.built)}, older than ${esc(g.main_branch)}. Promote to rebuild.</div>` : "") +
+    (!pr && g.has_app && !g.has_build ? `<div class="s-review">Not built yet. Promote to build it.</div>` : "") +
     (g.can_launch && g.dev_stale ? `<div class="s-review">${esc(g.dev_branch)} needs build: it moved since its last build. Play ${esc(g.dev_branch)} builds it first.</div>` : "") +
     (g.train ? `<div class="s-review">Promote after merge: ${g.train.ids.map(taskLink).join(", ")} ${trainWords(g.train)}.</div>` : "") +
-    devLogHtml(g) + (g.deploys.length ? "" : mainLogHtml(g)) +
+    (pr ? "" : devLogHtml(g)) + (g.deploys.length ? "" : mainLogHtml(g)) +
     `<div class="row">
       ${g.can_launch ? `<button class="primary" data-p="${g.name}" data-a="play" ${g.has_build && !playing ? "" : "disabled"}>Play ${esc(g.main_branch)}</button>` : ""}
       ${g.can_launch ? `<button data-p="${g.name}" data-a="play" data-where="dev" title="Run ${esc(g.dev_branch)} in its worktree, to try it before you promote${g.has_app ? `. Builds it first if it moved since its last build` : ""}" ${playing ? "disabled" : ""}>Play ${esc(g.dev_branch)}</button>` : ""}
       ${g.running ? `<button data-p="${g.name}" data-a="stop" title="Quit ${esc(g.title)} running from ${esc(g.main_branch)}" ${playing ? "disabled" : ""}>■ Stop ${esc(g.main_branch)}</button>` : ""}
       ${g.dev_running ? `<button data-p="${g.name}" data-a="stop" data-where="dev" title="Quit ${esc(g.title)} running from ${esc(g.dev_branch)}" ${playing ? "disabled" : ""}>■ Stop ${esc(g.dev_branch)}</button>` : ""}
-      ${!g.direct_main || busy || promotable ? `<button data-p="${g.name}" data-a="promote" title="Queues a release: if the gate (${g.gate.length ? esc(g.gate.join(", ")) : "none configured"}) passes on ${esc(g.dev_branch)}, ${esc(g.main_branch)} moves to it" ${busy || !promotable ? "disabled" : ""}>${busy ? `Release #${r.id} in progress` : `Promote ${esc(g.dev_branch)} → ${esc(g.main_branch)}`}</button>` : ""}
+      ${!pr && (!g.direct_main || busy || promotable) ? `<button data-p="${g.name}" data-a="promote" title="Queues a release: if the gate (${g.gate.length ? esc(g.gate.join(", ")) : "none configured"}) passes on ${esc(g.dev_branch)}, ${esc(g.main_branch)} moves to it" ${busy || !promotable ? "disabled" : ""}>${busy ? `Release #${r.id} in progress` : `Promote ${esc(g.dev_branch)} → ${esc(g.main_branch)}`}</button>` : ""}
       <button data-p="${g.name}" data-a="${g.paused ? "resume" : "pause"}" title="Pause or resume this project's tasks">${g.paused ? "▶ Resume" : "❚❚ Pause"}</button>
-      ${g.direct_main ? `<span class="muted" title="Set by direct_main = true in the project's toml">Merges go straight to ${esc(g.main_branch)}</span>` : `<label title="New tasks start with &quot;Promote after merge&quot; ticked: once one merges into dev, the queue promotes dev to main, as the Promote button does. You can still untick it on a task. Tasks already queued keep theirs."><input type="checkbox" data-rel="${g.name}" ${g.auto_release ? "checked" : ""}> Promote after merge by default</label>`}
+      ${pr ? `<span class="muted" title="Set by flow = &quot;pr&quot; in the project's toml">Every task ends in a PR</span>` : g.direct_main ? `<span class="muted" title="Set by direct_main = true in the project's toml">Merges go straight to ${esc(g.main_branch)}</span>` : `<label title="New tasks start with &quot;Promote after merge&quot; ticked: once one merges into dev, the queue promotes dev to main, as the Promote button does. You can still untick it on a task. Tasks already queued keep theirs."><input type="checkbox" data-rel="${g.name}" ${g.auto_release ? "checked" : ""}> Promote after merge by default</label>`}
       <span style="flex:1"></span>${archiveBtn(g)}
     </div><div class="muted" style="font-size:12px">gate: ${g.gate.length ? esc(g.gate.join(", ")) : "none configured"}</div>` + archiveAskHtml(g) + (msg ? `<div class="muted" style="margin-top:8px;white-space:pre-wrap">${msg}</div>` : "") +
     `</div>` + deploysHtml(g) + projTasksHtml(g);
@@ -1735,15 +1749,21 @@ function dirtyHtml(g) {
   const us = g.uncommitted || [], dev = esc(g.dev_branch), open = g.senddev_open;
   if (!us.length) return "";
   // Send to dev lands this work on dev as a queued change, then clears it here. One at a time: an open one is linked.
+  if (prFlow(g)) {  // flow = "pr": they go onto a branch of their own, for a PR, like every task here
+    const btn = open ? `<a class="btn" data-task="${open}" title="Your changes are on their way to a PR. Open the task">Sending… #${open}</a>`
+      : `<button data-p="${esc(g.name)}" data-a="senddev" title="Queue a task that commits these changes onto a branch of its own from origin/${esc(g.main_branch)} and runs the gate. Then Open PR, as any branch task. Nothing is cleared here: once the PR merges and ${esc(g.main_branch)} moves, your copy matches it. A copy is kept at refs/ops/senddev-&lt;id&gt;.">Send uncommitted changes</button>`;
+    return dirtyLines(g, us) + `${btn}</div>`;
+  }
   const btn = open ? `<a class="btn" data-task="${open}" title="Your changes are being sent to ${dev}. Open the task">Sending to ${dev}… #${open}</a>`
     : `<button data-p="${esc(g.name)}" data-a="senddev" title="Queue a task that lands these changes on ${dev} through the gate, as any task. Once it has merged, the files that still match what was sent are cleared from your checkout. A copy is kept at refs/ops/senddev-&lt;id&gt;.">Send to ${dev}</button>`;
-  return `<div class="callout dirty"><div class="lines">` + us.map(u => {
+  return dirtyLines(g, us) + `${btn}</div>`;
+}
+const dirtyLines = (g, us) => `<div class="callout dirty"><div class="lines">` + us.map(u => {
     const more = u.count - u.paths.length, list = u.paths.join("\n") + (more > 0 ? `\n…and ${more} more` : "");
     return `<details data-k="dirty:${esc(u.repo)}"><summary title="${esc(list)}">${files(u.count)} changed in <span class="mono">${esc(u.repo)}</span>
-      ${u.count === 1 ? "is" : "are"} not on ${esc(g.dev_branch)} and won't be in any release${u.oldest ? ` (oldest change: ${day(u.oldest * 1000)})` : ""}</summary>
+      ${u.count === 1 ? "is" : "are"} not on ${esc(prFlow(g) ? g.main_branch : g.dev_branch)} and won't be in any ${prFlow(g) ? "PR" : "release"}${u.oldest ? ` (oldest change: ${day(u.oldest * 1000)})` : ""}</summary>
       <ul class="ahead mono">${u.paths.map(x => `<li>${esc(x)}</li>`).join("")}${more > 0 ? `<li class="muted">…and ${more} more</li>` : ""}</ul></details>`;
-  }).join("") + `</div>${btn}</div>`;
-}
+  }).join("") + `</div>`;
 // Work Send to dev took out of your checkout that is on dev but not yet in main: Promote brings it back.
 const sentHtml = g => { const ids = g.senddev_pending || [];
   return ids.length ? `<div class="callout">Sent from your checkout by ${ids.map(taskLink).join(", ")}: On ${esc(g.dev_branch)}, not released yet. Promote to get ${ids.length === 1 ? "it" : "them"} back here.</div>` : ""; };
@@ -3704,6 +3724,7 @@ function tdActions(it) {
       .concat(g.deploys && g.deploys.length ? tdPlay(g, "main") : [A("projects", "Open in Projects", {primary: 1})]);
     // Send to dev underneath. It reaches main by itself when its task promotes after merge (the project's default)
     case "Commit": return [g.senddev_open ? A("details:" + g.senddev_open, `Sending… #${g.senddev_open}`, {primary: 1, title: "Open the task sending these files"})
+      : prFlow(g) ? A("senddev", "Commit these", {primary: 1, title: `Commits these files onto a branch of their own for a PR against ${g.main_branch}, through the gate`})
       : A("senddev", "Commit these", {primary: 1, title: `Lands these files on ${g.direct_main || g.auto_release ? g.main_branch : g.dev_branch} through the gate, then clears them from your checkout`})];
     case "Read": return it.report ? [A("markreport", "Mark read", {primary: 1, title: "Done with it: take it off your list"}),
         A("report", "Open report", {title: `Read ${it.report.path} as on ${g.dev_branch || "dev"}. It stays on your list until you mark it read`}), A("details", "Details")]
@@ -3998,7 +4019,10 @@ function depStage(d) {
 function tdPipeline(g, busy, compact) {
   const r = g.release, rbusy = r && !["done", "failed", "cancelled"].includes(r.state), n = (g.ahead || []).length;
   const play = tdPlay(g, "dev").map(b => `<button class="pplay" data-ha="${esc(b.a)}" ${busy || b.disabled ? "disabled" : ""} title="${esc(b.title || "")}">${esc(b.label)}</button>`);
-  const promote = g.direct_main ? "" : `<span class="stg main"><b class="sn">${esc(g.dev_branch)} → ${esc(g.main_branch)}</b>${
+  const bw = branchOpenWords(g);
+  const promote = prFlow(g) ? `<span class="stg main" title="flow = &quot;pr&quot;: every task goes through a branch and a PR against ${esc(g.main_branch)}; no Promote"><b class="sn">PRs → ${esc(g.main_branch)}</b>${
+    bw ? `<span class="ss todo">${esc(bw)}</span>` : `<span class="ss ok">none open</span>`}</span>`
+    : g.direct_main ? "" : `<span class="stg main"><b class="sn">${esc(g.dev_branch)} → ${esc(g.main_branch)}</b>${
     rbusy ? `<a class="ss todo pulse" data-task="${r.id}" title="Open the release">Release #${r.id} in progress</a>`
     : n ? `<span class="ss todo">${n} ahead</span><button class="primary" data-ha="promote" ${busy ? "disabled" : ""} title="If the gate passes on ${esc(g.dev_branch)}, ${esc(g.main_branch)} moves to it">Promote</button>`
     : `<span class="ss ok">✓ in sync</span>`}</span>`;
