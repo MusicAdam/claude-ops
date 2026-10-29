@@ -384,6 +384,8 @@ A task with no branch and no Jira key works exactly as before, unless the projec
                                                                                              ▼
                          PRs open: poll every 2 min ─ CI red ─▶ needs you: Fix CI resumes the worker,
                                   │                              gate, push
+                                  │ per PR: awaiting bot review ─▶ addressing comments (worker, gate, push)
+                                  │         ─▶ awaiting human review (gh pr edit --add-reviewer)
                                   ▼ merged (on GitHub, or Merge here)
                          fetch, fast-forward your main to origin/main, dev takes it in ─▶ done once all merged
 ```
@@ -442,9 +444,42 @@ You click **Open PR** on the task (or run `opsd.py pr open <id>`).
   resumes the worker with the failed logs (`gh run view <run> --log-failed`, the last 200 lines). It commits, the
   gate runs, then the queue pushes (no rebase, no force). If CI turns green again by itself (a re-run, a push from
   GitHub), the task goes back to watching.
-- **A message sent to the task** works the same way: the worker resumes, the gate runs, the queue pushes. This is how
-  you pass on review comments by hand. On an `on branch` task it resumes the worker and ends `on branch` again.
-- The task card shows each PR: repo, `#number` as a link, CI and state, and its Merge button.
+- **A message sent to the task** works the same way: the worker resumes, the gate runs, the queue pushes. On an
+  `on branch` task it resumes the worker and ends `on branch` again.
+- The task card shows each PR: repo, `#number` as a link, CI, its review stage and state, and its Merge button.
+  The task list and Today show the same words (`#12 CI green, awaiting human review`).
+
+### Review round
+
+Each PR goes through one review round after it opens: the bot review, the worker addressing its comments, then
+human reviewers. In a workspace each PR runs its own round as it opens in `pr_order`. CI red still comes first:
+while a PR's CI is red the task needs you (Fix CI), and the round goes on once it isn't.
+
+1. **Awaiting bot review.** The 2-minute poll reads the PR's reviews (`gh pr view --json reviews,...`). It waits for
+   a review by any login in the repo-level toml key `pr_bot_reviewers` (default
+   `["copilot-pull-request-reviewer[bot]"]`; the `[bot]` ending is optional) submitted after the queue pushed the
+   PR. With `pr_review_comment` set (say `"@claude /pr-review"`), the queue posts it as a PR comment right after
+   opening, and a review by anyone but the PR's author counts too. It has to be a review, not a plain comment.
+   After `pr_bot_review_timeout` minutes (default 30) the queue goes on and logs
+   `#12: no bot review came within 30 min; going on`. With no bot reviewers and no comment it goes on at once.
+2. **Addressing comments.** The queue reads the PR's review threads and reviews (`gh api graphql`, reviewThreads
+   and reviews). Work is each unresolved thread whose last comment isn't the PR author's (yours: the queue's own
+   reply), and the text of each Changes requested review. With none, this stage is skipped. Else the worker
+   resumes on its branch, as for Fix CI, with each thread, its id and comments, and the commands to reply
+   (`gh api repos/<owner>/<name>/pulls/<n>/comments/<id>/replies`) and resolve (`resolveReviewThread`). It decides
+   each comment itself, without asking you: it changes the code where the comment is right, replies on each
+   thread with what it did or why not, and resolves the threads it fixed. Then the gate runs and the queue pushes
+   (no rebase, no force-push).
+3. **Awaiting human review.** The queue runs `gh pr edit <n> --add-reviewer` with the repo-level toml key
+   `pr_reviewers` (logins or `org/team`). There is no second bot round. If `pr_reviewers` is empty and GitHub has
+   nobody requested, the task needs you (`Pick reviewers for PR #12: <url>`): answer with the logins (comma
+   separated) and the queue asks them; or request reviewers on GitHub and the poll sees them; or set
+   `pr_reviewers` and Retry.
+4. **Later comments.** **Address comments** on the task (and `opsd.py pr address <id>`) runs stage 2 again on
+   demand, for the comments that came after the last round: unresolved threads, and every review's text (not only
+   Changes requested). Then the queue asks the reviewers again. Merging stays as it is.
+
+A PR opened before the review round existed skips it. A message to the task still passes on comments by hand.
 
 ### Merging
 
@@ -468,8 +503,8 @@ Both ways work:
 - `after`/`depends_on` on a branch task waits until all its PRs have merged (the task is done). The one exception is
   a task on the same branch, which waits only until the earlier one is `on branch`.
 
-Out of scope: reading or updating Jira tickets, reading review comments by itself, auto-merge, PRs others open,
-and any force-push or rebase after the first push.
+Out of scope: reading or updating Jira tickets, a second bot review round after addressing, auto-merge, PRs others
+open, and any force-push or rebase after the first push.
 
 ### Every task as a PR (`flow = "pr"`)
 
@@ -2054,7 +2089,8 @@ plain project, the root repo (`"."` in `repos`) for a workspace. A workspace wit
 - **What goes where.** The home toml (`~/.claude-ops/projects/<name>.toml`) keeps identity and machine
   settings: `title`, `repo`, `main_branch`, `dev_branch`, `worktrees`, `max_parallel`, `direct_main`, `flow`,
   `chat_mcp` and `[worker] env` (and `port_base`). The repo file may hold `repos`, `[worktree]` (`clone`, `setup`,
-  `setup_timeout`), `[[gate]]`, `[app]`, `[[deploy]]`, `branch_pattern`, `default_branch_pattern`, `pr_order`, `pr_merge`, `[worker] notes`
+  `setup_timeout`), `[[gate]]`, `[app]`, `[[deploy]]`, `branch_pattern`, `default_branch_pattern`, `pr_order`,
+  `pr_merge`, `pr_bot_reviewers`, `pr_review_comment`, `pr_bot_review_timeout`, `pr_reviewers`, `[worker] notes`
   and `[design] notes`. A home-only key in
   the repo file is ignored with a warning, on the project's card and in the daemon log.
 - **Which wins.** A key in the repo file replaces the home toml's whole: two `[[gate]]` lists are not merged,
@@ -2123,6 +2159,10 @@ branch_pattern = "{key}-{slug}"     # a Jira-key task's branch (see Branches and
 default_branch_pattern = "ops/{id}-{slug}"  # flow = "pr": the branch of a task given none; must have {id}
 pr_order = ["backend", "app"]      # a workspace's PRs open, and merge, in this order; default: all at once
 pr_merge = "squash"                # how Merge merges a PR: squash, merge or rebase
+pr_bot_reviewers = ["copilot-pull-request-reviewer[bot]"]   # whose review a new PR waits for (see Review round)
+pr_review_comment = "@claude /pr-review"   # optional: posted on a new PR to ask a review workflow for its review
+pr_bot_review_timeout = 30         # minutes to wait for the bot review, then go on
+pr_reviewers = ["alice", "org/team"]   # asked to review once the comments are addressed; empty: you pick
 
 [worktree]
 clone = ["Library"]                # APFS-cloned into each new worktree. A folder (a warm cache) is cloned once;
