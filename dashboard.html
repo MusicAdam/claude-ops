@@ -4,14 +4,23 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Claude Ops</title>
+<script>
+try { const t = localStorage.getItem("ops-theme"); if (t === "dark") document.documentElement.dataset.theme = t; } catch {}
+</script>
 <style>
 :root {
   color-scheme: dark;
-  /* Solarized dark (Ethan Schoonover), always. --muted is base0, not base00: base00 is under 3:1 on --panel. */
+  /* Solarized dark (Ethan Schoonover), the default theme. --muted is base0, not base00: base00 is under 3:1 on --panel. */
   --bg: #002b36; --panel: #073642; --ink: #93a1a1; --muted: #839496; --line: #1a5565;
   --accent: #268bd2; --ok: #859900; --warn: #b58900; --bad: #dc322f; --chip: #04323e;
   --on-accent: #fdf6e3;
   --mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+/* Plain neutral dark (GitHub-style), chosen in Settings > Appearance. --muted on --panel is above 3:1. */
+:root[data-theme="dark"] {
+  --bg: #0d1117; --panel: #161b22; --ink: #c9d1d9; --muted: #8b949e; --line: #30363d;
+  --accent: #2f81f7; --ok: #3fb950; --warn: #d29922; --bad: #f85149; --chip: #1c2128;
+  --on-accent: #ffffff;
 }
 * { box-sizing: border-box; }
 body { margin: 0; background: var(--bg); color: var(--ink);
@@ -97,6 +106,18 @@ label { color: var(--muted); display: inline-flex; gap: 6px; align-items: center
 .s-failed { color: var(--bad); font-weight: 600; }
 .s-cancelled { color: var(--muted); }
 .s-paused { color: var(--muted); font-weight: 600; }
+/* A task on a named branch (README: Branches and pull requests): waits for Open PR, then its PRs are watched */
+.s-on_branch { color: var(--warn); font-weight: 600; }
+.s-pr { color: var(--accent); }
+.btag { font-family: var(--mono); font-size: 11px; }
+.prs { margin: 8px 0; }
+.prs .prrow { display: flex; flex-wrap: wrap; gap: 4px 8px; align-items: baseline; padding: 3px 0; border-bottom: 1px solid var(--line); }
+.prs .prrow:last-of-type { border-bottom: 0; }
+.prs .prrow .grow { flex: 1; }
+.prs .prrow button { padding: 1px 10px; font-size: 12px; }
+.prs .prnote { font-size: 12px; margin: 0 0 4px; white-space: pre-wrap; }
+.ci-green { color: var(--ok); } .ci-red { color: var(--bad); font-weight: 600; } .ci-pending { color: var(--muted); }
+.task .sub .openpr { font-size: 11px; padding: 0 6px; margin-left: 4px; }
 .pulse::before { content: "●"; margin-right: 4px; animation: p 1.4s infinite; }
 @keyframes p { 50% { opacity: .25; } }
 .feed { font-family: var(--mono); font-size: 12px; background: var(--bg); border: 1px solid var(--line);
@@ -966,6 +987,13 @@ details.tdparked .tditem { opacity: .8; }
       <h2>Spent</h2>
       <div id="spent"></div>
     </div>
+    <div class="card settings">
+      <h2>Appearance</h2>
+      <label><span>Theme</span><select id="theme">
+          <option value="solarized">Solarized dark</option>
+          <option value="dark">Dark</option></select>
+        <span class="why">How the dashboard looks in this browser. Saved here only: other devices keep their own.</span></label>
+    </div>
     <div class="card settings dangerzone">
       <h2>Danger zone</h2>
       <div id="restart"></div>
@@ -1068,6 +1096,7 @@ details.tdparked .tditem { opacity: .8; }
         <label id="tprojwrap">Project <select id="tproj"></select></label>
         <label>Priority <select id="prio"><option value="0">normal</option><option value="1">high</option><option value="-1">low</option></select></label>
         <label>After # <input id="after" style="width:60px" placeholder="—"></label>
+        <label title="Optional. Work on this branch and end in GitHub pull requests against main, not a merge into dev. A Jira key (BALL-123) names the branch from the key and the title; anything else is the branch name (README: Branches and pull requests)">Branch or Jira key <input id="tbranch" style="width:200px" placeholder="BALL-123 or feature/login" autocomplete="off" spellcheck="false"></label>
         <label title="The model its worker starts on. Default: the Tasks model setting (per kind, on the Settings tab)">Model <select id="tmodel"><option value="">Default</option><option value="opus">Opus</option><option value="sonnet">Sonnet</option><option value="haiku">Haiku</option></select></label>
         <label title="How hard its worker thinks (--effort). Default: the Effort setting on the Settings tab">Effort <select id="teffort"><option value="">Default</option><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option><option value="xhigh">Extra high</option><option value="max">Max</option></select></label>
         <label title="When it may start. It waits in the queue until then, and others can queue after it. After next reset: a minute after the usage window resets (README: Start later)">Start <select id="tstart"><option value="">now</option><option value="at">at…</option><option value="reset">after next reset</option></select> <input type="datetime-local" id="tstartat" class="hidden"></label>
@@ -1246,7 +1275,51 @@ const took = (t, now) => t.started ? ago(t.started, t.finished || now) : "";
 const pics = h => h.replace(/\[image: [^\]\n]*\/images\/([\w-]+\.(?:png|jpg|gif|webp))\]\n?/g,
   (_, n) => `<a href="/api/images/${n}" target="_blank"><img class="att" src="/api/images/${n}" alt="${n}"></a>`);
 const LABEL = {queued:"queued", running:"working", gating:"checking", merging:"merging", needs_input:"needs you",
-               review:"review", done:"done", failed:"failed", cancelled:"cancelled", paused:"paused"};
+               review:"review", done:"done", failed:"failed", cancelled:"cancelled", paused:"paused",
+               on_branch:"on branch", pr:"PRs open"};
+// ---- Branches and pull requests (README): a task on a named branch, or one named from a Jira key, ends "on branch"
+// (committed, nothing pushed); Open PR pushes it and opens its PRs, which the queue then watches until they merge.
+const isBranchTask = t => !!(t && (t.jira || t.target));
+const PR_FIX = {"CI failed": ["fix-ci", "Fix CI"], "PR closed": ["pr-retry", "Retry"],
+                "can't open PRs": ["pr-open", "Retry"], "main can't follow origin": ["pr-open", "Retry"]};
+// The task's next PR step as [action, label]: Open PR on its branch, or what a PR problem that needs you asks for
+const prStep = t => t.state === "on_branch" ? ["pr-open", "Open PR"]
+  : t.state === "needs_input" && isBranchTask(t) ? PR_FIX[t.phase] || null : null;
+const PR_STEP_TIP = {"pr-open": "Push the branch and open a pull request against main in each repo it commits to",
+                     "fix-ci": "Resume the worker with the failed CI logs; it commits a fix, the gate runs, then the queue pushes",
+                     "pr-retry": "Reopen the closed pull request and keep watching it"};
+// A message to the task resumes its worker on the branch; the gate runs and the queue pushes to its open PRs
+const prMsg = t => isBranchTask(t) && (["on_branch", "pr"].includes(t.state)
+  || (t.state === "needs_input" && ["CI failed", "PR closed"].includes(t.phase)));
+// GET /api/tasks/<id> has no prs: the list's copy of the task has them
+const prsOf = t => t.prs !== undefined ? t.prs : ((state && state.tasks.find(x => x.id === t.id)) || {}).prs || null;
+// The branch (and the Jira key, when the branch name doesn't already carry it), small, for the list and the page
+const branchTag = t => isBranchTask(t) ? `<span class="btag" title="Works on this branch and ends in pull requests against main, not a merge into dev">⎇ ${esc(t.branch || t.target || "")}${
+  t.jira && !String(t.branch || "").includes(t.jira) ? ` · ${esc(t.jira)}` : ""}</span>` : "";
+// One line of words for the list: each PR's number (or waiting), then its CI while open, else its state
+const prsShort = prs => (prs || []).map(x => `${x.name ? x.name + " " : ""}${x.number ? "#" + x.number : "waiting"}${
+  x.state === "OPEN" ? ` CI ${x.ci}` : x.state === "waiting" ? "" : " " + String(x.state).toLowerCase()}`).join(" · ");
+// The PR list on the task page: one row per PR, with its Merge button (enabled when the daemon says it may go),
+// gh's last merge error and any warning under it, and Merge all when two or more haven't merged.
+function prsHtml(t, prs, buttons) {
+  if (!prs || !prs.length) return "";
+  const can = ["pr", "needs_input"].includes(t.state), left = prs.filter(x => x.state !== "MERGED");
+  const stCls = {MERGED: "s-done", CLOSED: "err", OPEN: ""};
+  const rows = prs.map(x => {
+    const opened = x.state !== "waiting" && x.number;
+    const num = !opened ? `<span class="muted" title="Opens once the PR before it in pr_order has CI green">waiting</span>`
+      : x.url ? `<a href="${esc(x.url)}" target="_blank" rel="noopener">#${x.number}</a>` : `#${x.number}`;
+    const failing = x.ci === "red" && (x.failing || []).length ? ` <span class="ci-red">(failing: ${x.failing.map(f =>
+      f.url ? `<a href="${esc(f.url)}" target="_blank" rel="noopener">${esc(f.name)}</a>` : esc(f.name)).join(", ")})</span>` : "";
+    const ci = opened && x.state === "OPEN" ? `<span class="ci-${esc(x.ci || "pending")}">CI ${esc(x.ci || "pending")}</span>${failing}` : "";
+    const when = x.merged_at ? `merged ${ago(x.merged_at, state.now)} ago` : x.checked_at && x.state === "OPEN" ? `checked ${ago(x.checked_at, state.now)} ago` : "";
+    const merge = buttons && x.state === "OPEN" ? `<span title="${esc(x.merge ? "Merge it on GitHub (gh pr merge)" : x.merge_why || "Can't merge yet")}"><button data-act="pr-merge" data-pr="${x.id}" ${x.merge ? "" : "disabled"}>Merge</button></span>` : "";
+    return `<div class="prrow">${x.name ? `<b>${esc(x.name)}</b>` : ""}${num}${ci}${opened ? `<span class="${stCls[x.state] || ""}">${esc(x.state)}</span>` : ""}<span class="grow muted">${when}</span>${merge}</div>`
+      + (x.error ? `<div class="prnote err">${esc(x.error)}</div>` : "") + (x.warning ? `<div class="prnote s-review">⚠ ${esc(x.warning)}</div>` : "");
+  }).join("");
+  const all = buttons && left.length >= 2 ? `<div class="row"><button data-act="pr-merge-all" ${can && prs.some(x => x.state === "OPEN") ? "" : "disabled"} title="Merge them in order, each once the one before it has landed and its own CI is green">Merge all</button></div>` : "";
+  return `<div class="prs"><div class="muted">Pull request${prs.length === 1 ? "" : "s"}</div>${rows}${all}</div>`;
+}
 
 async function api(path, body) {
   // A read that hangs would hold its poll forever (see single below), so give up on it after 20 seconds.
@@ -1302,8 +1375,11 @@ async function loadState() {
   try { s = await api("/api/state"); } catch (e) { $("#hdr").innerHTML = `<span class="err">${esc(e.message)}</span>`; renderRestart(); return; }
   // Bound but still loading projects: keep what we last drew, and say why nothing moves.
   if (s.starting) { $("#hdr").innerHTML = `<span class="err">claude-ops is starting up…</span>`; renderRestart(); return; }
-  if (RESTART.at && s.pid !== RESTART.pid) RESTART.at = 0;  // the new daemon answers: the button comes back
+  if (RESTART.at && s.pid !== RESTART.pid) {  // the new daemon answers: "Restarted ✓", then the button comes back
+    RESTART.at = 0; RESTART.ok = Date.now(); setTimeout(renderRestart, 5100);
+  }
   state = s;
+  tdAddOpenPR(s);
   tdDropGone(s);
   render();
   if (sel) loadDetail(sel);
@@ -1312,35 +1388,46 @@ async function loadState() {
 const refresh = single(loadState);
 
 // Settings' Danger zone: Restart claude-ops. The first click asks again (for about 5 s, or until the pointer
-// leaves); the second runs `opsctl restart` at once. Then "Restarting…" until a daemon with a new pid answers.
-const RESTART = {confirm: false, timer: 0, at: 0, pid: 0, err: ""};
-function renderRestart() {
-  const el = $("#restart");
-  if (RESTART.at) {
-    const late = Date.now() - RESTART.at > 60000;
-    put(el, late ? `<span class="err">No answer: see ~/.claude-ops/restart.log and <code>opsctl log</code></span>`
-                 : `<span class="muted">Restarting…</span>`);
-    return;
-  }
-  const deploys = (state && state.running_deploys) || [];
-  const warn = RESTART.confirm && deploys.length
+// leaves); the second runs `opsctl restart` at once. Then "Restarting…" until a daemon with a new pid answers,
+// and "Restarted ✓" for 5 s. The button is built once and only relabelled: rebuilding it on the first click
+// removed the focused button, Chrome fired blur on it, and that reset the confirm before you could click again.
+const RESTART = {confirm: false, timer: 0, sending: false, at: 0, pid: 0, ok: 0, err: ""};
+// What the restart area shows for R at time now: the button's label, whether it is disabled, and the note's html.
+function restartView(R, deploys, now) {
+  if (R.sending || (R.at && now - R.at <= 60000)) return {label: "Restarting…", disabled: true, note: ""};
+  if (R.at) return {label: "Restart claude-ops", disabled: false,
+                    note: `<span class="err">No answer: see ~/.claude-ops/restart.log and <code>opsctl log</code></span>`};
+  if (R.ok && now - R.ok < 5000) return {label: "Restarted ✓", disabled: true, note: ""};
+  const warn = R.confirm && deploys.length
     ? `${deploys.length === 1 ? "deploy" : "deploys"} ${deploys.map(id => "#" + id).join(", ")} will fail` : "";
-  if (!put(el, `<button class="danger" id="restartbtn">${RESTART.confirm ? "Click again to restart" : "Restart claude-ops"}</button>`
-      + (warn ? `<span class="err">${esc(warn)}</span>` : "") + (RESTART.err ? `<span class="err">${esc(RESTART.err)}</span>` : ""))) return;
-  const b = $("#restartbtn");
-  const reset = () => { clearTimeout(RESTART.timer); if (RESTART.confirm) { RESTART.confirm = false; renderRestart(); } };
-  b.onmouseleave = b.onblur = reset;
-  b.onclick = async () => {
-    RESTART.err = "";
-    if (!RESTART.confirm) {
-      RESTART.confirm = true; RESTART.timer = setTimeout(reset, 5000); renderRestart(); return;
-    }
-    clearTimeout(RESTART.timer); RESTART.confirm = false; b.disabled = true;
-    try { await api("/api/restart", {}); }
-    catch (e) { RESTART.err = e.message; renderRestart(); return; }
-    RESTART.at = Date.now(); RESTART.pid = state && state.pid;
-    renderRestart();
-  };
+  return {label: R.confirm ? "Click again to restart" : "Restart claude-ops", disabled: false,
+          note: (warn ? `<span class="err">${esc(warn)}</span>` : "") + (R.err ? `<span class="err">${esc(R.err)}</span>` : "")};
+}
+function renderRestart() {
+  if (put($("#restart"), `<button class="danger" id="restartbtn"></button><span id="restartnote"></span>`)) {
+    const b = $("#restartbtn");
+    const reset = () => { clearTimeout(RESTART.timer); if (RESTART.confirm) { RESTART.confirm = false; renderRestart(); } };
+    b.onmouseleave = b.onblur = reset;
+    b.onclick = async () => {
+      if (RESTART.sending || (RESTART.at && Date.now() - RESTART.at <= 60000)) return;
+      RESTART.err = ""; RESTART.ok = 0; RESTART.at = 0;
+      if (!RESTART.confirm) {
+        RESTART.confirm = true; RESTART.timer = setTimeout(reset, 5000); renderRestart(); return;
+      }
+      clearTimeout(RESTART.timer); RESTART.confirm = false; RESTART.sending = true;
+      renderRestart();  // "Restarting…" now, not when the request returns
+      try { await api("/api/restart", {}); RESTART.at = Date.now(); RESTART.pid = state && state.pid; }
+      catch (e) { RESTART.err = e.message; }
+      RESTART.sending = false;
+      renderRestart();
+    };
+  }
+  // Relabel in place: the button keeps focus and its listeners, and an unchanged view touches nothing.
+  const v = restartView(RESTART, (state && state.running_deploys) || [], Date.now());
+  const b = $("#restartbtn"), note = $("#restartnote");
+  if (b.textContent !== v.label) b.textContent = v.label;
+  if (b.disabled !== v.disabled) b.disabled = v.disabled;
+  if (note.innerHTML !== v.note) note.innerHTML = v.note;
 }
 
 // Draw everything from the state we have. A click that changes the view calls this at once, then refresh.
@@ -1409,7 +1496,7 @@ function renderHeader() {
   const s = state.settings, ts = state.tasks.filter(t => inView(t.project));
   const n = st => ts.filter(t => st.includes(t.state)).length;
   const tcost = ts.reduce((a, t) => a + (t.cost || 0), 0), dcost = state.design_cost || 0;
-  const ask = n(["needs_input"]), rev = n(["review"]), bad = n(["failed"]), need = ask + rev + bad;
+  const ask = n(["needs_input"]), rev = n(["review"]), bad = n(["failed"]), opr = n(["on_branch"]), need = ask + rev + bad + opr;
   const plural = (k, one, many) => `${k} ${k === 1 ? one : many}`;
   const rsn = (state.research && state.research.active) || 0;  // research runs and chat turns: no task slot
   // One chip per number: a word next to it, a tooltip saying what it counts, and colour only when it wants you.
@@ -1423,9 +1510,9 @@ function renderHeader() {
       `${plural(n(["queued"]), "task waits", "tasks wait")} for a free worker${pfs.length ? ` in ${pfTitles()}` : ""}.`),
     chip(need ? "alert" : "zero", need ? `<span data-need><b>${need}</b> need${need === 1 ? "s" : ""} you</span>` : `<b>0</b> need you`,
       need ? [ask && plural(ask, "question to answer", "questions to answer"), rev && plural(rev, "task to review", "tasks to review"),
-              bad && plural(bad, "failed task", "failed tasks")].filter(Boolean).join(", ") + ". They stay put until you act."
+              bad && plural(bad, "failed task", "failed tasks"), opr && plural(opr, "branch to open PRs for", "branches to open PRs for")].filter(Boolean).join(", ") + ". They stay put until you act."
           + (need > 1 ? " Click to go to each in turn." : " Click to go to it.")
-        : "Nothing waits on you: no question, review or failure."),
+        : "Nothing waits on you: no question, review, failure or branch to open PRs for."),
     n(["paused"]) ? chip("", `<b>${n(["paused"])}</b> paused`, `${plural(n(["paused"]), "task is", "tasks are")} paused. Resume to put them back in the queue.`) : "",
   ].join(""));
   put($("#spent"), `<div class="big">$${(tcost + dcost).toFixed(2)}</div><div class="muted">Claude usage, priced at API rates. The Analyze tab shows where it went.</div>
@@ -1522,7 +1609,7 @@ const clock = ts => { const d = new Date(ts * 1000), today = d.toDateString() ==
     d.toLocaleTimeString([], {hour: "numeric", minute: "2-digit"}).replace(/\s*([AP])M$/i, (_, x) => ` ${x.toLowerCase()}m`); };
 const trainWords = tr => tr.by * 1000 <= Date.now() ? "promotes within a minute" : `promotes when the queue is quiet, or by ${clock(tr.by)}`;
 const trainOf = t => { const tr = t.state === "done" && (P(t.project).train || null); return tr && tr.ids.includes(t.id) ? tr : null; };
-const LIVE = ["running", "gating", "merging"], NEEDS = ["needs_input", "review", "failed"];
+const LIVE = ["running", "gating", "merging"], NEEDS = ["needs_input", "review", "failed", "on_branch"];
 // The focused project is the one expanded in the project list. Clicking a task focuses its project.
 function setFocus(name) {
   focus = name || "";
@@ -2014,8 +2101,9 @@ function selectTask(id) {
 
 function renderList() {
   const groups = [
-    ["Needs you", ["needs_input", "review", "failed"]],
+    ["Needs you", ["needs_input", "review", "failed", "on_branch"]],
     ["In progress", ["running", "gating", "merging"]],
+    ["PRs open", ["pr"]],
     ["Paused", ["paused"]],
     ["Queued", ["queued"]],
     ["Finished", ["done", "cancelled"]],
@@ -2030,6 +2118,7 @@ function renderList() {
       const live = ["running", "gating", "merging"].includes(t.state);
       const sub = [
         pf ? "" : `<span class="ptag">${esc(P(t.project).title)}${archivedP(t.project) ? " (archived)" : ""}</span>`,
+        branchTag(t),
         t.depends_on ? `after #${t.depends_on}` : "",
         t.start_words ? `${esc(t.start_words)}<button class="startnow" data-start="${t.id}" title="Start it as soon as the queue can, in its normal place">Start now</button>` : "",
         t.kind === "release" || t.kind === "deploy" ? `<span class="ktag">${t.kind}</span>` : t.kind === "senddev" ? `<span class="ktag">send to dev</span>` : "",
@@ -2043,7 +2132,7 @@ function renderList() {
         live ? `${took(t, now)} running` : t.finished ? `${ago(t.finished, now)} ago${t.started ? ` · took ${took(t, now)}` : ""}`
           : t.started && t.state !== "queued" ? `started ${took(t, now)} ago` : `queued ${ago(t.created, now)} ago`,
         t.cost ? `$${t.cost.toFixed(2)}` : "",
-      ].filter(Boolean).join(" · ");
+      ].filter(Boolean).join(" · ") + (prStep(t) ? `<button class="openpr primary" data-prstep="${t.id}" data-a="${prStep(t)[0]}" title="${esc(PR_STEP_TIP[prStep(t)[0]] || "")}">${prStep(t)[1]}</button>` : "");
       return `<div class="task ${sel === t.id ? "sel" : ""}" data-id="${t.id}">
         <div class="top">${tid(t.id)}<span class="title">${esc(t.title)}</span>
         <span class="badge s-${t.state} ${live ? "pulse" : ""}">${LABEL[t.state] || t.state}</span></div>
@@ -2054,6 +2143,9 @@ function renderList() {
   document.querySelectorAll(".task").forEach(el => el.onclick = () => selectTask(+el.dataset.id));
   document.querySelectorAll(".task [data-start]").forEach(b => b.onclick = e => {
     e.stopPropagation(); api(`/api/tasks/${b.dataset.start}/start-now`, {}).then(refresh, err => alert(err.message)); });
+  document.querySelectorAll(".task [data-prstep]").forEach(b => b.onclick = e => {
+    e.stopPropagation(); b.disabled = true;
+    api(`/api/tasks/${b.dataset.prstep}/${b.dataset.a}`, {}).then(refresh, err => { b.disabled = false; alert(err.message); }); });
 }
 
 // A small tag when the task runs, or will run, on something other than Opus: so a trial of Sonnet tasks stands out.
@@ -2083,6 +2175,8 @@ function nowLine(t, now) {
   else if (t.state === "review") { text = first(t.summary) || "waiting for your review"; cls = ""; }
   else if (t.state === "failed") { text = first(t.error); cls = "err"; }
   else if (t.state === "done") text = first(t.summary);
+  else if (t.state === "on_branch") { text = first(t.summary) || "on its branch, nothing pushed: Open PR when you are ready"; cls = ""; }
+  else if (t.state === "pr") text = prsShort(t.prs) || "opening its pull requests";
   return text ? `<div class="now ${cls}" title="${esc(text)}">${h || esc(text)}</div>` : "";
 }
 
@@ -2108,13 +2202,15 @@ async function loadDetail(id, fresh) {
   const proven = t.proof || t.proof_report;  // with a video or report to watch, Approve & merge leads
   if (t.state === "review") actions = (t.can_play ? btn("play", "▶ Try this build", proven ? "" : "primary") : "") + btn("approve", "Approve & merge", proven ? "primary" : "")
     + (t.proof_report ? btn("proofreport", "Open report") : "");
+  const ps = prStep(t), pm = prMsg(t);
+  if (ps) actions += `<button class="primary" data-act="${ps[0]}" title="${esc(PR_STEP_TIP[ps[0]] || "")}">${ps[1]}</button>`;
   if (t.start_words) actions += btn("start-now", "▶ Start now", "primary");
   if (["queued", "running", "gating"].includes(t.state)) actions += btn("pause", "❚❚ Pause");
   if (t.state === "paused") actions += btn("resume", "▶ Resume", "primary");
   if (["failed", "cancelled"].includes(t.state)) actions += btn("retry", "Retry") + btn("retryafter", "Retry after…");
   const ra = RA && RA.where === "detail" && RA.id === t.id && ["failed", "cancelled"].includes(t.state);
   if (!["done", "cancelled"].includes(t.state)) actions += btn("cancel", "Cancel", "danger");
-  if ((t.kind === "task" || t.kind === "senddev") && !P(t.project).direct_main && !["done", "failed", "cancelled"].includes(t.state))
+  if ((t.kind === "task" || t.kind === "senddev") && !P(t.project).direct_main && !isBranchTask(t) && !["done", "failed", "cancelled"].includes(t.state))
     actions += `<label title="Once it merges into dev, promote dev to main, as the Promote button does"><input type="checkbox" data-act="release" ${t.auto_release ? "checked" : ""}> Promote after merge</label>`;
 
   const html = `
@@ -2124,10 +2220,11 @@ async function loadDetail(id, fresh) {
     ${timeLine(t, live)}
     ${t.start_words ? `<div class="muted" style="margin:4px 0">${esc(t.start_words)}</div>` : ""}
     ${t.state === "queued" && (archivedP(t.project) || t.wait) ? `<div class="muted" style="margin:4px 0">${esc(archivedP(t.project) ? "archived project: restore it to run this" : t.wait)}</div>` : ""}
-    <div class="muted mono" style="margin:4px 0">${esc(P(t.project).title)} · ${esc(t.branch || "")}${t.merged ? ` → ${esc(t.kind === "release" || P(t.project).direct_main ? P(t.project).main_branch || "main" : P(t.project).dev_branch || "dev")} ${esc(t.merged_show || shas(t.merged))}` : ""}${t.kind === "release" && t.base && !t.merged ? `checking ${esc(t.base_show || shas(t.base))}` : ""}${t.kind === "deploy" && t.base ? `deploying ${esc(t.base_show || shas(t.base))}` : ""}${t.rounds ? ` · fix rounds: ${t.rounds}` : ""}${t.session_model ? ` · model: ${esc(t.session_model)}` : t.model ? ` · model: ${esc(t.model)} (not started)` : ""}${t.effort ? ` · effort: ${esc(t.effort)}` : ""}</div>
+    <div class="muted mono" style="margin:4px 0">${esc(P(t.project).title)} · ${esc(t.branch || "")}${t.jira && !String(t.branch || "").includes(t.jira) ? ` · ${esc(t.jira)}` : ""}${isBranchTask(t) ? " · PRs against " + esc(P(t.project).main_branch || "main") : ""}${t.merged ? ` → ${esc(t.kind === "release" || P(t.project).direct_main || isBranchTask(t) ? P(t.project).main_branch || "main" : P(t.project).dev_branch || "dev")} ${esc(t.merged_show || shas(t.merged))}` : ""}${t.kind === "release" && t.base && !t.merged ? `checking ${esc(t.base_show || shas(t.base))}` : ""}${t.kind === "deploy" && t.base ? `deploying ${esc(t.base_show || shas(t.base))}` : ""}${t.rounds ? ` · fix rounds: ${t.rounds}` : ""}${t.session_model ? ` · model: ${esc(t.session_model)}` : t.model ? ` · model: ${esc(t.model)} (not started)` : ""}${t.effort ? ` · effort: ${esc(t.effort)}` : ""}</div>
     ${t.question ? `<div class="callout"><b>Question:</b> ${esc(t.question)}</div>
       <textarea id="answer" placeholder="Your answer (drop or paste screenshots to attach them)" style="min-height:70px"></textarea>
       <div class="row">${btn("answer", "Send answer", "primary")}</div>` : ""}
+    ${prsHtml(t, prsOf(t), true)}
     ${t.state === "review" ? proofHtml(t, t.can_play) : ""}
     ${reviewHtml(t)}
     ${t.state === "review" ? `<textarea id="feedback" placeholder="Not right? Say what to change (drop or paste screenshots to attach them)" style="min-height:60px;margin-top:10px"></textarea>
@@ -2136,16 +2233,18 @@ async function loadDetail(id, fresh) {
     ${t.error ? `<div class="callout bad"><pre class="mono">${esc(t.error)}</pre></div>` : ""}
     <div class="row">${actions}</div>
     ${ra ? raBox(RA) : ""}
-    ${t.can_steer || t.can_chat || t.chat.length ? `<details data-k="chat" open><summary>${t.can_steer || t.chat_full ? "Talk to the worker" : "Ask the worker"}</summary>
+    ${t.can_steer || t.can_chat || pm || t.chat.length ? `<details data-k="chat" open><summary>${t.can_steer || t.chat_full || pm ? "Talk to the worker" : "Ask the worker"}</summary>
       <div class="tchat">${t.chat.map(m => m.role === "assistant" ? `<div class="msg">${md(m.text, undefined, links)}</div>`
           : `<div class="msg user">${userMd(m.text, links)}${m.role === "steer" ? `<div class="note">${steerNote(t, m)}</div>` : ""}</div>`).join("")}
         ${t.chat_live ? `<div class="live"><span class="pulse s-running">Claude is thinking</span>${t.chat_live.map(l => `<div>  ${esc(l)}</div>`).join("")}</div>` : ""}</div>
       ${t.state === "paused" && t.can_chat ? `<textarea id="ask" placeholder="${t.chat_full ? "Chat with the worker now: ask, or have it change things in its worktree (it commits on the task's branch)" : "Ask about this work now (read-only)"}, or send a message the worker gets when you resume the task. Drop or paste screenshots to attach them. (Enter chats now, Shift+Enter adds a line)" style="min-height:60px"></textarea>
         <div class="row">${t.chat_live ? btn("stopask", "Stop") : btn("ask", t.chat_full ? "Chat now" : "Ask", "primary")}${btn("steer", "Send when it resumes")}</div>`
+      : pm && !t.can_chat ? `<textarea id="ask" placeholder="Message the worker, e.g. review comments to pass on: it resumes on ${esc(t.branch || "the branch")} with your message, commits, the gate runs${t.state === "on_branch" ? ", and the task ends on its branch again" : ", then the queue pushes to its pull request"}. Drop or paste screenshots to attach them. (Enter sends, Shift+Enter adds a line)" style="min-height:60px"></textarea>
+        <div class="row">${btn("steer", "Send", "primary")}</div>`
       : t.can_steer ? `<textarea id="ask" placeholder="Steer the worker: change direction, add a requirement, or ask what it is doing. It reads your message after its current step. Drop or paste screenshots to attach them. (Enter sends, Shift+Enter adds a line)" style="min-height:60px"></textarea>
         <div class="row">${btn("steer", "Send", "primary")}</div>`
       : t.can_chat ? `<textarea id="ask" placeholder="${t.chat_full ? "Chat with the worker: ask why it did something, or have it fix, test or change things. It works in the task's worktree with its full tools and commits on the task's branch. " + ({review: "Approve merges it.", needs_input: "Send answer resumes the task.", failed: "Retry runs the task again.", cancelled: "Retry runs the task again.", paused: "Resume continues the task."}[t.state] || "") : "Ask about this work: why it did something, how it works, what it tested. This task is finished and its worktree is gone, so Claude reads the code, and can queue a follow-up task for a change."} Drop or paste screenshots to attach them. (Enter sends, Shift+Enter adds a line)" style="min-height:60px"></textarea>
-        <div class="row">${t.chat_live ? btn("stopask", "Stop") : btn("ask", t.chat_full ? "Send" : "Ask", "primary")}</div>` : ""}</details>` : ""}
+        <div class="row">${t.chat_live ? btn("stopask", "Stop") : btn("ask", t.chat_full ? "Send" : "Ask", "primary")}${pm ? `<button data-act="steer" title="Resume the worker on the branch with this message: it commits, the gate runs, then the queue pushes to the pull request">Send to the worker</button>` : ""}</div>` : ""}</details>` : ""}
     <details data-k="body" ${t.state === "queued" ? "open" : ""}><summary>Task description</summary><pre>${pics(esc(t.body))}</pre></details>
     ${t.kind === "deploy" ? "" : `<details data-k="feed" open><summary>Worker activity</summary>
       <div class="feed" id="feed">${t.activity.map(a => `<div class="${a.k}">${a.k === "tool" ? "  " : ""}${esc(a.t)}</div>`).join("") || '<span class="muted">nothing yet</span>'}</div></details>`}
@@ -2174,14 +2273,14 @@ async function loadDetail(id, fresh) {
     const was = same && scrolls.find(s => s[0] === (el.id || el.className));
     el.scrollTop = !was || was[2] ? el.scrollHeight : was[1];
   }
-  document.querySelectorAll("#detail [data-act]").forEach(b => b.onclick = () => b.dataset.act === "proofreport" ? proofReportOpen(t.id, t.title) : act(t.id, b.dataset.act));
+  document.querySelectorAll("#detail [data-act]").forEach(b => b.onclick = () => b.dataset.act === "proofreport" ? proofReportOpen(t.id, t.title) : act(t.id, b.dataset.act, b.dataset.pr));
   box.querySelectorAll("a.origin").forEach(a => a.onclick = () => openOrigin(t.origin));
   document.querySelectorAll("#detail textarea").forEach(el => { el.onfocus = () => typing = true; el.onblur = () => typing = !!el.value; });
   if (ra) {
     box.querySelectorAll(".rabox input[data-fld]").forEach(el => { el.onfocus = () => typing = true; el.onblur = () => typing = !!el.value; });
     raWire(box.querySelector(".rabox"), RA, () => detailRaGo(t.id), () => { RA = null; typing = false; loadDetail(t.id); });
   }
-  const ask = $("#ask"); if (ask) ask.onkeydown = e => { if (sendKey(e)) { e.preventDefault(); act(t.id, t.can_steer && !(t.state === "paused" && t.can_chat) ? "steer" : "ask"); } };
+  const ask = $("#ask"); if (ask) ask.onkeydown = e => { if (sendKey(e)) { e.preventDefault(); act(t.id, (t.can_steer || (pm && !t.can_chat)) && !(t.state === "paused" && t.can_chat) ? "steer" : "ask"); } };
 }
 
 // A task or chat another project's session sent: who sent it, as a link to that task or chat.
@@ -2232,13 +2331,14 @@ async function detailRaGo(id) {
   try { await raSend(r); RA = null; typing = false; refresh(); }
   catch (e) { r.busy = false; $("#actmsg").textContent = e.message; }
 }
-async function act(id, a) {
+async function act(id, a, pr) {
   if (a === "retryafter") { RA = RA && RA.where === "detail" && RA.id === id ? null : raNew(id, "detail"); typing = false; return loadDetail(id); }
   const body = {};
   if (a === "answer") { body.answer = $("#answer").value.trim(); if (!body.answer) return; }
   if (a === "reject") { body.feedback = $("#feedback").value.trim(); if (!body.feedback) return; }
   if (a === "release") body.on = $("#detail [data-act=release]").checked ? 1 : 0;
   if (a === "ask" || a === "steer") { body.text = $("#ask").value.trim(); if (!body.text) return; }
+  if (a === "pr-merge") body.pr = +pr;
   if (a === "cancel" && !document.getElementById("actmsg").dataset.armed) {
     const m = document.getElementById("actmsg"); m.dataset.armed = 1; m.textContent = "Click Cancel again to stop this task."; return;
   }
@@ -2254,8 +2354,9 @@ async function submit() {
     if (!project) throw new Error("pick a project");
     const start = $("#tstart").value, not_before = start === "at" ? $("#tstartat").value : start;
     if (start === "at" && !not_before) throw new Error("pick when it starts");
-    const r = await api("/api/tasks", {project, body, priority: +$("#prio").value, hold: $("#hold").checked ? 1 : 0, release: $("#autorel").checked ? 1 : 0, depends_on: $("#after").value.trim(), model: $("#tmodel").value, effort: $("#teffort").value, ...(not_before ? {not_before} : {})});
-    $("#body").value = ""; $("#after").value = ""; $("#tmodel").value = ""; $("#teffort").value = ""; $("#tstart").value = ""; $("#tstartat").value = ""; $("#tstartat").classList.add("hidden"); $("#formmsg").textContent = ""; delete $("#autorel").dataset.k; sel = r.id; setFocus(project); refresh();
+    const branch_or_jira = $("#tbranch").value.trim();
+    const r = await api("/api/tasks", {project, body, priority: +$("#prio").value, hold: $("#hold").checked ? 1 : 0, release: $("#autorel").checked ? 1 : 0, depends_on: $("#after").value.trim(), model: $("#tmodel").value, effort: $("#teffort").value, ...(not_before ? {not_before} : {}), ...(branch_or_jira ? {branch_or_jira} : {})});
+    $("#body").value = ""; $("#after").value = ""; $("#tbranch").value = ""; $("#tmodel").value = ""; $("#teffort").value = ""; $("#tstart").value = ""; $("#tstartat").value = ""; $("#tstartat").classList.add("hidden"); $("#formmsg").textContent = ""; delete $("#autorel").dataset.k; sel = r.id; setFocus(project); refresh();
   } catch (e) { $("#formmsg").textContent = e.message; }
 }
 $("#submit").onclick = submit;
@@ -2984,7 +3085,9 @@ function readerHead(d) {
 }
 // The change's commands, in the daemon's order. Deviation check needs something built to compare with.
 const specCmds = s => s.commands.filter(c => c.id !== "deviation-check" || s.done > 0);
-const bareCmds = s => !s.commands.some(c => c.id !== "validate");  // no opsx and no tk commands: Validate at most
+// The repo has no opsx commands (openspec init adds them); the plugin's audit, review and deviation check are always there
+const OPSX_CMDS = new Set(["explore", "sync", "archive"]);
+const bareCmds = s => !s.commands.some(c => OPSX_CMDS.has(c.id));
 const NO_OPSX = "Run Set up OpenSpec or Refresh OpenSpec commands to add the opsx commands.";
 function runCmd(s, c) {
   if (c.id === "archive" && !confirm(`Archive ${s.name}? This moves it to openspec/changes/archive and merges its spec deltas into openspec/specs. Saved to dev after the reply.`)) return;
@@ -3375,7 +3478,7 @@ function tdProjClick(cur, name) { return cur === name ? {proj: null, home: null,
 // listed twice.
 // Each row: {kind, chip, title, fact, since, act}; the page formats since as an age.
 function tdOpenRows(project, todos, tasks, recap, cap, all) {
-  const STATES = ["running", "gating", "merging", "needs_input", "queued", "paused"];
+  const STATES = ["running", "gating", "merging", "needs_input", "on_branch", "pr", "queued", "paused"];
   const r = recap || {}, rows = [], mine = todos.filter(x => x.project === project && !x.parked);
   const listed = new Set(mine.filter(x => x.source && x.source.kind === "task").map(x => +x.source.id));
   const talked = new Set(mine.filter(x => x.topic != null).map(x => String(x.topic)));
@@ -3558,7 +3661,12 @@ function tdActions(it) {
         [A("play", "▶ Play this build", {title: "Run the task's build from its worktree"}), A("sendback", "Send back…")])
       : [A("play", "▶ Play this build", {primary: 1, title: "Run the task's build from its worktree"}), A("approve", "Approve & merge"), A("sendback", "Send back…")];
     case "Review": return [A("approve", "Approve & merge", {primary: 1}), A("diff", "Open diff", {title: "The files it changed, in the task's details"}), A("sendback", "Send back…")];
-    case "Answer": return [A("answer", "Answer", {primary: 1, title: "Type your answer in the message box below"}), A("details", "Details")];
+    case "Answer": {  // a branch task's PR problem also offers its fix: Fix CI, or Retry
+      const t = s.kind === "task" && state.tasks.find(x => x.id === s.id), ps = t && prStep(t);
+      return (ps ? [A(ps[0], ps[1], {primary: 1, title: PR_STEP_TIP[ps[0]] || ""})] : [])
+        .concat([A("answer", "Answer", {primary: !ps, title: "Type your answer in the message box below"}), A("details", "Details")]);
+    }
+    case "Open PR": return [A("pr-open", "Open PR", {primary: 1, title: PR_STEP_TIP["pr-open"]}), A("details", "Details", {title: "Its summary, commits and the files it changed"})];
     case "Fix": return [A("retry", "Retry", {primary: 1}), A("retrynote", "Retry with a note…"), A("retryafter", "Retry after…", {title: "Retry it once another task merges"}), A("details", "Details")];
     case "Promote":
       if (s.kind === "task") return [g.running ? A("stopmain", `■ Stop ${g.main_branch}`, {primary: 1, title: `Quit ${g.title} running from ${g.main_branch}, so the release can move it`})
@@ -3660,7 +3768,7 @@ function tdStep(it, shown) {
   const html = `<div class="stepcard tdo${TD.dets ? " open" : ""}"><div class="top"><button class="ph back" data-back title="Back to the list">‹ To-do</button>
     <div class="k">${tdArrow(it, shown, -1)}<span class="kt">${it.parked ? `Parked ${ago(it.parked.since, state.now)}` : `<span class="ks">Step </span>${shown.indexOf(it) + 1} of ${shown.length}`}<span class="kp"> · ${esc(P(it.project).title)}</span></span>${tdArrow(it, shown, 1)}</div>
     ${dets ? `<button class="ph" data-dets aria-expanded="${TD.dets}">Details ${TD.dets ? "▴" : "▾"}</button>` : ""}
-    ${unpark("ph skip")}<button class="ph skip" data-skip title="${esc(skipTip)}">Skip →</button>
+    ${unpark("ph skip")}${it.local ? "" : `<button class="ph skip" data-skip title="${esc(skipTip)}">Skip →</button>`}
     <button class="fold" data-fold title="Fold the step to one line">▾</button>${tdTopBtns(it)}</div>
     <h2>${verbPill(it)}<span>${tdTid(it)}${esc(it.title)}</span></h2>
     ${it.verb === "Try" && TD.task && TD.task.id === (it.source || {}).id ? proofHtml(TD.task, true) : ""}
@@ -3670,7 +3778,7 @@ function tdStep(it, shown) {
     ${it.closes ? `<div class="closes">${esc(it.closes)}</div>` : ""}
     ${it.verb === "Ship" && P(it.project).deploys && P(it.project).deploys.length ? tdShipLog(P(it.project)) : ""}
     <div class="row">${acts.map(b => `<button data-ta="${esc(b.a)}" class="${b.primary ? "primary" : ""}" ${busy || b.disabled ? "disabled" : ""} title="${esc(b.title || "")}">${esc(b.label)}</button>`).join("")}
-      ${tdBondHtml(it)}${noteIn}<button class="tdwaitb" data-waitfor title="Park it until tasks you pick merge or are released, or until a time">Wait for…</button>${unpark("tdunpark")}<button class="skip" data-skip title="${esc(skipTip)}">Skip for now →</button></div>
+      ${tdBondHtml(it)}${it.local ? "" : `${noteIn}<button class="tdwaitb" data-waitfor title="Park it until tasks you pick merge or are released, or until a time">Wait for…</button>${unpark("tdunpark")}<button class="skip" data-skip title="${esc(skipTip)}">Skip for now →</button>`}</div>
     ${TD.wait && TD.wait.key === it.key ? tdWaitBox(it.project, TD.wait, `<button class="primary" data-wgo>Wait</button><button data-wx>Cancel</button>`) : ""}
     ${TD.qt && TD.qt.key === it.key ? tdQtBox(it, TD.qt) : ""}
     ${raHere ? raBox(RA) : ""}
@@ -3685,7 +3793,7 @@ function tdStep(it, shown) {
     el.onkeydown = e => { if (e.key === "Enter") { e.preventDefault(); el.blur(); } };
   });
   $("#tdtodo").querySelectorAll("[data-unpark]").forEach(b => b.onclick = tdUnpark);
-  $("#tdtodo [data-waitfor]").onclick = () => {
+  if ($("#tdtodo [data-waitfor]")) $("#tdtodo [data-waitfor]").onclick = () => {
     TD.wait = TD.wait && TD.wait.key === it.key ? null : {key: it.key, ...tdWaitNew(it.project, it.parked)}; renderToday();
     if (TD.wait) $("#tdtodo .tdwaitbox").scrollIntoView({block: "nearest"}); };  // a phone's step card is short
   if (TD.wait && TD.wait.key === it.key) tdWaitWire($("#tdtodo .tdwaitbox"), TD.wait);
@@ -3774,6 +3882,7 @@ function tdFull(it) {
     : `<div class="ftask"><h3>${tid(d.id)} ${esc(d.title)}</h3>
       <div class="muted"><span class="s-${d.state}">${LABEL[d.state] || d.state}</span>${d.phase ? ` · ${esc(d.phase)}` : ""} · ${esc(P(d.project).title || d.project)}</div>
       ${gate ? `<div class="${/^gate failed/.test(gate.text) ? "err" : "muted"}" style="margin-top:4px">${esc(gate.text)}</div>` : ""}
+      ${prsHtml(d, prsOf(d), false)}
       ${reviewHtml(d)}
       ${d.summary ? `<h4>Worker summary</h4><div class="callout ok" style="white-space:pre-wrap">${esc(d.summary)}</div>` : ""}
       ${d.error ? `<div class="callout bad"><pre class="mono">${esc(d.error)}</pre></div>` : ""}
@@ -4063,7 +4172,7 @@ async function tdUnpark() {
 // ---- Wait for…, pure (tests/test_todo_wake_at.py runs it in node)
 // Wait for… (README TODO-6): park an item until tasks merge or are released, or until a time. One chooser serves a
 // step and + Add.
-const TD_WAIT_STATES = ["queued", "running", "gating", "merging", "review"];
+const TD_WAIT_STATES = ["queued", "running", "gating", "merging", "review", "on_branch", "pr"];
 const p2 = n => String(n).padStart(2, "0");
 const tdDay = d => `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())}`, tdHm = d => `${p2(d.getHours())}:${p2(d.getMinutes())}`;
 // As the server's start_clock: 15:01 today, Tue 09:00 within the coming week, else 2026-11-03 09:00
@@ -4115,7 +4224,7 @@ function tdWaitWire(box, w) {
 // Retry after… (README TODAY-1): retry a failed or cancelled task so it waits (its depends_on) until another task
 // merges. One chooser at a time, on Today's Fix step or on the task's page: RA = {id, where, pick, other, note, busy}.
 let RA = null;
-const RA_STATES = ["queued", "running", "gating", "merging", "review", "needs_input"];  // open tasks; gating and merging run
+const RA_STATES = ["queued", "running", "gating", "merging", "review", "needs_input", "on_branch", "pr"];  // open tasks; gating and merging run
 const raTasks = id => state.tasks.filter(t => t.id !== id && RA_STATES.includes(t.state)).sort((a, b) => b.id - a.id);
 const raNew = (id, where) => ({id, where, pick: null, other: "", note: "", busy: false});
 function raBox(r) {
@@ -4296,6 +4405,8 @@ async function tdDo(a) {
   if (a === "projects") { setFocus(it.project); return showTab("projects"); }
   if (a === "play") return run(() => api(`/api/tasks/${s.id}/play`, {}), "Starting the build. Approve it, or send it back, when you have tried it.");
   if (a === "approve" || a === "retry") return run(() => api(`/api/tasks/${s.id}/${a}`, {}));
+  if (a === "pr-open") return run(() => api(`/api/tasks/${s.id}/pr-open`, {}), "Opening its pull requests: the task shows each one, its CI and a Merge button.");
+  if (a === "fix-ci" || a === "pr-retry") return run(() => api(`/api/tasks/${s.id}/${a}`, {}));
   if (/^(play|stop):/.test(a)) { const [act, where] = a.split(":");
     return run(() => api(`/api/projects/${encodeURIComponent(it.project)}/${act}`, where === "dev" ? {where} : {}), act === "play" ? `Starting ${where}.` : `Stopped ${where}.`); }
   if (a === "stopmain") return run(() => api(`/api/projects/${encodeURIComponent(it.project)}/stop`, {}), "Stopped. The release goes on by itself within a minute.");
@@ -4772,6 +4883,22 @@ async function tdMarkRead(project, path) {
 // Steps you just cleared. An /api/state answer from before the clear would still list one and bring it back, so
 // loadState drops these keys for a while after the server confirmed.
 const TD_GONE = new Map(), TD_GONE_MS = 20000;
+// Today lists a task on its branch as an Open PR step (README: Branches and pull requests). The daemon's to-do list
+// has no such item yet, so the page adds one, in the Ship group after the Fix and Answer items; once the daemon
+// lists anything for that task, its own item wins. Local: the daemon keeps no note, skip or park for it.
+function tdAddOpenPR(s) {
+  if (!s.todos || !s.tasks) return;
+  const have = new Set(s.todos.filter(x => x.source && x.source.kind === "task").map(x => +x.source.id));
+  const ORDER = ["unblock", "ship", "review", "only_me"], rank = x => ORDER.indexOf(x.group);
+  for (const t of s.tasks.filter(t => t.state === "on_branch" && !have.has(t.id))) {
+    const x = {key: `task:${t.id}:openpr`, subject: `task:${t.id}`, verb: "Open PR", group: "ship", project: t.project,
+      title: t.title, why: String(t.summary || "").trim() || `Its work is committed on ${t.branch}; nothing is pushed yet.`,
+      since: t.finished || t.started || t.created || 0, est_min: 1, note: "", local: true,
+      closes: "Closes when you open its pull requests.", source: {kind: "task", id: t.id}};
+    const i = s.todos.findIndex(y => y.parked || y.skipped || rank(y) > rank(x));
+    s.todos.splice(i < 0 ? s.todos.length : i, 0, x);
+  }
+}
 function tdDropGone(s) {
   const now = Date.now();
   for (const [k, until] of TD_GONE) if (until < now) TD_GONE.delete(k);
@@ -4866,7 +4993,7 @@ function tdTimeline() {
   const row = (t, sub) => `<div class="tlitem" data-tl="task:${t.id}" title="${esc(t.title)}"><div class="t">${tid(t.id)}${esc(t.title)}</div>
     <div class="sub">${sub.filter(Boolean).join(" · ")}</div></div>`;
   const working = ts.filter(t => LIVE.includes(t.state)), rsn = (state.research && state.research.active) || 0;
-  const waiting = ts.filter(t => ["queued", "paused"].includes(t.state)).sort((a, b) => b.priority - a.priority || a.id - b.id);
+  const waiting = ts.filter(t => ["queued", "paused", "pr"].includes(t.state)).sort((a, b) => b.priority - a.priority || a.id - b.id);
   const trains = state.projects.filter(g => inView(g.name) && g.train), done = tdDoneToday();
   const scheds = (state.schedules || []).filter(x => inView(x.project)).sort((a, b) => a.paused - b.paused || a.next_at - b.next_at);
   const html = `<h3>Working now</h3>`
@@ -4876,7 +5003,7 @@ function tdTimeline() {
     + `<h3>Scheduled</h3>`
     + (trains.map(g => `<div class="tlitem" data-tl="train:${esc(g.name)}"><div class="t">Promote train${pf ? "" : ` · ${esc(g.title)}`}</div>
         <div class="sub">${g.train.ids.length} task${g.train.ids.length === 1 ? "" : "s"} · ${esc(trainWords(g.train))}</div></div>`).join("")
-      + waiting.map(t => row(t, [proj(t), t.state === "paused" ? `<span class="s-paused">paused</span>` : "",
+      + waiting.map(t => row(t, [proj(t), t.state === "paused" ? `<span class="s-paused">paused</span>` : t.state === "pr" ? `<span class="s-pr">PRs open</span> ${esc(prsShort(t.prs))}` : "",
           esc(t.state === "queued" && archivedP(t.project) ? "archived project" : t.wait || (t.state === "queued" ? "waiting for a worker" : ""))])).join("")
       + scheds.map(x => `<div class="tlitem" data-tl="schedule:${x.id}" title="${esc(x.title)}"><div class="t">↻ ${esc(x.title)}</div>
           <div class="sub">${[pf ? "" : esc(P(x.project).title), x.paused ? `<span class="s-paused">paused</span>` : `next ${esc(when(x.next_at))}`, esc(x.every)].filter(Boolean).join(" · ")}</div></div>`).join("")
@@ -4929,7 +5056,7 @@ function stageOf(t) {
   if (st === "queued" || st === "paused") return t.started ? 1 : 0;
   if (st === "running" || st === "needs_input") return 1;
   if (st === "gating" || st === "merging") return 2;
-  if (st === "review") return 3;
+  if (st === "review" || st === "on_branch" || st === "pr") return 3;
   if (st !== "done") return -1;
   if (t.kind !== "task" && t.kind !== "senddev") return 5;
   return g.direct_main || !(g.dev_log || []).some(c => c.task === t.id) ? 5 : 4;
@@ -6028,7 +6155,7 @@ $("#rsrq").oninput = () => RS.refs && rsRenderRefs();
 // ---- the header's "N need you": open the task that waits on you; each further click goes to the next one
 $("#hdr").addEventListener("click", e => {
   if (!e.target.closest("[data-need]")) return;
-  const ts = state.tasks.filter(t => ["needs_input", "review", "failed"].includes(t.state) && inView(t.project));
+  const ts = state.tasks.filter(t => ["needs_input", "review", "failed", "on_branch"].includes(t.state) && inView(t.project));
   if (!ts.length) return;
   const t = ts[(ts.findIndex(x => x.id === sel) + 1) % ts.length];  // same order as the list's "Needs you" group
   if (tab !== "tasks") showTab("tasks");
@@ -6042,6 +6169,17 @@ $("#hdr").addEventListener("click", e => {
   if (tab !== "research") showTab("research");
   rsShow("run");
 });
+// Theme: client-only. "ops-theme" in localStorage; the head script applies it before first paint.
+{
+  let t = "solarized";
+  try { if (localStorage.getItem("ops-theme") === "dark") t = "dark"; } catch {}
+  $("#theme").value = t;
+  $("#theme").onchange = () => {
+    const v = $("#theme").value === "dark" ? "dark" : "solarized";
+    if (v === "dark") document.documentElement.dataset.theme = "dark"; else delete document.documentElement.dataset.theme;
+    try { localStorage.setItem("ops-theme", v); } catch {}
+  };
+}
 $("#rsrepo").onchange = () => api("/api/settings", {research_repo: $("#rsrepo").value.trim()})
   .then(() => { $("#rsrepomsg").textContent = ""; RS.loaded = false; RS.refs = null; refresh(); })
   .catch(e => $("#rsrepomsg").textContent = e.message);

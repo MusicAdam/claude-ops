@@ -68,12 +68,32 @@ the config has a comment on how to opt out. Read it, adjust it, then click **Rel
    click **Reload projects**.
 4. **macOS permissions.** Grant **Full Disk Access** to Claude Ops, and **Screen Recording** for proof videos.
    The text is under **macOS permissions** in Other details, below.
-5. **Research tasks** call the `/research` skill, which the tk toolkit installs (`~/dev/tk`, `./install.sh`).
-   Without it, normal tasks still work and research tasks fail.
+5. **Nothing else to install for skills.** Research tasks and spec chats use skills and commands that ship in this
+   repo's `plugin/` folder, and opsd loads them into every `claude` it starts with `--plugin-dir`. See
+   [The plugin](#the-plugin).
 6. **Each Mac has its own queue.** `~/.claude-ops` (`ops.db`, project tomls, runs) belongs to one machine and is not
    synced. To update claude-ops: `git pull` in the checkout, then `./opsctl restart`.
 7. **Workers run unattended with no permission prompts** (`--permission-mode auto`). On a work machine, check your
    employer's policy first.
+
+### The plugin
+
+`plugin/` is a Claude Code plugin named `claude-ops` (`plugin/.claude-plugin/plugin.json`). It holds what workers
+and chats call by name:
+
+| Name | File | Used by |
+|---|---|---|
+| `/claude-ops:research` | `plugin/skills/research/` (`SKILL.md`, `access.md`, `templates/`) | research tasks (RES-3): one report in the repo's `docs/research/<slug>.md` |
+| `/claude-ops:openspec:audit` | `plugin/commands/openspec/audit.md` | a change's chat: checks the change's files agree with each other and the code |
+| `/claude-ops:openspec:review` | `plugin/commands/openspec/review.md` | a change's chat: read-only review agents (general-purpose agents given a role) |
+| `/claude-ops:openspec:deviation-check` | `plugin/commands/openspec/deviation-check.md` | a change's chat: compares the plan with the code |
+| `/claude-ops:openspec:implement` | `plugin/commands/openspec/implement.md` | the brief of a task queued from a change |
+
+opsd passes `--plugin-dir <checkout>/plugin` (found next to `opsd.py`) to the worker, design and spec chats, and
+project chats. The one-shot calls that run with no tools don't get it. The plugin prefixes every name with
+`claude-ops:`, so a skill or command of the same name in your own `~/.claude` can't shadow it. A new user needs
+nothing installed beyond the `claude` CLI. The `/opsx:*` commands are the exception: they come from `openspec init`
+in each repo (see [OpenSpec changes](#openspec-changes)).
 
 ## Flow (per project)
 
@@ -81,8 +101,9 @@ the config has a comment on how to opt out. Read it, adjust it, then click **Rel
  Design topic ─(you agree)─┐
  Tasks tab ────────────────┴─▶ scheduler ──(up to N at once)──▶ worker: claude -p in <worktrees>/t<id>
                                                                   │ commits on task/<id>-<slug>
-                                                                  ▼
+                                                                  ▼ (a branch task: on its named branch)
                                rebase onto dev ─▶ gate: the [[gate]] commands, in order
+                                  │ (a branch task: onto origin/main until it is pushed, then no rebase)
                                   │ conflict / fail: the worker is resumed with the error (max 3 rounds)
                                   ▼ pass
         "hold for review" and an [app] launch? ── yes ─▶ build, record proof, wait for Try / Approve / Send back
@@ -90,6 +111,9 @@ the config has a comment on how to opt out. Read it, adjust it, then click **Rel
          a worker with a question still stops as needs_input. See "Proof video" below)
                                   │ no
                                   ▼
+      a branch task (named branch or Jira key)? ── yes ─▶ on branch, nothing pushed ─▶ you click Open PR
+                                  │ no                  ─▶ push, gh pr create in pr_order ─▶ CI green, merge
+                                  ▼                     ─▶ your main fast-forwards to origin/main (Branches and PRs)
                             merge --no-ff into dev   (<worktrees>/dev)
                                   │
                                   ├─ Straight to main (the default): main moves to dev at once, no release
@@ -316,20 +340,145 @@ main (see below).
   conflict with dev, a worker merges them in the release's worktree, resolves the conflicts and runs the checks;
   dev moves to that merge, and the release checks it as usual. Retry starts the merge over.
 - If the build fails, main and its build stay as they were.
-- Nothing is ever pushed to git. Push main yourself when you want to. A [deploy](#deploys) does publish
-  things (a store build, a backend), but only when you click it.
+- Nothing is pushed to git except a branch task's branch, when you click **Open PR** (see
+  [Branches and pull requests](#branches-and-pull-requests)). Push main yourself when you want to. A
+  [deploy](#deploys) does publish things (a store build, a backend), but only when you click it.
+
+## Branches and pull requests
+
+A task can work on a named branch instead of merging into dev, and turn it into a GitHub pull request against
+main when you choose. It is for work that lands on GitHub as PRs (say, from a Jira ticket), not as local merges.
+A task with no branch and no Jira key works exactly as before.
+
+### Naming the branch
+
+- A task has two optional fields: `jira`, a key such as `BALL-123` (`[A-Z][A-Z0-9]+-\d+`), and `target`, a branch
+  name. There is no Jira API: the key only names the branch and prefixes titles.
+- The branch is `target` as given. Else, with a Jira key, it is the repo-level toml key `branch_pattern` (default
+  `"{key}-{slug}"`) filled in: `{key}` is the key, `{slug}` the task title in lowercase with each run of other
+  characters than `a-z0-9` turned into `-`, 40 characters at most (the slug of `task/<id>-<slug>`). So
+  `BALL-123` with the title "Fix login crash" works on `BALL-123-fix-login-crash`. The name is fixed when the task
+  is queued and kept in the task's `branch`.
+- Where to give it:
+  - the New task form's **Branch or Jira key** field: a value that matches the key pattern sets `jira`, anything
+    else sets `target`;
+  - `opsd.py add -p NAME --branch BRANCH ...` or `--jira KEY`, and `opsd.py send PROJECT --branch/--jira ...`
+    (tasks only);
+  - `"branch"` or `"jira"` in a design chat's `queue` block.
+- With a Jira key, the worker is asked to start each commit message with it, and the PR title is
+  `KEY: <task title>`. Without one, the PR title is the task title.
+- A branch task never promotes after merge: it doesn't merge into dev, so main doesn't move by a release.
+
+### Working on the branch
+
+```
+ worker on <branch> ─▶ fetch origin ─▶ never pushed? rebase onto origin/main ─▶ gate (fix rounds as usual)
+                                        pushed already? no rebase, gate as it is
+                                  ▼ pass
+        hold for review? ─ yes ─▶ Try / Approve / Send back, as for any task
+                                  ▼
+                         on branch  (committed, nothing pushed)  ─── you click Open PR ──▶ push, gh pr create
+                                                                                             ▼
+                         PRs open: poll every 2 min ─ CI red ─▶ needs you: Fix CI resumes the worker,
+                                  │                              gate, push
+                                  ▼ merged (on GitHub, or Merge here)
+                         fetch, fast-forward your main to origin/main, dev takes it in ─▶ done once all merged
+```
+
+1. **Fetch.** At the start, and again before each rebase, the queue runs `git fetch origin` in each repo that has
+   an `origin`. The base is `origin/main` (your local `main` for a repo with no `origin`).
+2. **The worktree checks out the branch itself**, not `task/<id>-...`, in every repo of a workspace:
+   - it exists locally: that branch (fast-forwarded first to `origin/<branch>` when that is ahead of it);
+   - it exists only on origin: a new local branch tracking `origin/<branch>`;
+   - it exists nowhere: a new branch from the base.
+
+   A queue worktree that still has the branch checked out (an earlier task on it that ended or failed) is detached
+   from it first; your own checkout on it is an error that names it.
+3. **One task per branch at a time** in a project. A second task on the same branch stays queued, saying
+   `waiting for task #N on <branch>`, until the first is `on branch` (or later), failed or cancelled. Then it
+   continues the branch. Its `after`/`depends_on` on that earlier task waits only until it is `on branch`.
+4. **Rebase and gate.** In a repo where the branch has never been pushed (no `origin/<branch>`), the queue rebases
+   it onto the latest base and runs the normal [[gate]] with the usual fix rounds; the conflict and gate-failure
+   prompts name `main`, not dev. Once it has been pushed (it was on origin already, or its PR is open), the queue
+   **never rebases and never force-pushes**: it gates the branch as it is, and new commits go on top.
+5. **Hold / Try** works as for any task, before the next step.
+6. **On branch.** The task ends in the state `on branch`: the work is committed and nothing is pushed. Its
+   worktree stays, detached at the branch's tip, so a later Fix CI resumes there without a fresh setup. The summary
+   starts with the branch and the commits per repo (`On branch BALL-123-fix-login-crash: ballup-dunk 2 commits,
+   ballup-swish 1 commit. Nothing pushed yet.`). The task card and Today show **Open PR**.
+
+Nothing merges into dev, so main doesn't move: no release, no Straight to main and no promote train for these
+tasks. A repo the task doesn't commit to gets nothing pushed and no PR.
+
+### Open PR
+
+You click **Open PR** on the task (or run `opsd.py pr open <id>`).
+
+- **Pre-checks:** `gh` is on PATH, `gh auth status` passes, and each repo with commits on the branch has an `origin`
+  on GitHub. Otherwise the task needs you, naming what is missing; answer or Retry once it is fixed.
+- **Per repo, in PR order:** `git push -u origin <branch>` (never `--force`), then `gh pr create --base main --head
+  <branch>`. A PR already open for that branch is adopted instead (a second task on the same branch). The body is
+  the task summary, the review report (fixed / before / after / check) and links to the task's other PRs.
+- **Order (workspaces):** the repo-level toml key `pr_order = ["ballup-dunk", "ballup-swish"]`.
+  - The first repo of the list that has commits opens its PR at once.
+  - Each next one opens by itself once the PR before it has CI green. Its body says `Depends on <url>`.
+  - Repos with commits that are missing from `pr_order` open together with the first.
+  - A repo with no `origin` (the workspace root `"."`, say) keeps its commits on the local branch and gets no PR;
+    the summary says so.
+- The queue keeps each PR per task and repo (table `prs`): repo, number, url, state, ci (`pending`, `green` or
+  `red`), the failing checks, checked_at, merged_at, and the last merge error or warning.
+
+### Watching
+
+- While a task has an open PR, the scheduler polls it every 2 minutes (and right after you act on it):
+  `gh pr view <n> --json state,mergedAt,mergeCommit,statusCheckRollup,mergeable,url`.
+- **CI:** `green` once every check succeeded or was skipped (no checks counts as green), `red` on any failure,
+  else `pending`. A PR the queue just opened or pushed to stays `pending` until the next poll: GitHub registers
+  its checks a little after the push, and reading at once would see none (green) or the last push's.
+- **CI red:** the task needs you, listing the failing checks, and later PRs in the order don't open. **Fix CI**
+  resumes the worker with the failed logs (`gh run view <run> --log-failed`, the last 200 lines). It commits, the
+  gate runs, then the queue pushes (no rebase, no force). If CI turns green again by itself (a re-run, a push from
+  GitHub), the task goes back to watching.
+- **A message sent to the task** works the same way: the worker resumes, the gate runs, the queue pushes. This is how
+  you pass on review comments by hand. On an `on branch` task it resumes the worker and ends `on branch` again.
+- The task card shows each PR: repo, `#number` as a link, CI and state, and its Merge button.
+
+### Merging
+
+Both ways work:
+
+- **On GitHub:** the poll sees `MERGED` and records it.
+- **Merge** (a button per PR, and `opsd.py pr merge <id>`): shown when the PR's CI is green and every earlier PR in
+  `pr_order` has merged. It runs `gh pr merge <n> --<method> --delete-branch`, `method` from the repo-level toml
+  key `pr_merge` (`squash`, `merge` or `rebase`; default `squash`). **Merge all** merges them in order, each once
+  the one before it has landed and its own CI is green. A failed merge (review required, conflicts) shows gh's
+  message on the card.
+- A PR merged out of order on GitHub is recorded, with a warning on the card.
+- **After each merge** the queue fetches origin, then moves your local main to `origin/main` the way Straight to main
+  does: fast-forward, your uncommitted changes carried over, needs you if something is in the way (the main build
+  running, main checked out elsewhere, or a main with local commits `origin/main` lacks). Then dev takes main in
+  (a fast-forward, else a merge; a conflict is logged and left to the next release). This works with
+  `direct_main = false` too.
+- **Done** once every PR has merged: the state is `done` and `merged` holds the merge commits.
+- **Closed without merging:** the task needs you (`PR #n was closed without merging`), with **Retry** (reopens it)
+  and **Cancel**.
+- `after`/`depends_on` on a branch task waits until all its PRs have merged (the task is done). The one exception is
+  a task on the same branch, which waits only until the earlier one is `on branch`.
+
+Out of scope: reading or updating Jira tickets, reading review comments by itself, auto-merge, PRs others open,
+and any force-push or rebase after the first push.
 
 ## Deploys
 
 A project can list deploy targets: a store test build, a store release, a backend's prod deploy. claude-ops knows
-nothing about stores or servers. Each target is a shell command of the project's own (`bin/swish release`), and the
+nothing about stores or servers. Each target is a shell command of the project's own (`bin/app release`), and the
 daemon runs it for you.
 
 ```toml
 [[deploy]]
-name = "swish test"                 # required, unique in the project
-repo = "ballup-swish"               # workspace only: the repo it deploys; it runs in that folder
-run = "bin/swish build && bin/swish upload"   # required; non-zero exit fails the deploy
+name = "app test"                 # required, unique in the project
+repo = "shop-app"               # workspace only: the repo it deploys; it runs in that folder
+run = "bin/app build && bin/app upload"   # required; non-zero exit fails the deploy
 note = "What's new"                 # optional: then a note is required, passed as OPS_NOTE and OPS_NOTE_FILE;
                                     # the Deploy dialog drafts it from the changelog for you to approve
 version = "node -p \"require('./package.json').version\""   # optional: prints the current version, X.Y[.Z]
@@ -337,10 +486,10 @@ release_tag = "v{version}"          # optional, needs version: the tag that mark
 build_tags = "build/*/{version}+*"  # optional, needs version: the tags its builds leave
 
 [[deploy]]
-name = "swish distribute"
-repo = "ballup-swish"
-from = "swish test"                 # deploys what "swish test" last deployed, not main
-run = "bin/swish release"
+name = "app distribute"
+repo = "shop-app"
+from = "app test"                 # deploys what "app test" last deployed, not main
+run = "bin/app release"
 ```
 
 - **Only on your click.** A deploy starts only from the dashboard, `POST /api/deploys`, or
@@ -369,7 +518,7 @@ run = "bin/swish release"
     text. `opsd.py deploy` drafts nothing and still needs `--note`.
   - `POST /api/deploys/draft {project, target}` answers `{note, source}`: `source` is `"model"`, `"titles"`, or
     `null` with an empty note when there is no changelog.
-- **Like a release, it goes ahead of other work.** Its title reads `Deploy swish test → 3.5.0`. The task page shows
+- **Like a release, it goes ahead of other work.** Its title reads `Deploy app test → 3.5.0`. The task page shows
   its step, its events and `deploy.log`. You get notified when it needs you, fails or succeeds.
 - **One at a time.** A project runs one deploy at a time; a later click queues behind it. A release and a deploy of the
   same project never run at once: the one that waits says `waiting for deploy #N` or `waiting for release #N`.
@@ -378,12 +527,12 @@ run = "bin/swish release"
 - **The deploy worktree.** Each project has one, `<worktrees>/deploy`, made on first use like a task worktree
   (workspace files, the clone list, setup). Before each deploy every repo in it is put at the commit to deploy
   (`git checkout --force --detach`, then `git reset --hard`). It is **never cleaned**: untracked and ignored files
-  stay, because a later target uploads what an earlier one built (swish's release uploads the builds its test build
+  stay, because a later target uploads what an earlier one built (app's release uploads the builds its test build
   left in `ios/build` and `android/app/build`). Setup runs again when the commit changed since the last setup, and
   after a failed deploy, so a Retry starts over with setup too. Its clone files follow your checkout (see below).
 - **Which commit.** main, in every repo. A target with `from` deploys the commit that target last deployed
   successfully, in its repo (other repos sit at main); before that target's first deploy it refuses with
-  "Deploy swish test first."
+  "Deploy app test first."
 - **Versions.** A target with `version` runs it in its folder at the commit to deploy. You pick:
   - **same**: the current version. Refused once `release_tag` for it exists: the App Store closes a version once
     approved.
@@ -532,10 +681,10 @@ folder, even when it has no open changes.
   the project promotes after merge by default; only the last task of a chain is promoted). You can
   also ask Claude to queue it. Each task's brief points the worker at the change's folder, names the
   sections it covers, and tells it to tick the boxes as it goes, keep to the proposal's scope, update
-  `design.md` and the deltas if it has to deviate, and not archive the change. If you have
-  `/tk:openspec:implement`, the brief tells the worker to work through the items with it.
+  `design.md` and the deltas if it has to deviate, and not archive the change. The brief also tells the worker
+  to work through the items with `/claude-ops:openspec:implement` (from [the plugin](#the-plugin)).
 - **Slash commands.** In any design chat, a message that starts with `/` runs that command, as if you typed it
-  in a terminal: `/tk:openspec:audit <name>`, `/opsx:explore <name>`. The queue's usual note for the turn goes
+  in a terminal: `/claude-ops:openspec:audit <name>`, `/opsx:explore <name>`. The queue's usual note for the turn goes
   into the system prompt instead of in front of your text. Other messages are sent as before.
 - **What a change's chat can run.** The chat can use skills, subagents and any `openspec` command except
   `init` and `update` (they write outside `openspec/`, which a chat can't save; use **Set up** and
@@ -552,15 +701,15 @@ folder, even when it has no open changes.
   | `/opsx:explore` | the repo has the opsx command or skill | nothing, unless you agree to an edit |
   | `/opsx:sync` | the repo has the opsx command or skill | merges the deltas into `openspec/specs/` |
   | `/opsx:archive` | the repo has the opsx command or skill | merges the deltas and moves the change to `openspec/changes/archive/` |
-  | `/tk:openspec:audit` | you have the tk command | nothing: it reports gaps and drift |
-  | `/tk:openspec:review` | you have the tk command | nothing: read-only review agents report |
-  | `/tk:openspec:deviation-check` | you have the tk command and at least one item is ticked | nothing: it compares the plan with the code |
+  | `/claude-ops:openspec:audit` | always (the plugin ships it) | nothing: it reports gaps and drift |
+  | `/claude-ops:openspec:review` | always (the plugin ships it) | nothing: read-only review agents report |
+  | `/claude-ops:openspec:deviation-check` | at least one item is ticked | nothing: it compares the plan with the code |
 
   The opsx commands come from `openspec init` in the repo (`.claude/commands/opsx/`, or as skills such as
   `openspec-explore` in `.claude/skills/` in newer versions; the dashboard sends whichever exists). Apply,
   implement and propose are never listed: the first two change code, so queue the change instead. When the
-  repo has no opsx commands and you don't have the tk ones, only Validate is listed, with a muted hint: `Run Set
-  up OpenSpec or Refresh OpenSpec commands to add the opsx commands.`
+  repo has no opsx commands, Validate and the plugin's commands are listed, with a muted hint: `Run Set up OpenSpec
+  or Refresh OpenSpec commands to add the opsx commands.`
 - **`/` autocomplete.** In a change's chat, type `/` as the first character of the message box and a list of the
   same commands opens just above it, each by its label and the exact text it sends. Typing more filters it, by
   label or text. **Up** and **Down** move, **Enter** or **Tab** puts the command's text in the box for you to
@@ -697,7 +846,7 @@ the uncommitted-files banner, Deploy. `/api/state` gathers them into one list, `
   behind the task is skipped. Each body stands alone, like a split task: goal, exact steps, acceptance.
 
 Each item is `{key, verb, group, project, title, why, since, est_min, closes, source: {kind, id}}`. `key` stays the same
-across polls (`task:231:review`, `chat:42:read`, `project:diskgame:commit`, `todo:7`, `task:240:report`).
+across polls (`task:231:review`, `chat:42:read`, `project:game:commit`, `todo:7`, `task:240:report`).
 `since` is when the state began, as near as the queue knows: a task's last event, a chat's last reply, the oldest uncommitted file, the
 oldest commit not yet promoted or deployed. `est_min` is a guess at minutes: Answer 2, Fix 5, Try 5, Review 3,
 Agree 2, Read 3, Promote 1, Ship 2, Commit 2, Do 5. `closes` is one plain sentence on how the item leaves the
@@ -1005,7 +1154,7 @@ stay on the right of the header.
     (pulsing, a link to the release) while a release is open, or **✓ in sync**.
   - Below it, one **lane** per deploy chain. A lane starts at a `[[deploy]]` target with no `from` (or a `from`
     that names no target, or a loop of them) and follows the targets whose `from` names the stage before, joined
-    by arrows: for ballup-monorepo **swish** test → distribute, **dunk** prod, **web** preview → prod. A second
+    by arrows: for shop **app** test → distribute, **api** prod, **web** preview → prod. A second
     target with the same `from` starts a lane of its own, after its parent's, led by `<parent> →`. Lanes of one
     repo sit together, in config order. A lane's label is the first word all its target names share, cut off each
     stage's name ("test", "distribute"); with no shared word the label is the repo and stages keep their names.
@@ -1466,7 +1615,7 @@ settings and `CLAUDE.md`. Each chat keeps one Claude session across messages, un
 - **MCP servers.** A project chat loads only the MCP servers named in the project's `chat_mcp` list, none by
   default. Every server's tool definitions ride on every call, so each one you add makes every reply dearer.
   Name servers you defined with `claude mcp add` in any scope (user, local, or the repo's `.mcp.json`):
-  `chat_mcp = ["ballup-app"]` in `~/.claude-ops/projects/<name>.toml`. claude.ai connectors (Gmail, Google
+  `chat_mcp = ["shop-app"]` in `~/.claude-ops/projects/<name>.toml`. claude.ai connectors (Gmail, Google
   Sheets, Docs …) never load in a project chat: the chat runs with `--strict-mcp-config`, which drops them, and
   only claude.ai can define them. A name with no definition is skipped, and the chat says so.
 
@@ -1506,10 +1655,10 @@ Research is ordinary queue work in the project it is about. A report lives in th
   tasks. The task is titled `Research: <question>`. With `every` (any [schedule](#recurring-jobs) form) it also makes
   a recurring research job and queues the first run now, as the schedule's last task. It answers
   `{id, slug, path, schedule}`.
-- **RES-3 The brief.** The task's body tells the worker to answer the question at its tier with the research skill
-  in project mode, and to write the report to `docs/research/<slug>.md` in its worktree (the first repo's, in a
-  workspace). It says so in so many words, because the owner's `/research` skill writes to `~/dev/research` by
-  default: not there, and not `briefs/`, `reports/`, `topics/` or `watchlist.md`. The report starts with a `# `
+- **RES-3 The brief.** The task's body tells the worker to answer the question at its tier with the
+  `/claude-ops:research` skill from [the plugin](#the-plugin), and to write the report to `docs/research/<slug>.md`
+  in its worktree (the first repo's, in a workspace). It says so in so many words, so that no other research skill's
+  paths win: not `briefs/`, `reports/`, `topics/` or `watchlist.md`. The report starts with a `# `
   heading and a one-paragraph answer (the Research section's title and summary), then the findings with a source for
   each claim and a `## Sources` list. The worker commits that one file and touches nothing else.
 - **RES-4 Time and size follow the tier.** T0 10, T1 30, T2 80 minutes per worker turn: a research task's worker is
@@ -1616,7 +1765,7 @@ and `chat`. `file` serves only `.md` files inside the research repo.
 - **The brake.** While the usage brake holds the queue, dispatch refuses a new run with a 409 that gives the
   brake's words. Chats are never held.
 - **Linked code project.** A research project in `projects.json` may carry `repo`: the id of a claude-ops
-  project (a name `opsd.py send` accepts, such as `plugins`, `ballup-monorepo` or `claude-ops`). Without it, or
+  project (a name `opsd.py send` accepts, such as `plugins`, `shop` or `claude-ops`). Without it, or
   with it empty, the project stands alone; nothing is migrated. Each research project links to at most one code
   project, and several can link to the same one. Create and update (`/projects`, `/projects/<id>`) take `repo`;
   `""` or null clears it, and an id that isn't a configured claude-ops project is refused with a 400 that names it.
@@ -1683,7 +1832,7 @@ opsd.py send <project> --chat "<message>"     # a project chat there, in its che
 - **Context comes along.** The message starts with a line naming the sender, its title and where it works (its
   worktree and branch, or the folder a chat runs in), so the other session can read its files. The sender is told
   to make the message stand alone, like a design chat's task brief.
-- **Word comes back.** The sender's task logs "Sent task #71 to diskgame", and later how it ended: done with its
+- **Word comes back.** The sender's task logs "Sent task #71 to game", and later how it ended: done with its
   summary, failed, cancelled, or waiting on you. A sent chat's first reply goes back too. In a chat that sent
   something these show as notes, and Claude reads them with your next message.
 - **Waiting on a task.** `--after <task id>` (`333` or `#333`) gives the new task `depends_on`, the same wait as
@@ -1808,14 +1957,14 @@ API: `POST /api/tasks` takes `not_before`: a time string as above, `"reset"`, or
 
 ## Workspaces
 
-A workspace is a folder of separate git repos that work together, such as `~/dev/ballup-monorepo` with a
-backend (`ballup-dunk/`) and an app (`ballup-swish/`). Its config lists them: `repos = ["ballup-dunk",
-"ballup-swish"]`. `add-project` writes that list when the folder is not a git repo itself, along with each
-repo's setup and tests, run from its folder (`cd ballup-dunk && poetry run pytest -q tests/unit`), and the
+A workspace is a folder of separate git repos that work together, such as `~/dev/shop` with a
+backend (`shop-api/`) and an app (`shop-app/`). Its config lists them: `repos = ["shop-api",
+"shop-app"]`. `add-project` writes that list when the folder is not a git repo itself, along with each
+repo's setup and tests, run from its folder (`cd shop-api && poetry run pytest -q tests/unit`), and the
 gitignored `.env` files each repo has, to clone into new worktrees.
 
 - **Branches per repo.** Each repo gets its own `dev`, `task/<id>-<slug>` branches and `main`. The repos'
-  checkouts stay where they are (`<repo>/ballup-dunk`, …).
+  checkouts stay where they are (`<repo>/shop-api`, …).
 - **Worktrees.** A task's worktree is a folder holding a copy of the workspace's own files (`CLAUDE.md`,
   `docs/`, `.claude/`) and one git worktree per repo. Edits to those copied files are not kept: change the
   workspace's own files in its folder yourself, or make the folder a repo (below).
@@ -1823,13 +1972,13 @@ gitignored `.env` files each repo has, to clone into new worktrees.
   worktree root. It merges each repo the task committed to; a repo with no commits is left alone.
 - **Promote.** A release snapshots `dev` in every repo and checks them together. Each checkout is handled
   as in a plain project, uncommitted changes included. `main` moves in all repos or in none.
-- Commits show as one id per repo, such as `ballup-dunk 1a2b3c4d, ballup-swish 5e6f7a8b`.
+- Commits show as one id per repo, such as `shop-api 1a2b3c4d, shop-app 5e6f7a8b`.
 
 ### The workspace folder as a repo (`"."`)
 
 Without it, a task can never change the workspace's own files (`CLAUDE.md`, `docs/`, `.claude/`, `bin/`,
 `.gitignore`, `openspec/`): they are copies. To let tasks change them, make the workspace folder a git repo of
-its own and list it as `"."`: `repos = ["ballup-dunk", "ballup-swish", "."]`.
+its own and list it as `"."`: `repos = ["shop-api", "shop-app", "."]`.
 
 - **Set it up** with `./opsd.py adopt-workspace-root -p NAME`. In your checkout it runs `git init` in the folder
   if needed (on `main_branch`), adds `/<repo>/` to `.gitignore` for each repo folder not yet ignored, commits the
@@ -1843,7 +1992,7 @@ its own and list it as `"."`: `repos = ["ballup-dunk", "ballup-swish", "."]`.
   one more repo everywhere else: it is rebased, gated, merged into its `dev` only when the task committed to it,
   promoted (or sent straight to main) with the others, checked out for deploys, and included in Send to dev and
   in carrying your uncommitted changes over. Its commit shows under the workspace's folder name, such as
-  `ballup-monorepo 1a2b3c4d, ballup-dunk 5e6f7a8b`. The worker brief says the root is a repo and edits to its
+  `shop 1a2b3c4d, shop-api 5e6f7a8b`. The worker brief says the root is a repo and edits to its
   files must be committed there.
 - **Old records.** Commits are recorded in `repos` order, which is why `"."` goes last: releases and deploys
   recorded before it still match their repos. A deploy target with `from` asks you to deploy its source
@@ -1859,7 +2008,8 @@ plain project, the root repo (`"."` in `repos`) for a workspace. A workspace wit
 - **What goes where.** The home toml (`~/.claude-ops/projects/<name>.toml`) keeps identity and machine
   settings: `title`, `repo`, `main_branch`, `dev_branch`, `worktrees`, `max_parallel`, `direct_main`,
   `chat_mcp` and `[worker] env` (and `port_base`). The repo file may hold `repos`, `[worktree]` (`clone`, `setup`,
-  `setup_timeout`), `[[gate]]`, `[app]`, `[[deploy]]`, `[worker] notes` and `[design] notes`. A home-only key in
+  `setup_timeout`), `[[gate]]`, `[app]`, `[[deploy]]`, `branch_pattern`, `pr_order`, `pr_merge`, `[worker] notes`
+  and `[design] notes`. A home-only key in
   the repo file is ignored with a warning, on the project's card and in the daemon log.
 - **Which wins.** A key in the repo file replaces the home toml's whole: two `[[gate]]` lists are not merged,
   and a `[worktree]` table replaces the home one. A key the repo file leaves out comes from the home toml.
@@ -1871,7 +2021,7 @@ plain project, the root repo (`"."` in `repos`) for a workspace. A workspace wit
   use (after a restart with no last good one, the home toml alone). The error shows on the project's card and in
   the daemon log. Fix it on main and it loads by itself.
 - **A repo not cloned yet.** If `repos` in the file names a folder your checkout lacks (a task added
-  `ballup-web`), the card says "ballup-web/ is not cloned", the last good config stays in use, and the queue
+  `shop-web`), the card says "shop-web/ is not cloned", the last good config stays in use, and the queue
   holds that project's queued tasks. Clone it into the workspace folder yourself (nothing clones it for you);
   the daemon sees it within 10 seconds and goes on.
 - **Workers know.** A project with the file gets a section in each worker brief saying where it is, that a
@@ -1921,6 +2071,10 @@ max_parallel = 0                   # per-project cap; 0 = only the global "Paral
 chat_mcp = []                      # MCP servers a project chat loads, by name (see Chat mode); default none
 
 # --- repo: the rest may also live in claude-ops.toml (repos too; it must list "." there)
+branch_pattern = "{key}-{slug}"     # a Jira-key task's branch (see Branches and pull requests)
+pr_order = ["backend", "app"]      # a workspace's PRs open, and merge, in this order; default: all at once
+pr_merge = "squash"                # how Merge merges a PR: squash, merge or rebase
+
 [worktree]
 clone = ["Library"]                # APFS-cloned into each new worktree. A folder (a warm cache) is cloned once;
                                    # a file (.env, a key) follows your checkout before each deploy, dev build and
@@ -1984,10 +2138,9 @@ each removal the same way (`janitor removed worktree …`). A half-removed folde
 has nothing to keep, so it goes.
 
 The janitor also removes Xcode's build cache of a worktree that is gone (`sweep_derived_data`). Xcode keeps one
-`~/Library/Developer/Xcode/DerivedData/<name>-<hash>` per workspace path, about 3.5 GB for ballup's iOS app, and
+`~/Library/Developer/Xcode/DerivedData/<name>-<hash>` per workspace path, about 3.5 GB for a large iOS app, and
 nothing uses it once that worktree is removed. It only removes an entry whose `info.plist` `WorkspacePath` is in a
-folder under a project's `<worktrees>/` that no longer exists. For what a worktree really costs on disk, see
-[docs/worktree-disk-cost.md](docs/worktree-disk-cost.md).
+folder under a project's `<worktrees>/` that no longer exists. A worktree itself costs little on disk: git shares the history, so the cost is its build output.
 
 ## Other details
 
@@ -2018,14 +2171,24 @@ folder under a project's `<worktrees>/` that no longer exists. For what a worktr
   `tid()` in `dashboard.html` draws every one, so the format stays the same; `data-copyid` holds the exact text a
   click copies. `tests/test_task_ids.py` checks it.
 - **Settings tab.** Parallel, Promote wait, Usage brake, Taper from, Model, Effort and the model per kind of work, each
-  with what it does written next to it, and **Spent**: what Claude has cost, priced at API rates. Last, the
+  with what it does written next to it, **Appearance** (Theme: Solarized dark, the default, or Dark; kept per browser in
+  localStorage `ops-theme`, no server setting; `tests/test_theme.py`), and **Spent**: what Claude has cost, priced at API rates. Last, the
   **Danger zone** card holds **Restart claude-ops** (`POST /api/restart`): the same as `opsctl restart`, at once,
-  without waiting for deploys or idle tasks. Click it twice: the first click turns it into "Click again to restart"
-  and names any running deploy that will fail (`deploy #259 will fail`); moving away or waiting 5 s resets it.
+  without waiting for deploys or idle tasks. Every click gets an answer on the button itself:
+  - **First click:** the same button, not a new one, reads "Click again to restart" and names any running deploy
+    that will fail (`deploy #259 will fail`). It stays that way for 5 s, or until the pointer leaves or the button
+    loses focus. The 3 s state refresh doesn't reset it.
+  - **Second click:** the button reads "Restarting…" and is disabled at once, before `/api/restart` answers.
+  - **The request fails:** the error shows next to the button, and the button comes back.
+  - **Restarting:** "Restarting…" stays while the daemon is down, though the header shows an error then.
+  - **A daemon with a new pid answers:** "Restarted ✓" for about 5 s, then the normal button.
+  - **No new pid after 60 s:** "No answer: see ~/.claude-ops/restart.log and `opsctl log`", with the button back.
+
+  The page keeps the button element across these states and changes only its label, so focus and its listeners
+  survive: rebuilding it on the first click fired blur on the removed button, which undid the confirm at once.
+  `restartView()` in `dashboard.html` picks the state; `tests/test_restart_button.py` checks it.
   The daemon logs `restarting claude-ops: you clicked Restart in Settings' Danger zone` to `opsd.log` and runs
-  `opsctl restart` in a session of its own, logging to `DATA/restart.log`. The card then shows "Restarting…"
-  until a daemon with a new pid answers, or "No answer: see ~/.claude-ops/restart.log and `opsctl log`" after
-  60 s. Only the launchd service restarts: a scratch daemon (a test's or a worker's) refuses with "not the
+  `opsctl restart` in a session of its own, logging to `DATA/restart.log`. Only the launchd service restarts: a scratch daemon (a test's or a worker's) refuses with "not the
   launchd service; opsctl restart would restart that one". Sessions can't click it: the guard blocks the live
   port, and `opsctl restart` itself.
 - **Analyze tab.** Run times and costs of the tasks created in the last day, 7 days, 30 days or all time, for
@@ -2036,8 +2199,7 @@ folder under a project's `<worktrees>/` that no longer exists. For what a worktr
   outcome; what the fix rounds fixed; the dearest and slowest tasks; and **How to improve**: plain rules over the
   same data (fix rounds, Opus on releases, turns that started after the 1-hour cache expired, failed and cancelled
   spend, tiny tasks, queue waits, high effort), each with a rough saving. Run time leaves out the time a task
-  waited on your answer or review, a pause or the usage limit. The rules' constants come from
-  `docs/usage-analysis.md`.
+  waited on your answer or review, a pause or the usage limit. The rules' constants come from measuring the owner's own usage.
 - **Tasks tab.** New task and the task list are on the left; the task page is on the right. The project
   switcher in the header filters the list; with two or more ticked, each row shows its project. Clicking a task
   opens it on the right and focuses its project, and new tasks default to that project (when it is in view).
@@ -2250,7 +2412,7 @@ folder under a project's `<worktrees>/` that no longer exists. For what a worktr
   10k tokens, cutting the diff stat first. The task log says "started a fresh session: last call 3 h ago (cache
   expired)" or "…: context 120k". Each task keeps `last_call` and `ctx_tokens` from its worker's stream (Ask the
   worker updates them too). The thresholds are `FRESH_AFTER` and `FRESH_ABOVE` in `opsd.py`, from
-  `docs/usage-analysis.md` Q2 and Q3, with the context limit lowered from 155k to 90k later, as cache reads were
+  measured usage (cold-cache turns and big contexts cost most), with the context limit lowered from 155k to 90k later, as cache reads were
   most of all tokens used. Ask the worker always resumes; chats start over on context only (see Chat mode).
 - **Talk to a working worker.** While a task is queued, working or being checked, the task page has
   a "Talk to the worker" box. A message goes straight to the running worker, which reads it after its
@@ -2347,6 +2509,7 @@ Nothing claude-ops runs may stop, signal or quit a process it did not start.
 | `worker_prompt.md`, `design_prompt.md` | briefs for workers and design chats |
 | `spec_prompt.md` | added to a design chat's brief when it is about an OpenSpec change |
 | `spec_new_prompt.md` | added instead while a chat from **New change** has no change yet |
+| `plugin/` | the `claude-ops` Claude Code plugin: the research skill and the OpenSpec commands (see [The plugin](#the-plugin)) |
 | `dashboard.html` | the page |
 | `scripts/demo.sh`, `scripts/demo_seed.py`, `scripts/demo_capture.py` | the README's screenshots and clips (see [Demo media](#demo-media)) |
 | `~/.claude-ops/projects/*.toml` | one config per project |
@@ -2365,7 +2528,7 @@ web page can't reach it by re-pointing its own domain at 127.0.0.1 (DNS rebindin
 Keep the host on 127.0.0.1: the API can start work on your machine. For phone access, use Tailscale
 rather than binding to your LAN. It is served tailnet-only on its own HTTPS port (443 is taken by
 another dashboard): `tailscale serve --bg --https=8443 http://127.0.0.1:8788`, then open
-https://adams-mac-mini.pintail-bramble.ts.net:8443. Undo with `tailscale serve --https=8443 off`.
+https://<your-mac>.<your-tailnet>.ts.net:8443. Undo with `tailscale serve --https=8443 off`.
 
 ## Testing claude-ops itself
 

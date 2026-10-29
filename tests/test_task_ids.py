@@ -18,6 +18,7 @@ const out = {}, list = {dataset: {}};
 const $ = s => s === "#list" ? list : null;
 const document = {querySelectorAll: () => []};
 const P = () => ({title: "Proj"}), archivedP = () => false, modelTag = () => "", trainOf = () => null, inView = () => true;
+const branchTag = () => "", prsShort = () => "", prsOf = () => null, prStep = () => null, isBranchTask = () => false;
 const took = () => "1m", ago = () => "1m", nowLine = () => "", LABEL = {}, sel = 0, pf = "";
 const verbPill = x => `<span class="verb">${x.verb}</span>`, TD = {key: ""};
 let state = {now: 100, tasks: [{id: 316, project: "p", title: "Show ids", state: "queued", priority: 0, created: 1, kind: "task"},

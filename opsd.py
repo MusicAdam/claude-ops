@@ -8,7 +8,9 @@
   opsd.py add -p NAME [--model M] [--effort E] "text..."   queue a task through the running daemon; --model opus,
                                        sonnet, haiku or a full model id (else the setting model:task, then model);
                                        --effort low, medium, high, xhigh or max (else the setting effort);
-                                       --research T0|T1|T2 queues a research run whose question is the text
+                                       --research T0|T1|T2 queues a research run whose question is the text;
+                                       --branch NAME or --jira KEY: a branch task (README: Branches and pull requests)
+  opsd.py pr open|merge TASK_ID        a branch task: push and open its PRs / merge them in pr_order
   opsd.py schedule add -p NAME --every 'mon 09:00' [--body TEXT] [--hold] [--model M] [--effort E] "title..."
                                        a recurring job: queue that task on that timetable (README: Recurring jobs);
                                        --research T0|T1|T2 makes it a research job whose question is the text
@@ -16,7 +18,7 @@
                                        change schedule ID: only the fields given, the rest stay as they are;
                                        --after-schedule ID|none (add or edit): its task waits on schedule ID's task
   opsd.py deploy -p NAME TARGET [--version same|patch|minor|major|X.Y.Z] [--note TEXT]   deploy a [[deploy]] target
-  opsd.py send NAME [--design|--chat] [--title T] [--hold] [--model M] [--effort E] "text..."
+  opsd.py send NAME [--design|--chat] [--title T] [--hold] [--model M] [--effort E] [--branch B | --jira K] "text..."
                                        from a session the queue started: a task (or chat) in another project
   opsd.py pause-all | resume-all       pause every running task (it stops now, resumable) / resume every paused one
   opsd.py archive-project NAME         take a project off the queue: its config moves to projects/archived/
@@ -31,7 +33,8 @@ Per project (paths come from ~/.claude-ops/projects/<name>.toml):
                          merge time, uncommitted changes to tracked files there are saved as a patch in the task's
                          run folder (runs/<id>/dev-uncommitted-<repo>.patch) and discarded. Untracked files stay.
   <worktrees>/main       build of main, the golden version (detached). Changes only when a release passes.
-  <worktrees>/t<id>      one worktree per task, branch task/<id>-<slug> (a release: detached at its dev snapshot).
+  <worktrees>/t<id>      one worktree per task, branch task/<id>-<slug> (a release: detached at its dev snapshot;
+                         a branch task: its named branch).
   <worktrees>/deploy     where deploy targets run (detached). Reset for each deploy but never cleaned.
 
 A workspace (`repos = [...]` in its config) is a folder that holds several git repos, such as a backend and an
@@ -65,9 +68,14 @@ HOST = os.environ.get("OPS_HOST", "127.0.0.1")
 PORT = int(os.environ.get("OPS_PORT", "8788"))
 DAEMON_URL = f"http://{'127.0.0.1' if HOST in ('', '0.0.0.0', '::') else HOST}:{PORT}"  # for `opsd.py send`
 CLAUDE = os.environ.get("OPS_CLAUDE") or shutil.which("claude") or str(HOME / ".local/bin/claude")
+# The skills and commands workers and chats use (README: ### The plugin), loaded with --plugin-dir. Their names are
+# namespaced by the plugin, /claude-ops:research and /claude-ops:openspec:<cmd>, so no user copy can shadow them.
+PLUGIN = CODE / "plugin"
+PLUGIN_ARGS = ["--plugin-dir", str(PLUGIN)]
 MAX_FIX_ROUNDS = 3  # times a worker is sent back after a conflict or failed gate
 # A worker's next turn starts a fresh session, with a handoff note, instead of resuming one whose
-# prompt cache has expired (it lasts an hour) or whose context makes every call dear. docs/usage-analysis.md Q2, Q3.
+# prompt cache has expired (it lasts an hour) or whose context makes every call dear. Measured on the owner's own usage: a cold turn costs about
+# $0.80 and a fresh worker start-up about $0.53, so a handoff note is cheaper.
 # A chat's next turn does the same above FRESH_ABOVE (see chat_stale). Every call rereads the whole context, so cache
 # reads are most of the tokens used: a 90k limit about halves the dearest calls for the price of a ~10k-token note.
 FRESH_AFTER = 55 * 60  # seconds since the session's last call
@@ -212,6 +220,11 @@ class Project:
         # land), with no release. [[deploy]] targets keep it: a deploy and a merge moving main take turns
         # (exclusive_blocker), and commits a deploy makes on main reach dev before the next gate (catch_up_dev).
         self.direct_main = bool(c.get("direct_main", True))
+        # branch tasks (README: Branches and pull requests): a Jira key's branch name, the order a workspace's PRs
+        # open and merge in, and how Merge merges one
+        self.branch_pattern = str(c.get("branch_pattern") or BRANCH_PATTERN)
+        self.pr_order = [str(x).strip("/") or "." for x in c.get("pr_order", []) if isinstance(x, str)]
+        self.pr_merge = c.get("pr_merge") if c.get("pr_merge") in PR_MERGES else "squash"
         self.config_blob = ""  # claude-ops.toml's blob on main, "" with none (see load_project)
         self.config_error = None  # why the repo file on main is not the config in use
         self.config_warnings = []  # keys the repo file sets that only the home toml may
@@ -342,7 +355,10 @@ def deploy_targets(p, items):
 
 REPO_CONFIG = "claude-ops.toml"
 HOME_ONLY = ("title", "repo", "main_branch", "dev_branch", "worktrees", "max_parallel", "direct_main", "chat_mcp")
-MOVABLE = ("repos", "worktree", "gate", "app", "deploy")  # and notes in [worker] and [design]
+MOVABLE = ("repos", "worktree", "gate", "app", "deploy", "branch_pattern", "pr_order", "pr_merge")  # and notes in
+# [worker] and [design]
+BRANCH_PATTERN = "{key}-{slug}"  # a Jira-key task's branch, unless the project sets branch_pattern
+PR_MERGES = ("squash", "merge", "rebase")  # pr_merge: gh pr merge --<this>
 NOTES_TABLES = ("worker", "design")  # only notes moves: [worker] env and port_base are machine settings
 LAST_GOOD = {}  # project name -> the repo file's keys last loaded: a malformed one keeps these
 
@@ -378,12 +394,17 @@ def split_repo_config(text):
             warns.append(f"{k} is not a config key: ignored")
     for k, v in keep.items():
         bad = {"repos": not isinstance(v, list) or not all(isinstance(x, str) for x in v),
+               "pr_order": not isinstance(v, list) or not all(isinstance(x, str) for x in v),
+               "branch_pattern": not isinstance(v, str) or "{key}" not in v,
+               "pr_merge": v not in PR_MERGES,
                "gate": not isinstance(v, list) or not all(isinstance(g, dict) and isinstance(g.get("run"), str)
                                                           for g in v),
                "deploy": not isinstance(v, list) or not all(isinstance(t, dict) for t in v)}.get(k, not isinstance(v, dict))
         if bad or (k in NOTES_TABLES and not isinstance(v["notes"], str)):
             raise ValueError(f"{k} is not " + {"repos": "a list of folder names", "gate": "a list of [[gate]] tables "
-                             "each with a run command", "deploy": "a list of [[deploy]] tables"}.get(
+                             "each with a run command", "deploy": "a list of [[deploy]] tables",
+                             "pr_order": "a list of repo folder names", "branch_pattern": "text with {key} in it",
+                             "pr_merge": "one of " + ", ".join(PR_MERGES)}.get(
                                  k, f"a [{k}] table" if k not in NOTES_TABLES else "a [{k}] table whose notes is text"))
     if "repos" in keep and "." not in [str(r).strip("/") or "." for r in keep["repos"]]:
         raise ValueError(f'repos must list "." (the repo {REPO_CONFIG} is in)')
@@ -425,6 +446,8 @@ def config_toml(r):
            f"# The owner's home toml keeps {', '.join(HOME_ONLY[:4])},", f"# {', '.join(HOME_ONLY[4:])} and [worker] env.", ""]
     if "repos" in r:
         out += [f"repos = {toml_value(r['repos'])}", ""]
+    if top := [f"{k} = {toml_value(r[k])}" for k in ("branch_pattern", "pr_order", "pr_merge") if k in r]:
+        out += top + [""]
     for k in ("worktree", "gate", "app", "deploy", "worker", "design"):
         v = r.get(k)
         for table in (v if isinstance(v, list) else [v] if isinstance(v, dict) else []):
@@ -1069,10 +1092,16 @@ def init_db():
                       ("reports", "TEXT"),  # reports its done result listed: [{path, read}] as JSON (RES-10)
                       ("not_before", "REAL"),  # it starts no earlier than this epoch (README: Start later)
                       ("not_before_why", "TEXT"),
+                      ("jira", "TEXT"), ("target", "TEXT"),  # a branch task's Jira key and named branch
                       ("review", "TEXT")):  # a done result's review report {fixed, before, after, check}, as JSON  # the window when not_before is "after the next reset", e.g. 5-hour
         if col not in cols:
             q(f"ALTER TABLE tasks ADD COLUMN {col} {decl}")
     q("CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY, task_id INTEGER, ts REAL, text TEXT)")
+    q("""CREATE TABLE IF NOT EXISTS prs (id INTEGER PRIMARY KEY, task_id INTEGER, repo TEXT, seq INTEGER DEFAULT 0,
+        number INTEGER, url TEXT, state TEXT DEFAULT 'waiting', ci TEXT DEFAULT 'pending', failing TEXT,
+        checked_at REAL, opened_at REAL, merged_at REAL, merge_commit TEXT, synced INTEGER DEFAULT 0, error TEXT,
+        warning TEXT)""")  # a branch task's GitHub PRs, one per repo (README: Branches and pull requests)
+    q("CREATE INDEX IF NOT EXISTS prs_task ON prs (task_id, seq)")
     q("CREATE INDEX IF NOT EXISTS events_task ON events (task_id, id)")  # a task's log, and the latest per task
     q("""CREATE TABLE IF NOT EXISTS designs (id INTEGER PRIMARY KEY, project TEXT, title TEXT, session_id TEXT,
         state TEXT DEFAULT 'idle', created REAL, updated REAL, cost REAL DEFAULT 0)""")
@@ -1264,7 +1293,8 @@ def ev(tid, text):
 
 
 def add_task(project, body, title="", priority=0, hold=0, depends_on=None, parent=None, kind="task", auto_release=None,
-             deploy=None, origin=None, senddev=None, model=None, effort=None, research=None, not_before=None):
+             deploy=None, origin=None, senddev=None, model=None, effort=None, research=None, not_before=None,
+             jira=None, target=None):
     """auto_release None takes the project's default ("Promote after merge" on the project).
     A deploy (kind "deploy") is made only by queue_deploy: you clicked Deploy, or ran `opsd.py deploy`.
     origin: the session in another project that sent it (see send_peer).
@@ -1272,8 +1302,11 @@ def add_task(project, body, title="", priority=0, hold=0, depends_on=None, paren
     model: the model its worker starts on; None takes model:<kind> when it starts (see model_for).
     effort: its --effort; None takes the setting effort on each turn (see effort_for).
     research: a research run's {question, tier, slug, path} (see queue_research).
-    not_before: when it may start, as start_time takes it (a time, "reset" or an epoch); None starts it when it can."""
+    not_before: when it may start, as start_time takes it (a time, "reset" or an epoch); None starts it when it can.
+    jira, target: a branch task's Jira key and named branch (README: Branches and pull requests); its branch is
+    worked out now and kept in branch. A branch task never promotes after merge."""
     p = proj(project)
+    jira, target = (str(jira or "").strip() or None), (str(target or "").strip() or None)
     model, effort = model_name(model), effort_name(effort)
     nb, why = start_time(not_before) if not_before not in (None, "") else (None, None)
     if auto_release is None:
@@ -1282,19 +1315,57 @@ def add_task(project, body, title="", priority=0, hold=0, depends_on=None, paren
     title = (title or (title_of(body) if body else "untitled")).strip()[:120]
     if (kind == "deploy") != bool(deploy):
         raise ValueError("a deploy needs its target, and only a deploy has one")
+    branch = None
+    if jira or target:
+        if kind != "task" or research:
+            raise ValueError("only a task can work on a named branch")
+        branch = branch_name(p, title, jira, target)
     tid = q("INSERT INTO tasks (project, title, body, priority, hold, depends_on, parent, created, kind, auto_release, "
-            "deploy, origin, senddev, model, effort, research) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "deploy, origin, senddev, model, effort, research, jira, target, branch) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (project, title, body, int(priority), int(bool(hold)), depends_on or None, parent, time.time(), kind,
-             int(bool(auto_release) and kind in MERGES), json.dumps(deploy) if deploy else None,
+             int(bool(auto_release) and kind in MERGES and not branch), json.dumps(deploy) if deploy else None,
              json.dumps(origin) if origin else None, json.dumps(senddev) if senddev else None, model, effort,
-             json.dumps(research) if research else None))
+             json.dumps(research) if research else None, jira, target, branch))
     ev(tid, "queued" + (f" after #{depends_on}" if depends_on else "") + (f" on {model}" if model else "")
-       + (f" at {effort} effort" if effort else ""))
+       + (f" at {effort} effort" if effort else "") + (f" on branch {branch}" if branch else ""))
     if nb:
         q("UPDATE tasks SET not_before=?, not_before_why=? WHERE id=?", (nb, why, tid))
         ev(tid, f"waits for the {why} reset: starts after {start_clock(nb)}" if why
            else f"waits until {start_clock(nb)}")
     return tid
+
+
+JIRA_RE = re.compile(r"[A-Z][A-Z0-9]+-\d+")  # a Jira key: it names a branch task's branch and prefixes its titles
+
+
+def slug_of(title):
+    """A title as a branch name's part: lowercase, each run of other than a-z0-9 a '-', 40 characters at most."""
+    return re.sub(r"[^a-z0-9]+", "-", (title or "").lower()).strip("-")[:40] or "task"
+
+
+def branch_name(p, title, jira=None, target=None):
+    """A branch task's branch: target as given, else the project's branch_pattern for the Jira key. ValueError for
+    a bad key or a name git refuses, or one of the queue's own branches."""
+    if jira and not JIRA_RE.fullmatch(jira):
+        raise ValueError(f"{jira!r} is not a Jira key (like BALL-123)")
+    name = target or p.branch_pattern.replace("{key}", jira).replace("{slug}", slug_of(title))
+    if subprocess.run(["git", "check-ref-format", "--branch", name], capture_output=True).returncode:
+        raise ValueError(f"{name!r} is not a branch name git accepts")
+    if name in (p.main, p.dev) or name.startswith("task/"):
+        raise ValueError(f"{name!r} is one of the queue's own branches: pick another name")
+    return name
+
+
+def branch_input(text):
+    """The New task form's one field, Branch or Jira key: (jira, target). A value that looks like a key is one."""
+    text = str(text or "").strip()
+    return (text, None) if JIRA_RE.fullmatch(text) else (None, text or None)
+
+
+def is_branch_task(t):
+    """A task that works on a named branch and ends in pull requests, not a merge into dev."""
+    return bool(t and (t.get("jira") or t.get("target")))
 
 
 def notify(title, msg):
@@ -1868,11 +1939,26 @@ def guard(argv):
 def worker_prompt(p, t):
     tpl = (CODE / "worker_prompt.md").read_text()
     checks = ", ".join(f"`{g['run']}`" for g in p.gate) or "(none configured: run whatever tests the repo has)"
-    notes = workspace_note(p, t["branch"]) + (f"## Notes for {p.title}\n\n{p.worker_notes}\n" if p.worker_notes else "")
+    notes = workspace_note(p, t["branch"], is_branch_task(t)) + \
+        (f"## Notes for {p.title}\n\n{p.worker_notes}\n" if p.worker_notes else "")
     notes += repo_config_note(p) + peer_brief(p, "task")
+    base, rules, finish = p.dev, "", (f"When you finish, the queue rebases your branch onto the latest `{p.dev}`, runs "
+                                      f"the merge check again,\nand merges into `{p.dev}`. If that fails, you are "
+                                      "resumed with the error.")
+    if is_branch_task(t):  # README: Branches and pull requests
+        base = f"origin/{p.main}" + (f" (or `{p.main}` in a repo with no origin)" if p.repos else "")
+        rules = (f"\n- This is a branch task: commit on `{t['branch']}`, the branch you are given, and on no other. "
+                 f"Don't touch `{p.dev}` or `{p.main}`, and don't push: the queue pushes it when the owner opens a "
+                 f"pull request. The branch may have commits from earlier work already; add yours on top."
+                 + (f" Start each commit message with the Jira key `{t['jira']}`, as in `{t['jira']}: Fix the login "
+                    f"crash`." if t["jira"] else ""))
+        finish = (f"When you finish, the queue runs the merge check on `{t['branch']}` (rebased onto the latest "
+                  f"`origin/{p.main}` first, until the branch has been pushed; never after), and leaves the commits on "
+                  f"the branch. Nothing merges into `{p.dev}`. If the check fails, you are resumed with the error.")
     return tpl.format(id=t["id"], title=t["title"], body=t["body"], project=p.title, worktree=t["worktree"],
                       branch=t["branch"], repo=p.repo, dev=p.dev, main=p.main, port=p.port_for(t["id"]),
-                      result=result_path(t), checks=checks, notes=notes, proof_dir=proof_dir(t["id"]))
+                      result=result_path(t), checks=checks, notes=notes, proof_dir=proof_dir(t["id"]),
+                      base=base, branch_rules=rules, finish=finish)
 
 
 def repo_config_note(p):
@@ -1890,15 +1976,16 @@ def repo_config_note(p):
             "starts: the queue holds them until then.\n\n")
 
 
-def workspace_note(p, branch=None):
+def workspace_note(p, branch=None, named=False):
     """How a workspace's worktree is laid out, for the briefs. Empty for a plain project."""
     if not p.repos:
         return ""
     if "." in p.repos:
         kids = [r for r in p.parts if not r.root]
         names = ", ".join(f"`{r.sub}/`" for r in kids)
-        on = (f"Each is a git worktree on branch `{branch}`, branched from that repo's `{p.dev}`. Commit in each "
-              "repo you change; a repo you leave alone is not merged.") if branch else \
+        on = (f"Each is a git worktree on branch `{branch}`, branched from that repo's "
+              f"`{f'origin/{p.main}' if named else p.dev}`. Commit in each repo you change; a repo you leave alone "
+              f"is not {'pushed' if named else 'merged'}.") if branch else \
             "Each is a git worktree, detached at the commit being checked."
         return (f"## This is a workspace of {len(p.repos)} git repos\n\n"
                 f"The worktree root is itself a git repo: the workspace's own files (`CLAUDE.md`, docs, `.claude/`, "
@@ -1907,8 +1994,9 @@ def workspace_note(p, branch=None):
                 f"files, `git -C {kids[0].sub if kids else '.'} status` a repo folder. Edits to the root's files are "
                 f"kept only if you commit them in the root repo, like any other repo.\n\n")
     names = ", ".join(f"`{r}/`" for r in p.repos)
-    on = (f"Each is a git worktree of its own repo on branch `{branch}`, branched from that repo's `{p.dev}`. "
-          "Commit in each repo you change; a repo you leave alone is not merged.") if branch else \
+    on = (f"Each is a git worktree of its own repo on branch `{branch}`, branched from that repo's "
+          f"`{f'origin/{p.main}' if named else p.dev}`. Commit in each repo you change; a repo you leave alone is not "
+          f"{'pushed' if named else 'merged'}.") if branch else \
         "Each is a git worktree of its own repo, detached at the commit being checked."
     return (f"## This is a workspace of {len(p.repos)} git repos\n\n"
             f"The worktree root is not a git repo. It holds a copy of the workspace's own files (`CLAUDE.md`, "
@@ -2054,7 +2142,7 @@ def run_claude(p, tid, prompt, proof=False):
     cmd = ["caffeinate", "-i", CLAUDE, "-p", "--input-format", "stream-json", "--replay-user-messages",
            "--output-format", "stream-json", "--verbose",
            "--permission-mode", "auto", "--permission-prompts", "none", "--strict-mcp-config",
-           "--no-chrome", "--name", f"{p.name} #{tid}", "--add-dir", str(IMAGES),
+           "--no-chrome", *PLUGIN_ARGS, "--name", f"{p.name} #{tid}", "--add-dir", str(IMAGES),
            "--settings", guard_settings(t["worktree"], p), "--add-dir", str(run_dir if proof else proof_dir(tid))]
     if t["session_id"]:
         cmd += ["--resume", t["session_id"]]
@@ -2235,6 +2323,15 @@ def task_steer(tid, text):
     with STEER_LOCK:
         t = task(tid)
         pipe = STEER_PIPES.get(tid)
+        if is_branch_task(t) and (t["state"] in ("on_branch", "pr") or (t["state"] == "needs_input" and
+                                                                          t["phase"] in (PR_RED, PR_CLOSED))):
+            # README: Branches and pull requests. The worker resumes with it, the gate runs, and the queue pushes
+            # to an open PR: how you pass on review comments
+            q("INSERT INTO task_msgs (task_id, role, text, ts) VALUES (?,?,?,?)", (tid, "steer", text, time.time()))
+            upd(tid, state="queued", phase="", question=None, start_at="claude", rounds=0,
+                next_prompt=steered_prompt("after your work was on its branch"))
+            ev(tid, "you sent a message: " + text[:200])
+            return
         if t["state"] not in STEER_STATES:
             raise ValueError(f"the worker is not working (task is {t['state']})")
         if t["kind"] == "deploy":
@@ -2582,12 +2679,14 @@ def record_proof(p, tid):
 
 def ensure_worktree(p, tid):
     t = task(tid)
+    if is_branch_task(t):
+        return branch_worktree(p, tid)
     if t["worktree"] and all(r.present(t["worktree"]) for r in p.parts):
         if unprepared(t["worktree"]):  # its setup failed or was stopped: run it again
             upd(tid, phase="setting up the worktree")
             prepare_worktree(p, Path(t["worktree"]), key=tid)
         return
-    slug = re.sub(r"[^a-z0-9]+", "-", t["title"].lower()).strip("-")[:40] or "task"
+    slug = slug_of(t["title"])
     branch = t["branch"] or f"task/{tid}-{slug}"
     path = p.wt / f"t{tid}"
     upd(tid, phase="setting up the worktree")
@@ -2635,6 +2734,9 @@ def _pipeline(p, tid):
         return senddev_landed(p, tid, t["merged"], f"merged into {p.dev} earlier")
     if t["start_at"] == "main":  # direct_main: merged into dev before a wait, a restart or a retry; main moves now
         return land_on_main(p, tid)
+    if t["start_at"] == "pr":  # a branch task's Open PR, or a step after it (README: Branches and pull requests)
+        return pr_step(p, tid)
+    on_branch = is_branch_task(t)
     ensure_worktree(p, tid)
     t = task(tid)
     wt = t["worktree"]
@@ -2693,22 +2795,30 @@ def _pipeline(p, tid):
                             + (f" of {r.name})" if r.sub else ")"))
         need_claude = True
 
-        if not changed_parts(p, t["branch"]):
+        if not (branch_parts(p, t["branch"]) if on_branch else changed_parts(p, t["branch"])):
             if sending:  # applying your changes changed nothing: dev has them already
                 return senddev_landed(p, tid, None, f"{p.dev} already had these changes")
             return finish(p, tid, merged=None, note="no code changes")
 
-        # Rebase onto the latest dev, gate, then merge (or hold for review).
-        upd(tid, state="gating", phase=f"rebasing onto {p.dev}")
-        if p.direct_main:  # commits made straight to main come into dev first, so the gate checks them too
+        # Rebase onto the latest dev, gate, then merge (or hold for review). A branch task rebases onto the latest
+        # origin/main instead, and only in a repo where its branch was never pushed; then it stays on its branch.
+        upd(tid, state="gating", phase=f"rebasing onto {p.main if on_branch else p.dev}")
+        if p.direct_main and not on_branch:  # commits made straight to main come into dev first, so the gate checks them too
             with p.lock:
                 err = catch_up_dev(p, tid)
             if err:
                 return fail(p, tid, err + f"\n\nPromote once: the release has a worker merge {p.main} into "
                                           f"{p.dev}. Then Retry this task.")
+        if on_branch:
+            fetch_origin(p, tid)
         base = p.revs(p.dev)
+        r, kept = subprocess.CompletedProcess([], 0, "", ""), []
         for part in p.parts:  # every repo, so the gate checks the latest dev of each
-            r = subprocess.run(["git", "rebase", p.dev], cwd=part.at(wt), capture_output=True, text=True)
+            if on_branch and pushed(part, t["branch"]):  # never rebase a pushed branch: new commits go on top
+                kept.append(part)
+                continue
+            onto = base_ref(p, part) if on_branch else p.dev
+            r = subprocess.run(["git", "rebase", onto], cwd=part.at(wt), capture_output=True, text=True)
             if r.returncode:
                 subprocess.run(["git", "rebase", "--abort"], cwd=part.at(wt), capture_output=True)
                 break
@@ -2717,13 +2827,17 @@ def _pipeline(p, tid):
         if r.returncode:
             if not bump_round(p, tid, "rebase conflict" + (f" in {part.name}" if part.sub else "")):
                 return
-            run = f"git -C {part.sub} rebase {p.dev}" if part.sub else f"git rebase {p.dev}"
-            prompt = (f"The `{p.dev}` branch{f' of {part.name}' if part.sub else ''} moved and branch "
+            run = f"git -C {part.sub} rebase {onto}" if part.sub else f"git rebase {onto}"
+            what = f"`{p.main}` (`{onto}`)" if on_branch else f"`{p.dev}`"
+            prompt = (f"The {what} branch{f' of {part.name}' if part.sub else ''} moved and branch "
                       f"`{t['branch']}` no longer rebases cleanly onto it. Run `{run}`, resolve the conflicts "
-                      f"so both your change and the new {p.dev} work survive, re-run the checks, commit, and "
-                      f"write $OPS_RESULT again.\n\ngit said:\n{r.stdout[-1500:]}{r.stderr[-1500:]}")
+                      f"so both your change and the new {p.main if on_branch else p.dev} work survive, re-run the "
+                      f"checks, commit, and write $OPS_RESULT again.\n\ngit said:\n{r.stdout[-1500:]}{r.stderr[-1500:]}")
             upd(tid, state="running")
             continue
+        if kept:
+            ev(tid, f"not rebased: {t['branch']} is pushed already" + (f" ({', '.join(x.name for x in kept)})"
+                                                                         if p.repos else ""))
         key = gate_key(p, wt)
         if key and setting(f"gated:{tid}") == key:  # approved after a pass, and nothing moved since
             ok, detail = True, ""
@@ -2738,9 +2852,16 @@ def _pipeline(p, tid):
             ev(tid, f"gate failed: {detail.splitlines()[0]}")
             if not bump_round(p, tid, "gate failed:\n" + detail):
                 return
-            prompt = (f"The queue rebased your branch onto the latest `{p.dev}` and ran its merge check. "
-                      f"It failed:\n\n{detail}\n\nFix it in this worktree (keep the history rebased on "
-                      f"{p.dev}), re-run the failing step yourself, commit, and write $OPS_RESULT again.")
+            if on_branch and kept:
+                prompt = (f"The queue ran its merge check on branch `{t['branch']}`. It is pushed already, so it was "
+                          f"not rebased. It failed:\n\n{detail}\n\nFix it with new commits on top (never rebase, "
+                          f"amend or force-push a pushed branch), re-run the failing step yourself, commit, and write "
+                          f"$OPS_RESULT again.")
+            else:
+                onto = f"origin/{p.main}" if on_branch else p.dev
+                prompt = (f"The queue rebased your branch onto the latest `{onto}` and ran its merge check. "
+                          f"It failed:\n\n{detail}\n\nFix it in this worktree (keep the history rebased on "
+                          f"{onto}), re-run the failing step yourself, commit, and write $OPS_RESULT again.")
             upd(tid, state="running")
             continue
         ev(tid, "gate passed" + (": " + ", ".join(g["name"] for g in p.gate) if p.gate else " (no gate steps)"))
@@ -2773,6 +2894,16 @@ def _pipeline(p, tid):
             notify(f"{p.title}: task ready for review", f"#{tid}: {t['title']}")
             return
 
+        if on_branch:  # no merge into dev: the commits stay on the branch, for Open PR (or a push to its PR)
+            with STEER_LOCK:
+                steered = bool(pending_steers(tid))
+                if not steered:
+                    upd(tid, phase="")
+            if steered:
+                prompt = steered_prompt("while the queue checked your work")
+                upd(tid, state="running")
+                continue
+            return branch_end(p, tid)
         with p.lock:
             if stopped(tid):
                 return
@@ -2856,6 +2987,785 @@ def land_on_main(p, tid):
     finish(p, tid, merged=t["merged"], note=f"{p.main} is now {p.show(commit)}")
     if Path(p.repo).resolve() == CODE and p.revs(p.main) != before:
         restart_when_idle(tid)
+
+
+# ---------------------------------------------------------------- branches and pull requests
+# (README: Branches and pull requests) A branch task works on a named branch, given or made from a Jira key, and ends
+# `on_branch` instead of merging into dev. Open PR pushes it and opens a GitHub PR per repo it commits to, in the
+# project's pr_order; the queue then watches them (pr_poll), and once every PR has merged, main follows origin/main.
+# Every git or gh write runs in the task's own pipeline (start_at 'pr'), one task per branch at a time
+# (branch_holder); the poll only reads.
+
+PR_RED = "CI failed"  # the phase of a branch task that needs you because a PR's CI failed
+PR_CLOSED = "PR closed"  # ... because a PR was closed without merging
+PR_SETUP = "can't open PRs"  # ... because gh, its login, a GitHub origin or a push is in the way
+PR_MAIN = "main can't follow origin"  # ... because your main has commits origin/main lacks
+PR_PHASES = (PR_RED, PR_CLOSED, PR_SETUP, PR_MAIN)
+PR_POLL_EVERY = 120  # seconds between polls of open PRs
+GH_TIMEOUT = 120  # seconds a gh or git network call may take
+PR_LOCKS = {}  # task id -> lock: its PR step and a Merge click never run gh writes at once
+PR_POLLING = threading.Lock()
+NET_ENV = {"GIT_TERMINAL_PROMPT": "0", "GH_PROMPT_DISABLED": "1", "GH_NO_UPDATE_NOTIFIER": "1", "NO_COLOR": "1"}
+GITHUB_URL = re.compile(r"(?:[a-z+]+://)?(?:[^@/]+@)?(?P<host>[^/:@]*github[^/:]*)(?::\d+)?[:/]"
+                        r"(?P<repo>[^/]+/[^/]+?)(?:\.git)?/?$")
+
+
+def pr_lock(tid):
+    return PR_LOCKS.setdefault(tid, threading.Lock())
+
+
+def origin_url(r):
+    """origin's URL as configured (git config, not get-url, which applies insteadOf), "" with no origin."""
+    return r.git("config", "--get", "remote.origin.url", check=False)
+
+
+def gh_repo(r):
+    """[HOST/]OWNER/NAME of repo r's origin on GitHub, for gh -R, or None when origin is not on GitHub."""
+    m = GITHUB_URL.fullmatch(origin_url(r))
+    if not m:
+        return None
+    return m.group("repo") if m.group("host") == "github.com" else f"{m.group('host')}/{m.group('repo')}"
+
+
+def gh_path():
+    return shutil.which("gh") or next((x for x in ("/opt/homebrew/bin/gh", "/usr/local/bin/gh")
+                                       if os.access(x, os.X_OK)), None)
+
+
+def gh(r, *args, timeout=GH_TIMEOUT):
+    """gh args... against repo r's GitHub repo, by -R: gh never touches your checkout (no local branch switch or
+    delete). Returns (exit code, stdout, stderr)."""
+    exe = gh_path()
+    if not exe:
+        return 127, "", "gh is not installed"
+    try:
+        res = subprocess.run([exe, *args, *(("-R", gh_repo(r)) if r and gh_repo(r) else ())], cwd=r.src if r else None,
+                             capture_output=True, text=True, timeout=timeout, env={**os.environ, **NET_ENV})
+    except (subprocess.TimeoutExpired, OSError) as e:
+        return 1, "", f"gh {' '.join(args[:2])}: {e}"
+    return res.returncode, res.stdout, res.stderr
+
+
+def git_net(r, *args):
+    """A git command that talks to origin, with a time limit and no password prompt: None, or git's error."""
+    try:
+        res = subprocess.run(["git", *args], cwd=r.src, capture_output=True, text=True, timeout=GH_TIMEOUT,
+                             env={**os.environ, **NET_ENV})
+    except subprocess.TimeoutExpired:
+        return f"git {' '.join(args)} took over {GH_TIMEOUT} s"
+    return None if res.returncode == 0 else (res.stderr.strip() or res.stdout.strip() or f"exit {res.returncode}")
+
+
+def fetch_origin(p, tid=None):
+    """git fetch origin in each repo that has an origin. A failure is logged on the task, not fatal: the branch
+    work goes on from what was fetched before."""
+    for r in p.parts:
+        if origin_url(r) and (err := git_net(r, "fetch", "-q", "origin")) and tid:
+            ev(tid, f"git fetch origin{' in ' + r.name if r.sub else ''} failed: {err.splitlines()[-1][:300]}")
+
+
+def ref_ok(r, ref):
+    return bool(r.git("rev-parse", "--verify", "-q", ref, check=False))
+
+
+def base_ref(p, r):
+    """What a branch task branches from and rebases onto in repo r: origin/main, or main for a repo with no
+    origin (or one whose origin has no main yet)."""
+    return f"origin/{p.main}" if origin_url(r) and ref_ok(r, f"refs/remotes/origin/{p.main}") else p.main
+
+
+def pushed(r, branch):
+    """Whether branch is on origin (as of the last fetch or push): then the queue never rebases it again."""
+    return ref_ok(r, f"refs/remotes/origin/{branch}")
+
+
+def branch_parts(p, branch):
+    """The repos where branch has commits its base lacks: the ones the task commits to."""
+    return [r for r in p.parts if ref_ok(r, f"refs/heads/{branch}")
+            and int(r.git("rev-list", "--count", f"{base_ref(p, r)}..refs/heads/{branch}") or 0)]
+
+
+def part_of(p, sub):
+    return next((r for r in p.parts if r.sub == sub), None)
+
+
+def branch_holder(t):
+    """The other task of t's project on t's branch that t waits for, or None. One task per branch at a time: an
+    earlier queued one, or any that is working on it. One that is on branch, has PRs out, ended or failed doesn't
+    hold it (a PR phase that needs you doesn't either: Fix CI and messages requeue it, and then it waits its turn)."""
+    if not is_branch_task(t) or not t.get("branch"):
+        return None
+    for o in q("SELECT id,state,phase FROM tasks WHERE project=? AND branch=? AND id!=? AND (jira IS NOT NULL OR "
+               "target IS NOT NULL) ORDER BY id", (t["project"], t["branch"], t["id"])):
+        if o["state"] in ("on_branch", "pr", *ENDED) or (o["state"] == "queued" and o["id"] > t["id"]):
+            continue
+        if o["state"] == "needs_input" and o["phase"] in PR_PHASES:
+            continue
+        return o
+    return None
+
+
+def past_branch(t):
+    """Whether branch task t is on its branch or later: a task on the same branch after it may start."""
+    return t["state"] in ("on_branch", "pr") or (t["state"] == "needs_input" and t.get("phase") in PR_PHASES)
+
+
+def dep_waits(t, dep):
+    """Whether t still waits for dep, its depends_on: until dep is done (a branch task: all its PRs merged), but a
+    task on the same branch only until dep is on branch."""
+    if not dep or dep["state"] == "done":
+        return False
+    if is_branch_task(t) and is_branch_task(dep) and dep.get("project") == t.get("project") and \
+            dep.get("branch") == t.get("branch"):
+        return not past_branch(dep)
+    return True
+
+
+def free_branch(p, r, branch, mine):
+    """Detach each queue worktree of repo r that has branch checked out (a task on it that ended, failed or is on
+    branch: its files stay as they are), so worktree mine can check it out. RuntimeError if a checkout of yours has
+    it: git checks a branch out in one place only."""
+    for w in r.git("worktree", "list", "--porcelain").split("\n\n"):
+        lines = w.splitlines()
+        if not lines or f"branch refs/heads/{branch}" not in lines:
+            continue
+        at = lines[0][len("worktree "):]
+        if os.path.realpath(at) == os.path.realpath(r.at(mine)):
+            continue
+        if not within(at, p.wt):
+            raise RuntimeError(f"{branch} is checked out in {at}: switch that checkout to another branch, then Retry")
+        r.git("checkout", "-q", "--detach", cwd=at)
+
+
+def start_point(p, r, branch):
+    """(how, args for git worktree add / checkout -b) for a branch the repo lacks locally."""
+    if pushed(r, branch):
+        return f"from origin/{branch}", ["-b", branch, "--track", f"origin/{branch}"]
+    base = base_ref(p, r)
+    return f"new from {base}", ["-b", branch, "--no-track", base]
+
+
+def branch_worktree(p, tid):
+    """ensure_worktree for a branch task: its worktree has its named branch checked out in every repo. A local branch
+    is used (fast-forwarded first when origin/<branch> is ahead of it), else one is made tracking origin/<branch>,
+    else from origin/main (main with no origin)."""
+    t = task(tid)
+    branch = t["branch"]
+    path = Path(t["worktree"]) if t["worktree"] else p.wt / f"t{tid}"
+    upd(tid, phase="fetching origin")
+    fetch_origin(p, tid)
+    upd(tid, phase="setting up the worktree")
+    fresh = not all(r.present(path) for r in p.parts)
+    if fresh:
+        copy_workspace_files(p, path)
+    said = []
+    for r in p.root_first():
+        here = r.present(path)
+        on = here and r.git("branch", "--show-current", cwd=r.at(path), check=False) == branch
+        if ref_ok(r, f"refs/heads/{branch}"):
+            free_branch(p, r, branch, path)
+            o, head = f"refs/remotes/origin/{branch}", f"refs/heads/{branch}"
+            if ref_ok(r, o) and not is_ancestor(r, o, head) and is_ancestor(r, head, o):  # pushed to from GitHub
+                if on:
+                    r.git("merge", "--ff-only", "-q", o, cwd=r.at(path))
+                else:
+                    r.git("update-ref", head, r.rev(o), r.rev(head))
+                said.append(f"{r.name + ' ' if r.sub else ''}fast-forwarded to origin/{branch}")
+            how, args = "local", [branch]
+        else:
+            how, args = start_point(p, r, branch)
+        if on:
+            continue
+        if here:
+            r.git("checkout", "-q", *args, cwd=r.at(path))
+        else:
+            r.add_worktree(path, *args)
+        said.append(f"{r.name + ': ' if r.sub else ''}{how}")
+    if fresh or unprepared(path):
+        prepare_worktree(p, path, key=tid)
+    upd(tid, worktree=str(path))
+    ev(tid, f"worktree {path} on branch {branch}" + (f" ({'; '.join(said)})" if said else ""))
+
+
+def branch_line(p, t):
+    """The summary's first line on branch: the branch and its commits per repo, then the commits themselves."""
+    branch, counts, lines = t["branch"], [], []
+    for r in p.parts:
+        if not ref_ok(r, f"refs/heads/{branch}"):
+            continue
+        log = r.git("log", "--format=%h %s", f"{base_ref(p, r)}..refs/heads/{branch}").splitlines()
+        if not log:
+            continue
+        n = f"{len(log)} commit{'s' * (len(log) != 1)}"
+        local = "" if origin_url(r) else " (no origin: they stay on the local branch, no PR)"
+        counts.append((f"{r.name} {n}" if r.sub else n) + local)
+        lines += [f"- {r.name + ': ' if r.sub else ''}{c}" for c in log[:10]] + \
+            ([f"- ... and {len(log) - 10} more"] if len(log) > 10 else [])
+    return f"On branch {branch}: {', '.join(counts) or 'no commits'}.", lines
+
+
+def with_branch_line(p, t, tail):
+    """t's summary with the branch line on top, replacing the one an earlier round put there."""
+    s = (t["summary"] or "").strip()
+    if s.startswith("On branch "):
+        s = s.split("\n\n", 1)[1] if "\n\n" in s else ""
+    head, lines = branch_line(p, t)
+    return "\n".join([f"{head} {tail}".strip(), *lines]) + (f"\n\n{s}" if s else "")
+
+
+def detach_worktree(p, t):
+    """Leave the branch free for the next task on it: the worktree stays, detached at the same commit."""
+    wt = t["worktree"]
+    for r in p.parts:
+        if wt and r.present(wt) and r.git("branch", "--show-current", cwd=r.at(wt), check=False):
+            r.git("checkout", "-q", "--detach", cwd=r.at(wt), check=False)
+
+
+def branch_end(p, tid):
+    """A branch task passed its gate (and review): its commits stay on its branch. With PRs open already, the queue
+    pushes them (pr_step); else the task is on branch, and waits for Open PR."""
+    t = task(tid)
+    detach_worktree(p, t)
+    if q("SELECT 1 FROM prs WHERE task_id=? AND number IS NOT NULL", (tid,)):
+        upd(tid, start_at="pr")
+        return pr_step(p, tid)
+    summary = with_branch_line(p, t, "Nothing pushed yet.")
+    upd(tid, state="on_branch", phase="", summary=summary, start_at="claude", question=None)
+    ev(tid, summary.splitlines()[0])
+    notify(f"{p.title}: task on its branch", f"#{tid}: {t['title']}")
+    tell_sender(tid, f"is on branch {t['branch']}, waiting for the owner to open a PR: " + summary)
+
+
+def pr_rows(tid):
+    return q("SELECT * FROM prs WHERE task_id=? ORDER BY seq, id", (tid,))
+
+
+def pr_name(p, row):
+    r = part_of(p, row["repo"])
+    return (r.name if r else row["repo"]) if row["repo"] else ""
+
+
+def pr_words(p, row):
+    """"ballup-dunk #12" (or "#12" in a plain project; "ballup-dunk" before it opens)."""
+    name = pr_name(p, row)
+    num = f"#{row['number']}" if row["number"] else ""
+    return " ".join(x for x in (name, num) if x) or "the PR"
+
+
+def pr_plan(p, t):
+    """(repos with commits on t's branch and an origin, as [(part, seq)] in PR order; repos with commits and no
+    origin). seq is the place in pr_order among them: the first, and every repo pr_order leaves out, is 0."""
+    touched = branch_parts(p, t["branch"])
+    local = [r for r in touched if not origin_url(r)]
+    touched = [r for r in touched if r not in local]
+    named = lambda r, n: r.sub == n or (r.root and n in (".", r.name))
+    order = [r for n in p.pr_order for r in touched if named(r, n)]
+    order = [r for i, r in enumerate(order) if r not in order[:i]]
+    seqs = {r.sub: i for i, r in enumerate(order)}
+    return [(r, seqs.get(r.sub, 0)) for r in order + [r for r in touched if r not in order]], local
+
+
+def pr_precheck(p, parts):
+    """What is missing to push and open PRs for these repos, or None: gh on PATH, logged in, origins on GitHub."""
+    if not gh_path():
+        return "gh, the GitHub CLI, is not on PATH: install it (brew install gh), run gh auth login, then Retry."
+    rc, out, err = gh(None, "auth", "status")
+    if rc:
+        return f"gh is not logged in to GitHub: run gh auth login, then Retry. gh auth status said: " + \
+            ((err or out).strip().splitlines() or ["nothing"])[-1][:300]
+    bad = [f"{r.name or p.repo.name}'s origin ({origin_url(r) or 'none'})" for r in parts if not gh_repo(r)]
+    if bad:
+        return f"Not on GitHub: {', '.join(bad)}. Point origin at a GitHub repo, then Retry."
+    return None
+
+
+def pr_body(p, t, row, rows):
+    """A PR's description: the task summary, the review report, and the task's other PRs."""
+    out = []
+    deps = [x for x in rows if x["seq"] < row["seq"] and x["url"]]
+    out += [f"Depends on {x['url']}" for x in deps]
+    s = (t["summary"] or "").strip()
+    out += ["", s] if s else []
+    rv = clean_review(json.loads(t["review"])) if t["review"] else None
+    if rv:
+        out += ["", "## Review"]
+        out += [f"**{k.title()}:** {rv[k]}" for k in ("fixed", "before", "after") if rv.get(k)]
+        out += ["", "**Check:**", *[f"- {c}" for c in rv.get("check") or []]] if rv.get("check") else []
+    others = [x for x in rows if x["id"] != row["id"]]
+    if others:
+        out += ["", "## The other PRs of this change"]
+        out += [f"- {pr_name(p, x) or 'repo'}: " + (x["url"] or ("opens once the PR before it has CI green"
+                                                                  if x["seq"] > row["seq"] else "not open yet"))
+                for x in others]
+    out += ["", f"Opened by claude-ops task #{t['id']}" + (f" ({t['jira']})" if t["jira"] else "") + "."]
+    return "\n".join(out).strip()
+
+
+def pr_title(t):
+    return f"{t['jira']}: {t['title']}" if t["jira"] else t["title"]
+
+
+def pr_push(p, tid, r, branch):
+    """git push -u origin <branch>, never --force. None, or why it failed."""
+    err = git_net(r, "push", "-u", "origin", branch)
+    if err:
+        return (f"git push origin {branch}{' in ' + r.name if r.sub else ''} was refused, and the queue never "
+                f"force-pushes. git said:\n{err[-1500:]}\n\nIf GitHub has commits the branch lacks, bring them in "
+                f"(git pull on the branch), then Retry.")
+    ev(tid, f"pushed {branch}{' in ' + r.name if r.sub else ''}")
+    return None
+
+
+def pr_open_one(p, t, row, rows):
+    """Push and open (or adopt) row's PR. None, or why not."""
+    r, branch = part_of(p, row["repo"]), t["branch"]
+    if why := pr_push(p, t["id"], r, branch):
+        return why
+    rc, out, err = gh(r, "pr", "list", "--head", branch, "--base", p.main, "--state", "open", "--json", "number,url")
+    found = None
+    try:
+        found = (json.loads(out) or [None])[0] if rc == 0 else None
+    except ValueError:
+        pass
+    if found:
+        number, url = int(found["number"]), found["url"]
+        ev(t["id"], f"{pr_name(p, row) + ': ' if row['repo'] else ''}PR #{number} was open already for {branch}; "
+                    f"watching it: {url}")
+    else:
+        rc, out, err = gh(r, "pr", "create", "--base", p.main, "--head", branch, "--title", pr_title(t),
+                          "--body", pr_body(p, t, row, rows))
+        m = re.search(r"https?://\S+/pull/(\d+)", out + err)
+        if rc or not m:
+            return f"gh pr create{' in ' + r.name if r.sub else ''} failed: {(err or out).strip()[-1500:]}"
+        number, url = int(m.group(1)), m.group(0)
+        ev(t["id"], f"opened {pr_name(p, row) + ' ' if row['repo'] else ''}PR #{number}: {url}")
+    q("UPDATE prs SET number=?, url=?, state='OPEN', ci='pending', failing=NULL, opened_at=?, error=NULL WHERE id=?",
+      (number, url, time.time(), row["id"]))
+    for x in pr_rows(t["id"]):  # the earlier PRs' bodies link this one now
+        if x["id"] != row["id"] and x["number"] and x["state"] == "OPEN":
+            gh(part_of(p, x["repo"]), "pr", "edit", str(x["number"]), "--body", pr_body(p, task(t["id"]), x,
+                                                                                       pr_rows(t["id"])))
+    return None
+
+
+def ci_of(rollup):
+    """(ci, failing checks) from gh's statusCheckRollup: green once every check succeeded or was skipped (none is
+    green too), red on any failure, else pending."""
+    ci, failing = "green", []
+    for c in rollup or []:
+        if not isinstance(c, dict):
+            continue
+        name = c.get("name") or c.get("context") or "check"
+        url = c.get("detailsUrl") or c.get("targetUrl") or ""
+        if c.get("__typename") == "StatusContext" or ("state" in c and "conclusion" not in c):
+            v = str(c.get("state") or "").upper()
+            ok, bad = v == "SUCCESS", v in ("FAILURE", "ERROR")
+        else:
+            v = str(c.get("conclusion") or "").upper()
+            ok = v in ("SUCCESS", "SKIPPED", "NEUTRAL")
+            bad = v in ("FAILURE", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE")
+        if bad:
+            ci = "red"
+            failing.append({"name": name, "url": url})
+        elif not ok and ci == "green":
+            ci = "pending"
+    return ci, failing
+
+
+def pr_view(p, t, row):
+    """Read one PR's state and checks from GitHub into its row. Returns the new row, or None if gh failed."""
+    r = part_of(p, row["repo"])
+    rc, out, err = gh(r, "pr", "view", str(row["number"]), "--json",
+                      "state,mergedAt,mergeCommit,statusCheckRollup,mergeable,url")
+    try:
+        d = json.loads(out) if rc == 0 else None
+    except ValueError:
+        d = None
+    if not isinstance(d, dict):
+        q("UPDATE prs SET checked_at=?, error=? WHERE id=?",
+          (time.time(), f"gh pr view failed: {(err or out).strip()[-300:]}", row["id"]))
+        return None
+    state = str(d.get("state") or "OPEN").upper()
+    ci, failing = ci_of(d.get("statusCheckRollup"))
+    kw = {"state": state, "ci": ci, "failing": json.dumps(failing) if failing else None, "checked_at": time.time(),
+          "url": d.get("url") or row["url"]}
+    if state == "MERGED" and row["state"] != "MERGED":
+        kw["merged_at"] = iso_epoch(d.get("mergedAt")) or time.time()
+        kw["merge_commit"] = (d.get("mergeCommit") or {}).get("oid")
+        early = [x for x in pr_rows(t["id"]) if x["seq"] < row["seq"] and x["state"] != "MERGED"]
+        if early:
+            kw["warning"] = (f"merged on GitHub before {', '.join(pr_words(p, x) for x in early)}, out of pr_order")
+        ev(t["id"], f"{pr_words(p, row)} merged" + (f": {kw['warning']}" if early else ""))
+    elif state == "CLOSED" and row["state"] != "CLOSED":
+        ev(t["id"], f"{pr_words(p, row)} was closed without merging")
+    elif state == "OPEN" and ci != row["ci"] and ci != "pending":
+        ev(t["id"], f"{pr_words(p, row)}: CI {ci}" + (": " + ", ".join(f["name"] for f in failing) if failing else ""))
+    if state == "OPEN" and row["state"] == "CLOSED":
+        kw["error"] = None
+    q(f"UPDATE prs SET {','.join(k + '=?' for k in kw)} WHERE id=?", (*kw.values(), row["id"]))
+    return q("SELECT * FROM prs WHERE id=?", (row["id"],), one=True)
+
+
+def iso_epoch(s):
+    try:
+        return datetime.datetime.fromisoformat(str(s).replace("Z", "+00:00")).timestamp() if s else None
+    except ValueError:
+        return None
+
+
+def pr_due(row, rows):
+    """Whether a PR not open yet may open: every PR before it in the order is open with CI green, or merged."""
+    return not row["number"] and all(x["state"] == "MERGED" or (x["number"] and x["state"] == "OPEN" and
+                                                                  x["ci"] == "green")
+                                     for x in rows if x["seq"] < row["seq"])
+
+
+def pr_mergeable(row, rows):
+    """Why row's Merge button is off, or None when it may merge: open, CI green, every earlier PR merged."""
+    if row["state"] != "OPEN" or not row["number"]:
+        return "it is not open"
+    if row["ci"] != "green":
+        return f"its CI is {row['ci']}"
+    early = [x for x in rows if x["seq"] < row["seq"] and x["state"] != "MERGED"]
+    if early:
+        return "an earlier PR in pr_order has not merged"
+    return None
+
+
+def pr_merge_one(p, tid, row):
+    """gh pr merge --<pr_merge> --delete-branch. None, or gh's message (also kept on the row for the card)."""
+    r = part_of(p, row["repo"])
+    rc, out, err = gh(r, "pr", "merge", str(row["number"]), f"--{p.pr_merge}", "--delete-branch")
+    if rc:
+        msg = (err or out).strip()[-1000:] or f"gh pr merge exited {rc}"
+        q("UPDATE prs SET error=? WHERE id=?", (msg, row["id"]))
+        ev(tid, f"merging {pr_words(p, row)} failed: {msg.splitlines()[0][:300]}")
+        return msg
+    q("UPDATE prs SET error=NULL WHERE id=?", (row["id"],))
+    ev(tid, f"merged {pr_words(p, row)} ({p.pr_merge})")
+    pr_view(p, task(tid), row)  # its merge commit; the next PR step moves main
+    return None
+
+
+def pr_main_target(p):
+    """(revs main moves to after a PR merged: origin/main in each repo where it is ahead, main elsewhere; None and
+    why when your main has commits origin/main lacks while origin/main has new ones)."""
+    out = []
+    for r in p.parts:
+        o = f"refs/remotes/origin/{p.main}"
+        if not origin_url(r) or not ref_ok(r, o) or is_ancestor(r, o, p.main):
+            out.append(r.rev(p.main))
+        elif is_ancestor(r, p.main, o):
+            out.append(r.rev(o))
+        else:
+            return None, (f"{p.main}{' of ' + r.name if r.sub else ''} has commits origin/{p.main} lacks, so it can't "
+                          f"fast-forward to the merged PR. Bring them together yourself (say git pull --rebase in "
+                          f"{r.src}), then Retry.")
+    return " ".join(out), None
+
+
+def pr_main(p, tid):
+    """After a PR merged: move your main to origin/main the way Straight to main moves it (build main if there is an
+    [app] build, fast-forward, carry your uncommitted changes over), then dev takes main in. True once done; False
+    when it waits (a deploy, or something only you can clear) or stopped."""
+    upd(tid, state="merging", phase=f"moving {p.main} to origin/{p.main}")
+    fetch_origin(p, tid)  # the merge commit GitHub just made, whether the queue merged it in this step or you did
+    with p.main_lock:
+        if stopped(tid):
+            return False
+        if deploy := exclusive_blocker(task(tid)):
+            upd(tid, state="queued", phase="")
+            ev(tid, f"waiting for deploy #{deploy['id']}: it moves {p.main} too")
+            return False
+        commit, why = pr_main_target(p)
+        if why:
+            upd(tid, state="needs_input", phase=PR_MAIN, question=why)
+            ev(tid, "needs you: " + why)
+            notify(f"{p.title}: task needs you", f"#{tid}: {why}")
+            return False
+        if commit != p.revs(p.main):
+            if why := promote_blocker(p, commit, "merge"):
+                wait_for_you(p, tid, why, WAIT)
+                return False
+            try:
+                err = promote(p, tid, commit)
+            except NeedsYou as e:
+                wait_for_you(p, tid, str(e), WAIT_CHANGES)
+                return False
+            if stopped(tid):
+                return False
+            if err:
+                upd(tid, state="needs_input", phase=PR_MAIN, question=f"{p.main} did not move to origin/{p.main}. "
+                                                                          f"Retry moves it again.\n{err}")
+                ev(tid, f"{p.main} did not move: {err.splitlines()[0][:300]}")
+                return False
+            ev(tid, f"{p.main} is now {p.show(commit)} (origin/{p.main})")
+            stale_facts(p.name)
+    with p.lock:
+        err = catch_up_dev(p, tid)
+    if err:
+        ev(tid, f"{p.dev} could not take in {p.main}; the next release merges it: {err.splitlines()[0][:300]}")
+    q("UPDATE prs SET synced=1 WHERE task_id=? AND state='MERGED'", (tid,))
+    return True
+
+
+def merge_all_on(tid):
+    return setting(f"prmergeall:{tid}") == "1"
+
+
+def pr_step(p, tid):
+    """Open PR and every step after it, in the task's pipeline (start_at 'pr'): push and open the PRs that are due,
+    push new commits to open ones, Merge all's next merge, read every PR, move main after a merge, then settle the
+    task: done, needs you, or watching (state 'pr')."""
+    upd(tid, next_prompt=None, error=None, question=None, phase="checking the pull requests")
+    with pr_lock(tid):
+        return _pr_step(p, tid)
+
+
+def _pr_step(p, tid):
+    t = task(tid)
+    branch = t["branch"]
+    upd(tid, phase="fetching origin")
+    fetch_origin(p, tid)
+    plan, local = pr_plan(p, t)
+    rows = pr_rows(tid)
+    opened, top = any(x["number"] for x in rows), max((x["seq"] for x in rows), default=0)
+    for r, seq in plan:
+        if r.sub not in {x["repo"] for x in rows}:  # a repo that joins after the first PRs opened goes after them
+            q("INSERT INTO prs (task_id, repo, seq) VALUES (?,?,?)", (tid, r.sub, top + 1 if opened else seq))
+    rows = pr_rows(tid)
+    if local and setting(f"prlocal:{tid}") != branch:
+        set_setting(f"prlocal:{tid}", branch)
+        ev(tid, f"no origin in {', '.join(r.name for r in local)}: its commits stay on the local branch {branch}, "
+                "with no PR")
+    if not rows:
+        if not local:
+            return finish(p, tid, merged=None, note=f"no commits on {branch} that {p.main} lacks: no PR to open")
+        return pr_needs(p, tid, PR_SETUP, f"No repo with commits on {branch} has an origin, so there is no PR to "
+                                          "open. Add a GitHub origin, then Retry.")
+    todo = [x for x in rows if (x["state"] == "OPEN" and x["number"]) or pr_due(x, rows)]
+    if todo and (why := pr_precheck(p, [part_of(p, x["repo"]) for x in todo])):
+        return pr_needs(p, tid, PR_SETUP, why)
+    # A PR opened or pushed to in this step is read at the next poll, not now: GitHub registers its checks a little
+    # after the push, and "no checks" would read as green (opening the next PR in pr_order, or hiding a red CI)
+    fresh = set()
+    for x in rows:  # new commits on an open PR's branch (a fix round): push them, no rebase, no force
+        r = part_of(p, x["repo"])
+        if x["state"] == "OPEN" and x["number"] and r.rev(f"refs/heads/{branch}") != \
+                (r.git("rev-parse", "-q", "--verify", f"refs/remotes/origin/{branch}", check=False) or ""):
+            upd(tid, phase=f"pushing {pr_words(p, x)}")
+            if why := pr_push(p, tid, r, branch):
+                return pr_needs(p, tid, PR_SETUP, why)
+            q("UPDATE prs SET ci='pending', failing=NULL WHERE id=?", (x["id"],))
+            fresh.add(x["id"])
+    for _ in range(len(rows) + 1):
+        changed = False
+        rows = pr_rows(tid)
+        for x in rows:
+            if stopped(tid):
+                return
+            if pr_due(x, rows):
+                upd(tid, phase=f"opening the PR for {pr_name(p, x) or branch}")
+                if why := pr_open_one(p, task(tid), x, rows):
+                    return pr_needs(p, tid, PR_SETUP, why)
+                fresh.add(x["id"])
+                changed = True
+        rows = pr_rows(tid)
+        for x in rows:
+            if x["state"] == "OPEN" and x["number"] and x["id"] not in fresh:
+                pr_view(p, t, x)
+        rows = pr_rows(tid)
+        if merge_all_on(tid):
+            for x in rows:
+                if not pr_mergeable(x, rows):
+                    upd(tid, phase=f"merging {pr_words(p, x)}")
+                    if pr_merge_one(p, tid, x):
+                        set_setting(f"prmergeall:{tid}", "")
+                    changed = True
+                    break
+        if not changed:
+            break
+    if stopped(tid):
+        return
+    rows = pr_rows(tid)
+    if any(x["state"] == "MERGED" and not x["synced"] for x in rows):
+        if not pr_main(p, tid):
+            return
+    return pr_settle(p, tid)
+
+
+def pr_needs(p, tid, phase, why):
+    """The branch task needs you, in one of the PR phases."""
+    upd(tid, state="needs_input", phase=phase, question=why)
+    ev(tid, f"needs you: {why.splitlines()[0][:500]}")
+    tell_sender(tid, "needs the owner: " + why)
+    notify(f"{p.title}: task needs you", f"#{tid}: {why}")
+
+
+def pr_settle(p, tid):
+    """Where the task's PRs leave it: done once all merged, needs you if one closed or has red CI, else watching."""
+    rows, t = pr_rows(tid), task(tid)
+    if rows and all(x["state"] == "MERGED" for x in rows):
+        set_setting(f"prmergeall:{tid}", "")
+        upd(tid, start_at="claude")
+        return finish(p, tid, merged=" ".join(x["merge_commit"] for x in rows if x["merge_commit"]) or None,
+                      note="every PR merged: " + ", ".join(f"{pr_words(p, x)} {x['url']}" for x in rows))
+    if closed := [x for x in rows if x["state"] == "CLOSED"]:
+        return pr_needs(p, tid, PR_CLOSED, "; ".join(f"PR #{x['number']}" + (f" ({pr_name(p, x)})" if x["repo"] else "")
+                                                     + " was closed without merging" for x in closed)
+                        + ". Retry opens it again; Cancel leaves it closed.")
+    if red := [x for x in rows if x["state"] == "OPEN" and x["ci"] == "red"]:
+        set_setting(f"prmergeall:{tid}", "")
+        checks = [f"{pr_words(p, x)}: " + ", ".join(f["name"] for f in json.loads(x["failing"] or "[]"))
+                  for x in red]
+        later = [x for x in rows if not x["number"]]
+        return pr_needs(p, tid, PR_RED, "CI failed on " + "; ".join(checks) + "."
+                        + (f" {', '.join(pr_name(p, x) for x in later)} won't open until it is green." if later else "")
+                        + " Fix CI has the worker fix it from the failed logs; or send the task a message.")
+    if pending_steers(tid):  # a message came in while the queue pushed: the worker takes it next
+        upd(tid, state="queued", phase="", start_at="claude", next_prompt=steered_prompt("while the queue pushed"))
+        return
+    waiting = [x for x in rows if x["state"] == "OPEN" and x["ci"] == "pending"]
+    ready = [x for x in rows if not pr_mergeable(x, rows)]
+    phase = ("CI running on " + ", ".join(pr_words(p, x) for x in waiting)) if waiting else \
+        ("ready to merge: " + ", ".join(pr_words(p, x) for x in ready)) if ready else "PRs open"
+    upd(tid, state="pr", phase=phase, question=None, start_at="pr")
+    if phase != t["phase"] or t["state"] != "pr":
+        ev(tid, phase)
+
+
+def pr_poll():
+    """Every PR_POLL_EVERY seconds (and after you act on a PR): read each open PR of a branch task that is
+    watching them, then queue the task's PR step when there is something to do."""
+    if not PR_POLLING.acquire(blocking=False):
+        return
+    try:
+        for t in q("SELECT * FROM tasks WHERE id IN (SELECT task_id FROM prs WHERE state IN ('OPEN','CLOSED') AND "
+                   "number IS NOT NULL) AND (state='pr' OR (state='needs_input' AND phase IN (?,?)))",
+                   (PR_RED, PR_CLOSED)):
+            p = PROJECTS.get(t["project"])
+            if not p or t["id"] in THREADS or STOPPING.is_set():
+                continue
+            try:
+                pr_poll_task(p, t)
+            except Exception as e:  # one task's trouble must not stop the others' polls
+                print(f"pr poll #{t['id']}:", e, flush=True)
+    finally:
+        PR_POLLING.release()
+
+
+def pr_poll_task(p, t):
+    before = {x["id"]: (x["state"], x["ci"]) for x in pr_rows(t["id"])}
+    for x in pr_rows(t["id"]):
+        if x["number"] and x["state"] in ("OPEN", "CLOSED"):
+            pr_view(p, t, x)
+    rows = pr_rows(t["id"])
+    moved = any(before.get(x["id"]) != (x["state"], x["ci"]) for x in rows)
+    due = any(pr_due(x, rows) for x in rows) or (merge_all_on(t["id"]) and any(not pr_mergeable(x, rows)
+                                                                                for x in rows))
+    if (moved or due) and q("UPDATE tasks SET state='queued', phase='', question=NULL, start_at='pr' WHERE id=? AND "
+                            "state=? AND IFNULL(phase,'')=? RETURNING id", (t["id"], t["state"], t["phase"] or "")):
+        ev(t["id"], "the PRs moved on GitHub; checking them")
+
+
+def poll_soon():
+    threading.Thread(target=pr_poll, daemon=True).start()
+
+
+def pr_queue(tid, why):
+    """Queue the task's PR step (open, push, merge, move main), e.g. after a Merge click."""
+    upd(tid, state="queued", phase="", question=None, start_at="pr")
+    ev(tid, why)
+
+
+def pr_action(p, t, action, b):
+    """The PR buttons on a branch task's card (README: Branches and pull requests)."""
+    tid, st = t["id"], t["state"]
+    if not is_branch_task(t):
+        raise ValueError("this task merges into dev; only a task on a named branch opens PRs")
+    if not p:
+        raise ValueError("its project is not loaded")
+    rows = pr_rows(tid)
+    if action == "pr-open":  # Open PR, or Retry after what was missing is fixed
+        if st not in ("on_branch",) and not (st == "needs_input" and t["phase"] in (PR_SETUP, PR_MAIN)):
+            raise ValueError(f"task is {STATE_WORDS.get(st, st)}: Open PR is for a task on its branch")
+        return pr_queue(tid, "Open PR")
+    if action == "pr-retry":  # a PR was closed without merging: open it again
+        if not (st == "needs_input" and t["phase"] == PR_CLOSED):
+            raise ValueError("no PR of this task is closed")
+        for x in rows:
+            if x["state"] == "CLOSED":
+                rc, out, err = gh(part_of(p, x["repo"]), "pr", "reopen", str(x["number"]))
+                if rc:
+                    raise ValueError(f"gh pr reopen {x['number']} failed: {(err or out).strip()[-500:]}")
+                q("UPDATE prs SET state='OPEN', ci='pending', error=NULL WHERE id=?", (x["id"],))
+                ev(tid, f"reopened {pr_words(p, x)}")
+        return pr_queue(tid, "retried: PRs reopened")
+    if action == "fix-ci":
+        if not (st == "needs_input" and t["phase"] == PR_RED):
+            raise ValueError("no PR of this task has failed CI")
+        upd(tid, state="queued", phase="", question=None, start_at="claude", rounds=0,
+            next_prompt=fix_ci_prompt(p, t))
+        ev(tid, "Fix CI: the worker gets the failed logs")
+        return
+    if st not in ("pr", "needs_input"):
+        raise ValueError(f"task is {STATE_WORDS.get(st, st)}: nothing to merge now")
+    if tid in THREADS:
+        raise ValueError("the queue is working on its PRs right now: try again in a moment")
+    if action == "pr-merge-all":
+        if not [x for x in rows if x["state"] == "OPEN"]:
+            raise ValueError("no PR of this task is open")
+        set_setting(f"prmergeall:{tid}", "1")
+        return pr_queue(tid, "Merge all: the PRs merge in order, each once its CI is green")
+    row = next((x for x in rows if str(x["id"]) == str(b.get("pr")) or x["repo"] == b.get("repo")), None)
+    if not row and len([x for x in rows if x["state"] == "OPEN"]) == 1:
+        row = next(x for x in rows if x["state"] == "OPEN")
+    if not row:
+        raise ValueError("which PR? Give its repo")
+    if why := pr_mergeable(row, rows):
+        raise ValueError(f"{pr_words(p, row)} can't merge yet: {why}")
+    with pr_lock(tid):
+        if err := pr_merge_one(p, tid, row):
+            raise ValueError(f"gh pr merge {row['number']} failed: {err}")
+    pr_queue(tid, f"merged {pr_words(p, row)}; moving {p.main}")
+
+
+def pr_view_rows(t, rows):
+    """A branch task's PRs for the dashboard: repo, number, link, CI and state, and whether Merge may go."""
+    p = PROJECTS.get(t["project"])
+    out = []
+    for x in rows or []:
+        why = pr_mergeable(x, rows)
+        out.append({"id": x["id"], "repo": x["repo"], "name": (pr_name(p, x) if p else x["repo"]) or "",
+                    "number": x["number"], "url": x["url"], "state": x["state"], "ci": x["ci"],
+                    "failing": json.loads(x["failing"] or "[]"), "checked_at": x["checked_at"],
+                    "merged_at": x["merged_at"], "error": x["error"], "warning": x["warning"],
+                    "merge": not why and t["state"] in ("pr", "needs_input"), "merge_why": why})
+    return out
+
+
+def fix_ci_prompt(p, t):
+    """Fix CI: the failing checks and the end of each failed run's log, for the worker."""
+    parts, runs = [], set()
+    for x in pr_rows(t["id"]):
+        failing = json.loads(x["failing"] or "[]")
+        if x["state"] != "OPEN" or x["ci"] != "red":
+            continue
+        r = part_of(p, x["repo"])
+        parts.append(f"### {pr_words(p, x)} ({x['url']})\n\nFailing: " + ", ".join(f["name"] for f in failing))
+        for f in failing:
+            m = re.search(r"/actions/runs/(\d+)", f.get("url") or "")
+            if not m or (x["repo"], m.group(1)) in runs:
+                continue
+            runs.add((x["repo"], m.group(1)))
+            rc, out, err = gh(r, "run", "view", m.group(1), "--log-failed")
+            log = "\n".join((out or err).splitlines()[-200:])
+            parts.append(f"`gh run view {m.group(1)} --log-failed` (last 200 lines):\n\n```\n{log}\n```")
+    where = f"`{t['branch']}`" + (" in each repo" if p.repos else "")
+    return (f"CI failed on the pull request{'s' * (len(parts) > 1)} for branch {where}. The branch is pushed, so "
+            f"don't rebase, amend or force-push: fix it with new commits on top, re-run the failing step yourself "
+            f"if you can, commit, and write $OPS_RESULT again. The queue runs the merge check, then pushes.\n\n"
+            + "\n\n".join(parts))
 
 
 def ask_owner(p, tid, question):
@@ -3273,6 +4183,19 @@ def unblock_releases():
         p = PROJECTS.get(t["project"])
         try:
             if not p or promote_blocker(p, p.revs(p.dev)) or (t["phase"] == WAIT_CHANGES and clashing(p, p.revs(p.dev))):
+                continue
+        except Exception as e:
+            print(f"unblock #{t['id']}:", e, flush=True)
+            continue
+        if q("UPDATE tasks SET state='queued', phase='', question=NULL WHERE id=? AND state='needs_input' "
+             "RETURNING id", (t["id"],)):
+            ev(t["id"], "the way is clear; going on")
+    for t in q("SELECT * FROM tasks WHERE state='needs_input' AND start_at='pr' AND phase IN (?,?)",
+               (WAIT, WAIT_CHANGES)):  # a branch task moving main to origin/main after a PR merged
+        p = PROJECTS.get(t["project"])
+        try:
+            commit = pr_main_target(p)[0] if p else None
+            if not commit or promote_blocker(p, commit) or (t["phase"] == WAIT_CHANGES and clashing(p, commit)):
                 continue
         except Exception as e:
             print(f"unblock #{t['id']}:", e, flush=True)
@@ -3799,6 +4722,8 @@ def scheduler():
                 load_projects()
             if n % 30 == 0 and not STOPPING.is_set():  # every minute: promote trains whose time is up
                 release_trains()
+            if n % (PR_POLL_EVERY // 2) == 0 and not STOPPING.is_set():  # branch tasks' open PRs, off this thread
+                poll_soon()
             if n % (SWEEP_EVERY // 2) == 0 and not STOPPING.is_set():  # the worktree janitor, off this thread
                 threading.Thread(target=sweep_all, daemon=True).start()
         except Exception as e:
@@ -3817,8 +4742,9 @@ def schedule_once():
     claude = claude_running() if taper else 0
     slots = int(setting("max_parallel") or 1) - len(THREADS)
     for t in q("SELECT * FROM tasks WHERE state='queued' ORDER BY priority DESC, id"):
-        if slots <= 0:
-            break
+        quick = t["start_at"] == "pr"  # a branch task's PR step: git and gh calls, no worker, so no slot
+        if slots <= 0 and not quick:
+            continue
         p = PROJECTS.get(t["project"])
         if not p or setting(f"paused:{p.name}") == "1":
             continue
@@ -3836,14 +4762,17 @@ def schedule_once():
             continue
         if t["id"] in TASK_CHAT_LIVE:  # a chat turn has its session: the worker starts when the reply is in
             continue
-        if p.max_parallel:
+        if p.max_parallel and not quick:
             mine = sum(1 for i in THREADS if (task(i) or {}).get("project") == p.name)
             if mine >= p.max_parallel:
                 continue
-        if t["depends_on"]:
-            dep = task(t["depends_on"])
-            if dep and dep["state"] != "done":
-                continue
+        if t["depends_on"] and dep_waits(t, task(t["depends_on"])):
+            continue
+        if holder := branch_holder(t):  # one task per branch at a time
+            why = f"waiting for task #{holder['id']} on {t['branch']}"
+            if t["phase"] != why:
+                upd(t["id"], phase=why)
+            continue
         # a deploy of a direct_main project starts only with main_lock free: a merge holding it is moving main
         held = p.main_lock if t["kind"] == "deploy" and p.direct_main else None
         if held and not held.acquire(blocking=False):
@@ -3861,8 +4790,8 @@ def schedule_once():
         th = threading.Thread(target=pipeline, args=(t["id"],), daemon=True)
         THREADS[t["id"]] = th
         th.start()
-        slots -= 1
-        if t["kind"] not in ("deploy", "release"):
+        slots -= not quick
+        if t["kind"] not in ("deploy", "release") and not quick:
             claude += 1
 
 
@@ -3874,6 +4803,9 @@ def exclusive_blocker(t):
     and a deploy waits for a merge that is moving main. Check and start a deploy with p.main_lock held (schedule_once),
     as land_on_main checks with it held, so the two never both go."""
     p = PROJECTS.get(t["project"])
+    if t.get("start_at") == "pr" and q("SELECT 1 FROM prs WHERE task_id=? AND state='MERGED' AND synced=0", (t["id"],)):
+        return q("SELECT id,kind,state,priority FROM tasks WHERE project=? AND kind='deploy' AND state NOT IN "
+                 "(?,?,?,'queued') ORDER BY id", (t["project"], *ENDED), one=True)  # a merged PR moves main next
     if getattr(p, "direct_main", False) and t["kind"] in MERGES and t.get("start_at") == "main":
         return q("SELECT id,kind,state,priority FROM tasks WHERE project=? AND kind='deploy' AND state NOT IN "
                  "(?,?,?,'queued') ORDER BY id", (t["project"], *ENDED), one=True)
@@ -4322,11 +5254,10 @@ def research_brief(question, tier, path):
 
 ## What to do
 
-1. Answer the question at tier {tier} with the research skill in project mode: this repo is the target, and this
-   task's worktree is where the report goes.
+1. Answer the question at tier {tier} with the `/claude-ops:research` skill (the Skill tool) in project mode: this
+   repo is the target, and this task's worktree is where the report goes.
 2. Write the report to `{path}` in this worktree, and nowhere else. This overrides the research skill's own paths:
-   do not write to ~/dev/research, and do not write briefs/, reports/, topics/, sources/registry.md or watchlist.md
-   anywhere.
+   do not write briefs/, reports/, topics/, sources/registry.md or watchlist.md anywhere.
 3. Start the report with a `# ` heading that names the subject, then one paragraph that answers the question in plain
    words (the dashboard shows the heading as the title and that paragraph as the summary). Then the findings, with a
    source for every claim you quote or count, and a `## Sources` list of links at the end. Say what you could not
@@ -6058,7 +6989,7 @@ def target_facts(p, t, main, s):
     try:
         revs = deploy_input(p, t, main)
     except ValueError as e:
-        out["blocked"] = str(e)  # "Deploy swish test first."
+        out["blocked"] = str(e)  # "Deploy app test first."
         return out
     pairs = [(r, sha) for r, sha in p.pairs(revs) if r in t.parts(p)]
     subject = " · ".join((f"{r.name}: " if r.sub and not t.repo else "") + r.git("log", "-1", "--format=%s", sha)
@@ -7332,7 +8263,7 @@ def design_turn(did, text, fresh_why=None):
             system += "\n\n" + handoff
         cmd = [CLAUDE, "-p", ("[ops: " + " | ".join(said) + "]\n\n" if said else "") + with_images(text),
                "--output-format", "stream-json", "--verbose",
-               "--permission-mode", "auto", "--permission-prompts", "none", "--no-chrome",
+               "--permission-mode", "auto", "--permission-prompts", "none", "--no-chrome", *PLUGIN_ARGS,
                "--mcp-config", mcp, "--strict-mcp-config",  # only chat_mcp: every tool rides on every call
                "--name", f"{p.name} chat #{did}", "--settings", guard_settings(None, p, chat=True),
                "--append-system-prompt", system]
@@ -7344,7 +8275,7 @@ def design_turn(did, text, fresh_why=None):
             text, note = text.strip(), ""
         cmd = [CLAUDE, "-p", note + with_images(text), "--output-format", "stream-json",
                "--verbose", "--permission-mode", "dontAsk", "--permission-prompts", "none", "--allowedTools", tools,
-               "--strict-mcp-config", "--no-chrome", "--name", f"{p.name} design #{did}",
+               "--strict-mcp-config", "--no-chrome", *PLUGIN_ARGS, "--name", f"{p.name} design #{did}",
                "--settings", guard_settings(None),
                "--append-system-prompt", system]
         cmd += ["--add-dir", str(CHAT_FILES / str(did))]
@@ -7500,10 +8431,17 @@ def queue_from_reply(p, reply, did):
                 except ValueError as e:  # queue it anyway, to start as soon as it can
                     nb = None
                     notes.append(f"{e}; that task starts as soon as the queue can")
+            jira, target = it.get("jira"), it.get("branch")
+            if jira or target:
+                try:
+                    branch_name(p, it.get("title") or title_of(it.get("body") or ""), jira, target)
+                except ValueError as e:  # queue it anyway, as an ordinary task that merges into dev
+                    jira = target = None
+                    notes.append(f"{e}; that task merges into {p.dev} as usual")
             tid = add_task(p.name, it.get("body") or it.get("title", ""), it.get("title", ""),
                            priority=int(it.get("priority") or 0), hold=bool(it.get("hold")), depends_on=dep,
                            auto_release=None if it.get("release") is None else bool(it.get("release")),
-                           model=model, effort=effort, not_before=nb)
+                           model=model, effort=effort, not_before=nb, jira=jira, target=target)
             ev(tid, f"queued from design chat #{did}")
             local.append(tid)
         ids += local
@@ -7531,7 +8469,6 @@ SPEC_DENY = ",".join(f"Bash(openspec {c}:*)" for c in (
 # The opsx commands `openspec init` installs in a repo, or the skills newer versions install instead
 OPSX_SKILLS = {"explore": "openspec-explore", "sync": "openspec-sync-specs", "archive": "openspec-archive-change",
                "propose": "openspec-propose", "apply": "openspec-apply-change"}
-TK_OPENSPEC = Path.home() / ".claude" / "commands" / "tk" / "openspec"
 SPEC_COMMANDS = (  # (id, label, tip): what the chat's buttons may send. Never apply or implement: those are tasks.
     ("validate", "Validate", "Checks the change's format with openspec validate --strict. Changes nothing."),
     ("explore", "Explore", "Thinks the change through with you: questions, options, risks. Edits only if you agree."),
@@ -7578,7 +8515,7 @@ def spec_commands(roots, name):
         elif cid in OPSX_SKILLS:
             text = (opsx_invocation(roots, cid) or "") and f"{opsx_invocation(roots, cid)} {name}"
         else:
-            text = (TK_OPENSPEC / f"{cid}.md").is_file() and f"/tk:openspec:{cid} {name}"
+            text = f"/claude-ops:openspec:{cid} {name}"  # the plugin's own: always there
         if text:
             out.append({"id": cid, "label": label, "text": text, "tip": tip})
     return out
@@ -7972,8 +8909,8 @@ def spec_brief(p, r, name, title, group=None, k=0, n=1):
             f"- Add or update tests for the behaviour in the spec scenarios (`#### Scenario:`).\n"
             f"- If the `openspec` CLI is installed, `openspec validate {name} --strict` must pass.\n"
             f"- Don't archive the change (`openspec archive`); that is a separate step the owner asks for.\n"
-            + (f"- Work through the items with `/tk:openspec:implement {name}` (the Skill tool), still within "
-               f"this task's scope and these rules.\n" if (TK_OPENSPEC / "implement.md").is_file() else "")
+            + f"- Work through the items with `/claude-ops:openspec:implement {name}` (the Skill tool), still "
+              f"within this task's scope and these rules.\n"
             + f"{split}\n"
             f"Done when every box this task covers is ticked, the tests pass, and the change's docs match what "
             f"you built.")
@@ -8107,7 +9044,7 @@ def task_chat_turn(tid, text):
                 "]\n\n")
         mcp, _ = mcp_servers(p)
         cmd = [CLAUDE, "-p", note + with_images(text), "--output-format", "stream-json", "--verbose",
-               "--permission-mode", "auto", "--permission-prompts", "none", "--no-chrome",
+               "--permission-mode", "auto", "--permission-prompts", "none", "--no-chrome", *PLUGIN_ARGS,
                "--mcp-config", mcp, "--strict-mcp-config", "--settings", guard_settings(str(cwd), p, chat=True),
                "--append-system-prompt", PROJECT_CHAT_PROMPT]
     else:  # merged: its edits would land nowhere, so it reads, and a change goes to a follow-up task
@@ -8120,7 +9057,8 @@ def task_chat_turn(tid, text):
                   f"worktree from {p.dev} and merges through the queue.]\n\n")
         cmd = [CLAUDE, "-p", note + with_images(text), "--output-format", "stream-json", "--verbose",
                "--permission-mode", "dontAsk", "--permission-prompts", "none",
-               "--allowedTools", DESIGN_TOOLS + f",Bash({SEND_CMD}:*)", "--strict-mcp-config", "--no-chrome"]
+               "--allowedTools", DESIGN_TOOLS + f",Bash({SEND_CMD}:*)", "--strict-mcp-config", "--no-chrome",
+               *PLUGIN_ARGS]
         if made:
             cmd += ["--add-dir", str(p.dev_wt)]
     cmd += ["--resume", t["session_id"], "--add-dir", str(IMAGES)]
@@ -8203,7 +9141,7 @@ def origin_of(ref):
 
 
 def origin_words(o):
-    """"claude-ops task #12", "diskgame design chat #3"."""
+    """"claude-ops task #12", "game design chat #3"."""
     p = PROJECTS.get(o["project"])
     what = {"design": "design chat", "project": "chat"}.get(o["kind"], o["kind"])  # or task, release, deploy
     return f"{p.title if p else o['project']} {what} #{o['id']}"
@@ -8273,11 +9211,13 @@ def retry_after(tid, after):
     return a
 
 
-def send_peer(ref, project, kind, text, title="", hold=False, model=None, effort=None, after=None, not_before=None):
+def send_peer(ref, project, kind, text, title="", hold=False, model=None, effort=None, after=None, not_before=None,
+              jira=None, branch=None):
     """Start a task or chat in project for the session ref names. Returns {kind, id, project, said}.
     model, effort: the task's, as add_task takes them; a chat starts on its kind's model, at the effort setting.
     after: a task id (12 or "#12"), in any project, the new task waits on until it merges (its depends_on).
-    not_before: when the task may start, as add_task takes it (--at, --after-reset)."""
+    not_before: when the task may start, as add_task takes it (--at, --after-reset).
+    jira, branch: a branch task's Jira key or named branch (--jira, --branch; README: Branches and pull requests)."""
     p, text = proj(project), (text or "").strip()
     if kind not in PEER_KINDS:
         raise ValueError(f"kind is one of {', '.join(PEER_KINDS)}")
@@ -8298,6 +9238,8 @@ def send_peer(ref, project, kind, text, title="", hold=False, model=None, effort
         if kind != "task":
             raise ValueError("--at and --after-reset are for tasks; a chat starts at once")
         start_time(not_before)  # refused here, before anything is made
+    if (jira or branch) and kind != "task":
+        raise ValueError("--branch and --jira are for tasks; a chat works on no branch")
     if not text:
         raise ValueError("say what the other project should do")
     o = origin_of(ref)
@@ -8318,7 +9260,7 @@ def send_peer(ref, project, kind, text, title="", hold=False, model=None, effort
                 f"{place + '. ' if place else ''}You may read its files; change only your own worktree. "
                 "When this task ends, the queue tells the sender how it went.]")
         tid = add_task(p.name, f"{head}\n\n{text}", title, hold=hold, depends_on=after, origin=o, model=model,
-                       effort=effort, not_before=not_before)
+                       effort=effort, not_before=not_before, jira=jira, target=branch)
         ev(tid, f"sent by {who}" + (f", after #{after}" if after else ""))
         if o:
             tell_origin(o, f"Sent task #{tid} to {p.title}: {task(tid)['title']}", [tid])
@@ -8470,7 +9412,8 @@ def step_of(lines, ts):
     return step
 
 
-STATE_WORDS = {"running": "working", "gating": "checking", "needs_input": "needs you"}
+STATE_WORDS = {"running": "working", "gating": "checking", "needs_input": "needs you", "on_branch": "on its branch",
+               "pr": "watching its PRs"}
 
 
 def wait_reasons(tasks, s=None):
@@ -8509,19 +9452,21 @@ def wait_reasons(tasks, s=None):
             why = start_words(t)
         elif braked and starts_claude(t):
             why = braked["words"]
-        elif dep and dep["state"] != "done":
+        elif dep and dep_waits(t, dep):
             why = f"waiting for #{dep['id']} to finish (it is {STATE_WORDS.get(dep['state'], dep['state'])})"
+        elif holder := branch_holder(t):
+            why = f"waiting for task #{holder['id']} on {t['branch']}"
         elif blocker := exclusive_blocker(t):
             why = f"waiting for {blocker['kind']} #{blocker['id']}"
         elif p.max_parallel and mine.get(p.name, 0) >= p.max_parallel:
             why = f"{p.title} already runs {p.max_parallel} at once, its limit"
-        elif free <= 0:
+        elif free <= 0 and t.get("start_at") != "pr":
             why = "waiting for a free slot (all busy)"
         elif taper and starts_claude(t) and claude >= taper["cap"]:
             why = taper["words"]
         else:
             why = "starting now"
-            free -= 1
+            free -= t.get("start_at") != "pr"
             claude += t["kind"] not in ("deploy", "release")
         out[t["id"]] = why
     return out
@@ -8661,8 +9606,8 @@ WAIT_EVENTS = {"needs your input": "your answer", "needs you:": "your answer", "
                "hit the Claude usage limit": "the usage limit", "paused: usage limit": "the usage limit",
                "paused": "a pause"}  # the task sits idle from one of these to its next event
 COLD_GAP = 3600  # the prompt cache lives an hour: a turn that starts later writes its whole context again
-COLD_COST = 0.80  # extra $ per cold turn: $11.48 over 14 misses in docs/usage-analysis.md (Q2)
-STARTUP_COST = 0.53  # $ a fresh worker spends before its first edit, median (docs/usage-analysis.md Q1)
+COLD_COST = 0.80  # extra $ per cold turn: $11.48 over 14 misses (measured on the owner's own usage)
+STARTUP_COST = 0.53  # $ a fresh worker spends before its first edit, median (measured on the owner's own usage)
 SONNET_SHARE = 0.5  # Sonnet 5.5 costs half of Opus 5.5 per token ($2/$10 against $4/$20; cache reads are equal)
 
 
@@ -9557,8 +10502,12 @@ def todos_list(tasks, projects, last, now=None, notes=True):
 def state_payload():
     tasks = q("SELECT id,project,title,state,phase,priority,hold,depends_on,parent,created,started,"
               "finished,cost,rounds,summary,question,error,merged,branch,kind,auto_release,origin,paused_by,start_at,"
-              "model,session_model,effort,research,reports,not_before,not_before_why,review FROM tasks "
+              "model,session_model,effort,research,reports,not_before,not_before_why,review,jira,target FROM tasks "
               "ORDER BY id DESC LIMIT 500")
+    prs = {}
+    for x in q("SELECT * FROM prs WHERE task_id IN (SELECT id FROM tasks ORDER BY id DESC LIMIT 500) "
+               "ORDER BY task_id, seq, id"):
+        prs.setdefault(x["task_id"], []).append(x)
     # What each task is doing right now, for the status line under it in the list.
     # Per listed task, one index lookup (events_task): a GROUP BY over every event scanned the whole table.
     last = {r["task_id"]: r for r in q(
@@ -9576,6 +10525,7 @@ def state_payload():
         t["phase_since"] = PHASE_SINCE.get(t["id"]) if t["state"] in ACTIVE else None
         t["step"] = last_step(t["id"]) if t["state"] == "running" and t["phase"] == "claude working" else None
         t["wait"] = waits.get(t["id"])
+        t["prs"] = pr_view_rows(t, prs.get(t["id"])) if is_branch_task(t) else None
         t["start_words"] = start_words(t) if t["state"] == "queued" else None
         t["origin"] = origin_view(t["origin"])
         t["research"] = research_of(t)
@@ -9925,9 +10875,11 @@ class H(BaseHTTPRequestHandler):
             if not (b.get("body") or "").strip():
                 raise ValueError("describe the task")
             dep = int(str(b["depends_on"]).lstrip("#")) if str(b.get("depends_on") or "").strip() else None
+            jira, target = branch_input(b.get("branch_or_jira")) if b.get("branch_or_jira") else \
+                (b.get("jira"), b.get("branch"))  # the form's one field, or opsd.py add --jira / --branch
             tid = add_task(b["project"], b["body"], b.get("title", ""), b.get("priority", 0),
                            b.get("hold", 0), dep, auto_release=b.get("release"), model=b.get("model"),
-                           effort=b.get("effort"), not_before=b.get("not_before"))
+                           effort=b.get("effort"), not_before=b.get("not_before"), jira=jira, target=target)
             p = PROJECTS.get(b["project"])
             return {"id": tid, **({"warning": w} if p and (w := uncommitted_warning(p)) else {})}
         if path == "/api/schedules":
@@ -9962,7 +10914,7 @@ class H(BaseHTTPRequestHandler):
         if path == "/api/send":  # opsd.py send, from a session the queue started
             return send_peer(b.get("from"), b["project"], b.get("kind") or "task", b.get("text"), b.get("title") or "",
                              bool(b.get("hold")), b.get("model"), b.get("effort"), b.get("after"),
-                             b.get("not_before"))
+                             b.get("not_before"), b.get("jira"), b.get("branch"))
         if path == "/api/settings":
             if "usage_brake" in b:
                 b["usage_brake"] = min(100, max(0, int(float(b["usage_brake"] or 0))))
@@ -10121,6 +11073,8 @@ class H(BaseHTTPRequestHandler):
         elif action == "release":  # the "Promote after merge" toggle
             if t["kind"] not in MERGES or st in ENDED:
                 raise ValueError(f"task is {st}" if st in ENDED else "a release releases itself")
+            if is_branch_task(t) and b.get("on"):
+                raise ValueError("a branch task doesn't merge into dev, so there is nothing to promote")
             upd(tid, auto_release=int(bool(b.get("on"))))
             ev(tid, "will be promoted after it merges" if b.get("on") else "will not be promoted after it merges")
         elif action == "start-now":  # Start later's Start now: it takes its normal place in the queue
@@ -10144,7 +11098,8 @@ class H(BaseHTTPRequestHandler):
         elif action == "answer":
             if st != "needs_input":
                 raise ValueError(f"task is {st}")
-            upd(tid, state="queued", question=None, next_prompt=answer_prompt(t["question"], b["answer"]))
+            back = {"start_at": "claude"} if t["phase"] in (PR_RED, PR_CLOSED) else {}  # the worker takes it
+            upd(tid, state="queued", question=None, next_prompt=answer_prompt(t["question"], b["answer"]), **back)
             ev(tid, "answered: " + b["answer"][:200])
         elif action == "approve":
             if st != "review":
@@ -10162,6 +11117,8 @@ class H(BaseHTTPRequestHandler):
                             "Update the work, re-run the checks, commit, and write $OPS_RESULT (with an updated "
                             "`review`).")
             ev(tid, "changes requested: " + b["feedback"][:200])
+        elif action in ("pr-open", "pr-merge", "pr-merge-all", "fix-ci", "pr-retry"):
+            return pr_action(p, t, action, b)
         elif action == "play":
             if not p or not t["worktree"]:
                 raise ValueError("this task has no worktree")
@@ -10253,7 +11210,8 @@ def post(path, body):
 
 def send_cli(argv):
     """opsd.py send PROJECT [--design|--chat] [--title T] [--hold] [--model M] [--effort E] [--after TASK]
-    [--at TIME | --after-reset] [TEXT...]; TEXT from stdin when not given. --after takes 12 or #12."""
+    [--at TIME | --after-reset] [--branch NAME | --jira KEY] [TEXT...]; TEXT from stdin when not given. --after takes
+    12 or #12."""
     body, words, it = {"project": argv[0], "kind": "task", "from": os.environ.get("OPS_FROM", "")}, [], iter(argv[1:])
     for a in it:
         if a in ("--task", "--design", "--chat"):
@@ -10269,6 +11227,8 @@ def send_cli(argv):
             body["after"] = int(v) if v.isdigit() else v
         elif a == "--at":
             body["not_before"] = next(it, "")
+        elif a in ("--branch", "--jira"):
+            body[a[2:]] = next(it, "")
         elif a == "--after-reset":
             body["not_before"] = "reset"
         else:
@@ -10286,16 +11246,19 @@ def send_cli(argv):
 
 
 def add_request(project, words):
-    """opsd.py add -p PROJECT [--model M] [--effort E] [--research T0|T1|T2] [--at TIME | --after-reset] TEXT: (path,
+    """opsd.py add -p PROJECT [--model M] [--effort E] [--research T0|T1|T2] [--at TIME | --after-reset]
+    [--branch NAME | --jira KEY] TEXT: (path,
     body) to post. With --research it queues a one-off research run whose question is TEXT (RES-2), else a task.
     --at and --after-reset set its not_before (README: Start later). TEXT from stdin when not given."""
     opts, words = {}, list(words)
-    while (words[:1] in (["--model"], ["--effort"], ["--research"], ["--at"]) and len(words) >= 2) or \
-            words[:1] == ["--after-reset"]:
+    while (words[:1] in (["--model"], ["--effort"], ["--research"], ["--at"], ["--branch"], ["--jira"])
+           and len(words) >= 2) or words[:1] == ["--after-reset"]:
         if words[0] == "--after-reset":
             opts["not_before"], words = "reset", words[1:]
         else:
             opts["not_before" if words[0] == "--at" else words[0][2:]], words = words[1], words[2:]
+    if "research" in opts and ("branch" in opts or "jira" in opts):
+        raise ValueError("--branch and --jira are for tasks, not research runs")
     text = " ".join(words) or sys.stdin.read()
     if "research" in opts:
         return (f"/api/projects/{quote(project, safe='')}/research",
@@ -10387,6 +11350,8 @@ if __name__ == "__main__":
             out = post(*add_request(args[1], args[2:]))
         except HTTPError as e:
             sys.exit(json.loads(e.read() or b"{}").get("error") or str(e))
+        except ValueError as e:
+            sys.exit(str(e))
         if w := (json.loads(out or "{}") or {}).get("warning"):
             print(w, file=sys.stderr)
     elif cmd == "schedule" and args[:1] in (["add"], ["edit"]):
@@ -10398,6 +11363,13 @@ if __name__ == "__main__":
             sys.exit(f"the claude-ops daemon on port {PORT} did not answer ({e.reason})")
         except (ValueError, OSError) as e:  # a bad command line, or a --body-file it can't read
             sys.exit(str(e))
+    elif cmd == "pr" and len(args) == 2 and args[0] in ("open", "merge") and args[1].lstrip("#").isdigit():
+        try:  # README: Branches and pull requests
+            post(f"/api/tasks/{args[1].lstrip('#')}/" + {"open": "pr-open", "merge": "pr-merge-all"}[args[0]], {})
+        except HTTPError as e:
+            sys.exit(json.loads(e.read() or b"{}").get("error") or str(e))
+        except URLError as e:
+            sys.exit(f"the claude-ops daemon on port {PORT} did not answer ({e.reason})")
     elif cmd in ("archive-project", "unarchive-project") and len(args) == 1:
         try:
             post(f"/api/projects/{quote(args[0], safe='')}/{cmd.split('-')[0]}", {})

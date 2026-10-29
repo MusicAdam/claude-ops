@@ -52,7 +52,7 @@ class LinkKinds(unittest.TestCase):
 
     def test_image(self):
         att, shot, bare = self.md("[image: /srv/ops/images/shot-1.png]", "![New screens](~/.claude-ops/images/a.png)",
-                                  "see /Users/adam/.claude-ops/images/b.png here", user=False)
+                                  "see /Users/me/.claude-ops/images/b.png here", user=False)
         self.assertIn('data-ref="image:shot-1.png" data-href="/api/images/shot-1.png" data-img="att"', att)
         self.assertIn('data-ref="image:a.png" data-href="/api/images/a.png" data-img="mdimg">New screens', shot)
         self.assertIn('data-ref="image:b.png"', bare)

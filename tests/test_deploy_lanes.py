@@ -30,13 +30,13 @@ class Lanes(unittest.TestCase):
     def names(self, deploys):
         return [[s["name"] for s in lane["stages"]] for lane in self.lanes(deploys)]
 
-    def test_ballup_chains(self):
-        ds = [t("swish test", "ballup-swish"), t("swish distribute", "ballup-swish", "swish test"),
-              t("dunk prod", "ballup-dunk"), t("web preview", "ballup-web"), t("web prod", "ballup-web", "web preview")]
+    def test_shop_chains(self):
+        ds = [t("app test", "shop-app"), t("app distribute", "shop-app", "app test"),
+              t("api prod", "shop-api"), t("web preview", "shop-web"), t("web prod", "shop-web", "web preview")]
         lanes = self.lanes(ds)
         self.assertEqual([[s["short"] for s in l["stages"]] for l in lanes], [["test", "distribute"], ["prod"], ["preview", "prod"]])
-        self.assertEqual([l["label"] for l in lanes], ["swish", "dunk", "web"])
-        self.assertEqual([l["repo"] for l in lanes], ["ballup-swish", "ballup-dunk", "ballup-web"])
+        self.assertEqual([l["label"] for l in lanes], ["app", "api", "web"])
+        self.assertEqual([l["repo"] for l in lanes], ["shop-app", "shop-api", "shop-web"])
 
     def test_chain_follows_from_not_config_order(self):
         ds = [t("web prod", "web", "web preview"), t("web preview", "web")]

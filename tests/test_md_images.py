@@ -27,7 +27,7 @@ class MdImages(unittest.TestCase):
         return json.loads(out)
 
     def test_image_from_the_images_folder(self):
-        for path in ("/Users/adam/.claude-ops/images/shot-1.png", "~/.claude-ops/images/shot-1.png",
+        for path in ("/Users/me/.claude-ops/images/shot-1.png", "~/.claude-ops/images/shot-1.png",
                      "/srv/ops/images/shot-1.png"):
             html, = self.md(f"![New screens]({path})")
             self.assertIn('<img class="mdimg" src="/api/images/shot-1.png" alt="New screens"', html)
