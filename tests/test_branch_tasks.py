@@ -56,11 +56,22 @@ if a[:2] == ["pr", "create"]:
 if a[:2] == ["run", "view"]:
     print("\n".join(f"log line {i}" for i in range(300)))
     sys.exit(0)
+if a[:2] == ["api", "graphql"]:  # the review threads and reviews of one PR
+    import re
+    qy = opt("-f")[len("query="):]
+    m = re.search(r'owner: "([^"]+)", name: "([^"]+)"\) \{ pullRequest\(number: (\d+)', qy)
+    pr = st["prs"][f"{m.group(1)}/{m.group(2)}#{m.group(3)}"]
+    print(json.dumps({"data": {"repository": {"pullRequest": {
+        "author": {"login": "me"}, "reviewThreads": {"nodes": pr.get("threads", [])},
+        "reviews": {"nodes": pr.get("reviews", [])}}}}}))
+    sys.exit(0)
 pr = st["prs"][f"{repo}#{a[2]}"]
 if a[:2] == ["pr", "view"]:
     print(json.dumps({"state": pr["state"], "mergedAt": pr.get("mergedAt"),
                       "mergeCommit": {"oid": pr["merge"]} if pr.get("merge") else None,
-                      "statusCheckRollup": pr["checks"], "mergeable": "MERGEABLE", "url": pr["url"]}))
+                      "statusCheckRollup": pr["checks"], "mergeable": "MERGEABLE", "url": pr["url"],
+                      "author": {"login": "me"}, "reviews": pr.get("reviews", []),
+                      "reviewRequests": [{"login": x} for x in pr.get("requests", [])]}))
 elif a[:2] == ["pr", "merge"]:
     if pr.get("merge_error"):
         print(pr["merge_error"], file=sys.stderr)
@@ -74,7 +85,12 @@ elif a[:2] == ["pr", "merge"]:
 elif a[:2] == ["pr", "reopen"]:
     pr["state"] = "OPEN"
 elif a[:2] == ["pr", "edit"]:
-    pr["body"] = opt("--body")
+    if "--body" in a:
+        pr["body"] = opt("--body")
+    if "--add-reviewer" in a:
+        pr["requests"] = pr.get("requests", []) + opt("--add-reviewer").split(",")
+elif a[:2] == ["pr", "comment"]:
+    pr.setdefault("comments", []).append(opt("--body"))
 save()
 '''.replace("#!PYTHON", "#!" + sys.executable)
 
@@ -129,6 +145,7 @@ class Base(unittest.TestCase):
         for tid in self.ids:
             shutil.rmtree(opsd.RUNS / str(tid), ignore_errors=True)
             opsd.set_setting(f"prmergeall:{tid}", "")
+            opsd.set_setting(f"prreviewers:{tid}", "")
         self.toml.unlink()
         opsd.load_projects()
 
@@ -492,6 +509,183 @@ class Plain(Base):
         self.assertIsNone(opsd.pr_view_rows(t, []) or None)
 
 
+def iso(ts=None):
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ts or time.time()))
+
+
+class Reviews(Base):
+    """The review round after Open PR: the bot review, the worker addressing comments, then human reviewers."""
+
+    def setUp(self):
+        super().setUp()
+        self.repo = new_repo(self.root / "repo")
+        self.bare = self.add_origin(self.repo, "r")
+
+    def review(self, slug, n, login, state="COMMENTED", body="", ts=None):
+        self.load()
+        self.state["prs"][f"o/{slug}#{n}"].setdefault("reviews", []).append(
+            {"author": {"login": login}, "state": state, "body": body, "submittedAt": iso(ts), "url": "u"})
+        self.save()
+
+    def thread(self, slug, n, tid, *comments, resolved=False, path="c.txt", line=1):
+        """A review thread: comments are (login, body)."""
+        self.load()
+        self.state["prs"][f"o/{slug}#{n}"].setdefault("threads", []).append(
+            {"id": tid, "isResolved": resolved, "isOutdated": False, "path": path, "line": line,
+             "comments": {"nodes": [{"databaseId": 100 + i, "author": {"login": who}, "body": body, "url": "u"}
+                                    for i, (who, body) in enumerate(comments)]}})
+        self.save()
+
+    def opened(self, target, extra=""):
+        self.project(extra)
+        tid = self.add(target=target)
+        self.run_task(tid, {"c.txt": "x\n"})
+        opsd.pr_action(self.p, opsd.task(tid), "pr-open", {})
+        t = self.step(tid)
+        self.assertIn(t["state"], ("pr", "needs_input"), t["question"])
+        return tid
+
+    def stage(self, tid):
+        return opsd.pr_view_rows(opsd.task(tid), opsd.pr_rows(tid))[0]["review"]
+
+    def test_bot_review_then_address_then_humans(self):
+        tid = self.opened("feat/rv", 'pr_reviewers = ["alice", "org/team"]\n')
+        self.assertEqual(self.stage(tid), "awaiting bot review")
+        self.review("r", 1, "someone-else", body="old", ts=time.time() - 3600)  # before the push: doesn't count
+        opsd.pr_poll()  # no checks: CI green
+        self.step(tid)
+        opsd.pr_poll()
+        t = opsd.task(tid)
+        self.assertEqual((t["state"], self.stage(tid)), ("pr", "awaiting bot review"))
+        self.review("r", 1, "copilot-pull-request-reviewer", body="Pull request overview: 2 comments")
+        self.thread("r", 1, "TH_1", ("copilot-pull-request-reviewer", "Use a constant here"), line=3)
+        self.thread("r", 1, "TH_2", ("copilot-pull-request-reviewer", "Typo"), resolved=True)
+        self.thread("r", 1, "TH_3", ("copilot-pull-request-reviewer", "Why?"), ("me", "Because"))  # answered
+        opsd.pr_poll()
+        self.assertIn("copilot-pull-request-reviewer reviewed it", " ".join(self.events(tid)))
+        t = self.step(tid)
+        self.assertEqual((t["state"], t["start_at"]), ("queued", "claude"), t["question"])
+        prompt = t["next_prompt"]
+        self.assertIn("Thread `TH_1` on `c.txt:3`", prompt)
+        self.assertIn("Use a constant here", prompt)
+        self.assertIn("reply to comment 100", prompt)
+        self.assertIn("gh api repos/o/r/pulls/1/comments/COMMENT_ID/replies", prompt)
+        self.assertIn("resolveReviewThread", prompt)
+        self.assertNotIn("TH_2", prompt)  # resolved
+        self.assertNotIn("TH_3", prompt)  # its last word is ours
+        self.assertNotIn("Pull request overview", prompt)  # a Commented review's text isn't work by itself
+        self.assertEqual(self.stage(tid), "addressing comments")
+        seen = []
+        before = git(self.repo, "rev-parse", "origin/feat/rv")
+        t = self.run_task(tid, {"c.txt": "constant\n"}, seen)
+        self.assertIn("TH_1", seen[0])
+        self.assertEqual(t["state"], "pr", t["question"] or t["error"])
+        self.assertEqual(git(self.repo, "rev-parse", "feat/rv~1"), before)  # on top, pushed
+        self.assertEqual(git(self.repo, "rev-parse", "origin/feat/rv"), git(self.repo, "rev-parse", "feat/rv"))
+        self.assertIn(["pr", "edit", "1", "--add-reviewer", "alice,org/team", "-R", "o/r"], self.calls())
+        self.assertEqual(self.stage(tid), "awaiting human review")
+        n = len(self.calls())
+        opsd.pr_poll()  # one bot round, then humans: nothing more to do
+        self.assertEqual(self.step(tid)["state"], "pr")
+        self.assertFalse([c for c in self.calls()[n:] if c[:2] == ["api", "graphql"]])
+        self.no_force()
+
+    def test_no_bot_review_in_time_no_comments_and_pick_reviewers(self):
+        tid = self.opened("feat/to", "pr_bot_review_timeout = 1\n")
+        opsd.pr_poll()  # no checks: CI green
+        self.assertEqual(self.step(tid)["state"], "pr")  # still waiting for the bot
+        opsd.pr_poll()
+        self.assertEqual(opsd.task(tid)["state"], "pr")
+        opsd.q("UPDATE prs SET review_since=? WHERE task_id=?", (time.time() - 61, tid))
+        opsd.pr_poll()
+        t = self.step(tid)
+        self.assertIn("#1: no bot review came within 1 min; going on", self.events(tid))
+        self.assertIn("#1: no unresolved review comments", self.events(tid))
+        self.assertEqual((t["state"], t["phase"]), ("needs_input", opsd.PR_PICK_PHASE))
+        self.assertIn("Pick reviewers for PR #1: https://github.com/o/r/pull/1", t["question"])
+        self.assertEqual(self.stage(tid), "needs reviewers")
+        opsd.H.__new__(opsd.H).route(f"/api/tasks/{tid}/answer", {"answer": "@bob, carol"})
+        t = self.step(tid)
+        self.assertEqual(t["state"], "pr", t["question"])
+        self.assertIn(["pr", "edit", "1", "--add-reviewer", "bob,carol", "-R", "o/r"], self.calls())
+        self.assertEqual(self.stage(tid), "awaiting human review")
+
+    def test_reviewers_requested_on_github_end_the_pick(self):
+        tid = self.opened("feat/gh", "pr_bot_reviewers = []\n")  # no bot: straight on
+        t = opsd.task(tid)
+        self.assertEqual((t["state"], t["phase"]), ("needs_input", opsd.PR_PICK_PHASE))
+        opsd.pr_poll()  # CI green: the step runs, and still nobody reviews it
+        self.assertEqual(self.step(tid)["phase"], opsd.PR_PICK_PHASE)
+        opsd.pr_poll()
+        self.assertEqual(opsd.task(tid)["state"], "needs_input")  # nothing moved
+        self.load()["prs"]["o/r#1"]["requests"] = ["dana"]
+        self.save()
+        opsd.pr_poll()
+        t = self.step(tid)
+        self.assertEqual(t["state"], "pr", t["question"])
+        self.assertIn("#1: awaiting review by dana, requested on GitHub", self.events(tid))
+
+    def test_review_comment_is_posted_and_its_review_counts(self):
+        tid = self.opened("feat/cl", 'pr_bot_reviewers = []\npr_review_comment = "@claude /pr-review"\n'
+                                     'pr_reviewers = ["alice"]\n')
+        self.assertEqual(self.load()["prs"]["o/r#1"]["comments"], ["@claude /pr-review"])
+        self.assertEqual(self.stage(tid), "awaiting bot review")
+        self.review("r", 1, "claude", state="CHANGES_REQUESTED", body="Please add a test")
+        opsd.pr_poll()
+        t = self.step(tid)
+        self.assertEqual((t["state"], t["start_at"]), ("queued", "claude"))
+        self.assertIn("Please add a test", t["next_prompt"])  # Changes requested counts with no thread
+        t = self.run_task(tid, {"t.txt": "test\n"})
+        self.assertEqual(t["state"], "pr", t["question"] or t["error"])
+        self.assertEqual(self.stage(tid), "awaiting human review")
+
+    def test_ci_red_comes_before_addressing(self):
+        tid = self.opened("feat/red")
+        self.review("r", 1, "copilot-pull-request-reviewer[bot]")
+        self.thread("r", 1, "TH_9", ("copilot-pull-request-reviewer", "Nit"))
+        self.checks("r", 1, "FAILURE")
+        opsd.pr_poll()
+        t = self.step(tid)
+        self.assertEqual((t["state"], t["phase"]), ("needs_input", opsd.PR_RED))
+        opsd.pr_poll()  # still red: the bot review alone doesn't requeue it
+        self.assertEqual(opsd.task(tid)["state"], "needs_input")
+        opsd.pr_action(self.p, opsd.task(tid), "fix-ci", {})
+        t = self.run_task(tid, {"c.txt": "fixed\n"})  # pushed: its CI runs again, not red, so the review goes on
+        self.assertEqual((t["state"], t["start_at"]), ("queued", "claude"))
+        self.assertEqual(self.stage(tid), "addressing comments")
+        self.assertIn("TH_9", t["next_prompt"])
+
+    def test_address_comments_on_demand(self):
+        tid = self.opened("feat/od", 'pr_bot_reviewers = []\npr_reviewers = ["alice"]\n')
+        self.assertEqual(self.stage(tid), "awaiting human review")
+        with self.assertRaisesRegex(ValueError, "no unresolved review comments on #1"):
+            opsd.pr_action(self.p, opsd.task(tid), "pr-address", {})
+        self.review("r", 1, "alice", body="Rename the helper, please")  # Commented: counts when you ask
+        self.thread("r", 1, "TH_A", ("alice", "Split this function"))
+        opsd.pr_action(self.p, opsd.task(tid), "pr-address", {})
+        t = opsd.task(tid)
+        self.assertEqual((t["state"], t["start_at"]), ("queued", "claude"))
+        self.assertIn("TH_A", t["next_prompt"])
+        self.assertIn("Rename the helper", t["next_prompt"])
+        calls = len([c for c in self.calls() if "--add-reviewer" in c])
+        t = self.run_task(tid, {"c.txt": "split\n"})
+        self.assertEqual(t["state"], "pr", t["question"] or t["error"])
+        self.assertEqual(len([c for c in self.calls() if "--add-reviewer" in c]), calls + 1)  # asked again
+        self.assertEqual(self.stage(tid), "awaiting human review")
+
+    def test_review_keys_in_the_repo_file(self):
+        keep, _ = opsd.split_repo_config('pr_bot_reviewers = ["a[bot]"]\npr_review_comment = "@claude review"\n'
+                                         'pr_bot_review_timeout = 5\npr_reviewers = ["org/team"]\n')
+        self.assertEqual(keep["pr_bot_review_timeout"], 5)
+        self.assertIn('pr_reviewers = ["org/team"]', opsd.config_toml(keep))
+        for bad in ("pr_bot_review_timeout = -1", 'pr_reviewers = "alice"', "pr_review_comment = 3"):
+            with self.assertRaises(ValueError):
+                opsd.split_repo_config(bad)
+        self.project()
+        self.assertEqual((self.p.pr_bot_reviewers, self.p.pr_bot_review_timeout, self.p.pr_reviewers),
+                         (["copilot-pull-request-reviewer[bot]"], 30, []))
+
+
 class Workspace(Base):
     """ballup-monorepo's shape: a backend and an app, PRs in pr_order, and a root repo with no origin."""
 
@@ -531,6 +725,8 @@ class Workspace(Base):
         rows = opsd.pr_rows(tid)
         self.assertEqual(rows[1]["number"], 2)
         app = self.load()["prs"]["o/swish#2"]
+        self.assertEqual([x["review"] for x in opsd.pr_rows(tid)], ["bot", "bot"])  # each its own round, as it opens
+        self.assertLess(rows[0]["review_since"], rows[1]["review_since"])
         self.assertIn("Depends on https://github.com/o/dunk/pull/1", app["body"])
         self.assertIn("https://github.com/o/swish/pull/2", self.state["prs"]["o/dunk#1"]["body"])  # linked back
         opsd.pr_poll()  # swish has no checks: green

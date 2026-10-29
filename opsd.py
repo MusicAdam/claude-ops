@@ -10,7 +10,8 @@
                                        --effort low, medium, high, xhigh or max (else the setting effort);
                                        --research T0|T1|T2 queues a research run whose question is the text;
                                        --branch NAME or --jira KEY: a branch task (README: Branches and pull requests)
-  opsd.py pr open|merge TASK_ID        a branch task: push and open its PRs / merge them in pr_order
+  opsd.py pr open|merge|address TASK_ID  a branch task: push and open its PRs / merge them in pr_order / have the
+                                       worker address their review comments
   opsd.py schedule add -p NAME --every 'mon 09:00' [--body TEXT] [--hold] [--model M] [--effort E] "title..."
                                        a recurring job: queue that task on that timetable (README: Recurring jobs);
                                        --research T0|T1|T2 makes it a research job whose question is the text
@@ -232,6 +233,17 @@ class Project:
         self.default_branch_pattern = dbp if "{id}" in dbp else DEFAULT_BRANCH_PATTERN
         self.pr_order = [str(x).strip("/") or "." for x in c.get("pr_order", []) if isinstance(x, str)]
         self.pr_merge = c.get("pr_merge") if c.get("pr_merge") in PR_MERGES else "squash"
+        # the review round after Open PR: whose review the queue waits for (and how long), the comment that asks a
+        # review workflow for one, and who reviews once the comments are addressed
+        bots = c.get("pr_bot_reviewers", PR_BOT_REVIEWERS)
+        self.pr_bot_reviewers = [x for x in bots if isinstance(x, str) and x.strip()] if isinstance(bots, list) else []
+        self.pr_review_comment = str(c.get("pr_review_comment") or "").strip()
+        wait = c.get("pr_bot_review_timeout", PR_BOT_REVIEW_TIMEOUT)
+        self.pr_bot_review_timeout = wait if isinstance(wait, (int, float)) and not isinstance(wait, bool) and \
+            wait >= 0 else PR_BOT_REVIEW_TIMEOUT
+        humans = c.get("pr_reviewers", [])
+        self.pr_reviewers = [x.strip().lstrip("@") for x in humans if isinstance(x, str) and x.strip()] \
+            if isinstance(humans, list) else []
         self.config_blob = ""  # claude-ops.toml's blob on main, "" with none (see load_project)
         self.config_error = None  # why the repo file on main is not the config in use
         self.config_warnings = []  # keys the repo file sets that only the home toml may
@@ -364,11 +376,15 @@ REPO_CONFIG = "claude-ops.toml"
 HOME_ONLY = ("title", "repo", "main_branch", "dev_branch", "worktrees", "max_parallel", "direct_main", "flow",
              "chat_mcp")
 MOVABLE = ("repos", "worktree", "gate", "app", "deploy", "branch_pattern", "default_branch_pattern", "pr_order",
-           "pr_merge")  # and notes in
+           "pr_merge", "pr_bot_reviewers", "pr_review_comment", "pr_bot_review_timeout", "pr_reviewers")  # and notes in
 # [worker] and [design]
 BRANCH_PATTERN = "{key}-{slug}"  # a Jira-key task's branch, unless the project sets branch_pattern
 DEFAULT_BRANCH_PATTERN = "ops/{id}-{slug}"  # flow "pr": the branch of a task given none, unless default_branch_pattern
 PR_MERGES = ("squash", "merge", "rebase")  # pr_merge: gh pr merge --<this>
+PR_BOT_REVIEWERS = ["copilot-pull-request-reviewer[bot]"]  # pr_bot_reviewers: whose review the queue waits for
+PR_BOT_REVIEW_TIMEOUT = 30  # pr_bot_review_timeout: minutes it waits for one, then goes on without
+PR_TOP_KEYS = ("branch_pattern", "default_branch_pattern", "pr_order", "pr_merge", "pr_bot_reviewers",
+               "pr_review_comment", "pr_bot_review_timeout", "pr_reviewers")  # the repo file's top-level keys after repos
 NOTES_TABLES = ("worker", "design")  # only notes moves: [worker] env and port_base are machine settings
 LAST_GOOD = {}  # project name -> the repo file's keys last loaded: a malformed one keeps these
 
@@ -408,6 +424,10 @@ def split_repo_config(text):
                "branch_pattern": not isinstance(v, str) or "{key}" not in v,
                "default_branch_pattern": not isinstance(v, str) or "{id}" not in v,
                "pr_merge": v not in PR_MERGES,
+               "pr_bot_reviewers": not isinstance(v, list) or not all(isinstance(x, str) for x in v),
+               "pr_reviewers": not isinstance(v, list) or not all(isinstance(x, str) for x in v),
+               "pr_review_comment": not isinstance(v, str),
+               "pr_bot_review_timeout": isinstance(v, bool) or not isinstance(v, (int, float)) or v < 0,
                "gate": not isinstance(v, list) or not all(isinstance(g, dict) and isinstance(g.get("run"), str)
                                                           for g in v),
                "deploy": not isinstance(v, list) or not all(isinstance(t, dict) for t in v)}.get(k, not isinstance(v, dict))
@@ -416,7 +436,10 @@ def split_repo_config(text):
                              "each with a run command", "deploy": "a list of [[deploy]] tables",
                              "pr_order": "a list of repo folder names", "branch_pattern": "text with {key} in it",
                              "default_branch_pattern": "text with {id} in it",
-                             "pr_merge": "one of " + ", ".join(PR_MERGES)}.get(
+                             "pr_merge": "one of " + ", ".join(PR_MERGES),
+                             "pr_bot_reviewers": "a list of GitHub logins", "pr_reviewers": "a list of GitHub logins "
+                             "or org/team names", "pr_review_comment": "text",
+                             "pr_bot_review_timeout": "a number of minutes"}.get(
                                  k, f"a [{k}] table" if k not in NOTES_TABLES else "a [{k}] table whose notes is text"))
     if "repos" in keep and "." not in [str(r).strip("/") or "." for r in keep["repos"]]:
         raise ValueError(f'repos must list "." (the repo {REPO_CONFIG} is in)')
@@ -458,8 +481,7 @@ def config_toml(r):
            f"# The owner's home toml keeps {', '.join(HOME_ONLY[:4])},", f"# {', '.join(HOME_ONLY[4:])} and [worker] env.", ""]
     if "repos" in r:
         out += [f"repos = {toml_value(r['repos'])}", ""]
-    if top := [f"{k} = {toml_value(r[k])}" for k in ("branch_pattern", "default_branch_pattern", "pr_order", "pr_merge")
-                  if k in r]:
+    if top := [f"{k} = {toml_value(r[k])}" for k in PR_TOP_KEYS if k in r]:
         out += top + [""]
     for k in ("worktree", "gate", "app", "deploy", "worker", "design"):
         v = r.get(k)
@@ -1114,6 +1136,14 @@ def init_db():
         number INTEGER, url TEXT, state TEXT DEFAULT 'waiting', ci TEXT DEFAULT 'pending', failing TEXT,
         checked_at REAL, opened_at REAL, merged_at REAL, merge_commit TEXT, synced INTEGER DEFAULT 0, error TEXT,
         warning TEXT)""")  # a branch task's GitHub PRs, one per repo (README: Branches and pull requests)
+    pr_cols = {r["name"] for r in q("PRAGMA table_info(prs)")}
+    for col, decl in (("review", "TEXT"),  # its review round's stage: bot, addressing, reviewers or human (PR_REVIEW)
+                      ("review_since", "REAL"),  # when the queue pushed it for the round: older reviews don't count
+                      ("reviewed_at", "REAL"),  # when the bot review it waits for came
+                      ("addressed_at", "REAL"),  # when the worker last got its comments: older review bodies are done
+                      ("requested", "TEXT")):  # the reviewers GitHub has requested, as JSON
+        if col not in pr_cols:
+            q(f"ALTER TABLE prs ADD COLUMN {col} {decl}")
     q("CREATE INDEX IF NOT EXISTS prs_task ON prs (task_id, seq)")
     q("CREATE INDEX IF NOT EXISTS events_task ON events (task_id, id)")  # a task's log, and the latest per task
     q("""CREATE TABLE IF NOT EXISTS designs (id INTEGER PRIMARY KEY, project TEXT, title TEXT, session_id TEXT,
@@ -3035,7 +3065,14 @@ PR_RED = "CI failed"  # the phase of a branch task that needs you because a PR's
 PR_CLOSED = "PR closed"  # ... because a PR was closed without merging
 PR_SETUP = "can't open PRs"  # ... because gh, its login, a GitHub origin or a push is in the way
 PR_MAIN = "main can't follow origin"  # ... because your main has commits origin/main lacks
-PR_PHASES = (PR_RED, PR_CLOSED, PR_SETUP, PR_MAIN)
+PR_PICK_PHASE = "pick reviewers"  # ... because nobody is set to review a PR once its comments are addressed
+PR_PHASES = (PR_RED, PR_CLOSED, PR_SETUP, PR_MAIN, PR_PICK_PHASE)
+# A PR's review round (prs.review): awaiting the bot review, the worker addressing comments, needing you to pick its
+# reviewers, awaiting human review. NULL: a PR opened before the round existed, which skips it
+PR_BOT, PR_ADDRESSING, PR_PICK, PR_HUMAN = "bot", "addressing", "reviewers", "human"
+PR_REVIEW_WORDS = {PR_BOT: "awaiting bot review", PR_ADDRESSING: "addressing comments", PR_PICK: "needs reviewers",
+                   PR_HUMAN: "awaiting human review"}
+REVIEW_SLACK = 60  # seconds: a review GitHub stamps this much before the queue's push still counts (clock skew)
 PR_POLL_EVERY = 120  # seconds between polls of open PRs
 GH_TIMEOUT = 120  # seconds a gh or git network call may take
 PR_LOCKS = {}  # task id -> lock: its PR step and a Merge click never run gh writes at once
@@ -3067,14 +3104,15 @@ def gh_path():
                                        if os.access(x, os.X_OK)), None)
 
 
-def gh(r, *args, timeout=GH_TIMEOUT):
-    """gh args... against repo r's GitHub repo, by -R: gh never touches your checkout (no local branch switch or
-    delete). Returns (exit code, stdout, stderr)."""
+def gh(r, *args, timeout=GH_TIMEOUT, by_r=True):
+    """gh args... against repo r's GitHub repo, by -R (by_r=False for gh api, which has no -R): gh never touches
+    your checkout (no local branch switch or delete). Returns (exit code, stdout, stderr)."""
     exe = gh_path()
     if not exe:
         return 127, "", "gh is not installed"
     try:
-        res = subprocess.run([exe, *args, *(("-R", gh_repo(r)) if r and gh_repo(r) else ())], cwd=r.src if r else None,
+        res = subprocess.run([exe, *args, *(("-R", gh_repo(r)) if by_r and r and gh_repo(r) else ())],
+                             cwd=r.src if r else None,
                              capture_output=True, text=True, timeout=timeout, env={**os.environ, **NET_ENV})
     except (subprocess.TimeoutExpired, OSError) as e:
         return 1, "", f"gh {' '.join(args[:2])}: {e}"
@@ -3374,8 +3412,13 @@ def pr_open_one(p, t, row, rows):
             return f"gh pr create{' in ' + r.name if r.sub else ''} failed: {(err or out).strip()[-1500:]}"
         number, url = int(m.group(1)), m.group(0)
         ev(t["id"], f"opened {pr_name(p, row) + ' ' if row['repo'] else ''}PR #{number}: {url}")
-    q("UPDATE prs SET number=?, url=?, state='OPEN', ci='pending', failing=NULL, opened_at=?, error=NULL WHERE id=?",
-      (number, url, time.time(), row["id"]))
+    q("UPDATE prs SET number=?, url=?, state='OPEN', ci='pending', failing=NULL, opened_at=?, error=NULL, "
+      "review='bot', review_since=?, reviewed_at=NULL, addressed_at=NULL, requested=NULL WHERE id=?",
+      (number, url, time.time(), time.time(), row["id"]))
+    if p.pr_review_comment:  # asks a review workflow (say, @claude /pr-review) for its review
+        rc, out, err = gh(r, "pr", "comment", str(number), "--body", p.pr_review_comment)
+        ev(t["id"], f"asked for a review on #{number}: {p.pr_review_comment}" if rc == 0 else
+           f"couldn't post the review comment on #{number}: {(err or out).strip()[-300:]}")
     for x in pr_rows(t["id"]):  # the earlier PRs' bodies link this one now
         if x["id"] != row["id"] and x["number"] and x["state"] == "OPEN":
             gh(part_of(p, x["repo"]), "pr", "edit", str(x["number"]), "--body", pr_body(p, task(t["id"]), x,
@@ -3411,7 +3454,7 @@ def pr_view(p, t, row):
     """Read one PR's state and checks from GitHub into its row. Returns the new row, or None if gh failed."""
     r = part_of(p, row["repo"])
     rc, out, err = gh(r, "pr", "view", str(row["number"]), "--json",
-                      "state,mergedAt,mergeCommit,statusCheckRollup,mergeable,url")
+                      "state,mergedAt,mergeCommit,statusCheckRollup,mergeable,url,author,reviews,reviewRequests")
     try:
         d = json.loads(out) if rc == 0 else None
     except ValueError:
@@ -3437,6 +3480,12 @@ def pr_view(p, t, row):
         ev(t["id"], f"{pr_words(p, row)}: CI {ci}" + (": " + ", ".join(f["name"] for f in failing) if failing else ""))
     if state == "OPEN" and row["state"] == "CLOSED":
         kw["error"] = None
+    asked = [x.get("login") or x.get("slug") or x.get("name") for x in d.get("reviewRequests") or []
+             if isinstance(x, dict)]
+    kw["requested"] = json.dumps([x for x in asked if x])
+    if row["review"] == PR_BOT and not row["reviewed_at"] and (by := bot_review(p, row, d)):
+        kw["reviewed_at"] = time.time()
+        ev(t["id"], f"{pr_words(p, row)}: {by} reviewed it")
     q(f"UPDATE prs SET {','.join(k + '=?' for k in kw)} WHERE id=?", (*kw.values(), row["id"]))
     return q("SELECT * FROM prs WHERE id=?", (row["id"],), one=True)
 
@@ -3660,6 +3709,8 @@ def pr_settle(p, tid):
     if pending_steers(tid):  # a message came in while the queue pushed: the worker takes it next
         upd(tid, state="queued", phase="", start_at="claude", next_prompt=steered_prompt("while the queue pushed"))
         return
+    if pr_review_step(p, tid):
+        return
     waiting = [x for x in rows if x["state"] == "OPEN" and x["ci"] == "pending"]
     ready = [x for x in rows if not pr_mergeable(x, rows)]
     phase = ("CI running on " + ", ".join(pr_words(p, x) for x in waiting)) if waiting else \
@@ -3676,8 +3727,8 @@ def pr_poll():
         return
     try:
         for t in q("SELECT * FROM tasks WHERE id IN (SELECT task_id FROM prs WHERE state IN ('OPEN','CLOSED') AND "
-                   "number IS NOT NULL) AND (state='pr' OR (state='needs_input' AND phase IN (?,?)))",
-                   (PR_RED, PR_CLOSED)):
+                   "number IS NOT NULL) AND (state='pr' OR (state='needs_input' AND phase IN (?,?,?)))",
+                   (PR_RED, PR_CLOSED, PR_PICK_PHASE)):
             p = PROJECTS.get(t["project"])
             if not p or t["id"] in THREADS or STOPPING.is_set():
                 continue
@@ -3698,6 +3749,10 @@ def pr_poll_task(p, t):
     moved = any(before.get(x["id"]) != (x["state"], x["ci"]) for x in rows)
     due = any(pr_due(x, rows) for x in rows) or (merge_all_on(t["id"]) and any(not pr_mergeable(x, rows)
                                                                                 for x in rows))
+    # the review round moves on: the bot review came or the wait is over; or reviewers were requested on GitHub
+    due = due or (t["state"] == "pr" and any(review_due(p, x) for x in rows)) or \
+        (t["phase"] == PR_PICK_PHASE and any(x["review"] == PR_PICK and json.loads(x["requested"] or "[]")
+                                             for x in rows))
     if (moved or due) and q("UPDATE tasks SET state='queued', phase='', question=NULL, start_at='pr' WHERE id=? AND "
                             "state=? AND IFNULL(phase,'')=? RETURNING id", (t["id"], t["state"], t["phase"] or "")):
         ev(t["id"], "the PRs moved on GitHub; checking them")
@@ -3722,7 +3777,7 @@ def pr_action(p, t, action, b):
         raise ValueError("its project is not loaded")
     rows = pr_rows(tid)
     if action == "pr-open":  # Open PR, or Retry after what was missing is fixed
-        if st not in ("on_branch",) and not (st == "needs_input" and t["phase"] in (PR_SETUP, PR_MAIN)):
+        if st not in ("on_branch",) and not (st == "needs_input" and t["phase"] in (PR_SETUP, PR_MAIN, PR_PICK_PHASE)):
             raise ValueError(f"task is {STATE_WORDS.get(st, st)}: Open PR is for a task on its branch")
         return pr_queue(tid, "Open PR")
     if action == "pr-retry":  # a PR was closed without merging: open it again
@@ -3736,6 +3791,8 @@ def pr_action(p, t, action, b):
                 q("UPDATE prs SET state='OPEN', ci='pending', error=NULL WHERE id=?", (x["id"],))
                 ev(tid, f"reopened {pr_words(p, x)}")
         return pr_queue(tid, "retried: PRs reopened")
+    if action == "pr-address":
+        return pr_address(p, t)
     if action == "fix-ci":
         if not (st == "needs_input" and t["phase"] == PR_RED):
             raise ValueError("no PR of this task has failed CI")
@@ -3775,8 +3832,222 @@ def pr_view_rows(t, rows):
                     "number": x["number"], "url": x["url"], "state": x["state"], "ci": x["ci"],
                     "failing": json.loads(x["failing"] or "[]"), "checked_at": x["checked_at"],
                     "merged_at": x["merged_at"], "error": x["error"], "warning": x["warning"],
+                    "review": PR_REVIEW_WORDS.get(x["review"]) if x["state"] == "OPEN" else None,
                     "merge": not why and t["state"] in ("pr", "needs_input"), "merge_why": why})
     return out
+
+
+def login_key(s):
+    """A GitHub login to compare: gh's GraphQL reads drop the [bot] that REST and the web show."""
+    return str(s or "").strip().lstrip("@").lower().removesuffix("[bot]")
+
+
+def bot_review(p, row, d):
+    """Who gave the review row's PR waits for, from gh pr view's reviews, or None: one by a pr_bot_reviewers login
+    or, with pr_review_comment set, by anyone but the PR's author, submitted after the queue pushed it."""
+    since = (row["review_since"] or 0) - REVIEW_SLACK
+    bots = {login_key(x) for x in p.pr_bot_reviewers}
+    me = login_key((d.get("author") or {}).get("login"))
+    for rv in d.get("reviews") or []:
+        who = (rv.get("author") or {}).get("login") if isinstance(rv, dict) else None
+        if who and (iso_epoch(rv.get("submittedAt")) or 0) >= since and \
+                (login_key(who) in bots or (p.pr_review_comment and login_key(who) != me)):
+            return who
+    return None
+
+
+def review_due(p, row):
+    """Whether row's wait for the bot review is over: it came, there is no bot to wait for, or the time is up."""
+    if row["review"] != PR_BOT or row["state"] != "OPEN" or not row["number"]:
+        return False
+    return bool(row["reviewed_at"]) or not (p.pr_bot_reviewers or p.pr_review_comment) or \
+        time.time() - (row["review_since"] or 0) >= p.pr_bot_review_timeout * 60
+
+
+def gh_where(r):
+    """(gh api's --hostname args, owner, name) of repo r's origin on GitHub."""
+    *host, owner, name = gh_repo(r).split("/")
+    return (("--hostname", host[0]) if host else ()), owner, name
+
+
+def review_work(p, row, any_body):
+    """What on row's PR the worker should address: (unresolved threads, review bodies, None), or (.., .., gh's
+    error). A thread whose last comment is the PR author's (the queue's own reply) waits for the reviewer; review
+    bodies count from after the last round, every one when any_body (you asked), else only Changes requested."""
+    r = part_of(p, row["repo"])
+    host, owner, name = gh_where(r)
+    query = ("query { repository(owner: %s, name: %s) { pullRequest(number: %d) { author { login } "
+             "reviewThreads(first: 100) { nodes { id isResolved isOutdated path line comments(first: 50) { nodes { "
+             "databaseId author { login } body url } } } } reviews(last: 50) { nodes { author { login } state body "
+             "submittedAt url } } } } }") % (json.dumps(owner), json.dumps(name), row["number"])
+    rc, out, err = gh(r, "api", "graphql", *host, "-f", f"query={query}", by_r=False)
+    try:
+        pr = json.loads(out)["data"]["repository"]["pullRequest"] if rc == 0 else None
+    except (ValueError, KeyError, TypeError):
+        pr = None
+    if not isinstance(pr, dict):
+        return [], [], (err or out).strip()[-300:] or f"gh api graphql exited {rc}"
+    me = login_key((pr.get("author") or {}).get("login"))
+    who = lambda c: login_key((c.get("author") or {}).get("login"))
+    threads = []
+    for th in (pr.get("reviewThreads") or {}).get("nodes") or []:
+        cs = (th.get("comments") or {}).get("nodes") or []
+        if not th.get("isResolved") and cs and who(cs[-1]) != me:
+            threads.append(th)
+    since = (row["addressed_at"] or row["review_since"] or 0) - REVIEW_SLACK
+    bodies = [rv for rv in (pr.get("reviews") or {}).get("nodes") or []
+              if (rv.get("body") or "").strip() and who(rv) != me and (iso_epoch(rv.get("submittedAt")) or 0) >= since
+              and (any_body or rv.get("state") == "CHANGES_REQUESTED")]
+    return threads, bodies, None
+
+
+def address_prompt(p, t, work):
+    """Address comments: each PR's unresolved threads and review bodies, and how to reply and resolve, for the
+    worker. work is [(row, threads, bodies)]."""
+    clip = lambda s: (s or "").strip()[:3000]
+    parts = []
+    for row, threads, bodies in work:
+        r = part_of(p, row["repo"])
+        host, owner, name = gh_where(r)
+        h = f" --hostname {host[1]}" if host else ""
+        out = [f"### {pr_words(p, row)} ({row['url']})", "",
+               f"- reply: `gh api{h} repos/{owner}/{name}/pulls/{row['number']}/comments/COMMENT_ID/replies "
+               f"-f body='...'`",
+               f"- resolve: `gh api graphql{h} -f query='mutation {{ resolveReviewThread(input: {{threadId: "
+               f"\"THREAD_ID\"}}) {{ thread {{ isResolved }} }} }}'`"]
+        for th in threads:
+            cs = (th.get("comments") or {}).get("nodes") or []
+            where = f"{th.get('path') or 'the PR'}" + (f":{th['line']}" if th.get("line") else "")
+            out += ["", f"Thread `{th['id']}` on `{where}`{' (outdated: the code moved since)' * bool(th.get('isOutdated'))}"
+                        f", reply to comment {cs[-1].get('databaseId')}:"]
+            out += [f"> **{(c.get('author') or {}).get('login') or 'someone'}:** " + clip(c.get("body")).replace(
+                "\n", "\n> ") for c in cs]
+        for rv in bodies:
+            out += ["", f"Review by {(rv.get('author') or {}).get('login') or 'someone'} "
+                        f"({str(rv.get('state') or '').lower().replace('_', ' ')}), no thread to reply on:",
+                    "> " + clip(rv.get("body")).replace("\n", "\n> ")]
+        parts.append("\n".join(out))
+    where = f"`{t['branch']}`" + (" in each repo" if p.repos else "")
+    return (f"Review comments came in on the pull request{'s' * (len(work) > 1)} for branch {where}. Address them "
+            f"yourself; don't ask the owner. For each comment:\n\n"
+            f"1. Decide whether it is right. Where it is, change the code. Where it isn't (it is wrong, out of scope, "
+            f"or the code already settles it), leave the code as it is.\n"
+            f"2. Commit the fixes as new commits on top. The branch is pushed, so don't rebase, amend or force-push, "
+            f"and don't push: the queue runs the merge check, then pushes.\n"
+            f"3. Reply on each thread, once you have committed: what you changed (name the commit), or why you left "
+            f"it. Resolve each thread you fixed; leave the ones you declined open for the reviewer.\n"
+            f"4. A review's own text has no thread: address it in the code, and say what you did in your summary.\n\n"
+            f"Then write $OPS_RESULT again, saying what you changed and what you declined, and why.\n\n"
+            + "\n\n".join(parts))
+
+
+def pr_reviewers_of(p, tid):
+    """Who reviews the task's PRs once their comments are addressed: your answer to Pick reviewers, else
+    pr_reviewers."""
+    try:
+        mine = json.loads(setting(f"prreviewers:{tid}") or "[]")
+    except ValueError:
+        mine = []
+    return mine or p.pr_reviewers
+
+
+def pr_ask_reviewers(p, tid, x):
+    """Stage 3, awaiting human review: gh pr edit --add-reviewer. None once asked (or GitHub has reviewers
+    requested already), else why you are needed: nobody to ask, or gh's error."""
+    who = pr_reviewers_of(p, tid)
+    if who:
+        rc, out, err = gh(part_of(p, x["repo"]), "pr", "edit", str(x["number"]), "--add-reviewer", ",".join(who))
+        if rc:
+            q("UPDATE prs SET review=? WHERE id=?", (PR_PICK, x["id"]))
+            return (f"gh pr edit {x['number']} --add-reviewer {','.join(who)} failed on {pr_words(p, x)} "
+                    f"({x['url']}): {(err or out).strip()[-500:]}")
+        q("UPDATE prs SET review=? WHERE id=?", (PR_HUMAN, x["id"]))
+        ev(tid, f"{pr_words(p, x)}: asked {', '.join(who)} to review it")
+        return None
+    asked = json.loads(x["requested"] or "[]")
+    if asked:
+        q("UPDATE prs SET review=? WHERE id=?", (PR_HUMAN, x["id"]))
+        ev(tid, f"{pr_words(p, x)}: awaiting review by {', '.join(asked)}, requested on GitHub")
+        return None
+    q("UPDATE prs SET review=? WHERE id=?", (PR_PICK, x["id"]))
+    return f"Pick reviewers for PR #{x['number']}" + (f" ({pr_name(p, x)})" if x["repo"] else "") + f": {x['url']}"
+
+
+def pr_address_now(p, tid, work, why):
+    """Stage 2, addressing comments: resume the worker on the branch with them (the gate and push follow, as for
+    Fix CI)."""
+    t = task(tid)
+    for row, _, _ in work:
+        q("UPDATE prs SET review=?, addressed_at=? WHERE id=?", (PR_ADDRESSING, time.time(), row["id"]))
+    upd(tid, state="queued", phase="", question=None, start_at="claude", rounds=0,
+        next_prompt=address_prompt(p, t, work))
+    n = sum(len(th) + len(b) for _, th, b in work)
+    ev(tid, f"{why}: the worker addresses {n} review comment{'s' * (n != 1)} on "
+            + ", ".join(pr_words(p, row) for row, _, _ in work))
+
+
+def pr_review_step(p, tid):
+    """The review round of each open PR, after its CI is not red: once the bot review came (or the wait is over),
+    the worker addresses the unresolved comments, if any; then the queue asks pr_reviewers to review. True when
+    the task now waits for the worker or for you."""
+    rows = [x for x in pr_rows(tid) if x["state"] == "OPEN" and x["number"]]
+    asks, work = [], []
+    for x in rows:
+        if x["review"] in (PR_ADDRESSING, PR_PICK):  # the worker addressed it (or you were to pick): ask humans
+            if why := pr_ask_reviewers(p, tid, x):
+                asks.append(why)
+        elif review_due(p, x):
+            if not x["reviewed_at"] and (p.pr_bot_reviewers or p.pr_review_comment):
+                ev(tid, f"{pr_words(p, x)}: no bot review came within {p.pr_bot_review_timeout:g} min; going on")
+            threads, bodies, err = review_work(p, x, False)
+            q("UPDATE prs SET addressed_at=? WHERE id=?", (time.time(), x["id"]))
+            if err:
+                ev(tid, f"{pr_words(p, x)}: couldn't read its review comments ({err}); going on")
+            if threads or bodies:
+                work.append((x, threads, bodies))
+                continue
+            if not err:
+                ev(tid, f"{pr_words(p, x)}: no unresolved review comments")
+            if why := pr_ask_reviewers(p, tid, task_pr(x["id"])):
+                asks.append(why)
+    if work:
+        pr_address_now(p, tid, work, "review round")
+        return True
+    if asks:
+        pr_needs(p, tid, PR_PICK_PHASE, "; ".join(asks) + ". Answer with GitHub logins or org/team names (comma-"
+                 "separated), or set pr_reviewers in the project's toml and Retry, or request reviewers on GitHub: "
+                 "the queue sees them at its next poll.")
+        return True
+    return False
+
+
+def task_pr(pid):
+    return q("SELECT * FROM prs WHERE id=?", (pid,), one=True)
+
+
+def pr_address(p, t):
+    """Address comments (the button, opsd.py pr address): stage 2 again, on demand, for comments that came later."""
+    tid = t["id"]
+    if not (t["state"] == "pr" or (t["state"] == "needs_input" and t["phase"] == PR_PICK_PHASE)):
+        raise ValueError(f"task is {STATE_WORDS.get(t['state'], t['state'])}"
+                         + (f" ({t['phase']})" if t["state"] == "needs_input" and t["phase"] else "")
+                         + ": Address comments is for a task watching its open PRs")
+    if tid in THREADS:
+        raise ValueError("the queue is working on its PRs right now: try again in a moment")
+    rows = [x for x in pr_rows(tid) if x["state"] == "OPEN" and x["number"]]
+    if not rows:
+        raise ValueError("no PR of this task is open")
+    work, errs = [], []
+    for x in rows:
+        threads, bodies, err = review_work(p, x, True)
+        if err:
+            errs.append(f"{pr_words(p, x)}: {err}")
+        elif threads or bodies:
+            work.append((x, threads, bodies))
+    if not work:
+        raise ValueError("couldn't read the review comments: " + "; ".join(errs) if errs else
+                         "no unresolved review comments on " + ", ".join(pr_words(p, x) for x in rows))
+    pr_address_now(p, tid, work, "Address comments")
 
 
 def fix_ci_prompt(p, t):
@@ -11302,6 +11573,10 @@ class H(BaseHTTPRequestHandler):
         elif action == "answer":
             if st != "needs_input":
                 raise ValueError(f"task is {st}")
+            if t["phase"] == PR_PICK_PHASE and is_branch_task(t):  # Pick reviewers: the answer names them
+                who = [x.lstrip("@") for x in re.split(r"[\s,;]+", b["answer"]) if x.strip("@")]
+                set_setting(f"prreviewers:{tid}", json.dumps(who))
+                return pr_queue(tid, "reviewers picked: " + ", ".join(who))
             back = {"start_at": "claude"} if t["phase"] in (PR_RED, PR_CLOSED) else {}  # the worker takes it
             upd(tid, state="queued", question=None, next_prompt=answer_prompt(t["question"], b["answer"]), **back)
             ev(tid, "answered: " + b["answer"][:200])
@@ -11321,7 +11596,7 @@ class H(BaseHTTPRequestHandler):
                             "Update the work, re-run the checks, commit, and write $OPS_RESULT (with an updated "
                             "`review`).")
             ev(tid, "changes requested: " + b["feedback"][:200])
-        elif action in ("pr-open", "pr-merge", "pr-merge-all", "fix-ci", "pr-retry"):
+        elif action in ("pr-open", "pr-merge", "pr-merge-all", "fix-ci", "pr-retry", "pr-address"):
             return pr_action(p, t, action, b)
         elif action == "play":
             if not p or not t["worktree"]:
@@ -11585,9 +11860,10 @@ if __name__ == "__main__":
             sys.exit(f"the claude-ops daemon on port {PORT} did not answer ({e.reason})")
         except (ValueError, OSError) as e:  # a bad command line, or a --body-file it can't read
             sys.exit(str(e))
-    elif cmd == "pr" and len(args) == 2 and args[0] in ("open", "merge") and args[1].lstrip("#").isdigit():
+    elif cmd == "pr" and len(args) == 2 and args[0] in ("open", "merge", "address") and args[1].lstrip("#").isdigit():
         try:  # README: Branches and pull requests
-            post(f"/api/tasks/{args[1].lstrip('#')}/" + {"open": "pr-open", "merge": "pr-merge-all"}[args[0]], {})
+            post(f"/api/tasks/{args[1].lstrip('#')}/" + {"open": "pr-open", "merge": "pr-merge-all",
+                                                         "address": "pr-address"}[args[0]], {})
         except HTTPError as e:
             sys.exit(json.loads(e.read() or b"{}").get("error") or str(e))
         except URLError as e:

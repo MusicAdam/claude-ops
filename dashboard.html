@@ -1284,13 +1284,18 @@ const LABEL = {queued:"queued", running:"working", gating:"checking", merging:"m
 // (committed, nothing pushed); Open PR pushes it and opens its PRs, which the queue then watches until they merge.
 const isBranchTask = t => !!(t && (t.jira || t.target));
 const PR_FIX = {"CI failed": ["fix-ci", "Fix CI"], "PR closed": ["pr-retry", "Retry"],
-                "can't open PRs": ["pr-open", "Retry"], "main can't follow origin": ["pr-open", "Retry"]};
+                "can't open PRs": ["pr-open", "Retry"], "main can't follow origin": ["pr-open", "Retry"],
+                "pick reviewers": ["pr-open", "Retry"]};
 // The task's next PR step as [action, label]: Open PR on its branch, or what a PR problem that needs you asks for
 const prStep = t => t.state === "on_branch" ? ["pr-open", "Open PR"]
   : t.state === "needs_input" && isBranchTask(t) ? PR_FIX[t.phase] || null : null;
 const PR_STEP_TIP = {"pr-open": "Push the branch and open a pull request against main in each repo it commits to",
                      "fix-ci": "Resume the worker with the failed CI logs; it commits a fix, the gate runs, then the queue pushes",
-                     "pr-retry": "Reopen the closed pull request and keep watching it"};
+                     "pr-retry": "Reopen the closed pull request and keep watching it",
+                     "pr-address": "Resume the worker with the PRs' unresolved review comments; it fixes what is right, replies on each thread, the gate runs, the queue pushes and asks the reviewers again"};
+// Address comments: the review round's addressing again, for comments that came after it
+const prAddress = t => isBranchTask(t) && (t.state === "pr" || (t.state === "needs_input" && t.phase === "pick reviewers"))
+  && (prsOf(t) || []).some(x => x.state === "OPEN" && x.number);
 // A message to the task resumes its worker on the branch; the gate runs and the queue pushes to its open PRs
 const prMsg = t => isBranchTask(t) && (["on_branch", "pr"].includes(t.state)
   || (t.state === "needs_input" && ["CI failed", "PR closed"].includes(t.phase)));
@@ -1299,9 +1304,9 @@ const prsOf = t => t.prs !== undefined ? t.prs : ((state && state.tasks.find(x =
 // The branch (and the Jira key, when the branch name doesn't already carry it), small, for the list and the page
 const branchTag = t => isBranchTask(t) ? `<span class="btag" title="Works on this branch and ends in pull requests against main, not a merge into dev">⎇ ${esc(t.branch || t.target || "")}${
   t.jira && !String(t.branch || "").includes(t.jira) ? ` · ${esc(t.jira)}` : ""}</span>` : "";
-// One line of words for the list: each PR's number (or waiting), then its CI while open, else its state
+// One line of words for the list: each PR's number (or waiting), then its CI and review stage while open, else its state
 const prsShort = prs => (prs || []).map(x => `${x.name ? x.name + " " : ""}${x.number ? "#" + x.number : "waiting"}${
-  x.state === "OPEN" ? ` CI ${x.ci}` : x.state === "waiting" ? "" : " " + String(x.state).toLowerCase()}`).join(" · ");
+  x.state === "OPEN" ? ` CI ${x.ci}${x.review ? ", " + x.review : ""}` : x.state === "waiting" ? "" : " " + String(x.state).toLowerCase()}`).join(" · ");
 // The PR list on the task page: one row per PR, with its Merge button (enabled when the daemon says it may go),
 // gh's last merge error and any warning under it, and Merge all when two or more haven't merged.
 function prsHtml(t, prs, buttons) {
@@ -1314,7 +1319,8 @@ function prsHtml(t, prs, buttons) {
       : x.url ? `<a href="${esc(x.url)}" target="_blank" rel="noopener">#${x.number}</a>` : `#${x.number}`;
     const failing = x.ci === "red" && (x.failing || []).length ? ` <span class="ci-red">(failing: ${x.failing.map(f =>
       f.url ? `<a href="${esc(f.url)}" target="_blank" rel="noopener">${esc(f.name)}</a>` : esc(f.name)).join(", ")})</span>` : "";
-    const ci = opened && x.state === "OPEN" ? `<span class="ci-${esc(x.ci || "pending")}">CI ${esc(x.ci || "pending")}</span>${failing}` : "";
+    const ci = opened && x.state === "OPEN" ? `<span class="ci-${esc(x.ci || "pending")}">CI ${esc(x.ci || "pending")}</span>${failing}`
+      + (x.review ? `<span class="muted" title="Its review round: the bot review, the worker addressing its comments, then human reviewers">${esc(x.review)}</span>` : "") : "";
     const when = x.merged_at ? `merged ${ago(x.merged_at, state.now)} ago` : x.checked_at && x.state === "OPEN" ? `checked ${ago(x.checked_at, state.now)} ago` : "";
     const merge = buttons && x.state === "OPEN" ? `<span title="${esc(x.merge ? "Merge it on GitHub (gh pr merge)" : x.merge_why || "Can't merge yet")}"><button data-act="pr-merge" data-pr="${x.id}" ${x.merge ? "" : "disabled"}>Merge</button></span>` : "";
     return `<div class="prrow">${x.name ? `<b>${esc(x.name)}</b>` : ""}${num}${ci}${opened ? `<span class="${stCls[x.state] || ""}">${esc(x.state)}</span>` : ""}<span class="grow muted">${when}</span>${merge}</div>`
@@ -2227,6 +2233,7 @@ async function loadDetail(id, fresh) {
     + (t.proof_report ? btn("proofreport", "Open report") : "");
   const ps = prStep(t), pm = prMsg(t);
   if (ps) actions += `<button class="primary" data-act="${ps[0]}" title="${esc(PR_STEP_TIP[ps[0]] || "")}">${ps[1]}</button>`;
+  if (prAddress(t)) actions += `<button data-act="pr-address" title="${esc(PR_STEP_TIP["pr-address"])}">Address comments</button>`;
   if (t.start_words) actions += btn("start-now", "▶ Start now", "primary");
   if (["queued", "running", "gating"].includes(t.state)) actions += btn("pause", "❚❚ Pause");
   if (t.state === "paused") actions += btn("resume", "▶ Resume", "primary");
