@@ -1399,8 +1399,9 @@ stay on the right of the header.
     `new`, `mode`; `title` names a pending `subject` or `new` topic.
 
     To queue a task, ask Claude. The Tasks page's own **Queue task** form still queues one without Claude.
-  - **What a topic may run.** Plan & design and edit my checkout both run any shell command you could at the CLI,
-    past the guard (`guard_settings()`). Plan & design's prompt (`design_prompt.md`) sets its limits:
+  - **What a topic may run.** Plan & design and edit my checkout both run any shell command you could at the CLI:
+    plan & design past the guard (`guard_settings()`), edit my checkout without it and with its prompts sent to
+    you (see [Chat mode](#chat-mode)). Plan & design's prompt (`design_prompt.md`) sets its limits:
     - By default it reads `dev`, writes only its documents folder and, for an OpenSpec change, `openspec/`, and
       queues tasks for code.
     - When you ask for research, it runs `opsd.py add -p <project> --research T0|T1|T2 "question"`, which queues a
@@ -1612,16 +1613,34 @@ checkout (`repo`), not a worktree, so it can read, edit, commit and run commands
 settings and `CLAUDE.md`. Each chat keeps one Claude session across messages, until its context grows too big
 (see **Fresh sessions in chats** below).
 
-- **MCP servers.** A project chat loads only the MCP servers named in the project's `chat_mcp` list, none by
-  default. Every server's tool definitions ride on every call, so each one you add makes every reply dearer.
-  Name servers you defined with `claude mcp add` in any scope (user, local, or the repo's `.mcp.json`):
-  `chat_mcp = ["shop-app"]` in `~/.claude-ops/projects/<name>.toml`. claude.ai connectors (Gmail, Google
-  Sheets, Docs …) never load in a project chat: the chat runs with `--strict-mcp-config`, which drops them, and
-  only claude.ai can define them. A name with no definition is skipped, and the chat says so.
+A project chat is an attended replica of the CLI, not an unattended worker. Design chats, spec chats and chats
+with a stopped task keep their own limits.
 
-- Nobody can answer permission prompts on the dashboard, so it runs in auto mode: actions that would
-  prompt are denied, and Claude tells you what it couldn't do. claude-ops adds its own auto-mode rules for the
-  project, as workers get (see **Auto-mode rules** under **Workers**): the project's checkout is the trusted repo.
+- **Tools.** It loads every MCP server you configured (user, local and the repo's `.mcp.json`, plus claude.ai
+  connectors) and Claude in Chrome, as `claude` does: no `--strict-mcp-config`, no `--no-chrome`. Every server's
+  tool definitions ride on every call, so each chat call carries more tool definitions than a worker's, and
+  costs more. `chat_mcp` in the project's config no longer applies to project chats; chats with a stopped task
+  still load only the servers it names.
+- **Permission prompts.** It runs in auto mode, like the CLI. What would still prompt (an `ask` rule of yours,
+  or a step the auto-mode classifier sends to you) comes to the dashboard: the chat shows **Claude asks to use
+  <tool>** with the command, file or URL, the full input under **Full input**, and **Approve** / **Deny**. The
+  turn waits for your answer, up to an hour; then, or when the turn ends or is stopped, the prompt counts as
+  denied. How: the chat runs with `--permission-prompt-tool mcp__claude-ops__permit` and `--mcp-config` naming
+  an HTTP MCP server the daemon serves at `POST /mcp/permit/<chat id>` (`permit_rpc`). The tool gets
+  `{tool_name, input, tool_use_id}` and answers `{"behavior": "allow", "updatedInput": …}` or
+  `{"behavior": "deny", "message": …}`. The buttons post `POST /api/designs/<id>/permit {id, allow}`, and
+  `GET /api/designs/<id>` lists the open prompts as `permits`. The chat gets `MCP_TOOL_TIMEOUT` of just over an
+  hour, as Claude Code gives up on an MCP call after 60 s by default. It never runs with
+  `bypassPermissions` or `--dangerously-skip-permissions`.
+- **No guard.** It runs without the Bash guard (see [Process safety](#process-safety)), so it can run what you
+  could at the CLI, `opsctl` and the dashboard's API included. Its brief still tells it to stop only processes it
+  started. claude-ops adds its own auto-mode rules for the project, as workers get (see **Auto-mode rules**
+  under **Workers**): the project's checkout is the trusted repo.
+- **Restarting claude-ops.** A chat is the daemon's child, so `opsctl restart` would stop it mid-command, with
+  the restart half done. Its brief names `opsd.py restart` instead: it asks the daemon to run `opsctl restart`
+  in a session of its own, as Settings' **Restart** button does (`POST /api/restart`). Running tasks pause and
+  resume, and the new daemon picks the chat's reply up again with a note that the restart it asked for is done,
+  so it doesn't restart again. Workers' guard refuses `opsd.py restart`.
 - **Fresh sessions in chats.** Design and project chats track the context of each call. When the last call of a
   chat's session was over 90k tokens, your next message starts a fresh session on the same model, and the chat
   shows "Started a fresh session: this chat's context reached 95k tokens …". The new session gets a handoff
@@ -1629,8 +1648,8 @@ settings and `CLAUDE.md`. Each chat keeps one Claude session across messages, un
   all with the oldest cut. Files and the change's folder are as they were. The old session id stops working in
   the header's `claude --resume` line; the new one replaces it. Unlike a task, a chat does not start over just
   because its cache expired.
-- The chat header shows `cd <repo> && claude --resume <id>`. Run it to carry on in a terminal, where
-  you can answer prompts. Don't send from both places at once.
+- The chat header shows `cd <repo> && claude --resume <id>`. Run it to carry on in a terminal. Don't send
+  from both places at once.
 - Edits land in your checkout and nothing else. Uncommitted ones survive a release: it merges them onto the
   new main and puts them back.
 - Those edits are not on dev, so they don't ship and workers don't see them until you commit them to dev. The
@@ -2068,7 +2087,7 @@ worktrees = "/Users/you/dev/mygame-wt"   # default: <repo>-wt
 max_parallel = 0                   # per-project cap; 0 = only the global "Parallel" limit
 # direct_main = false              # default true: a merge moves main at once, no release (see Straight to main);
                                    # [[deploy]] targets keep it on: a deploy and a merge take turns moving main
-chat_mcp = []                      # MCP servers a project chat loads, by name (see Chat mode); default none
+chat_mcp = []                      # MCP servers a chat with a stopped task loads, by name; default none
 
 # --- repo: the rest may also live in claude-ops.toml (repos too; it must list "." there)
 branch_pattern = "{key}-{slug}"     # a Jira-key task's branch (see Branches and pull requests)
@@ -2188,9 +2207,10 @@ folder under a project's `<worktrees>/` that no longer exists. A worktree itself
   survive: rebuilding it on the first click fired blur on the removed button, which undid the confirm at once.
   `restartView()` in `dashboard.html` picks the state; `tests/test_restart_button.py` checks it.
   The daemon logs `restarting claude-ops: you clicked Restart in Settings' Danger zone` to `opsd.log` and runs
-  `opsctl restart` in a session of its own, logging to `DATA/restart.log`. Only the launchd service restarts: a scratch daemon (a test's or a worker's) refuses with "not the
-  launchd service; opsctl restart would restart that one". Sessions can't click it: the guard blocks the live
-  port, and `opsctl restart` itself.
+  `opsctl restart` in a session of its own, logging to `DATA/restart.log`. Only the launchd service restarts: a
+  scratch daemon (a test's or a worker's) refuses with "not the launchd service; opsctl restart would restart that
+  one". `opsd.py restart` does the same from the command line, and is how a project chat restarts claude-ops (see
+  [Chat mode](#chat-mode)). Workers can't: the guard blocks the live port, `opsctl restart` and `opsd.py restart`.
 - **Analyze tab.** Run times and costs of the tasks created in the last day, 7 days, 30 days or all time, for
   the projects ticked in the header or every project (`GET /api/analyze?period=1|7|30|all&project=<name>[,<name>…]`,
   a comma-separated list; empty means every project). The scope line reads `· A, B only`, and the per-project
@@ -2452,7 +2472,7 @@ folder under a project's `<worktrees>/` that no longer exists. A worktree itself
   don't touch your checkout, dev or main. A step outside it (your checkout, `~/.claude-ops`, a commit on main)
   is allowed when the brief asks for it or you approved it in an answer.
 - **Auto-mode rules.** The `--settings` that workers and project chats get (from `guard_settings`) carry an
-  `autoMode` object. Claude Code appends its lists to your own `autoMode` lists in `~/.claude/settings.json`;
+  `autoMode` object; a project chat's carry only that, without the guard hook. Claude Code appends its lists to your own `autoMode` lists in `~/.claude/settings.json`;
   it replaces nothing and removes no default rule. `claude --settings '<json>' auto-mode config` shows the merge.
   - `environment`: this session is a claude-ops worker (or chat) for project `<name>`. The trusted repos are
     your checkout, every repo of its workspace, its worktrees folder, and their origin remotes. `main` and `dev`
@@ -2468,7 +2488,8 @@ folder under a project's `<worktrees>/` that no longer exists. A worktree itself
   approval for the action it asked about, steps outside its worktree included. A bare "Do it" then names its
   action and target, which the auto-mode classifier needs before it allows a step such as a commit in your
   checkout.
-  None of the daemon's Claude sessions (workers, design, chat) connect to Claude in Chrome (`--no-chrome`).
+  Workers, design chats and chats with a stopped task don't connect to Claude in Chrome (`--no-chrome`); project
+  chats do, as the CLI does.
 - **Reading rules.** Worker, release and chat briefs tell Claude to search before reading, read big files in
   ranges of 150 lines or fewer, not reread what is already in context, and keep command output short. Everything
   read stays in context and is paid for again on every later call.
@@ -2484,13 +2505,15 @@ Nothing claude-ops runs may stop, signal or quit a process it did not start.
   executable lies in that worktree's `[app] process` path. It matches the path exactly, never as a pattern,
   so a terminal or editor that merely names the path is spared. With `[app] stop` set, it runs that command
   in the worktree instead, and your script decides what to stop.
-- **Workers and project chats** run each Bash command past `opsd.py guard` first (a
-  `PreToolUse` hook passed with `--settings`). It refuses:
+- **Workers, design chats and chats with a stopped task** run each Bash command past `opsd.py guard` first (a
+  `PreToolUse` hook passed with `--settings`). Project chats don't: they are your attended session, like the CLI,
+  and their brief states the rule instead. It refuses:
   - `pkill`, `killall`, `xargs kill`, and `kill` of pids found by `pgrep`, `lsof`, `ps` or `pidof`
   - `kill` of a pid the session did not start (not its descendant, and not running from its worktree),
     of `0`, `-1` or a process group
   - `launchctl` other than `print`/`list`, `sudo`, `shutdown`, `reboot`, `osascript` that quits apps or
-    drives System Events, `opsctl start|stop|restart|pause|resume`, and requests to the live dashboard's port
+    drives System Events, `opsctl start|stop|restart|pause|resume`, `opsd.py restart`, and requests to the live
+    dashboard's port
 
   `kill $!` and `kill "$(cat pidfile)"` still work. The briefs state the same rule. The guard catches slips;
   it is not a sandbox: a program can still call `kill()` itself.

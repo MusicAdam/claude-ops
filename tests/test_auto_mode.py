@@ -54,6 +54,12 @@ class GuardSettings(unittest.TestCase):
             self.assertIn(want, env)
         self.assertNotIn("this session's is", env)  # no worktree: the project's repo is where it works
 
+    def test_project_chat_has_no_guard(self):  # attended like the CLI: the auto-mode rules only
+        p = project("pc", f'repo = "{DATA}/pc"\n')
+        s = json.loads(opsd.guard_settings(None, p, chat=True, guard=False))
+        self.assertEqual(set(s), {"autoMode"})
+        self.assertEqual(s["autoMode"], json.loads(opsd.guard_settings(None, p, chat=True))["autoMode"])
+
     def test_no_project_no_auto_mode(self):  # design chats run in dontAsk mode and keep their settings
         self.assertEqual(set(json.loads(opsd.guard_settings(None))), {"hooks"})
 

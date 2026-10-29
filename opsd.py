@@ -21,6 +21,8 @@
   opsd.py send NAME [--design|--chat] [--title T] [--hold] [--model M] [--effort E] [--branch B | --jira K] "text..."
                                        from a session the queue started: a task (or chat) in another project
   opsd.py pause-all | resume-all       pause every running task (it stops now, resumable) / resume every paused one
+  opsd.py restart                      restart the claude-ops service now, detached, as Settings' Restart button does:
+                                       how a project chat (the daemon's child) restarts it without stopping itself
   opsd.py archive-project NAME         take a project off the queue: its config moves to projects/archived/
   opsd.py unarchive-project NAME       bring an archived project back, as it was
   opsd.py event TASK_ID TEXT           add a line to a task's log, without the daemon (opsctl, when a restart fails)
@@ -211,7 +213,7 @@ class Project:
         self.port_base = int(wk.get("port_base", 47900))
         self.worker_notes = wk.get("notes", "").strip()
         self.design_notes = c.get("design", {}).get("notes", "").strip()
-        self.chat_mcp = [str(n) for n in c.get("chat_mcp", [])]  # MCP servers a project chat loads (see mcp_servers)
+        self.chat_mcp = [str(n) for n in c.get("chat_mcp", [])]  # MCP servers a task chat loads (see mcp_servers)
         self.dev_wt = self.wt / "dev"
         self.main_wt = self.wt / "main"
         self.deploy_wt = self.wt / "deploy"  # persistent: build output survives from one deploy to the next
@@ -1701,15 +1703,16 @@ PID_FINDERS = {"pgrep", "pidof", "lsof", "fuser", "ps"}
 LAUNCHCTL_READ = {"print", "list", "blame", "getenv", "help", "version", "print-disabled", "print-cache"}
 
 
-def guard_settings(root, p=None, chat=False):
+def guard_settings(root, p=None, chat=False, guard=True):
     """--settings for a Claude session: run each Bash command past the guard. root is the session's worktree;
     a process working or installed there counts as the session's own. None: only its descendants do. With p, the
-    project of an auto-mode session (a worker, or a chat when chat), add auto-mode rules for it (see auto_mode)."""
+    project of an auto-mode session (a worker, or a chat when chat), add auto-mode rules for it (see auto_mode).
+    guard False (a project chat, attended like the CLI): no guard hook, only the auto-mode rules."""
     cmd = [sys.executable, str(CODE / "opsd.py"), "guard", "--daemon", str(os.getpid()), "--port", str(PORT)]
     if root:
         cmd += ["--root", str(root)]
     hook = {"type": "command", "command": " ".join(shlex.quote(a) for a in cmd)}
-    out = {"hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [hook]}]}}
+    out = {"hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [hook]}]}} if guard else {}
     if p:
         out["autoMode"] = auto_mode(p, root, chat)
     return json.dumps(out)
@@ -1892,6 +1895,8 @@ def guard_check(cmd, root=None, daemon=0, port=PORT):
             return "osascript quitting apps or driving System Events touches the user's apps."
         if name == "opsctl" and args[:1] and args[0] in ("start", "stop", "restart", "pause", "resume"):
             return f"`opsctl {args[0]}` acts on the live claude-ops service and every task it runs."
+        if any(Path(a).name == "opsd.py" and words[i + 1:i + 2] == ["restart"] for i, a in enumerate(words)):
+            return "`opsd.py restart` restarts the live claude-ops service and pauses every task it runs."
         if any(re.search(rf"(127\.0\.0\.1|localhost|\[::1\]):{port}\b", a) for a in args):
             return (f"port {port} is the live claude-ops dashboard; its API pauses and cancels tasks. Use the "
                     f"opsd.py commands instead: `{OPSD_CMD} schedule edit ID --body-file PATH` changes a schedule "
@@ -4415,14 +4420,18 @@ def restart_self(tid):
     spawn_restart(RUNS / str(tid) / "restart.log", OPS_RESTART_TASK=str(tid))
 
 
-def restart_now():
-    """The Restart button in Settings' Danger zone: `opsctl restart` at once, like typing it. It doesn't wait for
-    deploys or idle tasks: running tasks pause and resume, and a running deploy is cut off and fails."""
+def restart_now(src=""):
+    """The Restart button in Settings' Danger zone, or `opsd.py restart` from a chat (src, its OPS_FROM): `opsctl
+    restart` at once, like typing it. It doesn't wait for deploys or idle tasks: running tasks pause and resume, and
+    a running deploy is cut off and fails. A chat that asked is told so when the new daemon resumes it."""
     if not is_service():
         raise ValueError("not the launchd service; opsctl restart would restart that one")
     deploys = running_deploys()
-    print("restarting claude-ops: you clicked Restart in Settings' Danger zone"
+    chat = int(src[5:]) if re.fullmatch(r"chat:\d+", src or "") else None
+    print("restarting claude-ops: " + (f"chat #{chat} ran opsd.py restart" if chat else
+                                       "you clicked Restart in Settings' Danger zone")
           + (f"; {deploy_words(deploys)} will fail" if deploys else ""), flush=True)
+    set_setting("restarted_by", json.dumps(chat))
     spawn_restart(DATA / "restart.log")
     return {"ok": True}
 
@@ -8183,8 +8192,8 @@ def topic_from_reply(reply, did):
 
 
 def mcp_servers(p):
-    """The MCP servers p's project chats load: the chat_mcp names, defined in your local, project (.mcp.json) or
-    user scope, in Claude's order. Returns (the --mcp-config JSON, names not found). claude.ai connectors can't be
+    """The MCP servers a chat with a stopped task of p loads: the chat_mcp names, defined in your local, project
+    (.mcp.json) or user scope, in Claude's order. Returns (the --mcp-config JSON, names not found). claude.ai connectors can't be
     listed: --strict-mcp-config drops them and only claude.ai can define them."""
     found = {}
     try:
@@ -8201,6 +8210,100 @@ def mcp_servers(p):
             if name not in found and isinstance(scope.get(name), dict):
                 found[name] = scope[name]
     return json.dumps({"mcpServers": found}), [n for n in p.chat_mcp if n not in found]
+
+
+# A project chat runs like the CLI: auto mode, and what would still prompt goes to you. claude -p hands each such
+# prompt to its --permission-prompt-tool, an MCP tool; the daemon serves it over HTTP (POST /mcp/permit/<chat id>)
+# and holds the call until you click Approve or Deny in the chat, or the turn ends. The tool gets {tool_name, input,
+# tool_use_id} and answers {"behavior": "allow", "updatedInput": ...} or {"behavior": "deny", "message": ...}.
+
+PERMIT_SERVER = "claude-ops"
+PERMIT_TOOL = f"mcp__{PERMIT_SERVER}__permit"
+PERMIT_WAIT = 3600  # seconds a prompt waits for you before it counts as denied
+PERMITS = {}  # request id: {id, did, tool, input, ts, done (an Event), allow (None until answered), why}
+PERMIT_LOCK = threading.Lock()
+DENIED = "you clicked Deny"
+PERMIT_SPEC = {"name": "permit", "description": "Ask the owner, on the claude-ops dashboard, to allow a tool call.",
+               "inputSchema": {"type": "object", "required": ["tool_name", "input"], "properties": {
+                   "tool_name": {"type": "string"}, "input": {"type": "object"}, "tool_use_id": {"type": "string"}}}}
+
+
+def permit_mcp(did):
+    """The --mcp-config JSON that gives chat did the daemon's permission-prompt server."""
+    return json.dumps({"mcpServers": {PERMIT_SERVER: {"type": "http", "url": f"{DAEMON_URL}/mcp/permit/{did}",
+                                                      "headers": {"X-Ops": "1"}}}})
+
+
+def permit_rpc(did, m):
+    """Chat did's permission server: the JSON-RPC response to message m, or None for a notification."""
+    if not isinstance(m, dict) or "id" not in m:
+        return None
+    meth, params = m.get("method"), m.get("params") or {}
+    if meth == "initialize":
+        r = {"protocolVersion": params.get("protocolVersion") or "2025-06-18", "capabilities": {"tools": {}},
+             "serverInfo": {"name": PERMIT_SERVER, "version": "1"}}
+    elif meth == "tools/list":
+        r = {"tools": [PERMIT_SPEC]}
+    elif meth == "tools/call" and params.get("name") == "permit":
+        a = params.get("arguments") or {}
+        r = {"content": [{"type": "text", "text": json.dumps(permit_ask(did, str(a.get("tool_name") or "?"),
+                                                                        a.get("input") or {}))}]}
+    elif meth == "ping":
+        r = {}
+    else:
+        return {"jsonrpc": "2.0", "id": m["id"], "error": {"code": -32601, "message": f"no method {meth}"}}
+    return {"jsonrpc": "2.0", "id": m["id"], "result": r}
+
+
+def permit_ask(did, tool, inp, wait=PERMIT_WAIT):
+    """Hold one permission prompt of chat did until you answer it, the turn ends or wait runs out: the tool's
+    answer. The chat view lists it (permits_of) with Approve and Deny."""
+    req = {"id": secrets.token_hex(6), "did": did, "tool": tool, "input": inp, "ts": time.time(),
+           "done": threading.Event(), "allow": None, "why": f"no answer in {wait // 60} min"}
+    with PERMIT_LOCK:
+        PERMITS[req["id"]] = req
+    state_changed()
+    try:
+        req["done"].wait(wait)
+    finally:
+        with PERMIT_LOCK:
+            PERMITS.pop(req["id"], None)
+        state_changed()
+    word = "allowed" if req["allow"] else f"denied ({req['why']})"
+    if did in DESIGN_LIVE:
+        DESIGN_LIVE[did].append(f"{tool}: {word} on the dashboard")
+    if req["allow"]:
+        return {"behavior": "allow", "updatedInput": inp}
+    said = "The owner denied it" if req["why"] == DENIED else f"Not allowed: {req['why']}"
+    return {"behavior": "deny", "message": f"{said} on the claude-ops dashboard. Don't try it another way: say what "
+                                           "you wanted to do and why."}
+
+
+def permit_answer(did, rid, allow):
+    """Approve or Deny in the chat view: answer chat did's prompt rid."""
+    with PERMIT_LOCK:
+        req = PERMITS.get(rid)
+        if not req or req["did"] != did or req["done"].is_set():
+            raise ValueError("that permission request is gone: the turn ended or it was already answered")
+        req["allow"], req["why"] = bool(allow), DENIED
+        req["done"].set()
+    return {"ok": True}
+
+
+def permits_drop(did, why):
+    """Deny chat did's open prompts: its turn ended, so nothing waits for them."""
+    with PERMIT_LOCK:
+        for req in PERMITS.values():
+            if req["did"] == did and not req["done"].is_set():
+                req["allow"], req["why"] = False, why
+                req["done"].set()
+
+
+def permits_of(did):
+    """Chat did's open permission prompts, oldest first, for the chat view."""
+    with PERMIT_LOCK:
+        return [{"id": r["id"], "tool": r["tool"], "input": r["input"], "ts": r["ts"]}
+                for r in sorted(PERMITS.values(), key=lambda r: r["ts"]) if r["did"] == did and not r["done"].is_set()]
 
 
 def design_turn(did, text, fresh_why=None):
@@ -8247,13 +8350,9 @@ def design_turn(did, text, fresh_why=None):
     slash = text.strip().startswith("/")  # the CLI runs a slash command only from the start of the prompt
     if handoff and not slash:
         text = handoff + "\n\n## Now\n\n" + text
-    if chat:  # your own settings apply, like the CLI; auto mode stands in for prompts
+    env = dict(os.environ, OPS_FROM=f"chat:{did}", OPS_DAEMON=DAEMON_URL)
+    if chat:  # like the CLI: your own settings, MCP servers and Claude in Chrome; auto mode, and prompts come to you
         said = chat_said(did, orig)  # word from a project it sent something to; a design chat gets it in ops_note
-        mcp, missing = mcp_servers(p)
-        if missing and not d["session_id"]:  # once per session, as that is when servers load
-            q("INSERT INTO design_msgs (design_id, role, text, ts) VALUES (?,?,?,?)",
-              (did, "ops", f"chat_mcp in {p.name}.toml names MCP servers Claude has no definition for, so this "
-                           f"chat runs without them: {', '.join(missing)}.", time.time()))
         system = PROJECT_CHAT_PROMPT + "\n\n" + peer_brief(p, "chat")
         system += (f"\n\nTo queue a task in {p.name} itself, for an unattended worker in its own worktree, run "
                    f"`{SEND_CMD} {p.name} --title \"...\" \"<a brief that stands alone>\"`. Do it when the owner "
@@ -8263,10 +8362,10 @@ def design_turn(did, text, fresh_why=None):
             system += "\n\n" + handoff
         cmd = [CLAUDE, "-p", ("[ops: " + " | ".join(said) + "]\n\n" if said else "") + with_images(text),
                "--output-format", "stream-json", "--verbose",
-               "--permission-mode", "auto", "--permission-prompts", "none", "--no-chrome", *PLUGIN_ARGS,
-               "--mcp-config", mcp, "--strict-mcp-config",  # only chat_mcp: every tool rides on every call
-               "--name", f"{p.name} chat #{did}", "--settings", guard_settings(None, p, chat=True),
+               "--permission-mode", "auto", "--permission-prompt-tool", PERMIT_TOOL, "--mcp-config", permit_mcp(did),
+               *PLUGIN_ARGS, "--name", f"{p.name} chat #{did}", "--settings", guard_settings(None, p, chat=True, guard=False),
                "--append-system-prompt", system]
+        env["MCP_TOOL_TIMEOUT"] = str((PERMIT_WAIT + 60) * 1000)  # a prompt waits for you, not the 60 s default
     else:
         note, system = ops_note(p, did, extra, orig), design_system_prompt(p, d, cwd)
         if slash:
@@ -8300,8 +8399,7 @@ def design_turn(did, text, fresh_why=None):
     cost, retry = 0.0, False
     try:
         reply, cost = stream_claude(cmd, cwd, RUNS / f"design-{did}", DESIGN_LIVE[did], DESIGN_PROCS, did,
-                                    on_session, env=dict(os.environ, OPS_FROM=f"chat:{did}", OPS_DAEMON=DAEMON_URL),
-                                    on_model=on_model, on_call=lambda ctx: q(
+                                    on_session, env=env, on_model=on_model, on_call=lambda ctx: q(
                                         "UPDATE designs SET last_call=?, ctx_tokens=? WHERE id=?",
                                         (time.time(), ctx, did)))
         if STOPPING.is_set():  # the restart stopped it: the chat stays replying, and resume_chats picks it up
@@ -8338,6 +8436,7 @@ def design_turn(did, text, fresh_why=None):
             q("INSERT INTO design_msgs (design_id, role, text, ts) VALUES (?,?,?,?)",
               (did, "assistant", f"(chat error: {e})", time.time()))
     finally:
+        permits_drop(did, "the reply ended first")
         DESIGN_PROCS.pop(did, None)
         DESIGN_LIVE.pop(did, None)
         # A chat ended mid-reply stays read: what the stopped turn wrote last isn't a new reply when you reopen it.
@@ -8356,17 +8455,25 @@ LOST_SESSION = "No conversation found with session ID"  # claude's error when --
 RESUME_NOTE = ("[ops: claude-ops restarted while you were replying to the message below, which stopped your reply and "
                "any command it was running. Check what you had already done, then pick up where you left off and "
                "answer it. The owner did not resend it.]\n\n")
+RESTARTED_NOTE = ("[ops: claude-ops restarted because you ran `opsd.py restart`, which stopped your reply. The restart "
+                  "is done and this is the new daemon: don't run it again. Finish answering the message below. The "
+                  "owner did not resend it.]\n\n")
 
 
-def resumed(text):
+def resumed(text, mine=False):
     """The message of a turn a restart cut off, to send again: with a note, unless it is a slash command, which the
-    CLI runs only from the start of the prompt."""
-    return text if text.strip().startswith("/") else RESUME_NOTE + text
+    CLI runs only from the start of the prompt. mine: the chat itself ran opsd.py restart."""
+    return text if text.strip().startswith("/") else (RESTARTED_NOTE if mine else RESUME_NOTE) + text
 
 
 def resume_chats():
     """On start: answer the messages the last daemon was replying to when it stopped (a release restarts it), so
     you don't have to send them again. Chats it left replying, and the task chats shutdown listed in cut_task_chats."""
+    try:
+        by = json.loads(setting("restarted_by") or "null")  # the chat that ran opsd.py restart, if one did
+    except ValueError:
+        by = None
+    set_setting("restarted_by", "null")
     for d in q("SELECT id, project, ended FROM designs WHERE state='thinking'"):
         # the turn's message: the user's messages since the last answer (queued ones go as one turn)
         msgs = q("SELECT text FROM design_msgs WHERE design_id=? AND role='user' AND id>(SELECT COALESCE(MAX(id),0) "
@@ -8375,11 +8482,13 @@ def resume_chats():
         if d["ended"] or not msgs or d["project"] not in PROJECTS:
             q("UPDATE designs SET state='idle' WHERE id=?", (d["id"],))
             continue
+        mine = by == d["id"]
         q("INSERT INTO design_msgs (design_id, role, text, ts) VALUES (?,?,?,?)",
-          (d["id"], "ops", "claude-ops restarted while Claude was replying, which stopped the reply. Claude is picking "
-                           "it up again; you don't need to resend your message.", time.time()))
+          (d["id"], "ops", ("Claude restarted claude-ops (opsd.py restart)" if mine else
+                            "claude-ops restarted while Claude was replying") + ", which stopped the reply. Claude is "
+                           "picking it up again; you don't need to resend your message.", time.time()))
         text = "\n\n".join(m["text"] for m in msgs)
-        threading.Thread(target=design_turn, args=(d["id"], resumed(text)), daemon=True).start()
+        threading.Thread(target=design_turn, args=(d["id"], resumed(text, mine)), daemon=True).start()
     for d in q("SELECT id, project FROM designs WHERE state!='thinking' AND ended IS NULL AND queued NOT IN ('[]', '')"):
         if d["project"] in PROJECTS:
             send_queued(d["id"])  # stopped between a reply and the queued messages after it
@@ -8957,43 +9066,57 @@ def spec_queue(did, plan, hold=False, release=None):
 
 TASK_CHAT_PROCS = {}  # task id -> Popen
 TASK_CHAT_LIVE = {}  # task id -> tool lines of the reply in progress; a key here means a reply is running
-PROJECT_CHAT_PROMPT = ("You are talking with the owner through the claude-ops dashboard, not a terminal. "
-                       "Nobody can answer permission prompts here: actions that would prompt are denied. "
-                       "When one is denied, say what you tried, and that they can run it themselves or "
-                       "continue this session in a terminal with `claude --resume`. " + GUARD_RULE + " "
-                       "Reading code: search first (`grep -n`, Grep, Glob), then read only the range you need "
-                       "(Read with offset and limit, or `sed -n 'a,bp'`), 150 lines or fewer at a time. Never Read a "
-                       "file over about 500 lines without a range, and never `cat` one. Don't reread what is already "
-                       "in your context. Keep command output short: pipe it through `tail` or `grep`, and use quiet "
-                       "flags for tests and builds. "
-                       f"To show the owner a picture, such as a screenshot, copy it into {IMAGES} under a name of "
-                       "letters, digits, - and _ with a .png, .jpg, .gif or .webp ending, then embed it with "
-                       "`![what it shows](/api/images/<name>)`. The dashboard can't show a picture from anywhere else "
-                       "on disk, such as /tmp or the repo. "
-                       "A to-do is only for something that truly needs the owner: a password or sudo, a macOS "
-                       "permission grant (Full Disk Access and the like), an API key or account they must create, or "
-                       "a decision (you proposed something and wait for their yes). Add one to their to-do list with "
-                       "a fenced block in the language `todo` holding a JSON list of "
-                       '{"verb": "Do" or "Agree", "title", "why", "wait"?}; wait, {"tasks": [283], "until": '
-                       '"merged" or "released", "at": "tue 09:00"} (tasks, at, or both; at is local time as '
-                       "Start later takes it), keeps it out of their list until those tasks get there and that time comes, or "
-                       'until a task fails or stops. A step that a command or code change can do is '
-                       "never a to-do, even setup that must wait for a task to merge: do it, or queue it as a task. "
-                       'Close an '
-                       'item that is settled with {"close": "todo:<id>"} in a `todo` block. #N means a task and '
-                       'todo:N means a to-do; the ids the dashboard reports, and the owner pastes, come as todo:N. '
-                       "When the owner's reply settles one of your Agree items (a yes, a no, or a changed plan), close "
-                       "it that way; leave it open while it is still pending. The [ops: ...] line at the start of a "
-                       "message lists this chat's open Agree items with their todo:N ids. "
-                       "When the owner asks for work that repeats (\"every Monday, check the dependencies\"), add a "
-                       "fenced block with the language `schedule` holding a JSON list of {project, title, body, every, "
-                       "hold?, model?, effort?, after_schedule?}; after_schedule is another schedule's id whose current "
-                       "task each run waits on; every is local time: 'day HH:MM', 'weekday HH:MM', 'mon HH:MM' (any of "
-                       "mon..sun, or 'mon,thu HH:MM') or 'hour'. Each slot queues a task with that body for an "
-                       "unattended worker, so the body must stand alone. "
-                       "This chat is one topic of the project's conversation on the dashboard, titled from its first "
-                       "message. When the subject clearly changes (not every reply), retitle it with a fenced block in "
-                       'the language `topic` holding {"title": "a few words"}; it is taken out of the reply.')
+# The opening of a chat's system prompt. A project chat is the owner's own session, like the CLI: their prompts
+# come to the dashboard. A chat with a stopped task keeps the worker's limits: nothing can answer a prompt.
+PROJECT_CHAT_HEAD = ("You are talking with the owner through the claude-ops dashboard, not a terminal. This chat is "
+                     "their own attended session, like the Claude Code CLI: auto mode, their settings, MCP servers "
+                     "and Claude in Chrome. When an action needs their permission, the dashboard shows them the "
+                     "request with Approve and Deny, and your turn waits for the answer. When they deny one, say what "
+                     "you wanted to do and why; don't try it another way. " + GUARD_RULE + " "
+                     "You run as a child of the claude-ops daemon, so `opsctl restart`, `opsctl stop` or stopping its "
+                     "launchd job stops you mid-command and leaves the restart half done. To restart claude-ops (to "
+                     f"load new code, say), run `{CODE / 'opsd.py'} restart`: it restarts in a process of its own, as "
+                     "the Restart button in Settings does. Running tasks pause and resume, and this chat stops and "
+                     "picks up again in the new daemon; run it once, last in your turn, and only when the owner asks. ")
+TASK_CHAT_HEAD = ("You are talking with the owner through the claude-ops dashboard, not a terminal. "
+                  "Nobody can answer permission prompts here: actions that would prompt are denied. "
+                  "When one is denied, say what you tried, and that they can run it themselves or "
+                  "continue this session in a terminal with `claude --resume`. " + GUARD_RULE + " ")
+CHAT_PROMPT = ("Reading code: search first (`grep -n`, Grep, Glob), then read only the range you need "
+               "(Read with offset and limit, or `sed -n 'a,bp'`), 150 lines or fewer at a time. Never Read a "
+               "file over about 500 lines without a range, and never `cat` one. Don't reread what is already "
+               "in your context. Keep command output short: pipe it through `tail` or `grep`, and use quiet "
+               "flags for tests and builds. "
+               f"To show the owner a picture, such as a screenshot, copy it into {IMAGES} under a name of "
+               "letters, digits, - and _ with a .png, .jpg, .gif or .webp ending, then embed it with "
+               "`![what it shows](/api/images/<name>)`. The dashboard can't show a picture from anywhere else "
+               "on disk, such as /tmp or the repo. "
+               "A to-do is only for something that truly needs the owner: a password or sudo, a macOS "
+               "permission grant (Full Disk Access and the like), an API key or account they must create, or "
+               "a decision (you proposed something and wait for their yes). Add one to their to-do list with "
+               "a fenced block in the language `todo` holding a JSON list of "
+               '{"verb": "Do" or "Agree", "title", "why", "wait"?}; wait, {"tasks": [283], "until": '
+               '"merged" or "released", "at": "tue 09:00"} (tasks, at, or both; at is local time as '
+               "Start later takes it), keeps it out of their list until those tasks get there and that time comes, or "
+               'until a task fails or stops. A step that a command or code change can do is '
+               "never a to-do, even setup that must wait for a task to merge: do it, or queue it as a task. "
+               'Close an '
+               'item that is settled with {"close": "todo:<id>"} in a `todo` block. #N means a task and '
+               'todo:N means a to-do; the ids the dashboard reports, and the owner pastes, come as todo:N. '
+               "When the owner's reply settles one of your Agree items (a yes, a no, or a changed plan), close "
+               "it that way; leave it open while it is still pending. The [ops: ...] line at the start of a "
+               "message lists this chat's open Agree items with their todo:N ids. "
+               "When the owner asks for work that repeats (\"every Monday, check the dependencies\"), add a "
+               "fenced block with the language `schedule` holding a JSON list of {project, title, body, every, "
+               "hold?, model?, effort?, after_schedule?}; after_schedule is another schedule's id whose current "
+               "task each run waits on; every is local time: 'day HH:MM', 'weekday HH:MM', 'mon HH:MM' (any of "
+               "mon..sun, or 'mon,thu HH:MM') or 'hour'. Each slot queues a task with that body for an "
+               "unattended worker, so the body must stand alone. "
+               "This chat is one topic of the project's conversation on the dashboard, titled from its first "
+               "message. When the subject clearly changes (not every reply), retitle it with a fenced block in "
+               'the language `topic` holding {"title": "a few words"}; it is taken out of the reply.')
+PROJECT_CHAT_PROMPT = PROJECT_CHAT_HEAD + CHAT_PROMPT
+TASK_CHAT_PROMPT = TASK_CHAT_HEAD + CHAT_PROMPT
 CHAT_STATES = ("review", "needs_input", "failed", "done", "cancelled", "paused")  # the worker is not running
 CHAT_NEXT = {"review": "Approve merges the branch with your commits (the gate runs again first); Send back with "
                        "feedback sends the worker back to work",
@@ -9046,7 +9169,7 @@ def task_chat_turn(tid, text):
         cmd = [CLAUDE, "-p", note + with_images(text), "--output-format", "stream-json", "--verbose",
                "--permission-mode", "auto", "--permission-prompts", "none", "--no-chrome", *PLUGIN_ARGS,
                "--mcp-config", mcp, "--strict-mcp-config", "--settings", guard_settings(str(cwd), p, chat=True),
-               "--append-system-prompt", PROJECT_CHAT_PROMPT]
+               "--append-system-prompt", TASK_CHAT_PROMPT]
     else:  # merged: its edits would land nowhere, so it reads, and a change goes to a follow-up task
         note = (f"[ops: the user is asking about this task on the dashboard; its state is {t['state']}. Answer them. "
                 "This turn is read-only: do not change files and do not write $OPS_RESULT. "
@@ -10685,6 +10808,8 @@ class H(BaseHTTPRequestHandler):
         path = urlparse(self.path).path
         if path == "/":
             return self.send(200, (CODE / "dashboard.html").read_bytes(), "text/html; charset=utf-8")
+        if path.startswith("/mcp/"):  # the permission server answers POSTs only: no event stream
+            return self.send(405, {"error": "POST only"})
         if path == "/api/state" and not READY.is_set():  # the dashboard shows "starting up" until this goes
             return self.send(200, {"starting": True, "now": time.time(), "data_dir": str(DATA)})
         if path == "/api/state":
@@ -10820,6 +10945,7 @@ class H(BaseHTTPRequestHandler):
                 msg["tasks"] = [{"id": i, "title": t.get("title"), "state": t.get("state")}
                                 for i in ids for t in [task(i) or {}]]
             d["live"] = DESIGN_LIVE.get(did, [])[-12:]
+            d["permits"] = permits_of(did)
             d["queued"] = queued_of(d)
             d["files"] = chat_files(did) if d["kind"] != "project" else []
             return self.send(200, d)
@@ -10838,6 +10964,9 @@ class H(BaseHTTPRequestHandler):
         path = urlparse(self.path).path
         if not READY.is_set():  # PROJECTS is half loaded and tasks not yet recovered
             return self.send(503, {"error": STARTING, "starting": True})
+        if m := re.fullmatch(r"/mcp/permit/(\d+)", path):  # a project chat's permission prompts (permit_rpc)
+            out = permit_rpc(int(m.group(1)), body)
+            return self.send(200, out) if out else self.send(202, b"")
         if path.startswith("/api/research/"):  # its own status codes: 404 while off, 409 while read-only
             return self.send(*research.post(path, body))
         try:
@@ -10949,8 +11078,8 @@ class H(BaseHTTPRequestHandler):
             return pause_all()
         if path == "/api/resume-all":
             return resume_all()
-        if path == "/api/restart":  # Settings' Danger zone: restart at once
-            return restart_now()
+        if path == "/api/restart":  # Settings' Danger zone, or opsd.py restart: restart at once
+            return restart_now(str(b.get("from") or ""))
         if path == "/api/limit/clear":  # Try now: stop waiting out the usage limit
             return limit_clear("you clicked Try now")
         if path == "/api/projects/reload":
@@ -11007,7 +11136,7 @@ class H(BaseHTTPRequestHandler):
                     (b["project"], title_of(text)[:80], time.time(), time.time(), kind, int(bool(b.get("quick")))))
             design_say(did, text)
             return {"id": did}
-        m = re.fullmatch(r"/api/designs/(\d+)/(say|unqueue|stop|rename|queue|seen|end|reopen)", path)
+        m = re.fullmatch(r"/api/designs/(\d+)/(say|unqueue|stop|rename|queue|seen|end|reopen|permit)", path)
         if m:
             did = int(m.group(1))
             d = design(did)
@@ -11015,6 +11144,8 @@ class H(BaseHTTPRequestHandler):
                 raise ValueError("no such chat")
             if d["quick"] and m.group(2) in ("say", "reopen"):  # it never becomes the topic Today shows (TODAY-6)
                 conv_pin(d["project"])
+            if m.group(2) == "permit":  # Approve or Deny on a permission prompt the chat's turn waits on
+                return permit_answer(did, str(b["id"]), b.get("allow") is True)
             if m.group(2) == "say":
                 return {"queued": design_say(did, b["text"].strip())}
             elif m.group(2) == "unqueue":  # take back a queued message, by its place in the queue
@@ -11245,6 +11376,22 @@ def send_cli(argv):
         sys.exit(f"not sent: the claude-ops daemon at {url} did not answer ({e.reason})")
 
 
+def restart_cli():
+    """opsd.py restart: the daemon that started this session (OPS_DAEMON) runs opsctl restart detached, as Settings'
+    Restart button does, so a chat, the daemon's child, isn't stopped before the restart is under way."""
+    url = os.environ.get("OPS_DAEMON") or DAEMON_URL
+    req = Request(f"{url}/api/restart", data=json.dumps({"from": os.environ.get("OPS_FROM", "")}).encode(),
+                  headers={"Content-Type": "application/json", "X-Ops": "1"})
+    try:
+        urlopen(req, timeout=30).read()
+    except HTTPError as e:
+        sys.exit(f"not restarted: {json.loads(e.read() or b'{}').get('error', e)}")
+    except URLError as e:
+        sys.exit(f"not restarted: the claude-ops daemon at {url} did not answer ({e.reason})")
+    print("claude-ops is restarting: running tasks pause and resume, and a chat that ran this picks up again in the "
+          f"new daemon. Log: {DATA / 'restart.log'}")
+
+
 def add_request(project, words):
     """opsd.py add -p PROJECT [--model M] [--effort E] [--research T0|T1|T2] [--at TIME | --after-reset]
     [--branch NAME | --jira KEY] TEXT: (path,
@@ -11324,6 +11471,8 @@ if __name__ == "__main__":
         sys.stdout.write(out)
     elif cmd in ("pause-all", "resume-all"):
         post(f"/api/{cmd}", {})
+    elif cmd == "restart" and not args:
+        restart_cli()
     elif cmd == "add-project" and args:
         PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
         out = detect_project(str(Path(args[0]).expanduser().absolute()), args[1] if len(args) > 1 else None)
