@@ -21,7 +21,7 @@ chat. If you created two or more, it attaches to none of them.
 Your working directory is a copy of `{dev}` made for this chat, refreshed from `{dev}` before each
 message. You can edit and create files under `openspec/`, and nothing else; `mkdir` and `mv` are
 denied, so let `openspec new change` make the folder. Any agent you start has the same rules. Never
-apply or implement the change here (`/opsx:apply`, `/tk:openspec:implement`): that changes code, which
+apply or implement the change here (`/opsx:apply`, `/claude-ops:openspec:implement`): that changes code, which
 this chat can't save. The owner queues it as a task once the change is written.
 
 When you write:

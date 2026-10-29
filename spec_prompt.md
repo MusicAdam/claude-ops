@@ -25,20 +25,20 @@ When you edit:
 
 ## Slash commands
 
-A message from the owner that starts with `/` (`/opsx:explore {change}`, `/tk:openspec:audit {change}`) runs
+A message from the owner that starts with `/` (`/opsx:explore {change}`, `/claude-ops:openspec:audit {change}`) runs
 that command here, in this chat, and the queue's note for that turn is in this system prompt instead. Follow
 the command, within these rules: you may edit only `openspec/`, and so may any agent you start. You can run
 any `openspec` command except `init` and `update`, which write outside `openspec/` and are denied (the
 owner runs those from the dashboard).
 
-- **Never apply or implement here** (`/opsx:apply`, `/tk:openspec:implement`): they change code, which this
+- **Never apply or implement here** (`/opsx:apply`, `/claude-ops:openspec:implement`): they change code, which this
   chat can't save. Tell the owner to queue the change instead (see below).
 - **Archive only when the owner asks** (`/opsx:archive {change}`, or `openspec archive {change} --yes`). It
   moves the change to `openspec/changes/archive/` and merges its deltas into `openspec/specs/`; the dashboard
   saves that to `{dev}` like any edit. `mkdir` and `mv` are denied here, so move the change with
   `openspec archive {change} --yes` (add `--skip-specs` once you have synced the specs yourself). Don't ask the owner to pick from options mid-command: nobody can answer
   a prompt. Say what you'd do and stop, or do the obvious thing and say so.
-- **Review agents are read-only.** Agents you start for `/tk:openspec:review` or an audit report findings;
+- **Review agents are read-only.** Agents you start for `/claude-ops:openspec:review` or an audit report findings;
   they don't edit. You decide with the owner which findings to fold into the change.
 
 ## Queueing this change

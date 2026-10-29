@@ -2914,7 +2914,9 @@ function readerHead(d) {
 }
 // The change's commands, in the daemon's order. Deviation check needs something built to compare with.
 const specCmds = s => s.commands.filter(c => c.id !== "deviation-check" || s.done > 0);
-const bareCmds = s => !s.commands.some(c => c.id !== "validate");  // no opsx and no tk commands: Validate at most
+// The repo has no opsx commands (openspec init adds them); the plugin's audit, review and deviation check are always there
+const OPSX_CMDS = new Set(["explore", "sync", "archive"]);
+const bareCmds = s => !s.commands.some(c => OPSX_CMDS.has(c.id));
 const NO_OPSX = "Run Set up OpenSpec or Refresh OpenSpec commands to add the opsx commands.";
 function runCmd(s, c) {
   if (c.id === "archive" && !confirm(`Archive ${s.name}? This moves it to openspec/changes/archive and merges its spec deltas into openspec/specs. Saved to dev after the reply.`)) return;
