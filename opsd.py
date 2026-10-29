@@ -11,8 +11,10 @@
                                        --research T0|T1|T2 queues a research run whose question is the text;
                                        --branch NAME or --jira KEY: a branch task (README: Branches and pull requests)
                                        --base BRANCH: its PRs go against BRANCH, not the project's pr_base
-  opsd.py pr open|merge|address TASK_ID  a branch task: push and open its PRs / merge them in pr_order / have the
-                                       worker address their review comments
+  opsd.py pr open|address TASK_ID     a branch task: push and open its PRs / have the worker address their review
+                                       comments
+  opsd.py pr ready TASK_ID on|off      Merge when ready: the queue fixes red CI, addresses comments and merges each PR
+                                       in pr_order once green and approved, with nothing from you (pr merge = ready on)
   opsd.py schedule add -p NAME --every 'mon 09:00' [--body TEXT] [--hold] [--model M] [--effort E] "title..."
                                        a recurring job: queue that task on that timetable (README: Recurring jobs);
                                        --research T0|T1|T2 makes it a research job whose question is the text
