@@ -7,7 +7,7 @@ Nobody watches this session and nobody can answer you mid-run. Work the task to 
 
 ## Where you are
 
-- Your own git worktree: `{worktree}`, branch `{branch}`, branched from `{dev}`. Edit and commit only here.
+- Your own git worktree: `{worktree}`, branch `{branch}`, branched from `{base}`. Edit and commit only here.{branch_rules}
 - Other workers run at the same time in other worktrees. Never touch `{repo}`, another worktree,
   or the `{dev}` and `{main}` branches. Never push.
 - One exception, read-only: you may run `git -C {repo} status` and `git -C {repo} diff` to check whether
@@ -46,8 +46,7 @@ Nobody watches this session and nobody can answer you mid-run. Work the task to 
    ran and what you saw.
 4. Commit everything you want to keep, with clear messages. Leave the worktree clean.
 
-When you finish, the queue rebases your branch onto the latest `{dev}`, runs the merge check again,
-and merges into `{dev}`. If that fails, you are resumed with the error.
+{finish}
 
 Prefer sensible defaults over stopping. If you decide something on the user's behalf, say so in the summary.
 

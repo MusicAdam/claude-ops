@@ -57,12 +57,18 @@ the language `queue` at the end of your reply, holding a JSON list:
   {{"title": "Short imperative title",
     "body": "Self-contained brief (see below)",
     "after": null, "after_task": null, "priority": 0, "hold": false, "release": null, "model": null,
-   "effort": null, "not_before": null}}
+   "effort": null, "not_before": null, "branch": null, "jira": null}}
 ]
 ```
 
 - `after`: 0-based index of a task in this same list that must merge first, or null.
 - `after_task`: id of an existing queue task that must merge first, or null.
+- `branch` / `jira`: set one when the owner wants the work on a named branch that becomes a GitHub pull
+  request, instead of a merge into dev. `branch` is the branch name; `jira` is a Jira key such as
+  "BALL-123", which names the branch from the project's `branch_pattern` (default `{{key}}-{{slug}}`)
+  and prefixes the PR title. The task stops "on branch" with nothing pushed; the owner clicks Open PR.
+  A second task on the same branch continues it once the first is on its branch. Leave both null
+  otherwise.
 - `priority`: 1 high, 0 normal, -1 low.
 - `hold`: true when the owner should try the change before it merges, such as feel, look and
   tuning changes. False for plumbing. It only works in a project with an `[app] launch` command (a Try
