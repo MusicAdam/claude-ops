@@ -1163,7 +1163,10 @@ def init_db():
                       ("reviewed_at", "REAL"),  # when the bot review it waits for came
                       ("addressed_at", "REAL"),  # when the worker last got its comments: older review bodies are done
                       ("requested", "TEXT"),  # the reviewers GitHub has requested, as JSON
-                      ("base", "TEXT")):  # the branch it is against on GitHub, as last read (you may retarget it)
+                      ("base", "TEXT"),  # the branch it is against on GitHub, as last read (you may retarget it)
+                      ("decision", "TEXT"),  # GitHub's reviewDecision, as last read: "" when no review is required
+                      ("auto_fixes", "INTEGER DEFAULT 0"),  # Merge when ready's Fix CI rounds on it
+                      ("auto_addresses", "INTEGER DEFAULT 0")):  # ... and its Address comments rounds
         if col not in pr_cols:
             q(f"ALTER TABLE prs ADD COLUMN {col} {decl}")
     q("CREATE INDEX IF NOT EXISTS prs_task ON prs (task_id, seq)")
@@ -1225,6 +1228,10 @@ def init_db():
                  "release_wait": "180", "effort": "medium"}.items():
         q("INSERT OR IGNORE INTO settings VALUES (?,?)", (k, v))
     q("DELETE FROM settings WHERE key='draining'")  # the old restart's stored hold: a crash could leave it set
+    # Merge all's switch became Merge when ready's
+    q("INSERT OR IGNORE INTO settings SELECT 'prready:' || substr(key, 12), value FROM settings WHERE key LIKE "
+      "'prmergeall:%' AND value='1'")
+    q("DELETE FROM settings WHERE key LIKE 'prmergeall:%'")
 
 
 def setting(k):
@@ -2132,6 +2139,16 @@ def stale_session(t):
     return None
 
 
+def stale_or_ready(t):
+    """stale_session(t), except while Merge when ready is on: its steps resume the same session, to keep its context
+    across fixes, and the event log says what a fresh one would have saved."""
+    why = stale_session(t)
+    if why and is_branch_task(t) and ready_on(t["id"]):
+        ev(t["id"], f"Merge when ready: resumed the same session anyway ({why[1]}); a fresh one would have cost less")
+        return None
+    return why
+
+
 def first_brief(p, t):
     """The brief t's first turn sent, built again for a fresh session."""
     if t["kind"] == "senddev":
@@ -2223,7 +2240,7 @@ def run_claude(p, tid, prompt, proof=False):
     rp = result_path(t)
     rp.unlink(missing_ok=True)
     turn, kept = prompt, None
-    if not proof and (why := stale_session(t)):  # cheaper to start over than to resume: brief, handoff note, then this turn
+    if not proof and (why := stale_or_ready(t)):  # cheaper to start over than to resume: brief, handoff note, then this turn
         kept = session_model(t, t["kind"])  # the fresh session stays on the model the old one ran
         brief = first_brief(p, t)
         prompt = "\n\n".join(x for x in (brief, handoff_note(p, t, why[0]),
@@ -2419,7 +2436,8 @@ def task_steer(tid, text):
         t = task(tid)
         pipe = STEER_PIPES.get(tid)
         if is_branch_task(t) and (t["state"] in ("on_branch", "pr") or (t["state"] == "needs_input" and
-                                                                          t["phase"] in (PR_RED, PR_CLOSED))):
+                                                                          t["phase"] in (PR_RED, PR_CLOSED, PR_LEFT,
+                                                                                         PR_NO_MERGE))):
             # README: Branches and pull requests. The worker resumes with it, the gate runs, and the queue pushes
             # to an open PR: how you pass on review comments
             q("INSERT INTO task_msgs (task_id, role, text, ts) VALUES (?,?,?,?)", (tid, "steer", text, time.time()))
@@ -3099,7 +3117,10 @@ PR_CLOSED = "PR closed"  # ... because a PR was closed without merging
 PR_SETUP = "can't open PRs"  # ... because gh, its login, a GitHub origin or a push is in the way
 PR_MAIN = "main can't follow origin"  # ... because your main has commits origin/main lacks
 PR_PICK_PHASE = "pick reviewers"  # ... because nobody is set to review a PR once its comments are addressed
-PR_PHASES = (PR_RED, PR_CLOSED, PR_SETUP, PR_MAIN, PR_PICK_PHASE)
+PR_LEFT = "comments left"  # ... because Merge when ready addressed a PR's comments READY_ROUNDS times and more came
+PR_NO_MERGE = "can't merge"  # ... because Merge when ready's gh pr merge failed (a conflict, branch protection)
+PR_PHASES = (PR_RED, PR_CLOSED, PR_SETUP, PR_MAIN, PR_PICK_PHASE, PR_LEFT, PR_NO_MERGE)
+READY_ROUNDS = 3  # Merge when ready's automatic Fix CI rounds per PR, and its Address comments rounds per PR
 # A PR's review round (prs.review): awaiting the bot review, the worker addressing comments, needing you to pick its
 # reviewers, awaiting human review. NULL: a PR opened before the round existed, which skips it
 PR_BOT, PR_ADDRESSING, PR_PICK, PR_HUMAN = "bot", "addressing", "reviewers", "human"
@@ -3543,7 +3564,7 @@ def pr_view(p, t, row):
     r = part_of(p, row["repo"])
     rc, out, err = gh(r, "pr", "view", str(row["number"]), "--json",
                       "state,mergedAt,mergeCommit,statusCheckRollup,mergeable,url,author,reviews,reviewRequests,"
-                      "baseRefName")
+                      "baseRefName,reviewDecision")
     try:
         d = json.loads(out) if rc == 0 else None
     except ValueError:
@@ -3555,7 +3576,9 @@ def pr_view(p, t, row):
     state = str(d.get("state") or "OPEN").upper()
     ci, failing = ci_of(d.get("statusCheckRollup"))
     kw = {"state": state, "ci": ci, "failing": json.dumps(failing) if failing else None, "checked_at": time.time(),
-          "url": d.get("url") or row["url"]}
+          "url": d.get("url") or row["url"], "decision": str(d.get("reviewDecision") or "").upper()}
+    if state == "OPEN" and kw["decision"] != (row["decision"] or "") and kw["decision"]:
+        ev(t["id"], f"{pr_words(p, row)}: review {kw['decision'].lower().replace('_', ' ')}")
     if (base := str(d.get("baseRefName") or "").strip()) and base != row["base"]:  # retargeted on GitHub: kept
         kw["base"] = base
         if row["base"]:
@@ -3610,6 +3633,70 @@ def pr_mergeable(row, rows):
     if early:
         return "an earlier PR in pr_order has not merged"
     return None
+
+
+def ready_on(tid):
+    """Whether the task's Merge when ready switch is on (README: Merge when ready)."""
+    return setting(f"prready:{tid}") == "1"
+
+
+def ready_wait(p, row, rows):
+    """What Merge when ready waits for before it merges row, in words, or None once it may as GitHub last read: open,
+    CI green, every earlier PR merged, its review round past the bot and addressing stages, and approved
+    (reviewDecision APPROVED, or empty with no requested reviewer pending). Comments left are read at merge time."""
+    w = pr_words(p, row)
+    if not row["number"]:
+        return f"waiting for {w} to open"
+    if row["state"] != "OPEN":
+        return f"{w} is {row['state'].lower()}"
+    if row["ci"] != "green":
+        return f"CI red on {w}" if row["ci"] == "red" else f"waiting for CI on {w}"
+    if any(x["seq"] < row["seq"] and x["state"] != "MERGED" for x in rows):
+        return f"{w} waits for the PRs before it in pr_order"
+    if row["review"] in (PR_BOT, PR_ADDRESSING, PR_PICK):
+        return f"{PR_REVIEW_WORDS[row['review']]} on {w}"
+    decision = row["decision"] or ""
+    if decision == "CHANGES_REQUESTED":
+        return f"changes requested on {w}"
+    if decision != "APPROVED" and (decision or json.loads(row["requested"] or "[]")):
+        return f"waiting for approval on {w}"
+    return None
+
+
+def ready_left(p, row, unread=True):
+    """Whether row's PR still has review comments to address: it doesn't merge then. unread: comments gh couldn't
+    read count as left."""
+    threads, bodies, err = review_work(p, row, False)
+    return bool(threads or bodies or (err and unread))
+
+
+def ready_words(p, t, rows):
+    """Where Merge when ready stands on task t, for its PR list, or None while it is off."""
+    tid = t["id"]
+    if not ready_on(tid) or t["state"] in ENDED:
+        return None
+    if t["state"] in ("queued", "running", "gating", "paused") and (step := setting(f"prreadystep:{tid}")):
+        return step
+    if t["state"] == "running" and (t["phase"] or "").startswith("merging "):
+        return t["phase"]
+    if t["state"] == "needs_input":
+        return "stopped: the task needs you"
+    if not any(x["number"] for x in rows or []):
+        return "on: it starts once the PRs open"
+    return ready_where(p, rows)
+
+
+def ready_where(p, rows):
+    """The first thing Merge when ready waits for among rows, in pr_order, or that one may merge."""
+    waits = [w for x in rows if x["state"] != "MERGED" and (w := ready_wait(p, x, rows))]
+    ready = [x for x in rows if x["state"] == "OPEN" and not ready_wait(p, x, rows)]
+    return ("merging " + pr_words(p, ready[0]) + " at the next check") if ready else waits[0] if waits else "merged"
+
+
+def ready_step(tid, words):
+    """An automatic step under way: the words the PR list shows until the next PR step."""
+    set_setting(f"prreadystep:{tid}", words)
+    ev(tid, f"Merge when ready: {words}")
 
 
 def pr_merge_one(p, tid, row):
@@ -3725,15 +3812,12 @@ def pr_main(p, tid):
     return True
 
 
-def merge_all_on(tid):
-    return setting(f"prmergeall:{tid}") == "1"
-
-
 def pr_step(p, tid):
     """Open PR and every step after it, in the task's pipeline (start_at 'pr'): push and open the PRs that are due,
     push new commits to open ones, Merge all's next merge, read every PR, move main after a merge, then settle the
     task: done, needs you, or watching (state 'pr')."""
     upd(tid, next_prompt=None, error=None, question=None, phase="checking the pull requests")
+    set_setting(f"prreadystep:{tid}", "")
     with pr_lock(tid):
         return _pr_step(p, tid)
 
@@ -3791,12 +3875,14 @@ def _pr_step(p, tid):
             if x["state"] == "OPEN" and x["number"] and x["id"] not in fresh:
                 pr_view(p, t, x)
         rows = pr_rows(tid)
-        if merge_all_on(tid):
+        if ready_on(tid):  # Merge when ready: the next PR in order that is green, approved, with nothing to address
             for x in rows:
-                if not pr_mergeable(x, rows):
+                if not ready_wait(p, x, rows) and not ready_left(p, x):
                     upd(tid, phase=f"merging {pr_words(p, x)}")
-                    if pr_merge_one(p, tid, x):
-                        set_setting(f"prmergeall:{tid}", "")
+                    ev(tid, f"Merge when ready: merging {pr_words(p, x)}, green and approved")
+                    if err := pr_merge_one(p, tid, x):
+                        return pr_needs(p, tid, PR_NO_MERGE, f"Merge when ready couldn't merge {pr_words(p, x)} "
+                                        f"({x['url']}): {err}\nFix it on GitHub, then Retry.")
                     changed = True
                     break
         if not changed:
@@ -3826,7 +3912,7 @@ def pr_settle(p, tid):
     """Where the task's PRs leave it: done once all merged, needs you if one closed or has red CI, else watching."""
     rows, t = pr_rows(tid), task(tid)
     if rows and all(x["state"] == "MERGED" for x in rows):
-        set_setting(f"prmergeall:{tid}", "")
+        set_setting(f"prready:{tid}", "")
         upd(tid, start_at="claude")
         return finish(p, tid, merged=" ".join(x["merge_commit"] for x in rows if x["merge_commit"]) or None,
                       note="every PR merged: " + ", ".join(f"{pr_words(p, x)} {x['url']}" for x in rows))
@@ -3835,11 +3921,19 @@ def pr_settle(p, tid):
                                                      + " was closed without merging" for x in closed)
                         + ". Retry opens it again; Cancel leaves it closed.")
     if red := [x for x in rows if x["state"] == "OPEN" and x["ci"] == "red"]:
-        set_setting(f"prmergeall:{tid}", "")
+        gave = ""
+        if ready_on(tid):  # Merge when ready: Fix CI by itself, READY_ROUNDS times per PR
+            if all((x["auto_fixes"] or 0) < READY_ROUNDS for x in red):
+                n = max(x["auto_fixes"] or 0 for x in red) + 1
+                for x in red:
+                    q("UPDATE prs SET auto_fixes=IFNULL(auto_fixes,0)+1 WHERE id=?", (x["id"],))
+                ready_step(tid, f"fixing CI on {', '.join(pr_words(p, x) for x in red)} (round {n} of {READY_ROUNDS})")
+                return fix_ci_now(p, tid, "Fix CI by itself (Merge when ready): the worker gets the failed logs")
+            gave = f"Merge when ready gave up: CI still red after {READY_ROUNDS} fixes. "
         checks = [f"{pr_words(p, x)}: " + ", ".join(f["name"] for f in json.loads(x["failing"] or "[]"))
                   for x in red]
         later = [x for x in rows if not x["number"]]
-        return pr_needs(p, tid, PR_RED, "CI failed on " + "; ".join(checks) + "."
+        return pr_needs(p, tid, PR_RED, gave + "CI failed on " + "; ".join(checks) + "."
                         + (f" {', '.join(pr_name(p, x) for x in later)} won't open until it is green." if later else "")
                         + " Fix CI has the worker fix it from the failed logs; or send the task a message.")
     if pending_steers(tid):  # a message came in while the queue pushed: the worker takes it next
@@ -3847,9 +3941,11 @@ def pr_settle(p, tid):
         return
     if pr_review_step(p, tid):
         return
+    rows = pr_rows(tid)
     waiting = [x for x in rows if x["state"] == "OPEN" and x["ci"] == "pending"]
     ready = [x for x in rows if not pr_mergeable(x, rows)]
-    phase = ("CI running on " + ", ".join(pr_words(p, x) for x in waiting)) if waiting else \
+    phase = ("Merge when ready: " + ready_where(p, rows)) if ready_on(tid) else \
+        ("CI running on " + ", ".join(pr_words(p, x) for x in waiting)) if waiting else \
         ("ready to merge: " + ", ".join(pr_words(p, x) for x in ready)) if ready else "PRs open"
     upd(tid, state="pr", phase=phase, question=None, start_at="pr")
     if phase != t["phase"] or t["state"] != "pr":
@@ -3863,8 +3959,8 @@ def pr_poll():
         return
     try:
         for t in q("SELECT * FROM tasks WHERE id IN (SELECT task_id FROM prs WHERE state IN ('OPEN','CLOSED') AND "
-                   "number IS NOT NULL) AND (state='pr' OR (state='needs_input' AND phase IN (?,?,?)))",
-                   (PR_RED, PR_CLOSED, PR_PICK_PHASE)):
+                   "number IS NOT NULL) AND (state='pr' OR (state='needs_input' AND phase IN (?,?,?,?,?)))",
+                   (PR_RED, PR_CLOSED, PR_PICK_PHASE, PR_LEFT, PR_NO_MERGE)):
             p = PROJECTS.get(t["project"])
             if not p or t["id"] in THREADS or STOPPING.is_set():
                 continue
@@ -3877,14 +3973,18 @@ def pr_poll():
 
 
 def pr_poll_task(p, t):
-    before = {x["id"]: (x["state"], x["ci"]) for x in pr_rows(t["id"])}
+    before = {x["id"]: (x["state"], x["ci"], x["decision"] or "") for x in pr_rows(t["id"])}
     for x in pr_rows(t["id"]):
         if x["number"] and x["state"] in ("OPEN", "CLOSED"):
             pr_view(p, t, x)
     rows = pr_rows(t["id"])
-    moved = any(before.get(x["id"]) != (x["state"], x["ci"]) for x in rows)
-    due = any(pr_due(x, rows) for x in rows) or (merge_all_on(t["id"]) and any(not pr_mergeable(x, rows)
-                                                                                for x in rows))
+    moved = any(before.get(x["id"]) != (x["state"], x["ci"], x["decision"] or "") for x in rows)
+    due = any(pr_due(x, rows) for x in rows)
+    if ready_on(t["id"]) and t["state"] == "pr":  # Merge when ready: a PR may merge, or new comments came
+        due = due or any(not ready_wait(p, x, rows) for x in rows) or \
+            any(x["state"] == "OPEN" and x["review"] in (PR_HUMAN, None) and ready_left(p, x, False) for x in rows)
+    elif ready_on(t["id"]) and t["phase"] == PR_LEFT:  # it gave up on comments, and they are gone now
+        due = not any(x["state"] == "OPEN" and ready_left(p, x) for x in rows)
     # the review round moves on: the bot review came or the wait is over; or reviewers were requested on GitHub
     due = due or (t["state"] == "pr" and any(review_due(p, x) for x in rows)) or \
         (t["phase"] == PR_PICK_PHASE and any(x["review"] == PR_PICK and json.loads(x["requested"] or "[]")
@@ -3912,8 +4012,13 @@ def pr_action(p, t, action, b):
     if not p:
         raise ValueError("its project is not loaded")
     rows = pr_rows(tid)
+    if action == "pr-merge-all":  # Merge all became Merge when ready
+        action, b = "pr-ready", {"on": 1}
+    if action == "pr-ready":
+        return pr_ready(p, t, bool(b.get("on")))
     if action == "pr-open":  # Open PR, or Retry after what was missing is fixed
-        if st not in ("on_branch",) and not (st == "needs_input" and t["phase"] in (PR_SETUP, PR_MAIN, PR_PICK_PHASE)):
+        if st not in ("on_branch",) and not (st == "needs_input" and t["phase"] in (PR_SETUP, PR_MAIN, PR_PICK_PHASE,
+                                                                                     PR_LEFT, PR_NO_MERGE)):
             raise ValueError(f"task is {STATE_WORDS.get(st, st)}: Open PR is for a task on its branch")
         return pr_queue(tid, "Open PR")
     if action == "pr-retry":  # a PR was closed without merging: open it again
@@ -3932,19 +4037,11 @@ def pr_action(p, t, action, b):
     if action == "fix-ci":
         if not (st == "needs_input" and t["phase"] == PR_RED):
             raise ValueError("no PR of this task has failed CI")
-        upd(tid, state="queued", phase="", question=None, start_at="claude", rounds=0,
-            next_prompt=fix_ci_prompt(p, t))
-        ev(tid, "Fix CI: the worker gets the failed logs")
-        return
+        return fix_ci_now(p, tid, "Fix CI: the worker gets the failed logs")
     if st not in ("pr", "needs_input"):
         raise ValueError(f"task is {STATE_WORDS.get(st, st)}: nothing to merge now")
     if tid in THREADS:
         raise ValueError("the queue is working on its PRs right now: try again in a moment")
-    if action == "pr-merge-all":
-        if not [x for x in rows if x["state"] == "OPEN"]:
-            raise ValueError("no PR of this task is open")
-        set_setting(f"prmergeall:{tid}", "1")
-        return pr_queue(tid, "Merge all: the PRs merge in order, each once its CI is green")
     row = next((x for x in rows if str(x["id"]) == str(b.get("pr")) or x["repo"] == b.get("repo")), None)
     if not row and len([x for x in rows if x["state"] == "OPEN"]) == 1:
         row = next(x for x in rows if x["state"] == "OPEN")
@@ -3956,6 +4053,24 @@ def pr_action(p, t, action, b):
         if err := pr_merge_one(p, tid, row):
             raise ValueError(f"gh pr merge {row['number']} failed: {err}")
     pr_queue(tid, f"merged {pr_words(p, row)}; moving {p.main}")
+
+
+def pr_ready(p, t, on):
+    """The Merge when ready switch (README: Merge when ready). On: allowed before any PR is open; each PR gets its
+    automatic rounds afresh. Off: no further automatic step; one already running finishes. Either way a task
+    watching its PRs (or, turning it on, stuck where the switch helps) takes a PR step now."""
+    tid, st = t["id"], t["state"]
+    if st in ENDED:
+        raise ValueError(f"task is {STATE_WORDS.get(st, st)}")
+    if on == ready_on(tid):
+        return
+    set_setting(f"prready:{tid}", "1" if on else "")
+    if on:
+        q("UPDATE prs SET auto_fixes=0, auto_addresses=0 WHERE task_id=?", (tid,))
+    ev(tid, "Merge when ready on: the queue fixes CI, addresses comments and merges each PR once green and approved"
+       if on else "Merge when ready off: no more automatic steps (one already running finishes)")
+    if tid not in THREADS and (st == "pr" or (on and st == "needs_input" and t["phase"] in (PR_RED, PR_PICK_PHASE))):
+        pr_queue(tid, "Merge when ready " + ("on" if on else "off") + ": checking the PRs")
 
 
 def pr_view_rows(t, rows):
@@ -4105,6 +4220,11 @@ def pr_ask_reviewers(p, tid, x):
         q("UPDATE prs SET review=? WHERE id=?", (PR_HUMAN, x["id"]))
         ev(tid, f"{pr_words(p, x)}: awaiting review by {', '.join(asked)}, requested on GitHub")
         return None
+    if ready_on(tid) and (x["decision"] or "") in ("", "APPROVED"):  # Merge when ready: no review to wait for
+        q("UPDATE prs SET review=? WHERE id=?", (PR_HUMAN, x["id"]))
+        ev(tid, f"Merge when ready: {pr_words(p, x)} " + ("is approved" if x["decision"] else
+                                                          "needs no review on GitHub") + ": no reviewers to ask")
+        return None
     q("UPDATE prs SET review=? WHERE id=?", (PR_PICK, x["id"]))
     return f"Pick reviewers for PR #{x['number']}" + (f" ({pr_name(p, x)})" if x["repo"] else "") + f": {x['url']}"
 
@@ -4127,11 +4247,15 @@ def pr_review_step(p, tid):
     the worker addresses the unresolved comments, if any; then the queue asks pr_reviewers to review. True when
     the task now waits for the worker or for you."""
     rows = [x for x in pr_rows(tid) if x["state"] == "OPEN" and x["number"]]
-    asks, work = [], []
+    asks, work, auto, left = [], [], [], []
     for x in rows:
         if x["review"] in (PR_ADDRESSING, PR_PICK):  # the worker addressed it (or you were to pick): ask humans
             if why := pr_ask_reviewers(p, tid, x):
                 asks.append(why)
+        elif x["review"] in (PR_HUMAN, None) and ready_on(tid):  # Merge when ready: comments after the round
+            threads, bodies, _ = review_work(p, x, False)
+            if threads or bodies:
+                (left if (x["auto_addresses"] or 0) >= READY_ROUNDS else auto).append((x, threads, bodies))
         elif review_due(p, x):
             if not x["reviewed_at"] and (p.pr_bot_reviewers or p.pr_review_comment):
                 ev(tid, f"{pr_words(p, x)}: no bot review came within {p.pr_bot_review_timeout:g} min; going on")
@@ -4146,13 +4270,24 @@ def pr_review_step(p, tid):
                 ev(tid, f"{pr_words(p, x)}: no unresolved review comments")
             if why := pr_ask_reviewers(p, tid, task_pr(x["id"])):
                 asks.append(why)
-    if work:
-        pr_address_now(p, tid, work, "review round")
+    if auto:
+        n = max(x["auto_addresses"] or 0 for x, _, _ in auto) + 1
+        for x, _, _ in auto:
+            q("UPDATE prs SET auto_addresses=IFNULL(auto_addresses,0)+1 WHERE id=?", (x["id"],))
+        ready_step(tid, f"addressing comments on {', '.join(pr_words(p, x) for x, _, _ in auto)} "
+                        f"(round {n} of {READY_ROUNDS})")
+    if work or auto:
+        pr_address_now(p, tid, work + auto, "review round" if work else "Address comments by itself (Merge when ready)")
         return True
     if asks:
         pr_needs(p, tid, PR_PICK_PHASE, "; ".join(asks) + ". Answer with GitHub logins or org/team names (comma-"
                  "separated), or set pr_reviewers in the project's toml and Retry, or request reviewers on GitHub: "
                  "the queue sees them at its next poll.")
+        return True
+    if left:
+        pr_needs(p, tid, PR_LEFT, f"Merge when ready gave up: comments left after {READY_ROUNDS} rounds on "
+                 + ", ".join(f"{pr_words(p, x)} ({x['url']})" for x, _, _ in left)
+                 + ". Address comments has the worker take them again; or answer, or resolve them on GitHub.")
         return True
     return False
 
@@ -4164,7 +4299,7 @@ def task_pr(pid):
 def pr_address(p, t):
     """Address comments (the button, opsd.py pr address): stage 2 again, on demand, for comments that came later."""
     tid = t["id"]
-    if not (t["state"] == "pr" or (t["state"] == "needs_input" and t["phase"] == PR_PICK_PHASE)):
+    if not (t["state"] == "pr" or (t["state"] == "needs_input" and t["phase"] in (PR_PICK_PHASE, PR_LEFT))):
         raise ValueError(f"task is {STATE_WORDS.get(t['state'], t['state'])}"
                          + (f" ({t['phase']})" if t["state"] == "needs_input" and t["phase"] else "")
                          + ": Address comments is for a task watching its open PRs")
@@ -4184,6 +4319,12 @@ def pr_address(p, t):
         raise ValueError("couldn't read the review comments: " + "; ".join(errs) if errs else
                          "no unresolved review comments on " + ", ".join(pr_words(p, x) for x in rows))
     pr_address_now(p, tid, work, "Address comments")
+
+
+def fix_ci_now(p, tid, why):
+    """Fix CI: resume the worker with the failed logs (the gate and push follow)."""
+    upd(tid, state="queued", phase="", question=None, start_at="claude", rounds=0, next_prompt=fix_ci_prompt(p, task(tid)))
+    ev(tid, why)
 
 
 def fix_ci_prompt(p, t):
@@ -11151,6 +11292,10 @@ def state_payload():
         t["step"] = last_step(t["id"]) if t["state"] == "running" and t["phase"] == "claude working" else None
         t["wait"] = waits.get(t["id"])
         t["prs"] = pr_view_rows(t, prs.get(t["id"])) if is_branch_task(t) else None
+        if t["prs"] is not None:
+            t["pr_ready"] = ready_on(t["id"])
+            t["pr_ready_words"] = ready_words(PROJECTS[t["project"]], t, prs.get(t["id"]) or []) \
+                if t["pr_ready"] and t["project"] in PROJECTS else None
         t["pr_against"] = pr_against(PROJECTS[t["project"]], t) if t["prs"] is not None and \
             t["project"] in PROJECTS else None
         t["start_words"] = start_words(t) if t["state"] == "queued" else None
@@ -11738,7 +11883,7 @@ class H(BaseHTTPRequestHandler):
                 who = [x.lstrip("@") for x in re.split(r"[\s,;]+", b["answer"]) if x.strip("@")]
                 set_setting(f"prreviewers:{tid}", json.dumps(who))
                 return pr_queue(tid, "reviewers picked: " + ", ".join(who))
-            back = {"start_at": "claude"} if t["phase"] in (PR_RED, PR_CLOSED) else {}  # the worker takes it
+            back = {"start_at": "claude"} if t["phase"] in (PR_RED, PR_CLOSED, PR_LEFT, PR_NO_MERGE) else {}  # the worker takes it
             upd(tid, state="queued", question=None, next_prompt=answer_prompt(t["question"], b["answer"]), **back)
             ev(tid, "answered: " + b["answer"][:200])
         elif action == "approve":
@@ -11757,7 +11902,7 @@ class H(BaseHTTPRequestHandler):
                             "Update the work, re-run the checks, commit, and write $OPS_RESULT (with an updated "
                             "`review`).")
             ev(tid, "changes requested: " + b["feedback"][:200])
-        elif action in ("pr-open", "pr-merge", "pr-merge-all", "fix-ci", "pr-retry", "pr-address"):
+        elif action in ("pr-open", "pr-merge", "pr-merge-all", "fix-ci", "pr-retry", "pr-address", "pr-ready"):
             return pr_action(p, t, action, b)
         elif action == "play":
             if not p or not t["worktree"]:
@@ -12021,6 +12166,14 @@ if __name__ == "__main__":
             sys.exit(f"the claude-ops daemon on port {PORT} did not answer ({e.reason})")
         except (ValueError, OSError) as e:  # a bad command line, or a --body-file it can't read
             sys.exit(str(e))
+    elif cmd == "pr" and len(args) == 3 and args[0] == "ready" and args[1].lstrip("#").isdigit() and \
+            args[2] in ("on", "off"):
+        try:  # README: Merge when ready
+            post(f"/api/tasks/{args[1].lstrip('#')}/pr-ready", {"on": 1 if args[2] == "on" else 0})
+        except HTTPError as e:
+            sys.exit(json.loads(e.read() or b"{}").get("error") or str(e))
+        except URLError as e:
+            sys.exit(f"the claude-ops daemon on port {PORT} did not answer ({e.reason})")
     elif cmd == "pr" and len(args) == 2 and args[0] in ("open", "merge", "address") and args[1].lstrip("#").isdigit():
         try:  # README: Branches and pull requests
             post(f"/api/tasks/{args[1].lstrip('#')}/" + {"open": "pr-open", "merge": "pr-merge-all",
