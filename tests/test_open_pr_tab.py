@@ -33,7 +33,7 @@ out.inReview = tdActions({verb: "In review", source: {kind: "task", id: 11}, prs
 (async () => {
   await prOpenCall(10);  // the click: a blank tab at once, then the PR's link when the state has it
   out.blank = opened.length === 1 && tab.document.title.startsWith("Opening");
-  prSeen = {};
+  prKnown = {};
   prNewsApply({tasks: [{id: 10, state: "pr", prs: [pr(999, "evertrue-web")]}]});
   out.tab = [tab.location.href, tab.opener, tab.closed];
   out.toast1 = toasts.slice();
@@ -92,6 +92,12 @@ class OpenPrTab(unittest.TestCase):
     def test_in_review_step_links_each_pr(self):
         self.assertEqual(self.out["inReview"], [["prlink:0", "Open web PR #3 ↗", True], ["prlink:1", "Open PR #4 ↗", False],
                                                 ["pr-address", "Address comments", False], ["details", "Details", False]])
+
+    def test_page_script_parses(self):  # a name declared twice at top level stops the whole page
+        js = r'const h = require("fs").readFileSync(process.argv[1], "utf8");' \
+             r'for (const m of h.matchAll(/<script>([\s\S]*?)<\/script>/g)) new Function(m[1]);'
+        r = subprocess.run(["node", "-e", js, str(PAGE)], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr[-500:])
 
 
 if __name__ == "__main__":

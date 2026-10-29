@@ -1328,7 +1328,7 @@ const prWords = pr => `${pr.name ? pr.name + " " : ""}PR #${pr.number}`;
 // Open PR opens the first PR in a new tab. The tab opens blank on the click (so popup blockers allow it) and goes to
 // the PR once the queue has opened it; PRs that open later in pr_order only get a toast, as does a failure.
 const PR_WAIT = new Map();  // task id -> {w: the blank tab or null, at}
-let prSeen = null;
+let prKnown = null;
 function prOpenStart(id) {
   const t = state && state.tasks.find(x => x.id === id);
   if (t && (t.prs || []).some(x => x.number)) return;  // a Retry after the first PR opened: no new tab
@@ -1357,8 +1357,8 @@ async function prOpenCall(id) {
 }
 function prNewsApply(s) {
   for (const [id, x] of PR_WAIT) if (Date.now() - x.at > 30 * 60000) prOpenEnd(id, null, "no pull request after 30 minutes; see the task");
-  const r = prNews(prSeen, [...PR_WAIT.keys()], s.tasks || []);
-  prSeen = r.seen;
+  const r = prNews(prKnown, [...PR_WAIT.keys()], s.tasks || []);
+  prKnown = r.seen;
   r.first.forEach(f => prOpenEnd(f.id, f.pr));
   r.fail.forEach(f => prOpenEnd(f.id, null, f.text));
   if (r.news.length) toast("", {links: r.news.map(n => ({text: "Opened " + prWords(n.pr), url: n.pr.url})), ms: 8000});
