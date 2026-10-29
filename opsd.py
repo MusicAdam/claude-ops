@@ -2029,7 +2029,8 @@ def guard(argv):
 def worker_prompt(p, t):
     tpl = (CODE / "worker_prompt.md").read_text()
     checks = ", ".join(f"`{g['run']}`" for g in p.gate) or "(none configured: run whatever tests the repo has)"
-    notes = workspace_note(p, t["branch"], is_branch_task(t), pr_against(p, t, origin=True)) + \
+    notes = workspace_note(p, t["branch"], is_branch_task(t),
+                           pr_against(p, t, origin=True) if is_branch_task(t) else None) + \
         (f"## Notes for {p.title}\n\n{p.worker_notes}\n" if p.worker_notes else "")
     notes += repo_config_note(p) + peer_brief(p, "task")
     base, rules, finish = p.dev, "", (f"When you finish, the queue rebases your branch onto the latest `{p.dev}`, runs "
