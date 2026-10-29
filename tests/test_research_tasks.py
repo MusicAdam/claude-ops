@@ -146,7 +146,7 @@ class ResearchTasks(unittest.TestCase):
         body = t["body"]
         self.assertIn("What is the best vector database for a small app?", body)
         self.assertIn(f"Write the report to `{r['path']}` in this worktree", body)
-        self.assertIn("do not write to ~/dev/research", body)
+        self.assertIn("This overrides the research skill's own paths", body)
         self.assertIn("Commit only that file", body)
         self.assertIn("Touch nothing else", body)
         self.assertIn("## Sources", body)

@@ -226,7 +226,8 @@ class RestartButton(unittest.TestCase):
         opsd.init_db()
         self.spawned = []
         popen, service = subprocess.Popen, opsd.is_service
-        subprocess.Popen = lambda *a, **k: self.spawned.append((a, k))
+        # only opsctl calls: other tests' leftover threads may spawn while this patch is in place
+        subprocess.Popen = lambda *a, **k: str(a[0][0]).endswith("opsctl") and self.spawned.append((a, k))
         self.addCleanup(lambda: (setattr(subprocess, "Popen", popen), setattr(opsd, "is_service", service)))
 
     def route(self, path, body=None):
