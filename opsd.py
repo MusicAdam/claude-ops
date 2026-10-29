@@ -10312,16 +10312,18 @@ def suggestions(rows, a):
 # build from what the tasks, chats and project facts already say; only Do and Agree, which Claude adds, are stored.
 
 TODO_GROUP = {"Answer": "unblock", "Fix": "unblock", "Promote": "ship", "Ship": "ship", "Commit": "ship",
-              "Try": "review", "Review": "review", "Agree": "review", "Read": "review", "Do": "only_me"}
-TODO_ORDER = ("unblock", "ship", "review", "only_me")
+              "Try": "review", "Review": "review", "Agree": "review", "Read": "review", "Do": "only_me",
+              "In review": "in_review"}
+TODO_ORDER = ("unblock", "ship", "review", "only_me", "in_review")
 TODO_MIN = {"Answer": 2, "Fix": 5, "Try": 5, "Review": 3, "Agree": 2, "Read": 3, "Promote": 1, "Ship": 2,
-            "Commit": 2, "Do": 5}  # a guess at the minutes each takes you
+            "Commit": 2, "Do": 5, "In review": 1}  # a guess at the minutes each takes you
 TODO_CLOSES = {"Answer": "Closes when you answer.", "Fix": "Closes when it is retried or cancelled.",
                "Try": "Closes when you approve or send it back.", "Review": "Closes when you approve or send it back.",
                "Promote": "Closes when dev is promoted to main.", "Ship": "Closes when you deploy.",
                "Commit": "Closes when the files are committed or gone.",
                "Agree": "Closes when Claude records your answer, or you click Done.",
-               "Do": "Closes when you click Done."}  # how each item leaves the list, shown under its why
+               "Do": "Closes when you click Done.",
+               "In review": "Closes when every PR has merged or closed."}  # how each item leaves the list, shown under its why
 TODO_BLOCK = re.compile(r"```todo[ \t]*\n(.*?)^[ \t]*```[ \t]*$", re.S | re.M)
 
 
@@ -10878,6 +10880,22 @@ def todo_bond(key, ref):
     return bond
 
 
+# A branch task whose PRs are open and that waits on nobody: watching them, or a worker or PR step under way for them
+PR_WATCHING = ("pr", "queued", "running", "gating", "paused")
+
+
+def open_prs(t):
+    """The task's open PRs, as /api/state shows them (its prs, or read now when the caller's tasks lack them)."""
+    prs = t["prs"] if "prs" in t else pr_view_rows(t, pr_rows(t["id"]))
+    return [x for x in prs or [] if x["state"] == "OPEN" and x["number"]]
+
+
+def in_review_why(prs):
+    """One line per open PR: its name and number, CI and where its review round is."""
+    return "\n".join(f"{x['name'] + ' ' if x['name'] else ''}PR #{x['number']}: CI {x['ci'] or 'pending'}"
+                     f"{', ' + x['review'] if x['review'] else ''}" for x in prs)
+
+
 def todos_list(tasks, projects, last, now=None, notes=True):
     """The to-do list for /api/state, from what state_payload already read: its tasks (with last, their latest
     events), its projects (main_info, so no git call here), and two small queries for chats and stored items.
@@ -10908,6 +10926,8 @@ def todos_list(tasks, projects, last, now=None, notes=True):
                                 if proof_files(t["id"])[0].is_file() else "Play it, then approve or send it back"))
             else:
                 out.append(item(f"task:{t['id']}:review", "Review", why="Read the diff and summary, then approve"))
+        if is_branch_task(t) and st in PR_WATCHING and (prs := open_prs(t)):
+            out.append({**item(f"task:{t['id']}:inreview", "In review", why=in_review_why(prs)), "prs": prs})
         if st == "done" and t["merged"]:  # the reports it listed (RES-10), next to RES-5's own
             pj = PROJECTS.get(t["project"])
             dev = getattr(pj, "main" if is_branch_task(t) else "dev", "dev")  # a branch task's PR merged into main
