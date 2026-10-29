@@ -114,6 +114,7 @@ in each repo (see [OpenSpec changes](#openspec-changes)).
       a branch task (named branch or Jira key)? ── yes ─▶ on branch, nothing pushed ─▶ you click Open PR
                                   │ no                  ─▶ push, gh pr create in pr_order ─▶ CI green, merge
                                   ▼                     ─▶ your main fast-forwards to origin/main (Branches and PRs)
+                                  │                        (flow = "pr": every task takes this path)
                             merge --no-ff into dev   (<worktrees>/dev)
                                   │
                                   ├─ Straight to main (the default): main moves to dev at once, no release
@@ -200,6 +201,8 @@ build, the queue first records a short video of what the task changed, and the T
 ## main is the golden version
 
 By default a project goes **Straight to main** (below): each merge moves main at once, and dev stays equal to it.
+A project with `flow = "pr"` has neither: every task ends in a PR, and main moves when one merges (see
+[Every task as a PR](#every-task-as-a-pr-flow--pr)).
 The release, Promote and Promote after merge described here are for a project that opted out with
 `direct_main = false`. `[[deploy]]` targets don't turn Straight to main off: a deploy and a merge take turns moving
 main (see below).
@@ -348,7 +351,7 @@ main (see below).
 
 A task can work on a named branch instead of merging into dev, and turn it into a GitHub pull request against
 main when you choose. It is for work that lands on GitHub as PRs (say, from a Jira ticket), not as local merges.
-A task with no branch and no Jira key works exactly as before.
+A task with no branch and no Jira key works exactly as before, unless the project sets `flow = "pr"` (below).
 
 ### Naming the branch
 
@@ -467,6 +470,30 @@ Both ways work:
 
 Out of scope: reading or updating Jira tickets, reading review comments by itself, auto-merge, PRs others open,
 and any force-push or rebase after the first push.
+
+### Every task as a PR (`flow = "pr"`)
+
+For a project whose work must all land on GitHub as PRs, put `flow = "pr"` in its home toml (default `"dev"`, the
+flow above). Then:
+
+- **Every task is a branch task**: the New task form, `opsd.py add` and `send`, a design chat's `queue` block,
+  follow-ups, split parts, schedules and research runs. A task given a branch or Jira key works on that one. One
+  given neither gets a branch named by the repo-level key `default_branch_pattern` (default `"ops/{id}-{slug}"`:
+  `{id}` is the task id, `{slug}` as for `branch_pattern`; it must contain `{id}`, so no two tasks share a
+  branch). The name is fixed when the task is queued and kept as its `target` and `branch`. A pattern that makes
+  no name git accepts falls back to the default.
+- **Send uncommitted changes** (the banner about your checkout's uncommitted files, and the to-do's Commit these)
+  commits your changes onto a branch of its own made from `origin/main`, not onto dev. Then it waits for Open PR
+  like any branch task. Nothing is cleared from your checkout: once the PR merges and your main moves to
+  `origin/main`, your copy there matches it. One is open per project at a time, until its PRs merge.
+- **No Promote and no Straight to main.** `direct_main` is ignored (off), Promote and `opsd.py promote` refuse,
+  the promote train and the Promote to-do are gone, and Promote after merge is hidden. The project's header shows
+  `PRs → main` with its open branch tasks and open PRs (`2 open branch tasks · 1 PR open`) instead of
+  `dev → main N ahead / Promote`; its card says **PRs only**.
+- Everything after that is the branch-task flow above: Open PR, `pr_order`, CI watch, Merge. After a merge your
+  main fast-forwards to `origin/main` and dev takes it in, so dev just follows main.
+- Tasks queued before you set it keep their old flow. Commits already on dev that main lacks stay there; nothing
+  promotes them.
 
 ## Deploys
 
@@ -2025,9 +2052,9 @@ and history like any other change. Put `claude-ops.toml` at the root of the proj
 plain project, the root repo (`"."` in `repos`) for a workspace. A workspace without `"."` can't have one.
 
 - **What goes where.** The home toml (`~/.claude-ops/projects/<name>.toml`) keeps identity and machine
-  settings: `title`, `repo`, `main_branch`, `dev_branch`, `worktrees`, `max_parallel`, `direct_main`,
+  settings: `title`, `repo`, `main_branch`, `dev_branch`, `worktrees`, `max_parallel`, `direct_main`, `flow`,
   `chat_mcp` and `[worker] env` (and `port_base`). The repo file may hold `repos`, `[worktree]` (`clone`, `setup`,
-  `setup_timeout`), `[[gate]]`, `[app]`, `[[deploy]]`, `branch_pattern`, `pr_order`, `pr_merge`, `[worker] notes`
+  `setup_timeout`), `[[gate]]`, `[app]`, `[[deploy]]`, `branch_pattern`, `default_branch_pattern`, `pr_order`, `pr_merge`, `[worker] notes`
   and `[design] notes`. A home-only key in
   the repo file is ignored with a warning, on the project's card and in the daemon log.
 - **Which wins.** A key in the repo file replaces the home toml's whole: two `[[gate]]` lists are not merged,
@@ -2087,10 +2114,13 @@ worktrees = "/Users/you/dev/mygame-wt"   # default: <repo>-wt
 max_parallel = 0                   # per-project cap; 0 = only the global "Parallel" limit
 # direct_main = false              # default true: a merge moves main at once, no release (see Straight to main);
                                    # [[deploy]] targets keep it on: a deploy and a merge take turns moving main
+# flow = "pr"                      # default "dev": every task is a branch task and ends in a PR; no Promote and
+                                   # no Straight to main (see Every task as a PR)
 chat_mcp = []                      # MCP servers a chat with a stopped task loads, by name; default none
 
 # --- repo: the rest may also live in claude-ops.toml (repos too; it must list "." there)
 branch_pattern = "{key}-{slug}"     # a Jira-key task's branch (see Branches and pull requests)
+default_branch_pattern = "ops/{id}-{slug}"  # flow = "pr": the branch of a task given none; must have {id}
 pr_order = ["backend", "app"]      # a workspace's PRs open, and merge, in this order; default: all at once
 pr_merge = "squash"                # how Merge merges a PR: squash, merge or rebase
 

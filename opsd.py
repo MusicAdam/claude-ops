@@ -221,10 +221,15 @@ class Project:
         # direct_main (the default; `direct_main = false` opts out): a task's merge goes on to move main at once (see
         # land), with no release. [[deploy]] targets keep it: a deploy and a merge moving main take turns
         # (exclusive_blocker), and commits a deploy makes on main reach dev before the next gate (catch_up_dev).
-        self.direct_main = bool(c.get("direct_main", True))
+        # flow "pr" (default "dev"): every task is a branch task that ends in a PR, so nothing merges into dev and
+        # nothing waits for Promote; dev only follows main (pr_main). Straight to main is off with it.
+        self.flow = "pr" if c.get("flow") == "pr" else "dev"
+        self.direct_main = bool(c.get("direct_main", True)) and self.flow != "pr"
         # branch tasks (README: Branches and pull requests): a Jira key's branch name, the order a workspace's PRs
         # open and merge in, and how Merge merges one
         self.branch_pattern = str(c.get("branch_pattern") or BRANCH_PATTERN)
+        dbp = str(c.get("default_branch_pattern") or "")  # flow "pr": the branch of a task given none
+        self.default_branch_pattern = dbp if "{id}" in dbp else DEFAULT_BRANCH_PATTERN
         self.pr_order = [str(x).strip("/") or "." for x in c.get("pr_order", []) if isinstance(x, str)]
         self.pr_merge = c.get("pr_merge") if c.get("pr_merge") in PR_MERGES else "squash"
         self.config_blob = ""  # claude-ops.toml's blob on main, "" with none (see load_project)
@@ -356,10 +361,13 @@ def deploy_targets(p, items):
 # keys replace the home toml's whole; the home toml keeps identity and machine settings (HOME_ONLY).
 
 REPO_CONFIG = "claude-ops.toml"
-HOME_ONLY = ("title", "repo", "main_branch", "dev_branch", "worktrees", "max_parallel", "direct_main", "chat_mcp")
-MOVABLE = ("repos", "worktree", "gate", "app", "deploy", "branch_pattern", "pr_order", "pr_merge")  # and notes in
+HOME_ONLY = ("title", "repo", "main_branch", "dev_branch", "worktrees", "max_parallel", "direct_main", "flow",
+             "chat_mcp")
+MOVABLE = ("repos", "worktree", "gate", "app", "deploy", "branch_pattern", "default_branch_pattern", "pr_order",
+           "pr_merge")  # and notes in
 # [worker] and [design]
 BRANCH_PATTERN = "{key}-{slug}"  # a Jira-key task's branch, unless the project sets branch_pattern
+DEFAULT_BRANCH_PATTERN = "ops/{id}-{slug}"  # flow "pr": the branch of a task given none, unless default_branch_pattern
 PR_MERGES = ("squash", "merge", "rebase")  # pr_merge: gh pr merge --<this>
 NOTES_TABLES = ("worker", "design")  # only notes moves: [worker] env and port_base are machine settings
 LAST_GOOD = {}  # project name -> the repo file's keys last loaded: a malformed one keeps these
@@ -398,6 +406,7 @@ def split_repo_config(text):
         bad = {"repos": not isinstance(v, list) or not all(isinstance(x, str) for x in v),
                "pr_order": not isinstance(v, list) or not all(isinstance(x, str) for x in v),
                "branch_pattern": not isinstance(v, str) or "{key}" not in v,
+               "default_branch_pattern": not isinstance(v, str) or "{id}" not in v,
                "pr_merge": v not in PR_MERGES,
                "gate": not isinstance(v, list) or not all(isinstance(g, dict) and isinstance(g.get("run"), str)
                                                           for g in v),
@@ -406,6 +415,7 @@ def split_repo_config(text):
             raise ValueError(f"{k} is not " + {"repos": "a list of folder names", "gate": "a list of [[gate]] tables "
                              "each with a run command", "deploy": "a list of [[deploy]] tables",
                              "pr_order": "a list of repo folder names", "branch_pattern": "text with {key} in it",
+                             "default_branch_pattern": "text with {id} in it",
                              "pr_merge": "one of " + ", ".join(PR_MERGES)}.get(
                                  k, f"a [{k}] table" if k not in NOTES_TABLES else "a [{k}] table whose notes is text"))
     if "repos" in keep and "." not in [str(r).strip("/") or "." for r in keep["repos"]]:
@@ -448,7 +458,8 @@ def config_toml(r):
            f"# The owner's home toml keeps {', '.join(HOME_ONLY[:4])},", f"# {', '.join(HOME_ONLY[4:])} and [worker] env.", ""]
     if "repos" in r:
         out += [f"repos = {toml_value(r['repos'])}", ""]
-    if top := [f"{k} = {toml_value(r[k])}" for k in ("branch_pattern", "pr_order", "pr_merge") if k in r]:
+    if top := [f"{k} = {toml_value(r[k])}" for k in ("branch_pattern", "default_branch_pattern", "pr_order", "pr_merge")
+                  if k in r]:
         out += top + [""]
     for k in ("worktree", "gate", "app", "deploy", "worker", "design"):
         v = r.get(k)
@@ -1306,7 +1317,8 @@ def add_task(project, body, title="", priority=0, hold=0, depends_on=None, paren
     research: a research run's {question, tier, slug, path} (see queue_research).
     not_before: when it may start, as start_time takes it (a time, "reset" or an epoch); None starts it when it can.
     jira, target: a branch task's Jira key and named branch (README: Branches and pull requests); its branch is
-    worked out now and kept in branch. A branch task never promotes after merge."""
+    worked out now and kept in branch. A branch task never promotes after merge. In a flow "pr" project every task
+    and Send to dev is one: given no branch, it gets default_branch_pattern's (default_branch)."""
     p = proj(project)
     jira, target = (str(jira or "").strip() or None), (str(target or "").strip() or None)
     model, effort = model_name(model), effort_name(effort)
@@ -1322,13 +1334,18 @@ def add_task(project, body, title="", priority=0, hold=0, depends_on=None, paren
         if kind != "task" or research:
             raise ValueError("only a task can work on a named branch")
         branch = branch_name(p, title, jira, target)
-    tid = q("INSERT INTO tasks (project, title, body, priority, hold, depends_on, parent, created, kind, auto_release, "
-            "deploy, origin, senddev, model, effort, research, jira, target, branch) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (project, title, body, int(priority), int(bool(hold)), depends_on or None, parent, time.time(), kind,
-             int(bool(auto_release) and kind in MERGES and not branch), json.dumps(deploy) if deploy else None,
-             json.dumps(origin) if origin else None, json.dumps(senddev) if senddev else None, model, effort,
-             json.dumps(research) if research else None, jira, target, branch))
+    pr_flow = getattr(p, "flow", "dev") == "pr" and kind in MERGES and not branch
+    with DBL:  # flow "pr": its branch name has its id in it, so the id is picked first and no other write comes between
+        tid = q("SELECT COALESCE(MAX(id), 0) + 1 AS n FROM tasks", one=True)["n"] if pr_flow else None
+        if pr_flow:  # kept as its target too, so it is a branch task from the start
+            branch = target = default_branch(p, tid, title)
+        tid = q("INSERT INTO tasks (id, project, title, body, priority, hold, depends_on, parent, created, kind, "
+                "auto_release, deploy, origin, senddev, model, effort, research, jira, target, branch) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (tid, project, title, body, int(priority), int(bool(hold)), depends_on or None, parent, time.time(),
+                 kind, int(bool(auto_release) and kind in MERGES and not branch), json.dumps(deploy) if deploy else None,
+                 json.dumps(origin) if origin else None, json.dumps(senddev) if senddev else None, model, effort,
+                 json.dumps(research) if research else None, jira, target, branch))
     ev(tid, "queued" + (f" after #{depends_on}" if depends_on else "") + (f" on {model}" if model else "")
        + (f" at {effort} effort" if effort else "") + (f" on branch {branch}" if branch else ""))
     if nb:
@@ -1357,6 +1374,17 @@ def branch_name(p, title, jira=None, target=None):
     if name in (p.main, p.dev) or name.startswith("task/"):
         raise ValueError(f"{name!r} is one of the queue's own branches: pick another name")
     return name
+
+
+def default_branch(p, tid, title):
+    """A flow "pr" task's branch when it was given none: default_branch_pattern for its id and title, or
+    DEFAULT_BRANCH_PATTERN's when that makes no name git accepts."""
+    for pattern in (p.default_branch_pattern, DEFAULT_BRANCH_PATTERN):
+        name = pattern.replace("{id}", str(tid)).replace("{slug}", slug_of(title))
+        if not subprocess.run(["git", "check-ref-format", "--branch", name], capture_output=True).returncode and \
+                name not in (p.main, p.dev) and not name.startswith("task/"):
+            return name
+    return DEFAULT_BRANCH_PATTERN.replace("{id}", str(tid)).replace("{slug}", "task")
 
 
 def branch_input(text):
@@ -2801,8 +2829,10 @@ def _pipeline(p, tid):
         need_claude = True
 
         if not (branch_parts(p, t["branch"]) if on_branch else changed_parts(p, t["branch"])):
-            if sending:  # applying your changes changed nothing: dev has them already
+            if sending and not on_branch:  # applying your changes changed nothing: dev has them already
                 return senddev_landed(p, tid, None, f"{p.dev} already had these changes")
+            if sending:  # flow "pr": main has them already, and your checkout gets them when main moves there
+                return finish(p, tid, merged=None, note=f"origin/{p.main} already had these changes: no PR to open")
             return finish(p, tid, merged=None, note="no code changes")
 
         # Rebase onto the latest dev, gate, then merge (or hold for review). A branch task rebases onto the latest
@@ -4068,7 +4098,11 @@ def split(p, tid, res):
 
 def queue_release(p):
     """The Promote button: queue a release check of dev, ahead of ordinary tasks. It never refuses: with a release
-    already open it returns that one, and whatever is in the way of moving main the release waits for."""
+    already open it returns that one, and whatever is in the way of moving main the release waits for. A flow "pr"
+    project has no Promote: ValueError."""
+    if getattr(p, "flow", "dev") == "pr":
+        raise ValueError(f"{p.title} sends every task through a branch and PR (flow = \"pr\"), so there is no "
+                         f"Promote: {p.main} moves when a PR merges.")
     open_ = q("SELECT id FROM tasks WHERE project=? AND kind='release' AND state NOT IN ('done','failed','cancelled')",
               (p.name,), one=True)
     if open_:
@@ -4098,7 +4132,7 @@ def auto_release(p):
     the last of them merges."""
     with RELEASE_LOCK:
         TRAIN.pop(p.name, None)
-        if p.direct_main:  # its merges move main themselves (land_on_main)
+        if p.direct_main or getattr(p, "flow", "dev") == "pr":  # its merges move main themselves (land_on_main, pr_main)
             return None
         if q("SELECT id FROM tasks WHERE project=? AND kind='release' AND state NOT IN (?,?,?)",
              (p.name, *ENDED), one=True):
@@ -5723,6 +5757,15 @@ def settings_now():
     return {r["key"]: r["value"] for r in q("SELECT key, value FROM settings")}
 
 
+def branch_open(p):
+    """The project's branch tasks that haven't ended, and their open PRs: {"tasks", "prs"}."""
+    t = q("SELECT COUNT(*) AS n FROM tasks WHERE project=? AND (jira IS NOT NULL OR target IS NOT NULL) AND "
+          "state NOT IN (?,?,?)", (p.name, *ENDED), one=True)
+    r = q("SELECT COUNT(*) AS n FROM prs JOIN tasks ON tasks.id=prs.task_id WHERE tasks.project=? AND "
+          "prs.state='OPEN' AND prs.number IS NOT NULL AND tasks.state NOT IN (?,?,?)", (p.name, *ENDED), one=True)
+    return {"tasks": t["n"], "prs": r["n"]}
+
+
 def main_info(p, s=None):
     s = settings_now() if s is None else s
     f = facts(p)
@@ -5737,6 +5780,7 @@ def main_info(p, s=None):
     deploys = [dict(x, open=next((o["id"] for o in opens if json.loads(o["deploy"] or "{}").get("target") == x["name"]),
                                  None), log=x.get("log") and titled(p, x["log"])) for x in f.get("deploys") or []]
     return {"name": p.name, "title": p.title, "main_branch": p.main, "dev_branch": p.dev, "direct_main": p.direct_main,
+            "flow": p.flow, "branch_open": branch_open(p),  # flow "pr": the header's count instead of Promote
             # where its files live on disk, so a chat's absolute path to one links as a repo file (Links in chats)
             "roots": [str(x).replace(str(HOME), "~", 1) if v else str(x) for x in (p.repo, p.wt) for v in (0, 1)],
             "main": p.show(f["main"]), "built": p.show(built), "dev": p.show(f["dev"]), "ahead": f["ahead"],
@@ -6452,7 +6496,8 @@ def queue_senddev(p):
                           "files": [f for _, f in diff_status(r, head, wip)]})
         if not repos:
             raise ValueError("Your checkout has no uncommitted changes to send.")
-        tid = add_task(p.name, senddev_body(p, repos), f"Send uncommitted changes in {senddev_where(p, repos)} to {p.dev}",
+        to = "a PR" if getattr(p, "flow", "dev") == "pr" else p.dev
+        tid = add_task(p.name, senddev_body(p, repos), f"Send uncommitted changes in {senddev_where(p, repos)} to {to}",
                        kind="senddev", senddev={"repos": repos})
         when = task(tid)["created"]
         for x in repos:
@@ -6473,16 +6518,24 @@ def senddev_where(p, repos):
 
 
 def senddev_body(p, repos):
+    pr = getattr(p, "flow", "dev") == "pr"
     lines = [f"Send to dev, from the banner on the project card. Your checkout's uncommitted work, as it was at the "
-             f"click, lands on {p.dev} as a normal change:", ""]
+             f"click, lands " + (f"on a branch for a PR against {p.main}" if pr else f"on {p.dev}") + " as a normal change:",
+             ""]
     for x in repos:
         n = len(x["files"])
         lines.append(f"{x['repo']}" + (f" (on {x['branch']})" if x["branch"] else "") + f": {n} {files(n)}")
         lines += [f"- {f}" for f in x["files"][:50]] + ([f"- …and {n - 50} more"] if n > 50 else []) + [""]
-    lines.append(f"A copy is kept at refs/ops/senddev-<this task's id>. The queue applies it onto a branch made from "
-                 f"{p.dev} (a worker resolves any conflicts), runs the gate and merges it into {p.dev}, as for any task. "
-                 "Only then are the files that still match the snapshot cleared from your checkout. Stopping or "
-                 "cancelling before the merge leaves your checkout as it is.")
+    if pr:  # flow "pr": a branch task like any other there
+        lines.append(f"A copy is kept at refs/ops/senddev-<this task's id>. The queue applies it onto this task's "
+                     f"branch, made from origin/{p.main} (a worker resolves any conflicts), and runs the gate. Then the "
+                     f"branch waits for Open PR, as any branch task does. Once the PR merges and {p.main} moves in "
+                     "your checkout, your copy there matches it. Nothing is cleared from your checkout before that.")
+    else:
+        lines.append(f"A copy is kept at refs/ops/senddev-<this task's id>. The queue applies it onto a branch made from "
+                     f"{p.dev} (a worker resolves any conflicts), runs the gate and merges it into {p.dev}, as for any "
+                     "task. Only then are the files that still match the snapshot cleared from your checkout. Stopping "
+                     "or cancelling before the merge leaves your checkout as it is.")
     return "\n".join(lines)
 
 
@@ -6498,25 +6551,34 @@ def senddev_start(p, tid, prompt):
     return senddev_apply(p, tid)
 
 
+def senddev_onto(p, t, r=None):
+    """What a Send to dev task applies your changes onto: dev, or for a branch task (flow "pr") origin/main (main with
+    no origin) of repo r, or the words for it with no r."""
+    if not is_branch_task(t):
+        return p.dev
+    return base_ref(p, r) if r else f"origin/{p.main}"
+
+
 def senddev_apply(p, tid):
     """Apply the snapshot onto the task's branch, reset to the latest dev, in each repo it changes, as merge_wip does
     for a release. A repo that applies cleanly is committed at once. Returns "" when every repo is, the prompt for a
     worker to resolve the conflicts, or None if git can't apply it at all (the task then needs you)."""
     t = task(tid)
     d = senddev_of(t)
-    upd(tid, phase=f"applying your changes onto {p.dev}")
+    onto = senddev_onto(p, t)
+    upd(tid, phase=f"applying your changes onto {onto}")
     conflicts, made = [], 0
     for x in d["repos"]:
         r = part_of(p, x["sub"])
         wt = r.at(t["worktree"])
         x["keep"] = x.get("keep") or senddev_keep(r, tid, x, t["created"])
-        for a in (("cherry-pick", "--quit"), ("reset", "--hard", "-q", p.dev), ("clean", "-fdq")):
+        for a in (("cherry-pick", "--quit"), ("reset", "--hard", "-q", senddev_onto(p, t, r)), ("clean", "-fdq")):
             subprocess.run(["git", *a], cwd=wt, capture_output=True)
         m = subprocess.run(["git", "cherry-pick", "--no-commit", x["keep"]], cwd=wt, capture_output=True, text=True)
         x["conflicts"] = paths_of(r, "diff", "--name-only", "--diff-filter=U", cwd=wt) if m.returncode else []
         if m.returncode and not x["conflicts"]:
             senddev_save(tid, d)
-            ask_owner(p, tid, f"git could not apply your uncommitted changes in {x['repo']} onto {p.dev}: "
+            ask_owner(p, tid, f"git could not apply your uncommitted changes in {x['repo']} onto {onto}: "
                               + (m.stderr or m.stdout).strip()[-1500:])
             return None
         if x["conflicts"]:
@@ -6526,11 +6588,11 @@ def senddev_apply(p, tid):
     d["applied"] = not conflicts
     senddev_save(tid, d)
     if not conflicts:
-        ev(tid, f"applied your changes onto {p.dev} and committed them" if made else
-                f"applied your changes onto {p.dev}: it has them already, so there is nothing to commit")
+        ev(tid, f"applied your changes onto {onto} and committed them" if made else
+                f"applied your changes onto {onto}: it has them already, so there is nothing to commit")
         return ""
     n = sum(len(x["conflicts"]) for x in conflicts)
-    ev(tid, f"your changes conflict with {p.dev} in {n} {files(n)}; a worker is merging them")
+    ev(tid, f"your changes conflict with {onto} in {n} {files(n)}; a worker is merging them")
     upd(tid, session_id=None)
     return senddev_conflict_prompt(p, task(tid), conflicts)
 
@@ -6566,16 +6628,16 @@ def senddev_commit(p, tid):
         left = paths_of(r, "diff", "--name-only", "--diff-filter=U", cwd=wt) or [
             f for f in x["conflicts"] if (wt / f).is_file() and CONFLICT_MARK.search((wt / f).read_text(errors="replace"))]
         if left:
-            return (f"The worker said it merged your changes in {x['repo']} with {p.dev}, but conflicts are left in "
-                    f"{name_list(left)}. Say how to combine them and the worker tries again, or cancel to keep them "
+            return (f"The worker said it merged your changes in {x['repo']} with {senddev_onto(p, t)}, but "
+                    f"conflicts are left in {name_list(left)}. Say how to combine them and the worker tries again, or cancel to keep them "
                     "only in your checkout.")
-        if not int(r.git("rev-list", "--count", f"{p.dev}..HEAD", cwd=wt) or 0):  # it resolved but didn't commit
+        if not int(r.git("rev-list", "--count", f"{senddev_onto(p, t, r)}..HEAD", cwd=wt) or 0):  # resolved, no commit
             r.git("add", "-A", "--", *x["conflicts"], cwd=wt, check=False)
             senddev_commit_repo(r, wt, x)
         subprocess.run(["git", "cherry-pick", "--quit"], cwd=wt, capture_output=True)
     d["applied"] = True
     senddev_save(tid, d)
-    ev(tid, f"your changes are merged with {p.dev} and committed")
+    ev(tid, f"your changes are merged with {senddev_onto(p, t)} and committed")
     return None
 
 
@@ -6586,16 +6648,24 @@ def senddev_brief(p, t):
     notes = workspace_note(p, t["branch"]) + (f"## Notes for {p.title}\n\n{p.worker_notes}\n\n" if p.worker_notes else "")
     sent = "".join(f"- {x['repo']}: {len(x['files'])} {files(len(x['files']))}, kept as commit {x['keep'][:12]} "
                    f"(`refs/ops/senddev-{t['id']}`) on the user's HEAD {x['head'][:12]}\n" for x in d["repos"])
+    onto = senddev_onto(p, t)
+    if is_branch_task(t):  # flow "pr": the branch ends in a PR, not a merge into dev
+        lands = f"on branch `{t['branch']}` for a pull request against `{p.main}`"
+        after = (f"After you, it rebases the branch onto the latest `{onto}` and runs the merge check ({checks}). Then "
+                 f"the branch waits for the user to open its PR. Once the PR merges and `{p.main}` moves in the user's "
+                 "checkout, their copy matches it.")
+    else:
+        lands = f"on `{p.dev}`"
+        after = (f"After you, it rebases the branch onto the latest `{p.dev}`, runs the merge check ({checks}) and "
+                 f"merges it into `{p.dev}`. Then it clears the sent files from the user's checkout.")
     return (f"You are an unattended worker on the {p.title} project, {SENDDEV_HEAD} (task #{t['id']}). Nobody "
             f"watches this session and nobody can answer you mid-run.\n\n"
             f"The user's checkout had uncommitted changes: unfinished work on no branch, so workers didn't see it and "
-            f"no release shipped it. The user clicked Send to dev, which lands that work on `{p.dev}` as a normal "
+            f"no release shipped it. The user clicked Send to dev, which lands that work {lands} as a normal "
             f"change:\n\n{sent}\n"
-            f"This worktree ({t['worktree']}) is on branch `{t['branch']}`, made from `{p.dev}`. The queue applied "
+            f"This worktree ({t['worktree']}) is on branch `{t['branch']}`, made from `{onto}`. The queue applied "
             f"the user's changes here with `git cherry-pick --no-commit` of that commit, and commits them per repo as "
-            f"`Your uncommitted changes from <repo>`, with the files listed. After you, it rebases the branch onto the "
-            f"latest `{p.dev}`, runs the merge check ({checks}) and merges it into `{p.dev}`. Then it clears the sent "
-            f"files from the user's checkout.\n\n"
+            f"`Your uncommitted changes from <repo>`, with the files listed. {after}\n\n"
             f"Rules: edit and commit only in this worktree. Never touch {p.repo} (the user's checkout), another "
             f"worktree, or the `{p.dev}` and `{p.main}` branches, and never push. `OPS_PORT` is {p.port_for(t['id'])}; "
             f"use it for anything that listens. Never post mouse or keyboard events or take focus: the user is using "
@@ -6616,13 +6686,14 @@ def senddev_conflict_prompt(p, t, conflicts):
         parts.append(
             f"In {where} ({x['repo']}), `git cherry-pick --no-commit {x['keep'][:12]}` stopped on conflicts in:\n\n"
             + "".join(f"- {f}\n" for f in x["conflicts"]) +
-            f"\nThe `{p.dev}` side is checked work that passed the gate: `git diff {x['head'][:12]} HEAD -- <file>` "
+            f"\nThe `{senddev_onto(p, t)}` side is checked work that passed the gate: `git diff {x['head'][:12]} HEAD -- <file>` "
             f"shows what it changed since the user's base. The user's side is their unfinished work being landed: "
             f"`git diff {x['head'][:12]} {x['keep'][:12]} -- <file>`. Once resolved, `git add` those files and commit "
             f"everything staged with exactly:\n\n    git commit -m {shlex.quote(subject)} -m {shlex.quote(body)}\n")
-    return (senddev_brief(p, t) + "\n\n## Now: merge the user's changes with " + p.dev + "\n\n" + "\n".join(parts) +
+    return (senddev_brief(p, t) + "\n\n## Now: merge the user's changes with " + senddev_onto(p, t) + "\n\n" +
+            "\n".join(parts) +
             f"\nResolve every conflict so both sides survive. Where they truly contradict, keep what the user meant and "
-            f"fit it to `{p.dev}`'s code. Don't abort the cherry-pick, reset, rebase or stash. Then run the checks "
+            f"fit it to `{senddev_onto(p, t)}`'s code. Don't abort the cherry-pick, reset, rebase or stash. Then run the checks "
             f"({checks}). The user's work is unfinished, so they may fail: you may fix what they find, with the "
             f"smallest change that keeps the user's intent, in a further commit. If you can't merge the two sides "
             f"without the user, report needs_input and ask them how.")
@@ -10567,7 +10638,8 @@ def todos_list(tasks, projects, last, now=None, notes=True):
             else:
                 out.append(item(f"task:{t['id']}:review", "Review", why="Read the diff and summary, then approve"))
         if st == "done" and t["merged"]:  # the reports it listed (RES-10), next to RES-5's own
-            dev = getattr(PROJECTS.get(t["project"]), "dev", "dev")
+            pj = PROJECTS.get(t["project"])
+            dev = getattr(pj, "main" if is_branch_task(t) else "dev", "dev")  # a branch task's PR merged into main
             out += [{**item(f"task:{t['id']}:report:{x['path']}", "Read", why=f"Report {x['path']} merged into {dev}"),
                      "report": {"path": x["path"]}} for x in reports_of(t) if not x.get("read")]
     for f in projects:
@@ -10575,7 +10647,8 @@ def todos_list(tasks, projects, last, now=None, notes=True):
             continue
         name = f["name"]
         rel = f.get("release")
-        if f.get("ahead") and not f.get("auto_release") and not (rel and rel["state"] not in ENDED):
+        if f.get("ahead") and not f.get("auto_release") and not (rel and rel["state"] not in ENDED) and \
+                f.get("flow") != "pr":  # flow "pr": no Promote; dev follows main
             n = len(f["ahead"])
             out.append(todo_item(f"project:{name}:promote", "Promote", name, f"Promote {f['title']}",
                                  f"{f['dev_branch']} is {n}{'+' if n >= 30 else ''} change{'s' if n != 1 else ''} "
