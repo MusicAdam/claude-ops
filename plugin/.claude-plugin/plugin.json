@@ -1,0 +1,5 @@
+{
+  "name": "claude-ops",
+  "description": "The skills and commands claude-ops's own workers and chats use: research in project mode, and OpenSpec audit, review, deviation-check and implement.",
+  "version": "1.0.0"
+}

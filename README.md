@@ -67,12 +67,32 @@ the config has a comment on how to opt out. Read it, adjust it, then click **Rel
    click **Reload projects**.
 4. **macOS permissions.** Grant **Full Disk Access** to Claude Ops, and **Screen Recording** for proof videos.
    The text is under **macOS permissions** in Other details, below.
-5. **Research tasks** call the `/research` skill, which the tk toolkit installs (`~/dev/tk`, `./install.sh`).
-   Without it, normal tasks still work and research tasks fail.
+5. **Nothing else to install for skills.** Research tasks and spec chats use skills and commands that ship in this
+   repo's `plugin/` folder, and opsd loads them into every `claude` it starts with `--plugin-dir`. See
+   [The plugin](#the-plugin).
 6. **Each Mac has its own queue.** `~/.claude-ops` (`ops.db`, project tomls, runs) belongs to one machine and is not
    synced. To update claude-ops: `git pull` in the checkout, then `./opsctl restart`.
 7. **Workers run unattended with no permission prompts** (`--permission-mode auto`). On a work machine, check your
    employer's policy first.
+
+### The plugin
+
+`plugin/` is a Claude Code plugin named `claude-ops` (`plugin/.claude-plugin/plugin.json`). It holds what workers
+and chats call by name:
+
+| Name | File | Used by |
+|---|---|---|
+| `/claude-ops:research` | `plugin/skills/research/` (`SKILL.md`, `access.md`, `templates/`) | research tasks (RES-3): one report in the repo's `docs/research/<slug>.md` |
+| `/claude-ops:openspec:audit` | `plugin/commands/openspec/audit.md` | a change's chat: checks the change's files agree with each other and the code |
+| `/claude-ops:openspec:review` | `plugin/commands/openspec/review.md` | a change's chat: read-only review agents (general-purpose agents given a role) |
+| `/claude-ops:openspec:deviation-check` | `plugin/commands/openspec/deviation-check.md` | a change's chat: compares the plan with the code |
+| `/claude-ops:openspec:implement` | `plugin/commands/openspec/implement.md` | the brief of a task queued from a change |
+
+opsd passes `--plugin-dir <checkout>/plugin` (found next to `opsd.py`) to the worker, design and spec chats, and
+project chats. The one-shot calls that run with no tools don't get it. The plugin prefixes every name with
+`claude-ops:`, so a skill or command of the same name in your own `~/.claude` can't shadow it. A new user needs
+nothing installed beyond the `claude` CLI. The `/opsx:*` commands are the exception: they come from `openspec init`
+in each repo (see [OpenSpec changes](#openspec-changes)).
 
 ## Flow (per project)
 
@@ -526,10 +546,10 @@ folder, even when it has no open changes.
   the project promotes after merge by default; only the last task of a chain is promoted). You can
   also ask Claude to queue it. Each task's brief points the worker at the change's folder, names the
   sections it covers, and tells it to tick the boxes as it goes, keep to the proposal's scope, update
-  `design.md` and the deltas if it has to deviate, and not archive the change. If you have
-  `/tk:openspec:implement`, the brief tells the worker to work through the items with it.
+  `design.md` and the deltas if it has to deviate, and not archive the change. The brief also tells the worker
+  to work through the items with `/claude-ops:openspec:implement` (from [the plugin](#the-plugin)).
 - **Slash commands.** In any design chat, a message that starts with `/` runs that command, as if you typed it
-  in a terminal: `/tk:openspec:audit <name>`, `/opsx:explore <name>`. The queue's usual note for the turn goes
+  in a terminal: `/claude-ops:openspec:audit <name>`, `/opsx:explore <name>`. The queue's usual note for the turn goes
   into the system prompt instead of in front of your text. Other messages are sent as before.
 - **What a change's chat can run.** The chat can use skills, subagents and any `openspec` command except
   `init` and `update` (they write outside `openspec/`, which a chat can't save; use **Set up** and
@@ -546,15 +566,15 @@ folder, even when it has no open changes.
   | `/opsx:explore` | the repo has the opsx command or skill | nothing, unless you agree to an edit |
   | `/opsx:sync` | the repo has the opsx command or skill | merges the deltas into `openspec/specs/` |
   | `/opsx:archive` | the repo has the opsx command or skill | merges the deltas and moves the change to `openspec/changes/archive/` |
-  | `/tk:openspec:audit` | you have the tk command | nothing: it reports gaps and drift |
-  | `/tk:openspec:review` | you have the tk command | nothing: read-only review agents report |
-  | `/tk:openspec:deviation-check` | you have the tk command and at least one item is ticked | nothing: it compares the plan with the code |
+  | `/claude-ops:openspec:audit` | always (the plugin ships it) | nothing: it reports gaps and drift |
+  | `/claude-ops:openspec:review` | always (the plugin ships it) | nothing: read-only review agents report |
+  | `/claude-ops:openspec:deviation-check` | at least one item is ticked | nothing: it compares the plan with the code |
 
   The opsx commands come from `openspec init` in the repo (`.claude/commands/opsx/`, or as skills such as
   `openspec-explore` in `.claude/skills/` in newer versions; the dashboard sends whichever exists). Apply,
   implement and propose are never listed: the first two change code, so queue the change instead. When the
-  repo has no opsx commands and you don't have the tk ones, only Validate is listed, with a muted hint: `Run Set
-  up OpenSpec or Refresh OpenSpec commands to add the opsx commands.`
+  repo has no opsx commands, Validate and the plugin's commands are listed, with a muted hint: `Run Set up OpenSpec
+  or Refresh OpenSpec commands to add the opsx commands.`
 - **`/` autocomplete.** In a change's chat, type `/` as the first character of the message box and a list of the
   same commands opens just above it, each by its label and the exact text it sends. Typing more filters it, by
   label or text. **Up** and **Down** move, **Enter** or **Tab** puts the command's text in the box for you to
@@ -1483,10 +1503,10 @@ Research is ordinary queue work in the project it is about. A report lives in th
   tasks. The task is titled `Research: <question>`. With `every` (any [schedule](#recurring-jobs) form) it also makes
   a recurring research job and queues the first run now, as the schedule's last task. It answers
   `{id, slug, path, schedule}`.
-- **RES-3 The brief.** The task's body tells the worker to answer the question at its tier with the research skill
-  in project mode, and to write the report to `docs/research/<slug>.md` in its worktree (the first repo's, in a
-  workspace). It says so in so many words, because the owner's `/research` skill writes to `~/dev/research` by
-  default: not there, and not `briefs/`, `reports/`, `topics/` or `watchlist.md`. The report starts with a `# `
+- **RES-3 The brief.** The task's body tells the worker to answer the question at its tier with the
+  `/claude-ops:research` skill from [the plugin](#the-plugin), and to write the report to `docs/research/<slug>.md`
+  in its worktree (the first repo's, in a workspace). It says so in so many words, so that no other research skill's
+  paths win: not `briefs/`, `reports/`, `topics/` or `watchlist.md`. The report starts with a `# `
   heading and a one-paragraph answer (the Research section's title and summary), then the findings with a source for
   each claim and a `## Sources` list. The worker commits that one file and touches nothing else.
 - **RES-4 Time and size follow the tier.** T0 10, T1 30, T2 80 minutes per worker turn: a research task's worker is
@@ -2332,6 +2352,7 @@ Nothing claude-ops runs may stop, signal or quit a process it did not start.
 | `worker_prompt.md`, `design_prompt.md` | briefs for workers and design chats |
 | `spec_prompt.md` | added to a design chat's brief when it is about an OpenSpec change |
 | `spec_new_prompt.md` | added instead while a chat from **New change** has no change yet |
+| `plugin/` | the `claude-ops` Claude Code plugin: the research skill and the OpenSpec commands (see [The plugin](#the-plugin)) |
 | `dashboard.html` | the page |
 | `scripts/demo.sh`, `scripts/demo_seed.py`, `scripts/demo_capture.py` | the README's screenshots and clips (see [Demo media](#demo-media)) |
 | `~/.claude-ops/projects/*.toml` | one config per project |

@@ -64,6 +64,10 @@ HOST = os.environ.get("OPS_HOST", "127.0.0.1")
 PORT = int(os.environ.get("OPS_PORT", "8788"))
 DAEMON_URL = f"http://{'127.0.0.1' if HOST in ('', '0.0.0.0', '::') else HOST}:{PORT}"  # for `opsd.py send`
 CLAUDE = os.environ.get("OPS_CLAUDE") or shutil.which("claude") or str(HOME / ".local/bin/claude")
+# The skills and commands workers and chats use (README: ### The plugin), loaded with --plugin-dir. Their names are
+# namespaced by the plugin, /claude-ops:research and /claude-ops:openspec:<cmd>, so no user copy can shadow them.
+PLUGIN = CODE / "plugin"
+PLUGIN_ARGS = ["--plugin-dir", str(PLUGIN)]
 MAX_FIX_ROUNDS = 3  # times a worker is sent back after a conflict or failed gate
 # A worker's next turn starts a fresh session, with a handoff note, instead of resuming one whose
 # prompt cache has expired (it lasts an hour) or whose context makes every call dear. Measured on the owner's own usage: a cold turn costs about
@@ -2054,7 +2058,7 @@ def run_claude(p, tid, prompt, proof=False):
     cmd = ["caffeinate", "-i", CLAUDE, "-p", "--input-format", "stream-json", "--replay-user-messages",
            "--output-format", "stream-json", "--verbose",
            "--permission-mode", "auto", "--permission-prompts", "none", "--strict-mcp-config",
-           "--no-chrome", "--name", f"{p.name} #{tid}", "--add-dir", str(IMAGES),
+           "--no-chrome", *PLUGIN_ARGS, "--name", f"{p.name} #{tid}", "--add-dir", str(IMAGES),
            "--settings", guard_settings(t["worktree"], p), "--add-dir", str(run_dir if proof else proof_dir(tid))]
     if t["session_id"]:
         cmd += ["--resume", t["session_id"]]
@@ -4322,11 +4326,10 @@ def research_brief(question, tier, path):
 
 ## What to do
 
-1. Answer the question at tier {tier} with the research skill in project mode: this repo is the target, and this
-   task's worktree is where the report goes.
+1. Answer the question at tier {tier} with the `/claude-ops:research` skill (the Skill tool) in project mode: this
+   repo is the target, and this task's worktree is where the report goes.
 2. Write the report to `{path}` in this worktree, and nowhere else. This overrides the research skill's own paths:
-   do not write to ~/dev/research, and do not write briefs/, reports/, topics/, sources/registry.md or watchlist.md
-   anywhere.
+   do not write briefs/, reports/, topics/, sources/registry.md or watchlist.md anywhere.
 3. Start the report with a `# ` heading that names the subject, then one paragraph that answers the question in plain
    words (the dashboard shows the heading as the title and that paragraph as the summary). Then the findings, with a
    source for every claim you quote or count, and a `## Sources` list of links at the end. Say what you could not
@@ -7249,7 +7252,7 @@ def design_turn(did, text, fresh_why=None):
             system += "\n\n" + handoff
         cmd = [CLAUDE, "-p", ("[ops: " + " | ".join(said) + "]\n\n" if said else "") + with_images(text),
                "--output-format", "stream-json", "--verbose",
-               "--permission-mode", "auto", "--permission-prompts", "none", "--no-chrome",
+               "--permission-mode", "auto", "--permission-prompts", "none", "--no-chrome", *PLUGIN_ARGS,
                "--mcp-config", mcp, "--strict-mcp-config",  # only chat_mcp: every tool rides on every call
                "--name", f"{p.name} chat #{did}", "--settings", guard_settings(None, p, chat=True),
                "--append-system-prompt", system]
@@ -7261,7 +7264,7 @@ def design_turn(did, text, fresh_why=None):
             text, note = text.strip(), ""
         cmd = [CLAUDE, "-p", note + with_images(text), "--output-format", "stream-json",
                "--verbose", "--permission-mode", "dontAsk", "--permission-prompts", "none", "--allowedTools", tools,
-               "--strict-mcp-config", "--no-chrome", "--name", f"{p.name} design #{did}",
+               "--strict-mcp-config", "--no-chrome", *PLUGIN_ARGS, "--name", f"{p.name} design #{did}",
                "--settings", guard_settings(None),
                "--append-system-prompt", system]
         cmd += ["--add-dir", str(CHAT_FILES / str(did))]
@@ -7448,7 +7451,6 @@ SPEC_DENY = ",".join(f"Bash(openspec {c}:*)" for c in (
 # The opsx commands `openspec init` installs in a repo, or the skills newer versions install instead
 OPSX_SKILLS = {"explore": "openspec-explore", "sync": "openspec-sync-specs", "archive": "openspec-archive-change",
                "propose": "openspec-propose", "apply": "openspec-apply-change"}
-TK_OPENSPEC = Path.home() / ".claude" / "commands" / "tk" / "openspec"
 SPEC_COMMANDS = (  # (id, label, tip): what the chat's buttons may send. Never apply or implement: those are tasks.
     ("validate", "Validate", "Checks the change's format with openspec validate --strict. Changes nothing."),
     ("explore", "Explore", "Thinks the change through with you: questions, options, risks. Edits only if you agree."),
@@ -7495,7 +7497,7 @@ def spec_commands(roots, name):
         elif cid in OPSX_SKILLS:
             text = (opsx_invocation(roots, cid) or "") and f"{opsx_invocation(roots, cid)} {name}"
         else:
-            text = (TK_OPENSPEC / f"{cid}.md").is_file() and f"/tk:openspec:{cid} {name}"
+            text = f"/claude-ops:openspec:{cid} {name}"  # the plugin's own: always there
         if text:
             out.append({"id": cid, "label": label, "text": text, "tip": tip})
     return out
@@ -7889,8 +7891,8 @@ def spec_brief(p, r, name, title, group=None, k=0, n=1):
             f"- Add or update tests for the behaviour in the spec scenarios (`#### Scenario:`).\n"
             f"- If the `openspec` CLI is installed, `openspec validate {name} --strict` must pass.\n"
             f"- Don't archive the change (`openspec archive`); that is a separate step the owner asks for.\n"
-            + (f"- Work through the items with `/tk:openspec:implement {name}` (the Skill tool), still within "
-               f"this task's scope and these rules.\n" if (TK_OPENSPEC / "implement.md").is_file() else "")
+            + f"- Work through the items with `/claude-ops:openspec:implement {name}` (the Skill tool), still "
+              f"within this task's scope and these rules.\n"
             + f"{split}\n"
             f"Done when every box this task covers is ticked, the tests pass, and the change's docs match what "
             f"you built.")
@@ -8024,7 +8026,7 @@ def task_chat_turn(tid, text):
                 "]\n\n")
         mcp, _ = mcp_servers(p)
         cmd = [CLAUDE, "-p", note + with_images(text), "--output-format", "stream-json", "--verbose",
-               "--permission-mode", "auto", "--permission-prompts", "none", "--no-chrome",
+               "--permission-mode", "auto", "--permission-prompts", "none", "--no-chrome", *PLUGIN_ARGS,
                "--mcp-config", mcp, "--strict-mcp-config", "--settings", guard_settings(str(cwd), p, chat=True),
                "--append-system-prompt", PROJECT_CHAT_PROMPT]
     else:  # merged: its edits would land nowhere, so it reads, and a change goes to a follow-up task
@@ -8037,7 +8039,8 @@ def task_chat_turn(tid, text):
                   f"worktree from {p.dev} and merges through the queue.]\n\n")
         cmd = [CLAUDE, "-p", note + with_images(text), "--output-format", "stream-json", "--verbose",
                "--permission-mode", "dontAsk", "--permission-prompts", "none",
-               "--allowedTools", DESIGN_TOOLS + f",Bash({SEND_CMD}:*)", "--strict-mcp-config", "--no-chrome"]
+               "--allowedTools", DESIGN_TOOLS + f",Bash({SEND_CMD}:*)", "--strict-mcp-config", "--no-chrome",
+               *PLUGIN_ARGS]
         if made:
             cmd += ["--add-dir", str(p.dev_wt)]
     cmd += ["--resume", t["session_id"], "--add-dir", str(IMAGES)]
