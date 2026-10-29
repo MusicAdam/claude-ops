@@ -472,7 +472,11 @@ while a PR's CI is red the task needs you (Fix CI), and the round goes on once i
 1. **Awaiting bot review.** The 2-minute poll reads the PR's reviews (`gh pr view --json reviews,...`). It waits for
    a review by any login in the repo-level toml key `pr_bot_reviewers` (default
    `["copilot-pull-request-reviewer[bot]"]`; the `[bot]` ending is optional) submitted after the queue pushed the
-   PR. With `pr_review_comment` set (say `"@claude /pr-review"`), the queue posts it as a PR comment right after
+   PR. When Copilot is in `pr_bot_reviewers`, the queue requests its review itself right after opening the PR
+   (`gh api -X POST repos/{owner}/{repo}/pulls/{n}/requested_reviewers`), so repos without automatic Copilot
+   review get one too. It asks once per PR, not after later pushes, and skips an adopted PR Copilot already
+   reviewed or was asked to review. A failed request only logs `couldn't ask Copilot to review #12: ...`;
+   the timeout still applies. A requested bot never counts as a human reviewer. With `pr_review_comment` set (say `"@claude /pr-review"`), the queue posts it as a PR comment right after
    opening, and a review by anyone but the PR's author counts too. It has to be a review, not a plain comment.
    After `pr_bot_review_timeout` minutes (default 30) the queue goes on and logs
    `#12: no bot review came within 30 min; going on`. With no bot reviewers and no comment it goes on at once.
@@ -2187,7 +2191,7 @@ default_branch_pattern = "ops/{id}-{slug}"  # flow = "pr": the branch of a task 
 pr_order = ["backend", "app"]      # a workspace's PRs open, and merge, in this order; default: all at once
 pr_merge = "squash"                # how Merge merges a PR: squash, merge or rebase
 pr_base = "feat/next"              # the branch PRs go against; or {"web" = "feat/next"} per repo; default main_branch
-pr_bot_reviewers = ["copilot-pull-request-reviewer[bot]"]   # whose review a new PR waits for (see Review round)
+pr_bot_reviewers = ["copilot-pull-request-reviewer[bot]"]   # whose review a new PR waits for; Copilot here is also asked to review (see Review round)
 pr_review_comment = "@claude /pr-review"   # optional: posted on a new PR to ask a review workflow for its review
 pr_bot_review_timeout = 30         # minutes to wait for the bot review, then go on
 pr_reviewers = ["alice", "org/team"]   # asked to review once the comments are addressed; empty: you pick

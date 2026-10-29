@@ -396,6 +396,7 @@ BRANCH_PATTERN = "{key}-{slug}"  # a Jira-key task's branch, unless the project 
 DEFAULT_BRANCH_PATTERN = "ops/{id}-{slug}"  # flow "pr": the branch of a task given none, unless default_branch_pattern
 PR_MERGES = ("squash", "merge", "rebase")  # pr_merge: gh pr merge --<this>
 PR_BOT_REVIEWERS = ["copilot-pull-request-reviewer[bot]"]  # pr_bot_reviewers: whose review the queue waits for
+COPILOT = "copilot-pull-request-reviewer[bot]"  # the login the queue asks for a review when it opens a PR
 PR_BOT_REVIEW_TIMEOUT = 30  # pr_bot_review_timeout: minutes it waits for one, then goes on without
 PR_TOP_KEYS = ("branch_pattern", "default_branch_pattern", "pr_order", "pr_merge", "pr_base", "pr_bot_reviewers",
                "pr_review_comment", "pr_bot_review_timeout", "pr_reviewers")  # the repo file's top-level keys after repos
@@ -3481,11 +3482,34 @@ def pr_open_one(p, t, row, rows):
         rc, out, err = gh(r, "pr", "comment", str(number), "--body", p.pr_review_comment)
         ev(t["id"], f"asked for a review on #{number}: {p.pr_review_comment}" if rc == 0 else
            f"couldn't post the review comment on #{number}: {(err or out).strip()[-300:]}")
+    if login_key(COPILOT) in {login_key(x) for x in p.pr_bot_reviewers}:
+        pr_ask_copilot(t["id"], r, number, adopted=bool(found))
     for x in pr_rows(t["id"]):  # the earlier PRs' bodies link this one now
         if x["id"] != row["id"] and x["number"] and x["state"] == "OPEN":
             gh(part_of(p, x["repo"]), "pr", "edit", str(x["number"]), "--body", pr_body(p, task(t["id"]), x,
                                                                                        pr_rows(t["id"])))
     return None
+
+
+def pr_ask_copilot(tid, r, number, adopted):
+    """Request Copilot's review of a PR the queue just opened, or adopted unless Copilot reviewed it or is asked
+    already. gh pr edit --add-reviewer takes no bot, so it goes by the REST API. A failure only logs: the bot
+    review's timeout still applies."""
+    if adopted:
+        rc, out, err = gh(r, "pr", "view", str(number), "--json", "reviews,reviewRequests")
+        try:
+            d = json.loads(out) if rc == 0 else {}
+        except ValueError:
+            d = {}
+        seen = [(x.get("author") or {}).get("login") for x in d.get("reviews") or [] if isinstance(x, dict)]
+        seen += [x.get("login") or x.get("name") for x in d.get("reviewRequests") or [] if isinstance(x, dict)]
+        if {login_key(x) for x in seen} & {login_key(COPILOT), "copilot"}:  # gh may show the bot as Copilot
+            return
+    host, owner, name = gh_where(r)
+    rc, out, err = gh(r, "api", *host, "-X", "POST", f"repos/{owner}/{name}/pulls/{number}/requested_reviewers",
+                      "-f", f"reviewers[]={COPILOT}", by_r=False)
+    ev(tid, f"asked Copilot to review #{number}" if rc == 0 else
+       f"couldn't ask Copilot to review #{number}: {(err or out).strip()[-300:]}")
 
 
 def ci_of(rollup):
@@ -3551,7 +3575,8 @@ def pr_view(p, t, row):
         kw["error"] = None
     asked = [x.get("login") or x.get("slug") or x.get("name") for x in d.get("reviewRequests") or []
              if isinstance(x, dict)]
-    kw["requested"] = json.dumps([x for x in asked if x])
+    bots = {login_key(x) for x in p.pr_bot_reviewers} | {"copilot"}  # a bot asked to review is no human reviewer
+    kw["requested"] = json.dumps([x for x in asked if x and login_key(x) not in bots])
     if row["review"] == PR_BOT and not row["reviewed_at"] and (by := bot_review(p, row, d)):
         kw["reviewed_at"] = time.time()
         ev(t["id"], f"{pr_words(p, row)}: {by} reviewed it")
