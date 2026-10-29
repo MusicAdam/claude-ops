@@ -209,6 +209,8 @@ ul.clog { max-height: 220px; }
 #toast { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); z-index: 60; padding: 6px 14px; border-radius: 99px;
          background: var(--accent); color: var(--on-accent); font-size: 13px; opacity: 0; pointer-events: none; transition: opacity .2s; }
 #toast.on { opacity: 1; }
+#toast.link { pointer-events: auto; } #toast.err { background: var(--bad); white-space: pre-wrap; max-width: min(640px, 90vw); border-radius: 10px; }
+#toast a { color: inherit; text-decoration: underline; }
 .mdimg, .mdvideo { display: block; max-width: 100%; max-height: 480px; margin: 6px 0; border-radius: 6px; border: 1px solid var(--line); }
 .ref.bad { color: var(--muted); cursor: help; }
 .fdhead { position: sticky; top: -16px; margin: -16px -16px 12px; padding: 12px 16px; background: var(--panel); border-bottom: 1px solid var(--line); z-index: 1; }
@@ -669,7 +671,7 @@ details.tdparked .tditem { opacity: .8; }
 .proof figcaption, .proof.none { color: var(--muted); font-size: 13px; margin-top: 4px; }
 .stepcard .closes { color: var(--muted); font-size: 13px; margin: 4px 0; }
 .verb { font-size: 11px; font-weight: 600; padding: 1px 8px; border-radius: 99px; white-space: nowrap; border: 1px solid; }
-.verb.g-unblock { color: var(--bad); } .verb.g-ship { color: var(--ok); } .verb.g-review { color: var(--warn); } .verb.g-only_me { color: var(--accent); }
+.verb.g-unblock { color: var(--bad); } .verb.g-ship { color: var(--ok); } .verb.g-review { color: var(--warn); } .verb.g-only_me { color: var(--accent); } .verb.g-in_review { color: var(--muted); }
 .stepcard { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px; margin-bottom: 16px; }
 .stepcard .k { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
 .stepcard h2 { font-size: 18px; margin: 6px 0; display: flex; gap: 10px; align-items: baseline; }
@@ -1301,6 +1303,66 @@ const prMsg = t => isBranchTask(t) && (["on_branch", "pr"].includes(t.state)
   || (t.state === "needs_input" && ["CI failed", "PR closed"].includes(t.phase)));
 // GET /api/tasks/<id> has no prs: the list's copy of the task has them
 const prsOf = t => t.prs !== undefined ? t.prs : ((state && state.tasks.find(x => x.id === t.id)) || {}).prs || null;
+// ---- the PR news's pure helper
+// What a new /api/state says about pull requests. seen: task id -> the PR links shown already (null for the first
+// state: its PRs are not news); wait: ids of tasks you clicked Open PR on that had no PR yet. first: a waited task's
+// first PR, now open; fail: a waited task that stopped without one, and why; news: every other PR opened since.
+const PR_STOPPED = ["needs_input", "failed", "cancelled", "done"];
+function prNews(seen, wait, tasks) {
+  const out = {first: [], fail: [], news: [], seen: {}};
+  for (const t of tasks) {
+    const prs = (t.prs || []).filter(x => x.number && x.url), had = (seen && seen[t.id]) || [];
+    out.seen[t.id] = prs.map(x => x.url);
+    let fresh = seen ? prs.filter(x => !had.includes(x.url)) : [];
+    if (wait.includes(t.id)) {
+      if (prs.length) { out.first.push({id: t.id, pr: prs[0]}); fresh = fresh.filter(x => x !== prs[0]); }
+      else if (PR_STOPPED.includes(t.state))
+        out.fail.push({id: t.id, text: t.question || t.error || (t.last_event && t.last_event.text) || "No pull request opened."});
+    }
+    fresh.forEach(pr => out.news.push({id: t.id, pr}));
+  }
+  return out;
+}
+const prWords = pr => `${pr.name ? pr.name + " " : ""}PR #${pr.number}`;
+// ---- end of the PR news's pure helper
+// Open PR opens the first PR in a new tab. The tab opens blank on the click (so popup blockers allow it) and goes to
+// the PR once the queue has opened it; PRs that open later in pr_order only get a toast, as does a failure.
+const PR_WAIT = new Map();  // task id -> {w: the blank tab or null, at}
+let prSeen = null;
+function prOpenStart(id) {
+  const t = state && state.tasks.find(x => x.id === id);
+  if (t && (t.prs || []).some(x => x.number)) return;  // a Retry after the first PR opened: no new tab
+  let w = null;
+  try {
+    w = window.open("", "_blank");
+    if (w) { w.document.title = "Opening the pull request…"; w.document.body.textContent = "Opening the pull request… This tab goes to it once GitHub has it."; }
+  } catch {}
+  PR_WAIT.set(id, {w, at: Date.now()});
+}
+function prOpenEnd(id, pr, err, always) {
+  const x = PR_WAIT.get(id); PR_WAIT.delete(id);
+  const w = x && x.w && !x.w.closed ? x.w : null;
+  if (pr) {
+    if (w) { w.opener = null; w.location.href = pr.url; }
+    toast("", {links: [{text: "Opened " + prWords(pr), url: pr.url}], ms: 8000});
+  } else {
+    if (w) w.close();
+    if (x || always) toast(`#${id}: Open PR failed: ${err}`, {err: true, ms: 15000});
+  }
+}
+async function prOpenCall(id) {
+  prOpenStart(id);
+  try { return await api(`/api/tasks/${id}/pr-open`, {}); }
+  catch (e) { prOpenEnd(id, null, e.message, true); throw e; }
+}
+function prNewsApply(s) {
+  for (const [id, x] of PR_WAIT) if (Date.now() - x.at > 30 * 60000) prOpenEnd(id, null, "no pull request after 30 minutes; see the task");
+  const r = prNews(prSeen, [...PR_WAIT.keys()], s.tasks || []);
+  prSeen = r.seen;
+  r.first.forEach(f => prOpenEnd(f.id, f.pr));
+  r.fail.forEach(f => prOpenEnd(f.id, null, f.text));
+  if (r.news.length) toast("", {links: r.news.map(n => ({text: "Opened " + prWords(n.pr), url: n.pr.url})), ms: 8000});
+}
 // The branch (and the Jira key, when the branch name doesn't already carry it), small, for the list and the page
 const branchTag = t => isBranchTask(t) ? `<span class="btag" title="Works on this branch and ends in pull requests against main, not a merge into dev">⎇ ${esc(t.branch || t.target || "")}${
   t.jira && !String(t.branch || "").includes(t.jira) ? ` · ${esc(t.jira)}` : ""}</span>` : "";
@@ -1388,6 +1450,7 @@ async function loadState() {
     RESTART.at = 0; RESTART.ok = Date.now(); setTimeout(renderRestart, 5100);
   }
   state = s;
+  prNewsApply(s);
   tdAddOpenPR(s);
   tdDropGone(s);
   render();
@@ -1932,13 +1995,16 @@ function copyText(text, done) {
   };
   if (navigator.clipboard && window.isSecureContext) navigator.clipboard.writeText(text).then(done, fallback); else fallback();
 }
-// A short note at the bottom of the window, such as "Copied", gone after a moment
+// A short note at the bottom of the window, such as "Copied", gone after a moment. o.links: [{text, url}] shown
+// as links after the text, o.err: in red, o.ms: how long it stays.
 let toastT = 0;
-function toast(text) {
+function toast(text, o = {}) {
   let el = $("#toast");
   if (!el) { el = Object.assign(document.createElement("div"), {id: "toast"}); el.setAttribute("role", "status"); document.body.append(el); }
-  el.textContent = text; el.classList.add("on");
-  clearTimeout(toastT); toastT = setTimeout(() => el.classList.remove("on"), 1500);
+  const links = o.links || [];
+  el.innerHTML = [text ? esc(text) : "", ...links.map(l => `<a href="${esc(l.url)}" target="_blank" rel="noopener">${esc(l.text)}</a>`)].filter(Boolean).join(" · ");
+  el.classList.toggle("link", !!links.length); el.classList.toggle("err", !!o.err); el.classList.add("on");
+  clearTimeout(toastT); toastT = setTimeout(() => el.classList.remove("on"), o.ms || 1500);
 }
 // Copy reference: what you paste in another chat to point at a topic (README: LINK-8)
 const chatRefText = t => `chat:${t.id} (${t.title || "Untitled"})`;
@@ -2174,7 +2240,8 @@ function renderList() {
     e.stopPropagation(); api(`/api/tasks/${b.dataset.start}/start-now`, {}).then(refresh, err => alert(err.message)); });
   document.querySelectorAll(".task [data-prstep]").forEach(b => b.onclick = e => {
     e.stopPropagation(); b.disabled = true;
-    api(`/api/tasks/${b.dataset.prstep}/${b.dataset.a}`, {}).then(refresh, err => { b.disabled = false; alert(err.message); }); });
+    (b.dataset.a === "pr-open" ? prOpenCall(+b.dataset.prstep) : api(`/api/tasks/${b.dataset.prstep}/${b.dataset.a}`, {}))
+      .then(refresh, err => { b.disabled = false; if (b.dataset.a !== "pr-open") alert(err.message); }); });
 }
 
 // A small tag when the task runs, or will run, on something other than Opus: so a trial of Sonnet tasks stands out.
@@ -2372,7 +2439,7 @@ async function act(id, a, pr) {
   if (a === "cancel" && !document.getElementById("actmsg").dataset.armed) {
     const m = document.getElementById("actmsg"); m.dataset.armed = 1; m.textContent = "Click Cancel again to stop this task."; return;
   }
-  try { await api(`/api/tasks/${id}/${a}`, body); typing = false; refresh(); }
+  try { await (a === "pr-open" ? prOpenCall(id) : api(`/api/tasks/${id}/${a}`, body)); typing = false; refresh(); }
   catch (e) { $("#actmsg").textContent = e.message; }
 }
 
@@ -3424,7 +3491,7 @@ try {
   TD.proj = localStorage.getItem("ops-td-proj") || null;
   TD.recapFold = tdFoldRead(localStorage.getItem("ops-td-recap"));
 } catch {}
-const TD_FILTERS = [["all", "All"], ["review", "Review"], ["unblock", "Unblock"], ["ship", "Ship"], ["only_me", "Only me"]];
+const TD_FILTERS = [["all", "All"], ["review", "Review"], ["unblock", "Unblock"], ["ship", "Ship"], ["only_me", "Only me"], ["in_review", "In review"]];
 const SEND_WORDS = {answer: "Send answer", reject: "Send back", retry: "Retry", queue: "Queue task"};
 const STAGES = ["Queued", "Working", "Gate", "Review", "Merged", "Promoted"];
 const midnight = () => { const d = new Date(); d.setHours(0, 0, 0, 0); return d.getTime() / 1000; };
@@ -3720,6 +3787,12 @@ function tdActions(it) {
       return (ps ? [A(ps[0], ps[1], {primary: 1, title: PR_STEP_TIP[ps[0]] || ""})] : [])
         .concat([A("answer", "Answer", {primary: !ps, title: "Type your answer in the message box below"}), A("details", "Details")]);
     }
+    // Its open PRs: a link to each, Address comments when there are comments to take in, and Details
+    case "In review": {
+      const t = s.kind === "task" && state.tasks.find(x => x.id === s.id);
+      return (it.prs || []).map((x, i) => A("prlink:" + i, `Open ${prWords(x)} ↗`, {primary: !i, title: x.url}))
+        .concat(t && prAddress(t) ? [A("pr-address", "Address comments", {title: PR_STEP_TIP["pr-address"]})] : [], [A("details", "Details")]);
+    }
     case "Open PR": return [A("pr-open", "Open PR", {primary: 1, title: PR_STEP_TIP["pr-open"]}), A("details", "Details", {title: "Its summary, commits and the files it changed"})];
     case "Fix": return [A("retry", "Retry", {primary: 1}), A("retrynote", "Retry with a note…"), A("retryafter", "Retry after…", {title: "Retry it once another task merges"}), A("details", "Details")];
     case "Promote":
@@ -3830,6 +3903,7 @@ function tdStep(it, shown) {
     ${it.parked && tdWaiting(it.parked) ? `<div class="tdwaiting">${tdWaiting(it.parked)}<button data-wclear title="Forget the wait and put it back in the list">Clear</button></div>` : ""}
     <div class="dets">${it.why ? `<div class="why">${esc(it.why)}</div>` : ""}
     ${facts ? `<div class="facts">${facts}</div>` : ""}${it.verb === "Commit" ? tdUncommitted() : ""}${rv}</div>
+    ${it.verb === "In review" ? prsHtml({state: "pr"}, it.prs, false) : ""}
     ${it.closes ? `<div class="closes">${esc(it.closes)}</div>` : ""}
     ${it.verb === "Ship" && P(it.project).deploys && P(it.project).deploys.length ? tdShipLog(P(it.project)) : ""}
     <div class="row">${acts.map(b => `<button data-ta="${esc(b.a)}" class="${b.primary ? "primary" : ""}" ${busy || b.disabled ? "disabled" : ""} title="${esc(b.title || "")}">${esc(b.label)}</button>`).join("")}
@@ -4463,7 +4537,9 @@ async function tdDo(a) {
   if (a === "projects") { setFocus(it.project); return showTab("projects"); }
   if (a === "play") return run(() => api(`/api/tasks/${s.id}/play`, {}), "Starting the build. Approve it, or send it back, when you have tried it.");
   if (a === "approve" || a === "retry") return run(() => api(`/api/tasks/${s.id}/${a}`, {}));
-  if (a === "pr-open") return run(() => api(`/api/tasks/${s.id}/pr-open`, {}), "Opening its pull requests: the task shows each one, its CI and a Merge button.");
+  if (a === "pr-open") return run(() => prOpenCall(s.id), "Opening its pull requests: the first opens in a new tab, and the task stays here, In review, until they merge.");
+  if (a.startsWith("prlink:")) { const pr = (it.prs || [])[+a.slice(7)]; if (pr) window.open(pr.url, "_blank", "noopener"); return; }
+  if (a === "pr-address") return run(() => api(`/api/tasks/${s.id}/pr-address`, {}));
   if (a === "fix-ci" || a === "pr-retry") return run(() => api(`/api/tasks/${s.id}/${a}`, {}));
   if (/^(play|stop):/.test(a)) { const [act, where] = a.split(":");
     return run(() => api(`/api/projects/${encodeURIComponent(it.project)}/${act}`, where === "dev" ? {where} : {}), act === "play" ? `Starting ${where}.` : `Stopped ${where}.`); }
@@ -4947,7 +5023,7 @@ const TD_GONE = new Map(), TD_GONE_MS = 20000;
 function tdAddOpenPR(s) {
   if (!s.todos || !s.tasks) return;
   const have = new Set(s.todos.filter(x => x.source && x.source.kind === "task").map(x => +x.source.id));
-  const ORDER = ["unblock", "ship", "review", "only_me"], rank = x => ORDER.indexOf(x.group);
+  const ORDER = ["unblock", "ship", "review", "only_me", "in_review"], rank = x => ORDER.indexOf(x.group);
   for (const t of s.tasks.filter(t => t.state === "on_branch" && !have.has(t.id))) {
     const x = {key: `task:${t.id}:openpr`, subject: `task:${t.id}`, verb: "Open PR", group: "ship", project: t.project,
       title: t.title, why: String(t.summary || "").trim() || `Its work is committed on ${t.branch}; nothing is pushed yet.`,

@@ -419,6 +419,12 @@ tasks. A repo the task doesn't commit to gets nothing pushed and no PR.
 
 You click **Open PR** on the task (or run `opsd.py pr open <id>`).
 
+- **In the browser:** the click opens a blank tab at once (so a popup blocker allows it). Once the queue has
+  opened the first PR, or adopted one already open, the tab goes to it and a toast says `Opened evertrue-web PR
+  #999`, with the link. PRs that open later in `pr_order` open no tab: their links are on the card and in a toast.
+  If opening fails (a pre-check, a push, `gh pr create`), the tab closes and the toast shows the error; the task
+  needs you with the same words. A Retry after the first PR is open opens no tab.
+
 - **Pre-checks:** `gh` is on PATH, `gh auth status` passes, and each repo with commits on the branch has an `origin`
   on GitHub. Otherwise the task needs you, naming what is missing; answer or Retry once it is fixed.
 - **Per repo, in PR order:** `git push -u origin <branch>` (never `--force`), then `gh pr create --base main --head
@@ -845,6 +851,12 @@ the uncommitted-files banner, Deploy. `/api/state` gathers them into one list, `
   - **Read**: a design or project chat with a reply you haven't opened, as ● on its tab marks it. A chat with an
     open reminder (TODO-2, **Remind me**) shows no Read item: it is on the list once, as that **Do**. Once the
     reminder closes, the Read item shows as it normally would.
+  - **In review**: a branch task with open PRs that waits on nobody: watching them (`pr`), or queued, working
+    or checking for them (a fix round, addressing comments). Why: one line per PR, `evertrue-web PR #999: CI
+    green, awaiting human review`; `prs` holds each one's link, CI and review stage, and the card shows them with
+    a link to each and **Address comments**. It stays until every PR has merged or closed. When a PR needs you
+    (CI red, pick reviewers, closed without merging) the task is in needs_input and shows as **Answer** instead,
+    and the header's **need you** counts it as before; In review never counts there.
   - **Read** (a report): a research task merged into `dev` whose report you haven't marked read, or a report any
     merged task listed in its result (see [Research](#research), RES-5 and RES-10). Opening the report leaves it on
     the list: a report you looked at may still need a decision. Only **Mark read** closes it.
@@ -895,7 +907,8 @@ the uncommitted-files banner, Deploy. `/api/state` gathers them into one list, `
   items, with their `todo:N` ids, in its `[ops: ...]` line (a research topic, in its `(Dashboard: ...)` line).
   Closed items stay in the table.
 - **TODO-4 Order and groups.** Each item has a group: `unblock` (Answer, Fix), `ship` (Promote, Ship, Commit),
-  `review` (Try, Review, Agree, Read), `only_me` (Do). The list runs unblock, ship, review, only_me, oldest first
+  `review` (Try, Review, Agree, Read), `only_me` (Do), `in_review` (In review). The list runs unblock, ship, review,
+  only_me, in_review, oldest first
   within a group.
 - **TODO-5 Follow-up tasks.** A worker's result is `{"status": "done" | "needs_input" | "failed" | "split",
   "summary", "question"?, "tasks"?, "todos"?, "followups"?, "reports"?, "review"?}` (`review`: see *Proof video*, the review report). `followups` is a list of `{title, body}`, the
@@ -1088,7 +1101,7 @@ stay on the right of the header.
 
 - **TODAY-1 Left: To-do.** The `todos` list from `/api/state`, nothing else.
   - Filter chips, each with its count: **All**, **Review** (Try, Review, Agree, Read), **Unblock** (Answer, Fix),
-    **Ship** (Promote, Ship, Commit), **Only me** (Do).
+    **Ship** (Promote, Ship, Commit), **Only me** (Do), **In review** (In review: open PRs, nothing to do yet).
   - Each item shows its verb, title, project (unless one project is ticked in the switcher) and age.
   - The selection is the item's `key`, so it survives polls and reloads. When the selected item leaves the list
     (you acted on it, or its state changed), the item after it is selected.

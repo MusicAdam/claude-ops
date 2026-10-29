@@ -420,6 +420,31 @@ class Plain(Base):
         self.assertEqual(t["state"], "done", t["question"] or t["error"])
         self.assertEqual(git(self.repo, "rev-parse", "main"), self.load()["prs"]["o/r#1"]["merge"])
 
+    def test_open_prs_stay_on_the_todo_list_until_merged(self):
+        tid = self.add(target="feat/td")
+        self.run_task(tid, {"c.txt": "x\n"})
+
+        def items():
+            return {x["verb"]: x for x in opsd.todos_list([opsd.task(tid)], [], {}) if x["source"]["id"] == tid}
+        opsd.pr_action(self.p, opsd.task(tid), "pr-open", {})
+        self.step(tid)
+        it = items()["In review"]  # watching: In review, with the PR's link, CI and review stage
+        self.assertEqual((it["group"], it["key"]), ("in_review", f"task:{tid}:inreview"))
+        self.assertEqual([x["number"] for x in it["prs"]], [1])
+        self.assertIn("PR #1: CI pending", it["why"])
+        self.checks("r", 1, "FAILURE")  # red CI needs you: an Answer, not In review
+        opsd.pr_poll()
+        self.step(tid)
+        self.assertEqual(set(items()), {"Answer"})
+        self.checks("r", 1, "SUCCESS")
+        opsd.pr_poll()
+        self.step(tid)
+        self.assertEqual(set(items()), {"In review"})
+        self.gh_merge("r", 1)
+        opsd.pr_poll()
+        self.assertEqual(self.step(tid)["state"], "done")
+        self.assertEqual(set(items()), set())
+
     def test_ci_red_needs_you_and_fix_ci_resumes_the_worker(self):
         tid = self.add(target="feat/ci")
         self.run_task(tid, {"c.txt": "x\n"})
