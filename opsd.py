@@ -3468,6 +3468,7 @@ def pr_main(p, tid):
     [app] build, fast-forward, carry your uncommitted changes over), then dev takes main in. True once done; False
     when it waits (a deploy, or something only you can clear) or stopped."""
     upd(tid, state="merging", phase=f"moving {p.main} to origin/{p.main}")
+    fetch_origin(p, tid)  # the merge commit GitHub just made, whether the queue merged it in this step or you did
     with p.main_lock:
         if stopped(tid):
             return False
@@ -3544,6 +3545,9 @@ def _pr_step(p, tid):
     todo = [x for x in rows if (x["state"] == "OPEN" and x["number"]) or pr_due(x, rows)]
     if todo and (why := pr_precheck(p, [part_of(p, x["repo"]) for x in todo])):
         return pr_needs(p, tid, PR_SETUP, why)
+    # A PR opened or pushed to in this step is read at the next poll, not now: GitHub registers its checks a little
+    # after the push, and "no checks" would read as green (opening the next PR in pr_order, or hiding a red CI)
+    fresh = set()
     for x in rows:  # new commits on an open PR's branch (a fix round): push them, no rebase, no force
         r = part_of(p, x["repo"])
         if x["state"] == "OPEN" and x["number"] and r.rev(f"refs/heads/{branch}") != \
@@ -3552,6 +3556,7 @@ def _pr_step(p, tid):
             if why := pr_push(p, tid, r, branch):
                 return pr_needs(p, tid, PR_SETUP, why)
             q("UPDATE prs SET ci='pending', failing=NULL WHERE id=?", (x["id"],))
+            fresh.add(x["id"])
     for _ in range(len(rows) + 1):
         changed = False
         rows = pr_rows(tid)
@@ -3562,10 +3567,11 @@ def _pr_step(p, tid):
                 upd(tid, phase=f"opening the PR for {pr_name(p, x) or branch}")
                 if why := pr_open_one(p, task(tid), x, rows):
                     return pr_needs(p, tid, PR_SETUP, why)
+                fresh.add(x["id"])
                 changed = True
         rows = pr_rows(tid)
         for x in rows:
-            if x["state"] == "OPEN" and x["number"]:
+            if x["state"] == "OPEN" and x["number"] and x["id"] not in fresh:
                 pr_view(p, t, x)
         rows = pr_rows(tid)
         if merge_all_on(tid):

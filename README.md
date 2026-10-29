@@ -432,7 +432,8 @@ You click **Open PR** on the task (or run `opsd.py pr open <id>`).
 - While a task has an open PR, the scheduler polls it every 2 minutes (and right after you act on it):
   `gh pr view <n> --json state,mergedAt,mergeCommit,statusCheckRollup,mergeable,url`.
 - **CI:** `green` once every check succeeded or was skipped (no checks counts as green), `red` on any failure,
-  else `pending`.
+  else `pending`. A PR the queue just opened or pushed to stays `pending` until the next poll: GitHub registers
+  its checks a little after the push, and reading at once would see none (green) or the last push's.
 - **CI red:** the task needs you, listing the failing checks, and later PRs in the order don't open. **Fix CI**
   resumes the worker with the failed logs (`gh run view <run> --log-failed`, the last 200 lines). It commits, the
   gate runs, then the queue pushes (no rebase, no force). If CI turns green again by itself (a re-run, a push from
