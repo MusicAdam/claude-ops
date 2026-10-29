@@ -23,7 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import opsd  # noqa: E402
 
 # The fake gh keeps its PRs in $FAKE_GH/state.json and logs every call to $FAKE_GH/calls.log. A merge really moves
-# the bare origin's main (a squash: the branch's tree on top of main), as GitHub would.
+# the bare origin's base branch (a squash: the branch's tree on top of it), as GitHub would.
 FAKE_GH = r'''#!PYTHON
 import json, os, subprocess, sys
 d = os.environ["FAKE_GH"]
@@ -71,14 +71,16 @@ if a[:2] == ["pr", "view"]:
                       "mergeCommit": {"oid": pr["merge"]} if pr.get("merge") else None,
                       "statusCheckRollup": pr["checks"], "mergeable": "MERGEABLE", "url": pr["url"],
                       "author": {"login": "me"}, "reviews": pr.get("reviews", []),
-                      "reviewRequests": [{"login": x} for x in pr.get("requests", [])]}))
+                      "reviewRequests": [{"login": x} for x in pr.get("requests", [])],
+                      "baseRefName": pr.get("base") or "main"}))
 elif a[:2] == ["pr", "merge"]:
     if pr.get("merge_error"):
         print(pr["merge_error"], file=sys.stderr)
         sys.exit(1)
-    oid = git("commit-tree", git("rev-parse", f"refs/heads/{pr['head']}^{{tree}}"), "-p", "main", "-m",
+    base = pr.get("base") or "main"
+    oid = git("commit-tree", git("rev-parse", f"refs/heads/{pr['head']}^{{tree}}"), "-p", base, "-m",
               f"{pr['title']} (#{a[2]})")
-    git("update-ref", "refs/heads/main", oid)
+    git("update-ref", f"refs/heads/{base}", oid)
     if "--delete-branch" in a:
         git("update-ref", "-d", f"refs/heads/{pr['head']}")
     pr.update(state="MERGED", merge=oid, mergedAt="2026-10-29T10:00:00Z", how=a[3])
