@@ -1102,6 +1102,7 @@ details.tdparked .tditem { opacity: .8; }
         <label>Priority <select id="prio"><option value="0">normal</option><option value="1">high</option><option value="-1">low</option></select></label>
         <label>After # <input id="after" style="width:60px" placeholder="—"></label>
         <label title="Optional. Work on this branch and end in GitHub pull requests against main, not a merge into dev. A Jira key (BALL-123) names the branch from the key and the title; anything else is the branch name (README: Branches and pull requests)">Branch or Jira key <input id="tbranch" style="width:200px" placeholder="BALL-123 or feature/login" autocomplete="off" spellcheck="false"></label>
+        <label title="Optional, for a branch task. The branch its pull requests go against, in place of the project's pr_base (default: main). The queue makes the branch from it, rebases onto it before the first push, and opens each PR against it">PRs against <input id="tbase" style="width:170px" placeholder="main" autocomplete="off" spellcheck="false"></label>
         <label title="The model its worker starts on. Default: the Tasks model setting (per kind, on the Settings tab)">Model <select id="tmodel"><option value="">Default</option><option value="opus">Opus</option><option value="sonnet">Sonnet</option><option value="haiku">Haiku</option></select></label>
         <label title="How hard its worker thinks (--effort). Default: the Effort setting on the Settings tab">Effort <select id="teffort"><option value="">Default</option><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option><option value="xhigh">Extra high</option><option value="max">Max</option></select></label>
         <label title="When it may start. It waits in the queue until then, and others can queue after it. After next reset: a minute after the usage window resets (README: Start later)">Start <select id="tstart"><option value="">now</option><option value="at">at…</option><option value="reset">after next reset</option></select> <input type="datetime-local" id="tstartat" class="hidden"></label>
@@ -1363,8 +1364,11 @@ function prNewsApply(s) {
   r.fail.forEach(f => prOpenEnd(f.id, null, f.text));
   if (r.news.length) toast("", {links: r.news.map(n => ({text: "Opened " + prWords(n.pr), url: n.pr.url})), ms: 8000});
 }
+// The branch a branch task's PRs go against (pr_base, the task's own, or what GitHub shows): the list's copy has it
+const prAgainst = t => t.pr_against || ((state && state.tasks.find(x => x.id === t.id)) || {}).pr_against
+  || (P(t.project) || {}).main_branch || "main";
 // The branch (and the Jira key, when the branch name doesn't already carry it), small, for the list and the page
-const branchTag = t => isBranchTask(t) ? `<span class="btag" title="Works on this branch and ends in pull requests against main, not a merge into dev">⎇ ${esc(t.branch || t.target || "")}${
+const branchTag = t => isBranchTask(t) ? `<span class="btag" title="Works on this branch and ends in pull requests against ${esc(prAgainst(t))}, not a merge into dev">⎇ ${esc(t.branch || t.target || "")}${
   t.jira && !String(t.branch || "").includes(t.jira) ? ` · ${esc(t.jira)}` : ""}</span>` : "";
 // One line of words for the list: each PR's number (or waiting), then its CI and review stage while open, else its state
 const prsShort = prs => (prs || []).map(x => `${x.name ? x.name + " " : ""}${x.number ? "#" + x.number : "waiting"}${
@@ -1385,7 +1389,7 @@ function prsHtml(t, prs, buttons) {
       + (x.review ? `<span class="muted" title="Its review round: the bot review, the worker addressing its comments, then human reviewers">${esc(x.review)}</span>` : "") : "";
     const when = x.merged_at ? `merged ${ago(x.merged_at, state.now)} ago` : x.checked_at && x.state === "OPEN" ? `checked ${ago(x.checked_at, state.now)} ago` : "";
     const merge = buttons && x.state === "OPEN" ? `<span title="${esc(x.merge ? "Merge it on GitHub (gh pr merge)" : x.merge_why || "Can't merge yet")}"><button data-act="pr-merge" data-pr="${x.id}" ${x.merge ? "" : "disabled"}>Merge</button></span>` : "";
-    return `<div class="prrow">${x.name ? `<b>${esc(x.name)}</b>` : ""}${num}${ci}${opened ? `<span class="${stCls[x.state] || ""}">${esc(x.state)}</span>` : ""}<span class="grow muted">${when}</span>${merge}</div>`
+    return `<div class="prrow">${x.name ? `<b>${esc(x.name)}</b>` : ""}${num}${x.base ? `<span class="muted mono" title="The branch this PR goes against on GitHub">→ ${esc(x.base)}</span>` : ""}${ci}${opened ? `<span class="${stCls[x.state] || ""}">${esc(x.state)}</span>` : ""}<span class="grow muted">${when}</span>${merge}</div>`
       + (x.error ? `<div class="prnote err">${esc(x.error)}</div>` : "") + (x.warning ? `<div class="prnote s-review">⚠ ${esc(x.warning)}</div>` : "");
   }).join("");
   const all = buttons && left.length >= 2 ? `<div class="row"><button data-act="pr-merge-all" ${can && prs.some(x => x.state === "OPEN") ? "" : "disabled"} title="Merge them in order, each once the one before it has landed and its own CI is green">Merge all</button></div>` : "";
@@ -2317,7 +2321,7 @@ async function loadDetail(id, fresh) {
     ${timeLine(t, live)}
     ${t.start_words ? `<div class="muted" style="margin:4px 0">${esc(t.start_words)}</div>` : ""}
     ${t.state === "queued" && (archivedP(t.project) || t.wait) ? `<div class="muted" style="margin:4px 0">${esc(archivedP(t.project) ? "archived project: restore it to run this" : t.wait)}</div>` : ""}
-    <div class="muted mono" style="margin:4px 0">${esc(P(t.project).title)} · ${esc(t.branch || "")}${t.jira && !String(t.branch || "").includes(t.jira) ? ` · ${esc(t.jira)}` : ""}${isBranchTask(t) ? " · PRs against " + esc(P(t.project).main_branch || "main") : ""}${t.merged ? ` → ${esc(t.kind === "release" || P(t.project).direct_main || isBranchTask(t) ? P(t.project).main_branch || "main" : P(t.project).dev_branch || "dev")} ${esc(t.merged_show || shas(t.merged))}` : ""}${t.kind === "release" && t.base && !t.merged ? `checking ${esc(t.base_show || shas(t.base))}` : ""}${t.kind === "deploy" && t.base ? `deploying ${esc(t.base_show || shas(t.base))}` : ""}${t.rounds ? ` · fix rounds: ${t.rounds}` : ""}${t.session_model ? ` · model: ${esc(t.session_model)}` : t.model ? ` · model: ${esc(t.model)} (not started)` : ""}${t.effort ? ` · effort: ${esc(t.effort)}` : ""}</div>
+    <div class="muted mono" style="margin:4px 0">${esc(P(t.project).title)} · ${esc(t.branch || "")}${t.jira && !String(t.branch || "").includes(t.jira) ? ` · ${esc(t.jira)}` : ""}${isBranchTask(t) ? " · PRs against " + esc(prAgainst(t)) : ""}${t.merged ? ` → ${esc(isBranchTask(t) ? prAgainst(t) : t.kind === "release" || P(t.project).direct_main ? P(t.project).main_branch || "main" : P(t.project).dev_branch || "dev")} ${esc(t.merged_show || shas(t.merged))}` : ""}${t.kind === "release" && t.base && !t.merged ? `checking ${esc(t.base_show || shas(t.base))}` : ""}${t.kind === "deploy" && t.base ? `deploying ${esc(t.base_show || shas(t.base))}` : ""}${t.rounds ? ` · fix rounds: ${t.rounds}` : ""}${t.session_model ? ` · model: ${esc(t.session_model)}` : t.model ? ` · model: ${esc(t.model)} (not started)` : ""}${t.effort ? ` · effort: ${esc(t.effort)}` : ""}</div>
     ${t.question ? `<div class="callout"><b>Question:</b> ${esc(t.question)}</div>
       <textarea id="answer" placeholder="Your answer (drop or paste screenshots to attach them)" style="min-height:70px"></textarea>
       <div class="row">${btn("answer", "Send answer", "primary")}</div>` : ""}
@@ -2451,9 +2455,9 @@ async function submit() {
     if (!project) throw new Error("pick a project");
     const start = $("#tstart").value, not_before = start === "at" ? $("#tstartat").value : start;
     if (start === "at" && !not_before) throw new Error("pick when it starts");
-    const branch_or_jira = $("#tbranch").value.trim();
-    const r = await api("/api/tasks", {project, body, priority: +$("#prio").value, hold: $("#hold").checked ? 1 : 0, release: $("#autorel").checked ? 1 : 0, depends_on: $("#after").value.trim(), model: $("#tmodel").value, effort: $("#teffort").value, ...(not_before ? {not_before} : {}), ...(branch_or_jira ? {branch_or_jira} : {})});
-    $("#body").value = ""; $("#after").value = ""; $("#tbranch").value = ""; $("#tmodel").value = ""; $("#teffort").value = ""; $("#tstart").value = ""; $("#tstartat").value = ""; $("#tstartat").classList.add("hidden"); $("#formmsg").textContent = ""; delete $("#autorel").dataset.k; sel = r.id; setFocus(project); refresh();
+    const branch_or_jira = $("#tbranch").value.trim(), base = $("#tbase").value.trim();
+    const r = await api("/api/tasks", {project, body, priority: +$("#prio").value, hold: $("#hold").checked ? 1 : 0, release: $("#autorel").checked ? 1 : 0, depends_on: $("#after").value.trim(), model: $("#tmodel").value, effort: $("#teffort").value, ...(not_before ? {not_before} : {}), ...(branch_or_jira ? {branch_or_jira} : {}), ...(base ? {base} : {})});
+    $("#body").value = ""; $("#after").value = ""; $("#tbranch").value = ""; $("#tbase").value = ""; $("#tmodel").value = ""; $("#teffort").value = ""; $("#tstart").value = ""; $("#tstartat").value = ""; $("#tstartat").classList.add("hidden"); $("#formmsg").textContent = ""; delete $("#autorel").dataset.k; sel = r.id; setFocus(project); refresh();
   } catch (e) { $("#formmsg").textContent = e.message; }
 }
 $("#submit").onclick = submit;

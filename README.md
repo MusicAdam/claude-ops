@@ -350,7 +350,7 @@ main (see below).
 ## Branches and pull requests
 
 A task can work on a named branch instead of merging into dev, and turn it into a GitHub pull request against
-main when you choose. It is for work that lands on GitHub as PRs (say, from a Jira ticket), not as local merges.
+main (or the PR base you set, below) when you choose. It is for work that lands on GitHub as PRs (say, from a Jira ticket), not as local merges.
 A task with no branch and no Jira key works exactly as before, unless the project sets `flow = "pr"` (below).
 
 ### Naming the branch
@@ -368,6 +368,12 @@ A task with no branch and no Jira key works exactly as before, unless the projec
   - `opsd.py add -p NAME --branch BRANCH ...` or `--jira KEY`, and `opsd.py send PROJECT --branch/--jira ...`
     (tasks only);
   - `"branch"` or `"jira"` in a design chat's `queue` block.
+- **PR base.** The branch its PRs go against. The repo-level toml key `pr_base` sets it: a branch name for every
+  repo (`pr_base = "feat/admin-console-on-main"`), or a table per repo folder
+  (`pr_base = {"evertrue-web" = "feat/admin-console-on-main"}`; a repo it leaves out uses `main_branch`). Default:
+  `main_branch`. A task can override it for all its repos: the New task form's **PRs against** field,
+  `opsd.py add --base BRANCH` or `opsd.py send --base BRANCH` (a branch task only). The task card shows
+  `PRs against <base>`.
 - With a Jira key, the worker is asked to start each commit message with it, and the PR title is
   `KEY: <task title>`. Without one, the PR title is the task title.
 - A branch task never promotes after merge: it doesn't merge into dev, so main doesn't move by a release.
@@ -375,7 +381,7 @@ A task with no branch and no Jira key works exactly as before, unless the projec
 ### Working on the branch
 
 ```
- worker on <branch> ─▶ fetch origin ─▶ never pushed? rebase onto origin/main ─▶ gate (fix rounds as usual)
+ worker on <branch> ─▶ fetch origin ─▶ never pushed? rebase onto origin/<base> ─▶ gate (fix rounds as usual)
                                         pushed already? no rebase, gate as it is
                                   ▼ pass
         hold for review? ─ yes ─▶ Try / Approve / Send back, as for any task
@@ -387,11 +393,13 @@ A task with no branch and no Jira key works exactly as before, unless the projec
                                   │ per PR: awaiting bot review ─▶ addressing comments (worker, gate, push)
                                   │         ─▶ awaiting human review (gh pr edit --add-reviewer)
                                   ▼ merged (on GitHub, or Merge here)
-                         fetch, fast-forward your main to origin/main, dev takes it in ─▶ done once all merged
+                         into main: fast-forward your main to origin/main, dev takes it in
+                         into another base: fetch and record it  ─▶ done once all merged
 ```
 
 1. **Fetch.** At the start, and again before each rebase, the queue runs `git fetch origin` in each repo that has
-   an `origin`. The base is `origin/main` (your local `main` for a repo with no `origin`).
+   an `origin`. The base is `origin/<PR base>` (that local branch for a repo with no `origin`; `main` when the
+   base is on neither).
 2. **The worktree checks out the branch itself**, not `task/<id>-...`, in every repo of a workspace:
    - it exists locally: that branch (fast-forwarded first to `origin/<branch>` when that is ahead of it);
    - it exists only on origin: a new local branch tracking `origin/<branch>`;
@@ -404,7 +412,7 @@ A task with no branch and no Jira key works exactly as before, unless the projec
    continues the branch. Its `after`/`depends_on` on that earlier task waits only until it is `on branch`.
 4. **Rebase and gate.** In a repo where the branch has never been pushed (no `origin/<branch>`), the queue rebases
    it onto the latest base and runs the normal [[gate]] with the usual fix rounds; the conflict and gate-failure
-   prompts name `main`, not dev. Once it has been pushed (it was on origin already, or its PR is open), the queue
+   prompts name the base, not dev. Once it has been pushed (it was on origin already, or its PR is open), the queue
    **never rebases and never force-pushes**: it gates the branch as it is, and new commits go on top.
 5. **Hold / Try** works as for any task, before the next step.
 6. **On branch.** The task ends in the state `on branch`: the work is committed and nothing is pushed. Its
@@ -498,8 +506,13 @@ Both ways work:
   the one before it has landed and its own CI is green. A failed merge (review required, conflicts) shows gh's
   message on the card.
 - A PR merged out of order on GitHub is recorded, with a warning on the card.
-- **After each merge** the queue fetches origin, then moves your local main to `origin/main` the way Straight to main
-  does: fast-forward, your uncommitted changes carried over, needs you if something is in the way (the main build
+- **Retargeted on GitHub.** Each poll reads the PR's `baseRefName`. If you change a PR's base on GitHub, the queue
+  records the new base, logs it, and uses it from then on (the card's `PRs against`, the after-merge step).
+- **After a merge into another base than `main_branch`**, the queue fetches origin, records it and marks the PR
+  merged. Main and dev don't move, and nothing needs you. If your checkout of that repo has the base branch checked
+  out and it can fast-forward cleanly to `origin/<base>`, it does; else it stays as it is.
+- **After a merge into `main_branch`** the queue fetches origin, then moves your local main to `origin/main`, in the
+  repos whose PR merged into main only, the way Straight to main does: fast-forward, your uncommitted changes carried over, needs you if something is in the way (the main build
   running, main checked out elsewhere, or a main with local commits `origin/main` lacks). Then dev takes main in
   (a fast-forward, else a merge; a conflict is logged and left to the next release). This works with
   `direct_main = false` too.
@@ -2103,7 +2116,8 @@ plain project, the root repo (`"."` in `repos`) for a workspace. A workspace wit
   settings: `title`, `repo`, `main_branch`, `dev_branch`, `worktrees`, `max_parallel`, `direct_main`, `flow`,
   `chat_mcp` and `[worker] env` (and `port_base`). The repo file may hold `repos`, `[worktree]` (`clone`, `setup`,
   `setup_timeout`), `[[gate]]`, `[app]`, `[[deploy]]`, `branch_pattern`, `default_branch_pattern`, `pr_order`,
-  `pr_merge`, `pr_bot_reviewers`, `pr_review_comment`, `pr_bot_review_timeout`, `pr_reviewers`, `[worker] notes`
+  `pr_merge`, `pr_base`, `pr_bot_reviewers`, `pr_review_comment`, `pr_bot_review_timeout`, `pr_reviewers`,
+  `[worker] notes`
   and `[design] notes`. A home-only key in
   the repo file is ignored with a warning, on the project's card and in the daemon log.
 - **Which wins.** A key in the repo file replaces the home toml's whole: two `[[gate]]` lists are not merged,
@@ -2172,6 +2186,7 @@ branch_pattern = "{key}-{slug}"     # a Jira-key task's branch (see Branches and
 default_branch_pattern = "ops/{id}-{slug}"  # flow = "pr": the branch of a task given none; must have {id}
 pr_order = ["backend", "app"]      # a workspace's PRs open, and merge, in this order; default: all at once
 pr_merge = "squash"                # how Merge merges a PR: squash, merge or rebase
+pr_base = "feat/next"              # the branch PRs go against; or {"web" = "feat/next"} per repo; default main_branch
 pr_bot_reviewers = ["copilot-pull-request-reviewer[bot]"]   # whose review a new PR waits for (see Review round)
 pr_review_comment = "@claude /pr-review"   # optional: posted on a new PR to ask a review workflow for its review
 pr_bot_review_timeout = 30         # minutes to wait for the bot review, then go on
