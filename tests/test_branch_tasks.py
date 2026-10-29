@@ -65,6 +65,15 @@ if a[:2] == ["api", "graphql"]:  # the review threads and reviews of one PR
         "author": {"login": "me"}, "reviewThreads": {"nodes": pr.get("threads", [])},
         "reviews": {"nodes": pr.get("reviews", [])}}}}}))
     sys.exit(0)
+if a[0] == "api" and a[-1].startswith("reviewers[]="):  # gh api -X POST repos/o/r/pulls/N/requested_reviewers
+    if st.get("request_error"):
+        print(st["request_error"], file=sys.stderr)
+        sys.exit(1)
+    _, o, n, _, num, _ = a[a.index("POST") + 1].split("/")
+    pr = st["prs"][f"{o}/{n}#{num}"]
+    pr["requests"] = pr.get("requests", []) + [a[-1].split("=", 1)[1]]
+    save()
+    sys.exit(0)
 pr = st["prs"][f"{repo}#{a[2]}"]
 if a[:2] == ["pr", "view"]:
     print(json.dumps({"state": pr["state"], "mergedAt": pr.get("mergedAt"),
@@ -144,6 +153,7 @@ class Base(unittest.TestCase):
         if self.ids:
             opsd.q(f"DELETE FROM tasks WHERE id IN ({','.join('?' * len(self.ids))})", self.ids)
             opsd.q(f"DELETE FROM prs WHERE task_id IN ({','.join('?' * len(self.ids))})", self.ids)
+            opsd.q(f"DELETE FROM events WHERE task_id IN ({','.join('?' * len(self.ids))})", self.ids)
         for tid in self.ids:
             shutil.rmtree(opsd.RUNS / str(tid), ignore_errors=True)
             opsd.set_setting(f"prmergeall:{tid}", "")
@@ -616,6 +626,71 @@ class Reviews(Base):
         self.assertEqual(self.step(tid)["state"], "pr")
         self.assertFalse([c for c in self.calls()[n:] if c[:2] == ["api", "graphql"]])
         self.no_force()
+
+    COPILOT_CALL = ["api", "-X", "POST", "repos/o/r/pulls/1/requested_reviewers", "-f",
+                    "reviewers[]=copilot-pull-request-reviewer[bot]"]
+
+    def test_copilot_is_asked_on_open(self):
+        tid = self.opened("feat/cp")
+        self.assertEqual(self.calls().count(self.COPILOT_CALL), 1)
+        self.assertIn("asked Copilot to review #1", self.events(tid))
+        self.assertEqual(self.load()["prs"]["o/r#1"]["requests"], ["copilot-pull-request-reviewer[bot]"])
+        self.review("r", 1, "copilot-pull-request-reviewer")
+        opsd.pr_poll()
+        self.step(tid)
+        opsd.pr_poll()
+        self.assertEqual(self.calls().count(self.COPILOT_CALL), 1)  # once, when it opened
+        self.assertEqual(self.stage(tid), "needs reviewers")  # Copilot's request isn't a human reviewer
+
+    def test_copilot_not_asked_without_it_in_bot_reviewers(self):
+        for i, extra in enumerate(("pr_bot_reviewers = []\n", 'pr_bot_reviewers = ["other[bot]"]\n')):
+            tid = self.opened(f"feat/nc{i}", extra)
+            self.assertFalse([c for c in self.calls() if c[:1] == ["api"] and "POST" in c])
+            self.assertFalse([e for e in self.events(tid) if "Copilot" in e])
+
+    def test_copilot_matched_without_bot_suffix(self):
+        tid = self.opened("feat/sx", 'pr_bot_reviewers = ["Copilot-Pull-Request-Reviewer"]\n')
+        self.assertIn("asked Copilot to review #1", self.events(tid))
+
+    def test_adopted_pr_copilot_reviewed_already_is_not_asked_again(self):
+        self.project()
+        self.load()
+        self.state["next"] = 2
+        self.state["prs"]["o/r#1"] = {"head": "feat/ad", "base": "main", "title": "t", "body": "", "state": "OPEN",
+                                      "checks": [], "url": "https://github.com/o/r/pull/1",
+                                      "reviews": [{"author": {"login": "copilot-pull-request-reviewer"},
+                                                   "state": "COMMENTED", "body": "", "submittedAt": iso(None),
+                                                   "url": "u"}]}
+        self.save()
+        tid = self.opened("feat/ad")
+        self.assertIn("PR #1 was open already", " ".join(self.events(tid)))
+        self.assertNotIn(self.COPILOT_CALL, self.calls())
+        self.assertFalse([e for e in self.events(tid) if "Copilot" in e])
+
+    def test_adopted_pr_without_copilot_is_asked(self):
+        self.project()
+        self.load()
+        self.state["next"] = 2
+        self.state["prs"]["o/r#1"] = {"head": "feat/ad2", "base": "main", "title": "t", "body": "",
+                                      "state": "OPEN", "checks": [], "url": "https://github.com/o/r/pull/1"}
+        self.save()
+        tid = self.opened("feat/ad2")
+        self.assertIn("asked Copilot to review #1", self.events(tid))
+
+    def test_failed_copilot_request_logs_and_times_out(self):
+        self.load()
+        self.state["request_error"] = "HTTP 422: Reviews may only be requested from collaborators."
+        self.save()
+        tid = self.opened("feat/cf", "pr_bot_review_timeout = 1\n")
+        self.assertIn("couldn't ask Copilot to review #1: HTTP 422: Reviews may only be requested from "
+                      "collaborators.", self.events(tid))
+        self.assertEqual(self.stage(tid), "awaiting bot review")
+        opsd.pr_poll()
+        self.assertEqual(self.step(tid)["state"], "pr")
+        opsd.q("UPDATE prs SET review_since=? WHERE task_id=?", (time.time() - 61, tid))
+        opsd.pr_poll()
+        self.step(tid)
+        self.assertIn("#1: no bot review came within 1 min; going on", self.events(tid))
 
     def test_no_bot_review_in_time_no_comments_and_pick_reviewers(self):
         tid = self.opened("feat/to", "pr_bot_review_timeout = 1\n")
