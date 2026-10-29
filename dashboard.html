@@ -184,6 +184,9 @@ ul.clog { max-height: 220px; }
 .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
 .chip { font-size: 12px; padding: 4px 10px; border-radius: 99px; border: 1px solid var(--accent); color: var(--accent); cursor: pointer; background: none; }
 .live { color: var(--muted); font: 12px var(--mono); margin: 0 0 14px; }
+.permit { border: 1px solid var(--warn); border-radius: 8px; padding: 10px 12px; margin: 0 0 14px; }
+.permit pre { font: 12px var(--mono); white-space: pre-wrap; word-break: break-word; margin: 6px 0; max-height: 240px; overflow: auto; }
+.permit .row { display: flex; gap: 8px; align-items: center; margin-top: 8px; }
 .composer { position: sticky; bottom: 0; background: var(--bg); padding-top: 10px; }
 .composer textarea { min-height: 80px; }
 /* / in a change's message box: its commands, just above the box */
@@ -3194,7 +3197,7 @@ function renderChat() {
   const d = chatData && chatSel === chatData.id ? chatData : null;
   const thinking = d && d.state === "thinking";
   // Looking at a topic doesn't mark it read: only Mark read does, so a Read item doesn't vanish while you read it.
-  const key = d ? `${d.id}:${d.title}:${d.msgs.length}:${JSON.stringify(d.queued || [])}:${d.state}:${d.ended}:${d.live.length}:${JSON.stringify(d.msgs.map(m => m.tasks.map(t => t.state)))}:${d.spec_view ? hash(JSON.stringify(d.spec_view)) : ""}:${(d.files || []).map(f => f.name + f.mtime).join()}` : "none";
+  const key = d ? `${d.id}:${d.title}:${d.msgs.length}:${JSON.stringify(d.queued || [])}:${d.state}:${d.ended}:${d.live.length}:${permitKey(d)}:${JSON.stringify(d.msgs.map(m => m.tasks.map(t => t.state)))}:${d.spec_view ? hash(JSON.stringify(d.spec_view)) : ""}:${(d.files || []).map(f => f.name + f.mtime).join()}` : "none";
   $("#stopchat").classList.toggle("hidden", !thinking);
   // While Claude replies, a message waits in the chat's queue and goes when the reply ends
   $("#send").textContent = thinking ? "Queue" : "Send";
@@ -3224,6 +3227,7 @@ function renderChat() {
   const links = chatCtx(d.project, d.id, (d.files || []).map(f => f.name));
   box.innerHTML = topicDivider() + msgsHtml(d, links);
   box.querySelectorAll("[data-unq]").forEach(b => b.onclick = () => unqueue(d.id, +b.dataset.unq));
+  permitButtons(box, d.id, () => { chatKey = ""; refreshDesign(); });
   box.querySelectorAll("[data-task]").forEach(b => b.onclick = () => openTask(+b.dataset.task));
   const bottom = () => {
     if (!(stick || thinking)) return;
@@ -3241,7 +3245,30 @@ function msgsHtml(d, links) {
       ? `<div class="msg user">${userMd(m.text.replace(/^\[ops:[^\n]*\]\n\n/, ""), links)}</div>`
       : `<div class="msg ${m.role === "ops" ? "ops" : ""}">${md(m.text, undefined, links)}${m.tasks.length ? `<div class="chips">${m.tasks.map(t => `<button class="chip" data-task="${t.id}">${tid(t.id)}${esc(t.title || "")} · ${LABEL[t.state] || t.state}</button>`).join("")}</div>` : ""}</div>`).join("")
     + (thinking ? `<div class="live"><span class="pulse s-running">Claude is thinking</span>${d.live.map(l => `<div>  ${esc(l)}</div>`).join("")}</div>` : "")
+    + permitsHtml(d)
     + (d.queued || []).map((t, k) => `<div class="msg user queued">${userMd(t, links)}<div class="qbar">Queued: sent ${thinking ? "when this reply ends" : "next"} · <button data-unq="${k}" title="Take it off the queue and put it back in the message box">Edit</button></div></div>`).join("");
+}
+// A project chat's permission prompts: its turn waits until you click Approve or Deny (README: Permission prompts).
+// The main field of the input (a command, a file, a URL) shows; the rest is under Full input.
+function permitsHtml(d) {
+  return (d.permits || []).map(r => {
+    const i = r.input || {}, main = i.command || i.file_path || i.notebook_path || i.url || i.path || "";
+    return `<div class="permit"><b>Claude asks to use ${esc(r.tool)}</b>${i.description ? ` <span class="muted">${esc(i.description)}</span>` : ""}`
+      + (main ? `<pre>${esc(String(main))}</pre>` : "")
+      + `<details><summary class="muted">Full input</summary><pre>${esc(JSON.stringify(i, null, 2))}</pre></details>`
+      + `<div class="row"><button class="primary" data-permit="${esc(r.id)}" data-allow="1">Approve</button>`
+      + `<button data-permit="${esc(r.id)}">Deny</button><span class="err"></span></div></div>`;
+  }).join("");
+}
+const permitKey = d => (d.permits || []).map(r => r.id).join();
+function permitButtons(box, did, again) {
+  box.querySelectorAll("[data-permit]").forEach(b => b.onclick = async () => {
+    const row = b.closest(".row");
+    row.querySelectorAll("button").forEach(x => x.disabled = true);
+    try { await api(`/api/designs/${did}/permit`, {id: b.dataset.permit, allow: !!b.dataset.allow}); }
+    catch (e) { row.querySelector(".err").textContent = e.message; return; }
+    again();
+  });
 }
 // What lnRef needs to know about a chat: its project, where that project is on disk, and a design chat's documents.
 const chatCtx = (project, did, files) => ({project, roots: P(project).roots || [], did, files: files || []});
@@ -5360,7 +5387,7 @@ function qcRender() {
   $("#qcsend").title = thinking ? "Claude is replying: this message goes as soon as the reply ends" : "";
   if (!QC_PHONE.matches) qcPlace();
   const box = $("#qcmsgs");
-  const key = d ? `${d.id}:${d.title}:${d.msgs.length}:${JSON.stringify(d.queued || [])}:${d.state}:${d.live.length}:${JSON.stringify(d.msgs.map(m => m.tasks.map(t => t.state)))}:${(d.files || []).map(f => f.name + f.mtime).join()}`
+  const key = d ? `${d.id}:${d.title}:${d.msgs.length}:${JSON.stringify(d.queued || [])}:${d.state}:${d.live.length}:${permitKey(d)}:${JSON.stringify(d.msgs.map(m => m.tasks.map(t => t.state)))}:${(d.files || []).map(f => f.name + f.mtime).join()}`
     : t.did ? "loading" : `new:${t.project}:${JSON.stringify(qcRecent(QC.recent, QC.tabs))}`;
   if (key === QC.key) return;
   const stick = box.scrollTop + box.clientHeight >= box.scrollHeight - 40 || !QC.key.startsWith(`${d && d.id}:`);
@@ -5379,6 +5406,7 @@ function qcRender() {
   const links = chatCtx(d.project, d.id, (d.files || []).map(f => f.name));
   box.innerHTML = msgsHtml(d, links);
   box.querySelectorAll("[data-unq]").forEach(b => b.onclick = () => qcUnqueue(+b.dataset.unq));
+  permitButtons(box, d.id, () => { QC.key = ""; qcLoad(); });
   box.querySelectorAll("[data-task]").forEach(b => b.onclick = () => openTask(+b.dataset.task));
   const bottom = () => {
     if (!(stick || thinking)) return;

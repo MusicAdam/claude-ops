@@ -1,4 +1,4 @@
-"""Fresh sessions for tasks and chats, and the MCP servers a project chat loads. Stdlib only, no Claude calls:
+"""Fresh sessions for tasks and chats, and the tools and MCP servers each kind of chat loads. Stdlib only, no Claude calls:
 a fake claude script records its arguments and prompt and streams one assistant event.
 Run from the repo root: /opt/homebrew/bin/python3 -m unittest discover -s tests -q"""
 import json
@@ -18,6 +18,7 @@ import opsd  # noqa: E402
 
 FAKE = """#!/bin/sh
 printf '%s\\n' "$@" > "$FAKE_ARGS"
+printf '%s' "$MCP_TOOL_TIMEOUT" > "$FAKE_ARGS.timeout"
 echo '{"type":"system","subtype":"init","session_id":"new-sid","model":"claude-test"}'
 echo '{"type":"assistant","session_id":"new-sid","message":{"content":[{"type":"text","text":"hi back"}],"usage":{"input_tokens":5,"cache_creation_input_tokens":1000,"cache_read_input_tokens":40000}}}'
 echo '{"type":"result","session_id":"new-sid","total_cost_usd":0}'
@@ -142,21 +143,40 @@ class ChatFresh(Base):
         self.assertNotIn("msg0 ", note)
 
 
-class ChatMcp(Base):
-    def test_default_none(self):
-        did = self.chat()
-        args = self.turn(did, "hello")
-        self.assertIn("--strict-mcp-config", args)
-        self.assertEqual(json.loads(args[args.index("--mcp-config") + 1]), {"mcpServers": {}})
+class ProjectChatLikeCli(Base):
+    """A project chat is the owner's attended session: auto mode, their own MCP servers and Claude in Chrome, no
+    guard, and its permission prompts go to the dashboard (permit_rpc)."""
 
-    def test_listed_servers_only(self):
+    def test_loads_your_tools_and_routes_prompts(self):
         did = self.chat(project="mcpdemo")
         args = self.turn(did, "hello")
-        self.assertIn("--strict-mcp-config", args)
-        self.assertEqual(json.loads(args[args.index("--mcp-config") + 1]),
-                         {"mcpServers": {"kept": {"command": "true"}}})
+        for gone in ("--strict-mcp-config", "--no-chrome", "--permission-prompts", "--allowedTools",
+                     "--dangerously-skip-permissions"):
+            self.assertNotIn(gone, args)
+        self.assertEqual(args[args.index("--permission-mode") + 1], "auto")
+        self.assertEqual(args[args.index("--permission-prompt-tool") + 1], "mcp__claude-ops__permit")
+        server = json.loads(args[args.index("--mcp-config") + 1])["mcpServers"]  # chat_mcp is moot: all of yours load
+        self.assertEqual(server, {"claude-ops": {"type": "http", "url": f"{opsd.DAEMON_URL}/mcp/permit/{did}",
+                                                 "headers": {"X-Ops": "1"}}})
+        settings = json.loads(args[args.index("--settings") + 1])
+        self.assertNotIn("hooks", settings)  # no guard
+        self.assertIn(f"chat for project `mcpdemo`", "\n".join(settings["autoMode"]["environment"]))
+        self.assertGreater(int(Path(f"{self.args}.timeout").read_text()), opsd.PERMIT_WAIT * 1000)
+        system = args[args.index("--append-system-prompt") + 1]
+        self.assertIn("Approve and Deny", system)
+        self.assertIn(f"{opsd.CODE / 'opsd.py'} restart", system)
+        self.assertNotIn("Nobody can answer permission prompts", system)
         msgs = opsd.q("SELECT text FROM design_msgs WHERE design_id=? AND role='ops'", (did,))
-        self.assertTrue(any("nowhere" in m["text"] for m in msgs))
+        self.assertFalse(any("nowhere" in m["text"] for m in msgs))
+
+    def test_design_chat_keeps_its_limits(self):
+        did = self.chat(kind="design")
+        args = self.turn(did, "hello")
+        for kept in ("--strict-mcp-config", "--no-chrome", "--allowedTools"):
+            self.assertIn(kept, args)
+        self.assertEqual(args[args.index("--permission-prompts") + 1], "none")
+        self.assertNotIn("--permission-prompt-tool", args)
+        self.assertIn("hooks", json.loads(args[args.index("--settings") + 1]))
 
 
 class TaskChat(Base):
@@ -188,6 +208,26 @@ class TaskChat(Base):
             self.assertIn("full tools", args[args.index("-p") + 1])
             self.assertEqual(opsd.q("SELECT text FROM task_msgs WHERE task_id=? ORDER BY id DESC LIMIT 1", (tid,),
                                     one=True)["text"], "hi back")
+
+    def test_stopped_task_chat_keeps_worker_limits(self):
+        tid, path = self.task("review")
+        args = self.turn(tid)
+        for kept in ("--strict-mcp-config", "--no-chrome"):
+            self.assertIn(kept, args)
+        self.assertEqual(args[args.index("--permission-prompts") + 1], "none")
+        self.assertNotIn("--permission-prompt-tool", args)
+        self.assertIn("hooks", json.loads(args[args.index("--settings") + 1]))  # the guard
+        self.assertIn("Nobody can answer permission prompts", args[args.index("--append-system-prompt") + 1])
+        self.assertEqual(json.loads(args[args.index("--mcp-config") + 1]), {"mcpServers": {}})
+
+    def test_task_chat_loads_chat_mcp_only(self):
+        tid = opsd.add_task("mcpdemo", "do a thing", title="thing")
+        path = Path(DATA) / f"wt{tid}"
+        path.mkdir()
+        opsd.upd(tid, state="review", session_id="worker-sid", worktree=str(path), branch=f"task/{tid}")
+        args = self.turn(tid)
+        self.assertEqual(json.loads(args[args.index("--mcp-config") + 1]),
+                         {"mcpServers": {"kept": {"command": "true"}}})
 
     def test_merged_task_is_read_only(self):
         tid, path = self.task("done", wt=False)
@@ -285,6 +325,23 @@ class ChatRestart(Base):
         self.assertTrue(msgs[1]["role"] == "ops" and "don't need to resend" in msgs[1]["text"])
         self.assertEqual(msgs[-1]["text"], "hi back")
         self.assertEqual(opsd.design(did)["state"], "idle")
+
+    def test_chat_that_restarted_is_told_not_to_again(self):
+        did = self.chat(sid="old-sid")
+        self.say(did, "user", "restart claude-ops")
+        opsd.q("UPDATE designs SET state='thinking' WHERE id=?", (did,))
+        opsd.set_setting("restarted_by", json.dumps(did))
+        self.args.unlink(missing_ok=True)
+        before = set(opsd.threading.enumerate())
+        opsd.resume_chats()
+        for t in set(opsd.threading.enumerate()) - before:
+            t.join(10)
+        prompt = "\n".join(self.args.read_text().split("\n"))
+        self.assertIn("because you ran `opsd.py restart`", prompt)
+        self.assertIn("don't run it again", prompt)
+        self.assertNotIn("restarted while you were replying", prompt)
+        self.assertTrue(any("Claude restarted claude-ops" in m["text"] for m in self.msgs(did)))
+        self.assertEqual(opsd.setting("restarted_by"), "null")  # once only
 
     def test_ended_chat_is_not_resumed(self):
         did = self.chat(sid="old-sid")
