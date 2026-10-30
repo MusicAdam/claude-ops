@@ -10,7 +10,11 @@
                                        --effort low, medium, high, xhigh or max (else the setting effort);
                                        --research T0|T1|T2 queues a research run whose question is the text;
                                        --branch NAME or --jira KEY: a branch task (README: Branches and pull requests)
-  opsd.py pr open|merge TASK_ID        a branch task: push and open its PRs / merge them in pr_order
+                                       --base BRANCH: its PRs go against BRANCH, not the project's pr_base
+  opsd.py pr open|address TASK_ID     a branch task: push and open its PRs / have the worker address their review
+                                       comments
+  opsd.py pr ready TASK_ID on|off      Merge when ready: the queue fixes red CI, addresses comments and merges each PR
+                                       in pr_order once green and approved, with nothing from you (pr merge = ready on)
   opsd.py schedule add -p NAME --every 'mon 09:00' [--body TEXT] [--hold] [--model M] [--effort E] "title..."
                                        a recurring job: queue that task on that timetable (README: Recurring jobs);
                                        --research T0|T1|T2 makes it a research job whose question is the text
@@ -21,9 +25,12 @@
   opsd.py send NAME [--design|--chat] [--title T] [--hold] [--model M] [--effort E] [--branch B | --jira K] "text..."
                                        from a session the queue started: a task (or chat) in another project
   opsd.py pause-all | resume-all       pause every running task (it stops now, resumable) / resume every paused one
+  opsd.py restart                      restart the claude-ops service now, detached, as Settings' Restart button does:
+                                       how a project chat (the daemon's child) restarts it without stopping itself
   opsd.py archive-project NAME         take a project off the queue: its config moves to projects/archived/
   opsd.py unarchive-project NAME       bring an archived project back, as it was
   opsd.py event TASK_ID TEXT           add a line to a task's log, without the daemon (opsctl, when a restart fails)
+  opsd.py chat show ID [--last K]      print any project's chat, from the db: a header, then its messages in full
   opsd.py guard --daemon PID [--root DIR]   PreToolUse hook: refuse Bash commands that stop processes the session did not start
 
 Per project (paths come from ~/.claude-ops/projects/<name>.toml):
@@ -210,7 +217,7 @@ class Project:
         self.port_base = int(wk.get("port_base", 47900))
         self.worker_notes = wk.get("notes", "").strip()
         self.design_notes = c.get("design", {}).get("notes", "").strip()
-        self.chat_mcp = [str(n) for n in c.get("chat_mcp", [])]  # MCP servers a project chat loads (see mcp_servers)
+        self.chat_mcp = [str(n) for n in c.get("chat_mcp", [])]  # MCP servers a task chat loads (see mcp_servers)
         self.dev_wt = self.wt / "dev"
         self.main_wt = self.wt / "main"
         self.deploy_wt = self.wt / "deploy"  # persistent: build output survives from one deploy to the next
@@ -218,12 +225,34 @@ class Project:
         # direct_main (the default; `direct_main = false` opts out): a task's merge goes on to move main at once (see
         # land), with no release. [[deploy]] targets keep it: a deploy and a merge moving main take turns
         # (exclusive_blocker), and commits a deploy makes on main reach dev before the next gate (catch_up_dev).
-        self.direct_main = bool(c.get("direct_main", True))
+        # flow "pr" (default "dev"): every task is a branch task that ends in a PR, so nothing merges into dev and
+        # nothing waits for Promote; dev only follows main (pr_main). Straight to main is off with it.
+        self.flow = "pr" if c.get("flow") == "pr" else "dev"
+        self.direct_main = bool(c.get("direct_main", True)) and self.flow != "pr"
         # branch tasks (README: Branches and pull requests): a Jira key's branch name, the order a workspace's PRs
         # open and merge in, and how Merge merges one
         self.branch_pattern = str(c.get("branch_pattern") or BRANCH_PATTERN)
+        dbp = str(c.get("default_branch_pattern") or "")  # flow "pr": the branch of a task given none
+        self.default_branch_pattern = dbp if "{id}" in dbp else DEFAULT_BRANCH_PATTERN
         self.pr_order = [str(x).strip("/") or "." for x in c.get("pr_order", []) if isinstance(x, str)]
         self.pr_merge = c.get("pr_merge") if c.get("pr_merge") in PR_MERGES else "squash"
+        # pr_base: the branch PRs go against, one for every repo or a table of repo folder -> branch (main_branch for
+        # a repo it leaves out)
+        pb = c.get("pr_base")
+        self.pr_base = pb.strip() if isinstance(pb, str) and pb.strip() else \
+            {str(k).strip("/") or ".": v.strip() for k, v in pb.items() if isinstance(v, str) and v.strip()} \
+            if isinstance(pb, dict) else None
+        # the review round after Open PR: whose review the queue waits for (and how long), the comment that asks a
+        # review workflow for one, and who reviews once the comments are addressed
+        bots = c.get("pr_bot_reviewers", PR_BOT_REVIEWERS)
+        self.pr_bot_reviewers = [x for x in bots if isinstance(x, str) and x.strip()] if isinstance(bots, list) else []
+        self.pr_review_comment = str(c.get("pr_review_comment") or "").strip()
+        wait = c.get("pr_bot_review_timeout", PR_BOT_REVIEW_TIMEOUT)
+        self.pr_bot_review_timeout = wait if isinstance(wait, (int, float)) and not isinstance(wait, bool) and \
+            wait >= 0 else PR_BOT_REVIEW_TIMEOUT
+        humans = c.get("pr_reviewers", [])
+        self.pr_reviewers = [x.strip().lstrip("@") for x in humans if isinstance(x, str) and x.strip()] \
+            if isinstance(humans, list) else []
         self.config_blob = ""  # claude-ops.toml's blob on main, "" with none (see load_project)
         self.config_error = None  # why the repo file on main is not the config in use
         self.config_warnings = []  # keys the repo file sets that only the home toml may
@@ -262,6 +291,13 @@ class Project:
     def mine(self, r, shas):
         """The sha in a space-separated list that is a commit of repo r, or None."""
         return next((s for s in (shas or "").split() if r.has(s)), None)
+
+    def base_for(self, r):
+        """The branch repo r's PRs go against by default: pr_base for it, else main_branch."""
+        if isinstance(self.pr_base, dict):
+            return next((v for k, v in self.pr_base.items() if r.sub == k or (r.root and k in (".", r.name))),
+                        self.main)
+        return self.pr_base or self.main
 
     def root_first(self, items=None):
         """parts (or (part, x) pairs) with a root repo first, the order to make worktrees in: the others' go
@@ -353,11 +389,19 @@ def deploy_targets(p, items):
 # keys replace the home toml's whole; the home toml keeps identity and machine settings (HOME_ONLY).
 
 REPO_CONFIG = "claude-ops.toml"
-HOME_ONLY = ("title", "repo", "main_branch", "dev_branch", "worktrees", "max_parallel", "direct_main", "chat_mcp")
-MOVABLE = ("repos", "worktree", "gate", "app", "deploy", "branch_pattern", "pr_order", "pr_merge")  # and notes in
+HOME_ONLY = ("title", "repo", "main_branch", "dev_branch", "worktrees", "max_parallel", "direct_main", "flow",
+             "chat_mcp")
+MOVABLE = ("repos", "worktree", "gate", "app", "deploy", "branch_pattern", "default_branch_pattern", "pr_order",
+           "pr_merge", "pr_base", "pr_bot_reviewers", "pr_review_comment", "pr_bot_review_timeout", "pr_reviewers")  # and notes in
 # [worker] and [design]
 BRANCH_PATTERN = "{key}-{slug}"  # a Jira-key task's branch, unless the project sets branch_pattern
+DEFAULT_BRANCH_PATTERN = "ops/{id}-{slug}"  # flow "pr": the branch of a task given none, unless default_branch_pattern
 PR_MERGES = ("squash", "merge", "rebase")  # pr_merge: gh pr merge --<this>
+PR_BOT_REVIEWERS = ["copilot-pull-request-reviewer[bot]"]  # pr_bot_reviewers: whose review the queue waits for
+COPILOT = "copilot-pull-request-reviewer[bot]"  # the login the queue asks for a review when it opens a PR
+PR_BOT_REVIEW_TIMEOUT = 30  # pr_bot_review_timeout: minutes it waits for one, then goes on without
+PR_TOP_KEYS = ("branch_pattern", "default_branch_pattern", "pr_order", "pr_merge", "pr_base", "pr_bot_reviewers",
+               "pr_review_comment", "pr_bot_review_timeout", "pr_reviewers")  # the repo file's top-level keys after repos
 NOTES_TABLES = ("worker", "design")  # only notes moves: [worker] env and port_base are machine settings
 LAST_GOOD = {}  # project name -> the repo file's keys last loaded: a malformed one keeps these
 
@@ -395,7 +439,14 @@ def split_repo_config(text):
         bad = {"repos": not isinstance(v, list) or not all(isinstance(x, str) for x in v),
                "pr_order": not isinstance(v, list) or not all(isinstance(x, str) for x in v),
                "branch_pattern": not isinstance(v, str) or "{key}" not in v,
+               "default_branch_pattern": not isinstance(v, str) or "{id}" not in v,
                "pr_merge": v not in PR_MERGES,
+               "pr_base": not (isinstance(v, str) and v.strip()) and not (
+                   isinstance(v, dict) and all(isinstance(x, str) and x.strip() for x in v.values())),
+               "pr_bot_reviewers": not isinstance(v, list) or not all(isinstance(x, str) for x in v),
+               "pr_reviewers": not isinstance(v, list) or not all(isinstance(x, str) for x in v),
+               "pr_review_comment": not isinstance(v, str),
+               "pr_bot_review_timeout": isinstance(v, bool) or not isinstance(v, (int, float)) or v < 0,
                "gate": not isinstance(v, list) or not all(isinstance(g, dict) and isinstance(g.get("run"), str)
                                                           for g in v),
                "deploy": not isinstance(v, list) or not all(isinstance(t, dict) for t in v)}.get(k, not isinstance(v, dict))
@@ -403,7 +454,12 @@ def split_repo_config(text):
             raise ValueError(f"{k} is not " + {"repos": "a list of folder names", "gate": "a list of [[gate]] tables "
                              "each with a run command", "deploy": "a list of [[deploy]] tables",
                              "pr_order": "a list of repo folder names", "branch_pattern": "text with {key} in it",
-                             "pr_merge": "one of " + ", ".join(PR_MERGES)}.get(
+                             "default_branch_pattern": "text with {id} in it",
+                             "pr_merge": "one of " + ", ".join(PR_MERGES),
+                             "pr_base": "a branch name, or a table of repo folder = branch name",
+                             "pr_bot_reviewers": "a list of GitHub logins", "pr_reviewers": "a list of GitHub logins "
+                             "or org/team names", "pr_review_comment": "text",
+                             "pr_bot_review_timeout": "a number of minutes"}.get(
                                  k, f"a [{k}] table" if k not in NOTES_TABLES else "a [{k}] table whose notes is text"))
     if "repos" in keep and "." not in [str(r).strip("/") or "." for r in keep["repos"]]:
         raise ValueError(f'repos must list "." (the repo {REPO_CONFIG} is in)')
@@ -445,7 +501,7 @@ def config_toml(r):
            f"# The owner's home toml keeps {', '.join(HOME_ONLY[:4])},", f"# {', '.join(HOME_ONLY[4:])} and [worker] env.", ""]
     if "repos" in r:
         out += [f"repos = {toml_value(r['repos'])}", ""]
-    if top := [f"{k} = {toml_value(r[k])}" for k in ("branch_pattern", "pr_order", "pr_merge") if k in r]:
+    if top := [f"{k} = {toml_value(r[k])}" for k in PR_TOP_KEYS if k in r]:
         out += top + [""]
     for k in ("worktree", "gate", "app", "deploy", "worker", "design"):
         v = r.get(k)
@@ -1092,6 +1148,7 @@ def init_db():
                       ("not_before", "REAL"),  # it starts no earlier than this epoch (README: Start later)
                       ("not_before_why", "TEXT"),
                       ("jira", "TEXT"), ("target", "TEXT"),  # a branch task's Jira key and named branch
+                      ("pr_base", "TEXT"),  # the branch its PRs go against, in place of the project's pr_base
                       ("review", "TEXT")):  # a done result's review report {fixed, before, after, check}, as JSON  # the window when not_before is "after the next reset", e.g. 5-hour
         if col not in cols:
             q(f"ALTER TABLE tasks ADD COLUMN {col} {decl}")
@@ -1100,6 +1157,18 @@ def init_db():
         number INTEGER, url TEXT, state TEXT DEFAULT 'waiting', ci TEXT DEFAULT 'pending', failing TEXT,
         checked_at REAL, opened_at REAL, merged_at REAL, merge_commit TEXT, synced INTEGER DEFAULT 0, error TEXT,
         warning TEXT)""")  # a branch task's GitHub PRs, one per repo (README: Branches and pull requests)
+    pr_cols = {r["name"] for r in q("PRAGMA table_info(prs)")}
+    for col, decl in (("review", "TEXT"),  # its review round's stage: bot, addressing, reviewers or human (PR_REVIEW)
+                      ("review_since", "REAL"),  # when the queue pushed it for the round: older reviews don't count
+                      ("reviewed_at", "REAL"),  # when the bot review it waits for came
+                      ("addressed_at", "REAL"),  # when the worker last got its comments: older review bodies are done
+                      ("requested", "TEXT"),  # the reviewers GitHub has requested, as JSON
+                      ("base", "TEXT"),  # the branch it is against on GitHub, as last read (you may retarget it)
+                      ("decision", "TEXT"),  # GitHub's reviewDecision, as last read: "" when no review is required
+                      ("auto_fixes", "INTEGER DEFAULT 0"),  # Merge when ready's Fix CI rounds on it
+                      ("auto_addresses", "INTEGER DEFAULT 0")):  # ... and its Address comments rounds
+        if col not in pr_cols:
+            q(f"ALTER TABLE prs ADD COLUMN {col} {decl}")
     q("CREATE INDEX IF NOT EXISTS prs_task ON prs (task_id, seq)")
     q("CREATE INDEX IF NOT EXISTS events_task ON events (task_id, id)")  # a task's log, and the latest per task
     q("""CREATE TABLE IF NOT EXISTS designs (id INTEGER PRIMARY KEY, project TEXT, title TEXT, session_id TEXT,
@@ -1159,6 +1228,10 @@ def init_db():
                  "release_wait": "180", "effort": "medium"}.items():
         q("INSERT OR IGNORE INTO settings VALUES (?,?)", (k, v))
     q("DELETE FROM settings WHERE key='draining'")  # the old restart's stored hold: a crash could leave it set
+    # Merge all's switch became Merge when ready's
+    q("INSERT OR IGNORE INTO settings SELECT 'prready:' || substr(key, 12), value FROM settings WHERE key LIKE "
+      "'prmergeall:%' AND value='1'")
+    q("DELETE FROM settings WHERE key LIKE 'prmergeall:%'")
 
 
 def setting(k):
@@ -1293,7 +1366,7 @@ def ev(tid, text):
 
 def add_task(project, body, title="", priority=0, hold=0, depends_on=None, parent=None, kind="task", auto_release=None,
              deploy=None, origin=None, senddev=None, model=None, effort=None, research=None, not_before=None,
-             jira=None, target=None):
+             jira=None, target=None, pr_base=None):
     """auto_release None takes the project's default ("Promote after merge" on the project).
     A deploy (kind "deploy") is made only by queue_deploy: you clicked Deploy, or ran `opsd.py deploy`.
     origin: the session in another project that sent it (see send_peer).
@@ -1303,7 +1376,9 @@ def add_task(project, body, title="", priority=0, hold=0, depends_on=None, paren
     research: a research run's {question, tier, slug, path} (see queue_research).
     not_before: when it may start, as start_time takes it (a time, "reset" or an epoch); None starts it when it can.
     jira, target: a branch task's Jira key and named branch (README: Branches and pull requests); its branch is
-    worked out now and kept in branch. A branch task never promotes after merge."""
+    worked out now and kept in branch. A branch task never promotes after merge. In a flow "pr" project every task
+    and Send to dev is one: given no branch, it gets default_branch_pattern's (default_branch).
+    pr_base: the branch its PRs go against in every repo, in place of the project's pr_base (a branch task only)."""
     p = proj(project)
     jira, target = (str(jira or "").strip() or None), (str(target or "").strip() or None)
     model, effort = model_name(model), effort_name(effort)
@@ -1319,15 +1394,27 @@ def add_task(project, body, title="", priority=0, hold=0, depends_on=None, paren
         if kind != "task" or research:
             raise ValueError("only a task can work on a named branch")
         branch = branch_name(p, title, jira, target)
-    tid = q("INSERT INTO tasks (project, title, body, priority, hold, depends_on, parent, created, kind, auto_release, "
-            "deploy, origin, senddev, model, effort, research, jira, target, branch) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (project, title, body, int(priority), int(bool(hold)), depends_on or None, parent, time.time(), kind,
-             int(bool(auto_release) and kind in MERGES and not branch), json.dumps(deploy) if deploy else None,
-             json.dumps(origin) if origin else None, json.dumps(senddev) if senddev else None, model, effort,
-             json.dumps(research) if research else None, jira, target, branch))
+    pr_flow = getattr(p, "flow", "dev") == "pr" and kind in MERGES and not branch
+    pr_base = str(pr_base or "").strip() or None
+    if pr_base:
+        if not (branch or pr_flow):
+            raise ValueError("a PR base is for a task on a branch: give it a branch or Jira key too")
+        if subprocess.run(["git", "check-ref-format", "--branch", pr_base], capture_output=True).returncode:
+            raise ValueError(f"{pr_base} is not a branch name git accepts")
+    with DBL:  # flow "pr": its branch name has its id in it, so the id is picked first and no other write comes between
+        tid = q("SELECT COALESCE(MAX(id), 0) + 1 AS n FROM tasks", one=True)["n"] if pr_flow else None
+        if pr_flow:  # kept as its target too, so it is a branch task from the start
+            branch = target = default_branch(p, tid, title)
+        tid = q("INSERT INTO tasks (id, project, title, body, priority, hold, depends_on, parent, created, kind, "
+                "auto_release, deploy, origin, senddev, model, effort, research, jira, target, branch, pr_base) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (tid, project, title, body, int(priority), int(bool(hold)), depends_on or None, parent, time.time(),
+                 kind, int(bool(auto_release) and kind in MERGES and not branch), json.dumps(deploy) if deploy else None,
+                 json.dumps(origin) if origin else None, json.dumps(senddev) if senddev else None, model, effort,
+                 json.dumps(research) if research else None, jira, target, branch, pr_base))
     ev(tid, "queued" + (f" after #{depends_on}" if depends_on else "") + (f" on {model}" if model else "")
-       + (f" at {effort} effort" if effort else "") + (f" on branch {branch}" if branch else ""))
+       + (f" at {effort} effort" if effort else "") + (f" on branch {branch}" if branch else "")
+       + (f", PRs against {pr_base}" if pr_base else ""))
     if nb:
         q("UPDATE tasks SET not_before=?, not_before_why=? WHERE id=?", (nb, why, tid))
         ev(tid, f"waits for the {why} reset: starts after {start_clock(nb)}" if why
@@ -1354,6 +1441,17 @@ def branch_name(p, title, jira=None, target=None):
     if name in (p.main, p.dev) or name.startswith("task/"):
         raise ValueError(f"{name!r} is one of the queue's own branches: pick another name")
     return name
+
+
+def default_branch(p, tid, title):
+    """A flow "pr" task's branch when it was given none: default_branch_pattern for its id and title, or
+    DEFAULT_BRANCH_PATTERN's when that makes no name git accepts."""
+    for pattern in (p.default_branch_pattern, DEFAULT_BRANCH_PATTERN):
+        name = pattern.replace("{id}", str(tid)).replace("{slug}", slug_of(title))
+        if not subprocess.run(["git", "check-ref-format", "--branch", name], capture_output=True).returncode and \
+                name not in (p.main, p.dev) and not name.startswith("task/"):
+            return name
+    return DEFAULT_BRANCH_PATTERN.replace("{id}", str(tid)).replace("{slug}", "task")
 
 
 def branch_input(text):
@@ -1700,15 +1798,16 @@ PID_FINDERS = {"pgrep", "pidof", "lsof", "fuser", "ps"}
 LAUNCHCTL_READ = {"print", "list", "blame", "getenv", "help", "version", "print-disabled", "print-cache"}
 
 
-def guard_settings(root, p=None, chat=False):
+def guard_settings(root, p=None, chat=False, guard=True):
     """--settings for a Claude session: run each Bash command past the guard. root is the session's worktree;
     a process working or installed there counts as the session's own. None: only its descendants do. With p, the
-    project of an auto-mode session (a worker, or a chat when chat), add auto-mode rules for it (see auto_mode)."""
+    project of an auto-mode session (a worker, or a chat when chat), add auto-mode rules for it (see auto_mode).
+    guard False (a project chat, attended like the CLI): no guard hook, only the auto-mode rules."""
     cmd = [sys.executable, str(CODE / "opsd.py"), "guard", "--daemon", str(os.getpid()), "--port", str(PORT)]
     if root:
         cmd += ["--root", str(root)]
     hook = {"type": "command", "command": " ".join(shlex.quote(a) for a in cmd)}
-    out = {"hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [hook]}]}}
+    out = {"hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [hook]}]}} if guard else {}
     if p:
         out["autoMode"] = auto_mode(p, root, chat)
     return json.dumps(out)
@@ -1891,6 +1990,8 @@ def guard_check(cmd, root=None, daemon=0, port=PORT):
             return "osascript quitting apps or driving System Events touches the user's apps."
         if name == "opsctl" and args[:1] and args[0] in ("start", "stop", "restart", "pause", "resume"):
             return f"`opsctl {args[0]}` acts on the live claude-ops service and every task it runs."
+        if any(Path(a).name == "opsd.py" and words[i + 1:i + 2] == ["restart"] for i, a in enumerate(words)):
+            return "`opsd.py restart` restarts the live claude-ops service and pauses every task it runs."
         if any(re.search(rf"(127\.0\.0\.1|localhost|\[::1\]):{port}\b", a) for a in args):
             return (f"port {port} is the live claude-ops dashboard; its API pauses and cancels tasks. Use the "
                     f"opsd.py commands instead: `{OPSD_CMD} schedule edit ID --body-file PATH` changes a schedule "
@@ -1938,21 +2039,23 @@ def guard(argv):
 def worker_prompt(p, t):
     tpl = (CODE / "worker_prompt.md").read_text()
     checks = ", ".join(f"`{g['run']}`" for g in p.gate) or "(none configured: run whatever tests the repo has)"
-    notes = workspace_note(p, t["branch"], is_branch_task(t)) + \
+    notes = workspace_note(p, t["branch"], is_branch_task(t),
+                           pr_against(p, t, origin=True) if is_branch_task(t) else None) + \
         (f"## Notes for {p.title}\n\n{p.worker_notes}\n" if p.worker_notes else "")
     notes += repo_config_note(p) + peer_brief(p, "task")
     base, rules, finish = p.dev, "", (f"When you finish, the queue rebases your branch onto the latest `{p.dev}`, runs "
                                       f"the merge check again,\nand merges into `{p.dev}`. If that fails, you are "
                                       "resumed with the error.")
     if is_branch_task(t):  # README: Branches and pull requests
-        base = f"origin/{p.main}" + (f" (or `{p.main}` in a repo with no origin)" if p.repos else "")
+        against = pr_against(p, t)
+        base = pr_against(p, t, origin=True) + (" (or the local branch in a repo with no origin)" if p.repos else "")
         rules = (f"\n- This is a branch task: commit on `{t['branch']}`, the branch you are given, and on no other. "
                  f"Don't touch `{p.dev}` or `{p.main}`, and don't push: the queue pushes it when the owner opens a "
-                 f"pull request. The branch may have commits from earlier work already; add yours on top."
+                 f"pull request against `{against}`. The branch may have commits from earlier work already; add yours on top."
                  + (f" Start each commit message with the Jira key `{t['jira']}`, as in `{t['jira']}: Fix the login "
                     f"crash`." if t["jira"] else ""))
         finish = (f"When you finish, the queue runs the merge check on `{t['branch']}` (rebased onto the latest "
-                  f"`origin/{p.main}` first, until the branch has been pushed; never after), and leaves the commits on "
+                  f"`{pr_against(p, t, origin=True)}` first, until the branch has been pushed; never after), and leaves the commits on "
                   f"the branch. Nothing merges into `{p.dev}`. If the check fails, you are resumed with the error.")
     return tpl.format(id=t["id"], title=t["title"], body=t["body"], project=p.title, worktree=t["worktree"],
                       branch=t["branch"], repo=p.repo, dev=p.dev, main=p.main, port=p.port_for(t["id"]),
@@ -1975,7 +2078,7 @@ def repo_config_note(p):
             "starts: the queue holds them until then.\n\n")
 
 
-def workspace_note(p, branch=None, named=False):
+def workspace_note(p, branch=None, named=False, base=None):
     """How a workspace's worktree is laid out, for the briefs. Empty for a plain project."""
     if not p.repos:
         return ""
@@ -1983,7 +2086,7 @@ def workspace_note(p, branch=None, named=False):
         kids = [r for r in p.parts if not r.root]
         names = ", ".join(f"`{r.sub}/`" for r in kids)
         on = (f"Each is a git worktree on branch `{branch}`, branched from that repo's "
-              f"`{f'origin/{p.main}' if named else p.dev}`. Commit in each repo you change; a repo you leave alone "
+              f"`{(base or f'origin/{p.main}') if named else p.dev}`. Commit in each repo you change; a repo you leave alone "
               f"is not {'pushed' if named else 'merged'}.") if branch else \
             "Each is a git worktree, detached at the commit being checked."
         return (f"## This is a workspace of {len(p.repos)} git repos\n\n"
@@ -1994,7 +2097,7 @@ def workspace_note(p, branch=None, named=False):
                 f"kept only if you commit them in the root repo, like any other repo.\n\n")
     names = ", ".join(f"`{r}/`" for r in p.repos)
     on = (f"Each is a git worktree of its own repo on branch `{branch}`, branched from that repo's "
-          f"`{f'origin/{p.main}' if named else p.dev}`. Commit in each repo you change; a repo you leave alone is not "
+          f"`{(base or f'origin/{p.main}') if named else p.dev}`. Commit in each repo you change; a repo you leave alone is not "
           f"{'pushed' if named else 'merged'}.") if branch else \
         "Each is a git worktree of its own repo, detached at the commit being checked."
     return (f"## This is a workspace of {len(p.repos)} git repos\n\n"
@@ -2034,6 +2137,16 @@ def stale_session(t):
     if ctx > FRESH_ABOVE:
         return f"the context reached {ctx:,} tokens", f"context {ctx // 1000}k"
     return None
+
+
+def stale_or_ready(t):
+    """stale_session(t), except while Merge when ready is on: its steps resume the same session, to keep its context
+    across fixes, and the event log says what a fresh one would have saved."""
+    why = stale_session(t)
+    if why and is_branch_task(t) and ready_on(t["id"]):
+        ev(t["id"], f"Merge when ready: resumed the same session anyway ({why[1]}); a fresh one would have cost less")
+        return None
+    return why
 
 
 def first_brief(p, t):
@@ -2127,7 +2240,7 @@ def run_claude(p, tid, prompt, proof=False):
     rp = result_path(t)
     rp.unlink(missing_ok=True)
     turn, kept = prompt, None
-    if not proof and (why := stale_session(t)):  # cheaper to start over than to resume: brief, handoff note, then this turn
+    if not proof and (why := stale_or_ready(t)):  # cheaper to start over than to resume: brief, handoff note, then this turn
         kept = session_model(t, t["kind"])  # the fresh session stays on the model the old one ran
         brief = first_brief(p, t)
         prompt = "\n\n".join(x for x in (brief, handoff_note(p, t, why[0]),
@@ -2323,7 +2436,8 @@ def task_steer(tid, text):
         t = task(tid)
         pipe = STEER_PIPES.get(tid)
         if is_branch_task(t) and (t["state"] in ("on_branch", "pr") or (t["state"] == "needs_input" and
-                                                                          t["phase"] in (PR_RED, PR_CLOSED))):
+                                                                          t["phase"] in (PR_RED, PR_CLOSED, PR_LEFT,
+                                                                                         PR_NO_MERGE))):
             # README: Branches and pull requests. The worker resumes with it, the gate runs, and the queue pushes
             # to an open PR: how you pass on review comments
             q("INSERT INTO task_msgs (task_id, role, text, ts) VALUES (?,?,?,?)", (tid, "steer", text, time.time()))
@@ -2794,14 +2908,16 @@ def _pipeline(p, tid):
                             + (f" of {r.name})" if r.sub else ")"))
         need_claude = True
 
-        if not (branch_parts(p, t["branch"]) if on_branch else changed_parts(p, t["branch"])):
-            if sending:  # applying your changes changed nothing: dev has them already
+        if not (branch_parts(p, t["branch"], t) if on_branch else changed_parts(p, t["branch"])):
+            if sending and not on_branch:  # applying your changes changed nothing: dev has them already
                 return senddev_landed(p, tid, None, f"{p.dev} already had these changes")
+            if sending:  # flow "pr": main has them already, and your checkout gets them when main moves there
+                return finish(p, tid, merged=None, note=f"origin/{p.main} already had these changes: no PR to open")
             return finish(p, tid, merged=None, note="no code changes")
 
         # Rebase onto the latest dev, gate, then merge (or hold for review). A branch task rebases onto the latest
         # origin/main instead, and only in a repo where its branch was never pushed; then it stays on its branch.
-        upd(tid, state="gating", phase=f"rebasing onto {p.main if on_branch else p.dev}")
+        upd(tid, state="gating", phase=f"rebasing onto {pr_against(p, t) if on_branch else p.dev}")
         if p.direct_main and not on_branch:  # commits made straight to main come into dev first, so the gate checks them too
             with p.lock:
                 err = catch_up_dev(p, tid)
@@ -2816,7 +2932,7 @@ def _pipeline(p, tid):
             if on_branch and pushed(part, t["branch"]):  # never rebase a pushed branch: new commits go on top
                 kept.append(part)
                 continue
-            onto = base_ref(p, part) if on_branch else p.dev
+            onto = base_ref(p, part, t) if on_branch else p.dev
             r = subprocess.run(["git", "rebase", onto], cwd=part.at(wt), capture_output=True, text=True)
             if r.returncode:
                 subprocess.run(["git", "rebase", "--abort"], cwd=part.at(wt), capture_output=True)
@@ -2827,10 +2943,11 @@ def _pipeline(p, tid):
             if not bump_round(p, tid, "rebase conflict" + (f" in {part.name}" if part.sub else "")):
                 return
             run = f"git -C {part.sub} rebase {onto}" if part.sub else f"git rebase {onto}"
-            what = f"`{p.main}` (`{onto}`)" if on_branch else f"`{p.dev}`"
+            bname = onto.removeprefix("origin/")
+            what = f"`{bname}` (`{onto}`)" if on_branch else f"`{p.dev}`"
             prompt = (f"The {what} branch{f' of {part.name}' if part.sub else ''} moved and branch "
                       f"`{t['branch']}` no longer rebases cleanly onto it. Run `{run}`, resolve the conflicts "
-                      f"so both your change and the new {p.main if on_branch else p.dev} work survive, re-run the "
+                      f"so both your change and the new {bname if on_branch else p.dev} work survive, re-run the "
                       f"checks, commit, and write $OPS_RESULT again.\n\ngit said:\n{r.stdout[-1500:]}{r.stderr[-1500:]}")
             upd(tid, state="running")
             continue
@@ -2857,7 +2974,7 @@ def _pipeline(p, tid):
                           f"amend or force-push a pushed branch), re-run the failing step yourself, commit, and write "
                           f"$OPS_RESULT again.")
             else:
-                onto = f"origin/{p.main}" if on_branch else p.dev
+                onto = pr_against(p, t, origin=True) if on_branch else p.dev
                 prompt = (f"The queue rebased your branch onto the latest `{onto}` and ran its merge check. "
                           f"It failed:\n\n{detail}\n\nFix it in this worktree (keep the history rebased on "
                           f"{onto}), re-run the failing step yourself, commit, and write $OPS_RESULT again.")
@@ -2999,7 +3116,17 @@ PR_RED = "CI failed"  # the phase of a branch task that needs you because a PR's
 PR_CLOSED = "PR closed"  # ... because a PR was closed without merging
 PR_SETUP = "can't open PRs"  # ... because gh, its login, a GitHub origin or a push is in the way
 PR_MAIN = "main can't follow origin"  # ... because your main has commits origin/main lacks
-PR_PHASES = (PR_RED, PR_CLOSED, PR_SETUP, PR_MAIN)
+PR_PICK_PHASE = "pick reviewers"  # ... because nobody is set to review a PR once its comments are addressed
+PR_LEFT = "comments left"  # ... because Merge when ready addressed a PR's comments READY_ROUNDS times and more came
+PR_NO_MERGE = "can't merge"  # ... because Merge when ready's gh pr merge failed (a conflict, branch protection)
+PR_PHASES = (PR_RED, PR_CLOSED, PR_SETUP, PR_MAIN, PR_PICK_PHASE, PR_LEFT, PR_NO_MERGE)
+READY_ROUNDS = 3  # Merge when ready's automatic Fix CI rounds per PR, and its Address comments rounds per PR
+# A PR's review round (prs.review): awaiting the bot review, the worker addressing comments, needing you to pick its
+# reviewers, awaiting human review. NULL: a PR opened before the round existed, which skips it
+PR_BOT, PR_ADDRESSING, PR_PICK, PR_HUMAN = "bot", "addressing", "reviewers", "human"
+PR_REVIEW_WORDS = {PR_BOT: "awaiting bot review", PR_ADDRESSING: "addressing comments", PR_PICK: "needs reviewers",
+                   PR_HUMAN: "awaiting human review"}
+REVIEW_SLACK = 60  # seconds: a review GitHub stamps this much before the queue's push still counts (clock skew)
 PR_POLL_EVERY = 120  # seconds between polls of open PRs
 GH_TIMEOUT = 120  # seconds a gh or git network call may take
 PR_LOCKS = {}  # task id -> lock: its PR step and a Merge click never run gh writes at once
@@ -3031,14 +3158,15 @@ def gh_path():
                                        if os.access(x, os.X_OK)), None)
 
 
-def gh(r, *args, timeout=GH_TIMEOUT):
-    """gh args... against repo r's GitHub repo, by -R: gh never touches your checkout (no local branch switch or
-    delete). Returns (exit code, stdout, stderr)."""
+def gh(r, *args, timeout=GH_TIMEOUT, by_r=True):
+    """gh args... against repo r's GitHub repo, by -R (by_r=False for gh api, which has no -R): gh never touches
+    your checkout (no local branch switch or delete). Returns (exit code, stdout, stderr)."""
     exe = gh_path()
     if not exe:
         return 127, "", "gh is not installed"
     try:
-        res = subprocess.run([exe, *args, *(("-R", gh_repo(r)) if r and gh_repo(r) else ())], cwd=r.src if r else None,
+        res = subprocess.run([exe, *args, *(("-R", gh_repo(r)) if by_r and r and gh_repo(r) else ())],
+                             cwd=r.src if r else None,
                              capture_output=True, text=True, timeout=timeout, env={**os.environ, **NET_ENV})
     except (subprocess.TimeoutExpired, OSError) as e:
         return 1, "", f"gh {' '.join(args[:2])}: {e}"
@@ -3067,10 +3195,41 @@ def ref_ok(r, ref):
     return bool(r.git("rev-parse", "--verify", "-q", ref, check=False))
 
 
-def base_ref(p, r):
-    """What a branch task branches from and rebases onto in repo r: origin/main, or main for a repo with no
-    origin (or one whose origin has no main yet)."""
-    return f"origin/{p.main}" if origin_url(r) and ref_ok(r, f"refs/remotes/origin/{p.main}") else p.main
+def pr_base(p, r, t=None):
+    """The branch t's PR in repo r goes against: the base GitHub last showed for its PR (you may retarget it there),
+    else the task's own base, else the project's pr_base for r, else main_branch."""
+    row = q("SELECT base FROM prs WHERE task_id=? AND repo IS ? AND base IS NOT NULL", (t["id"], r.sub), one=True) \
+        if t and t.get("id") else None
+    return (row and row["base"]) or (t and t.get("pr_base")) or p.base_for(r)
+
+
+def pr_against(p, t, origin=False):
+    """The branch t's PRs go against, for people: "main", or "dunk: feat/x, swish: main" when its repos differ.
+    origin: "origin/main" for one branch."""
+    rows = [part_of(p, x["repo"]) for x in pr_rows(t["id"])] if t and t.get("id") else []
+    bases = {r.name: pr_base(p, r, t) for r in [r for r in rows if r] or p.parts}
+    if len(set(bases.values())) == 1:
+        return ("origin/" if origin else "") + next(iter(bases.values()))
+    return ", ".join(f"{n}: {b}" for n, b in bases.items())
+
+
+def base_ref(p, r, t=None):
+    """What a branch task branches from and rebases onto in repo r: origin/<its PR base>, or that branch for a repo
+    with no origin (or whose origin lacks it). main as above when the base is on neither."""
+    for b in dict.fromkeys((pr_base(p, r, t), p.main)):
+        if origin_url(r) and ref_ok(r, f"refs/remotes/origin/{b}"):
+            return f"origin/{b}"
+        if ref_ok(r, f"refs/heads/{b}"):
+            return b
+    return p.main
+
+
+def own_range(p, r, branch, t=None):
+    """git rev-list args for the commits branch has of its own in repo r: none its base has, nor origin/main. A
+    branch made from main before its base moved to another branch keeps main's commits out of the count."""
+    base = base_ref(p, r, t)
+    om = f"origin/{p.main}" if origin_url(r) and ref_ok(r, f"refs/remotes/origin/{p.main}") else p.main
+    return [f"refs/heads/{branch}", f"^{base}"] + ([f"^{om}"] if om != base and ref_ok(r, om) else [])
 
 
 def pushed(r, branch):
@@ -3078,10 +3237,10 @@ def pushed(r, branch):
     return ref_ok(r, f"refs/remotes/origin/{branch}")
 
 
-def branch_parts(p, branch):
-    """The repos where branch has commits its base lacks: the ones the task commits to."""
+def branch_parts(p, branch, t=None):
+    """The repos where branch has commits of its own (own_range): the ones the task commits to."""
     return [r for r in p.parts if ref_ok(r, f"refs/heads/{branch}")
-            and int(r.git("rev-list", "--count", f"{base_ref(p, r)}..refs/heads/{branch}") or 0)]
+            and int(r.git("rev-list", "--count", *own_range(p, r, branch, t)) or 0)]
 
 
 def part_of(p, sub):
@@ -3136,18 +3295,18 @@ def free_branch(p, r, branch, mine):
         r.git("checkout", "-q", "--detach", cwd=at)
 
 
-def start_point(p, r, branch):
+def start_point(p, r, branch, t=None):
     """(how, args for git worktree add / checkout -b) for a branch the repo lacks locally."""
     if pushed(r, branch):
         return f"from origin/{branch}", ["-b", branch, "--track", f"origin/{branch}"]
-    base = base_ref(p, r)
+    base = base_ref(p, r, t)
     return f"new from {base}", ["-b", branch, "--no-track", base]
 
 
 def branch_worktree(p, tid):
     """ensure_worktree for a branch task: its worktree has its named branch checked out in every repo. A local branch
     is used (fast-forwarded first when origin/<branch> is ahead of it), else one is made tracking origin/<branch>,
-    else from origin/main (main with no origin)."""
+    else from origin/<its PR base> (base_ref)."""
     t = task(tid)
     branch = t["branch"]
     path = Path(t["worktree"]) if t["worktree"] else p.wt / f"t{tid}"
@@ -3172,7 +3331,7 @@ def branch_worktree(p, tid):
                 said.append(f"{r.name + ' ' if r.sub else ''}fast-forwarded to origin/{branch}")
             how, args = "local", [branch]
         else:
-            how, args = start_point(p, r, branch)
+            how, args = start_point(p, r, branch, t)
         if on:
             continue
         if here:
@@ -3192,7 +3351,7 @@ def branch_line(p, t):
     for r in p.parts:
         if not ref_ok(r, f"refs/heads/{branch}"):
             continue
-        log = r.git("log", "--format=%h %s", f"{base_ref(p, r)}..refs/heads/{branch}").splitlines()
+        log = r.git("log", "--format=%h %s", *own_range(p, r, branch, t)).splitlines()
         if not log:
             continue
         n = f"{len(log)} commit{'s' * (len(log) != 1)}"
@@ -3254,7 +3413,7 @@ def pr_words(p, row):
 def pr_plan(p, t):
     """(repos with commits on t's branch and an origin, as [(part, seq)] in PR order; repos with commits and no
     origin). seq is the place in pr_order among them: the first, and every repo pr_order leaves out, is 0."""
-    touched = branch_parts(p, t["branch"])
+    touched = branch_parts(p, t["branch"], t)
     local = [r for r in touched if not origin_url(r)]
     touched = [r for r in touched if r not in local]
     named = lambda r, n: r.sub == n or (r.root and n in (".", r.name))
@@ -3318,9 +3477,10 @@ def pr_push(p, tid, r, branch):
 def pr_open_one(p, t, row, rows):
     """Push and open (or adopt) row's PR. None, or why not."""
     r, branch = part_of(p, row["repo"]), t["branch"]
+    base = pr_base(p, r, t)
     if why := pr_push(p, t["id"], r, branch):
         return why
-    rc, out, err = gh(r, "pr", "list", "--head", branch, "--base", p.main, "--state", "open", "--json", "number,url")
+    rc, out, err = gh(r, "pr", "list", "--head", branch, "--base", base, "--state", "open", "--json", "number,url")
     found = None
     try:
         found = (json.loads(out) or [None])[0] if rc == 0 else None
@@ -3331,20 +3491,48 @@ def pr_open_one(p, t, row, rows):
         ev(t["id"], f"{pr_name(p, row) + ': ' if row['repo'] else ''}PR #{number} was open already for {branch}; "
                     f"watching it: {url}")
     else:
-        rc, out, err = gh(r, "pr", "create", "--base", p.main, "--head", branch, "--title", pr_title(t),
+        rc, out, err = gh(r, "pr", "create", "--base", base, "--head", branch, "--title", pr_title(t),
                           "--body", pr_body(p, t, row, rows))
         m = re.search(r"https?://\S+/pull/(\d+)", out + err)
         if rc or not m:
             return f"gh pr create{' in ' + r.name if r.sub else ''} failed: {(err or out).strip()[-1500:]}"
         number, url = int(m.group(1)), m.group(0)
-        ev(t["id"], f"opened {pr_name(p, row) + ' ' if row['repo'] else ''}PR #{number}: {url}")
-    q("UPDATE prs SET number=?, url=?, state='OPEN', ci='pending', failing=NULL, opened_at=?, error=NULL WHERE id=?",
-      (number, url, time.time(), row["id"]))
+        ev(t["id"], f"opened {pr_name(p, row) + ' ' if row['repo'] else ''}PR #{number} against {base}: {url}")
+    q("UPDATE prs SET number=?, url=?, state='OPEN', ci='pending', failing=NULL, opened_at=?, error=NULL, "
+      "review='bot', review_since=?, reviewed_at=NULL, addressed_at=NULL, requested=NULL, base=? WHERE id=?",
+      (number, url, time.time(), time.time(), base, row["id"]))
+    if p.pr_review_comment:  # asks a review workflow (say, @claude /pr-review) for its review
+        rc, out, err = gh(r, "pr", "comment", str(number), "--body", p.pr_review_comment)
+        ev(t["id"], f"asked for a review on #{number}: {p.pr_review_comment}" if rc == 0 else
+           f"couldn't post the review comment on #{number}: {(err or out).strip()[-300:]}")
+    if login_key(COPILOT) in {login_key(x) for x in p.pr_bot_reviewers}:
+        pr_ask_copilot(t["id"], r, number, adopted=bool(found))
     for x in pr_rows(t["id"]):  # the earlier PRs' bodies link this one now
         if x["id"] != row["id"] and x["number"] and x["state"] == "OPEN":
             gh(part_of(p, x["repo"]), "pr", "edit", str(x["number"]), "--body", pr_body(p, task(t["id"]), x,
                                                                                        pr_rows(t["id"])))
     return None
+
+
+def pr_ask_copilot(tid, r, number, adopted):
+    """Request Copilot's review of a PR the queue just opened, or adopted unless Copilot reviewed it or is asked
+    already. gh pr edit --add-reviewer takes no bot, so it goes by the REST API. A failure only logs: the bot
+    review's timeout still applies."""
+    if adopted:
+        rc, out, err = gh(r, "pr", "view", str(number), "--json", "reviews,reviewRequests")
+        try:
+            d = json.loads(out) if rc == 0 else {}
+        except ValueError:
+            d = {}
+        seen = [(x.get("author") or {}).get("login") for x in d.get("reviews") or [] if isinstance(x, dict)]
+        seen += [x.get("login") or x.get("name") for x in d.get("reviewRequests") or [] if isinstance(x, dict)]
+        if {login_key(x) for x in seen} & {login_key(COPILOT), "copilot"}:  # gh may show the bot as Copilot
+            return
+    host, owner, name = gh_where(r)
+    rc, out, err = gh(r, "api", *host, "-X", "POST", f"repos/{owner}/{name}/pulls/{number}/requested_reviewers",
+                      "-f", f"reviewers[]={COPILOT}", by_r=False)
+    ev(tid, f"asked Copilot to review #{number}" if rc == 0 else
+       f"couldn't ask Copilot to review #{number}: {(err or out).strip()[-300:]}")
 
 
 def ci_of(rollup):
@@ -3375,7 +3563,8 @@ def pr_view(p, t, row):
     """Read one PR's state and checks from GitHub into its row. Returns the new row, or None if gh failed."""
     r = part_of(p, row["repo"])
     rc, out, err = gh(r, "pr", "view", str(row["number"]), "--json",
-                      "state,mergedAt,mergeCommit,statusCheckRollup,mergeable,url")
+                      "state,mergedAt,mergeCommit,statusCheckRollup,mergeable,url,author,reviews,reviewRequests,"
+                      "baseRefName,reviewDecision")
     try:
         d = json.loads(out) if rc == 0 else None
     except ValueError:
@@ -3387,20 +3576,35 @@ def pr_view(p, t, row):
     state = str(d.get("state") or "OPEN").upper()
     ci, failing = ci_of(d.get("statusCheckRollup"))
     kw = {"state": state, "ci": ci, "failing": json.dumps(failing) if failing else None, "checked_at": time.time(),
-          "url": d.get("url") or row["url"]}
+          "url": d.get("url") or row["url"], "decision": str(d.get("reviewDecision") or "").upper()}
+    if state == "OPEN" and kw["decision"] != (row["decision"] or "") and kw["decision"]:
+        ev(t["id"], f"{pr_words(p, row)}: review {kw['decision'].lower().replace('_', ' ')}")
+    if (base := str(d.get("baseRefName") or "").strip()) and base != row["base"]:  # retargeted on GitHub: kept
+        kw["base"] = base
+        if row["base"]:
+            ev(t["id"], f"{pr_words(p, row)} now goes against {base} (was {row['base']}): the task follows it")
     if state == "MERGED" and row["state"] != "MERGED":
         kw["merged_at"] = iso_epoch(d.get("mergedAt")) or time.time()
         kw["merge_commit"] = (d.get("mergeCommit") or {}).get("oid")
         early = [x for x in pr_rows(t["id"]) if x["seq"] < row["seq"] and x["state"] != "MERGED"]
         if early:
             kw["warning"] = (f"merged on GitHub before {', '.join(pr_words(p, x) for x in early)}, out of pr_order")
-        ev(t["id"], f"{pr_words(p, row)} merged" + (f": {kw['warning']}" if early else ""))
+        into = kw.get("base") or row["base"]
+        ev(t["id"], f"{pr_words(p, row)} merged" + (f" into {into}" if into else "")
+           + (f": {kw['warning']}" if early else ""))
     elif state == "CLOSED" and row["state"] != "CLOSED":
         ev(t["id"], f"{pr_words(p, row)} was closed without merging")
     elif state == "OPEN" and ci != row["ci"] and ci != "pending":
         ev(t["id"], f"{pr_words(p, row)}: CI {ci}" + (": " + ", ".join(f["name"] for f in failing) if failing else ""))
     if state == "OPEN" and row["state"] == "CLOSED":
         kw["error"] = None
+    asked = [x.get("login") or x.get("slug") or x.get("name") for x in d.get("reviewRequests") or []
+             if isinstance(x, dict)]
+    bots = {login_key(x) for x in p.pr_bot_reviewers} | {"copilot"}  # a bot asked to review is no human reviewer
+    kw["requested"] = json.dumps([x for x in asked if x and login_key(x) not in bots])
+    if row["review"] == PR_BOT and not row["reviewed_at"] and (by := bot_review(p, row, d)):
+        kw["reviewed_at"] = time.time()
+        ev(t["id"], f"{pr_words(p, row)}: {by} reviewed it")
     q(f"UPDATE prs SET {','.join(k + '=?' for k in kw)} WHERE id=?", (*kw.values(), row["id"]))
     return q("SELECT * FROM prs WHERE id=?", (row["id"],), one=True)
 
@@ -3431,6 +3635,70 @@ def pr_mergeable(row, rows):
     return None
 
 
+def ready_on(tid):
+    """Whether the task's Merge when ready switch is on (README: Merge when ready)."""
+    return setting(f"prready:{tid}") == "1"
+
+
+def ready_wait(p, row, rows):
+    """What Merge when ready waits for before it merges row, in words, or None once it may as GitHub last read: open,
+    CI green, every earlier PR merged, its review round past the bot and addressing stages, and approved
+    (reviewDecision APPROVED, or empty with no requested reviewer pending). Comments left are read at merge time."""
+    w = pr_words(p, row)
+    if not row["number"]:
+        return f"waiting for {w} to open"
+    if row["state"] != "OPEN":
+        return f"{w} is {row['state'].lower()}"
+    if row["ci"] != "green":
+        return f"CI red on {w}" if row["ci"] == "red" else f"waiting for CI on {w}"
+    if any(x["seq"] < row["seq"] and x["state"] != "MERGED" for x in rows):
+        return f"{w} waits for the PRs before it in pr_order"
+    if row["review"] in (PR_BOT, PR_ADDRESSING, PR_PICK):
+        return f"{PR_REVIEW_WORDS[row['review']]} on {w}"
+    decision = row["decision"] or ""
+    if decision == "CHANGES_REQUESTED":
+        return f"changes requested on {w}"
+    if decision != "APPROVED" and (decision or json.loads(row["requested"] or "[]")):
+        return f"waiting for approval on {w}"
+    return None
+
+
+def ready_left(p, row, unread=True):
+    """Whether row's PR still has review comments to address: it doesn't merge then. unread: comments gh couldn't
+    read count as left."""
+    threads, bodies, err = review_work(p, row, False)
+    return bool(threads or bodies or (err and unread))
+
+
+def ready_words(p, t, rows):
+    """Where Merge when ready stands on task t, for its PR list, or None while it is off."""
+    tid = t["id"]
+    if not ready_on(tid) or t["state"] in ENDED:
+        return None
+    if t["state"] in ("queued", "running", "gating", "paused") and (step := setting(f"prreadystep:{tid}")):
+        return step
+    if t["state"] == "running" and (t["phase"] or "").startswith("merging "):
+        return t["phase"]
+    if t["state"] == "needs_input":
+        return "stopped: the task needs you"
+    if not any(x["number"] for x in rows or []):
+        return "on: it starts once the PRs open"
+    return ready_where(p, rows)
+
+
+def ready_where(p, rows):
+    """The first thing Merge when ready waits for among rows, in pr_order, or that one may merge."""
+    waits = [w for x in rows if x["state"] != "MERGED" and (w := ready_wait(p, x, rows))]
+    ready = [x for x in rows if x["state"] == "OPEN" and not ready_wait(p, x, rows)]
+    return ("merging " + pr_words(p, ready[0]) + " at the next check") if ready else waits[0] if waits else "merged"
+
+
+def ready_step(tid, words):
+    """An automatic step under way: the words the PR list shows until the next PR step."""
+    set_setting(f"prreadystep:{tid}", words)
+    ev(tid, f"Merge when ready: {words}")
+
+
 def pr_merge_one(p, tid, row):
     """gh pr merge --<pr_merge> --delete-branch. None, or gh's message (also kept on the row for the card)."""
     r = part_of(p, row["repo"])
@@ -3446,13 +3714,21 @@ def pr_merge_one(p, tid, row):
     return None
 
 
-def pr_main_target(p):
+def main_merged(p, tid):
+    """The repo folders where one of tid's PRs merged into main_branch and main has not followed yet."""
+    return {x["repo"] for x in pr_rows(tid) if x["state"] == "MERGED" and not x["synced"]
+            and (x["base"] or p.main) == p.main}
+
+
+def pr_main_target(p, subs=None):
     """(revs main moves to after a PR merged: origin/main in each repo where it is ahead, main elsewhere; None and
-    why when your main has commits origin/main lacks while origin/main has new ones)."""
+    why when your main has commits origin/main lacks while origin/main has new ones). subs: only these repo
+    folders move (the ones whose PR merged into main); the rest keep their main."""
     out = []
     for r in p.parts:
         o = f"refs/remotes/origin/{p.main}"
-        if not origin_url(r) or not ref_ok(r, o) or is_ancestor(r, o, p.main):
+        if (subs is not None and r.sub not in subs) or not origin_url(r) or not ref_ok(r, o) or \
+                is_ancestor(r, o, p.main):
             out.append(r.rev(p.main))
         elif is_ancestor(r, p.main, o):
             out.append(r.rev(o))
@@ -3463,12 +3739,40 @@ def pr_main_target(p):
     return " ".join(out), None
 
 
+def pr_other_base(p, tid):
+    """After PRs merged into a branch other than main_branch: nothing of main moves. Each such base your checkout
+    has checked out fast-forwards to origin/<base> when it can cleanly; else it stays as it is."""
+    for x in pr_rows(tid):
+        if x["state"] != "MERGED" or x["synced"] or (x["base"] or p.main) == p.main:
+            continue
+        r, base = part_of(p, x["repo"]), x["base"]
+        where = f"{base}{' of ' + r.name if r and r.sub else ''}"
+        o = f"refs/remotes/origin/{base}"
+        if r and r.git("branch", "--show-current", check=False) == base and ref_ok(r, o) and \
+                not is_ancestor(r, o, "HEAD"):
+            if is_ancestor(r, "HEAD", o) and \
+                    not subprocess.run(["git", "merge", "--ff-only", "-q", o], cwd=r.src, capture_output=True).returncode:
+                ev(tid, f"{pr_words(p, x)} merged into {base}: your checkout's {where} fast-forwarded to origin/{base}")
+            else:
+                ev(tid, f"{pr_words(p, x)} merged into {base}: your checkout's {where} can't fast-forward to "
+                        f"origin/{base}, so it stays as it is")
+        else:
+            ev(tid, f"{pr_words(p, x)} merged into {base}, not {p.main}: {p.main} stays as it is")
+        q("UPDATE prs SET synced=1 WHERE id=?", (x["id"],))
+
+
 def pr_main(p, tid):
-    """After a PR merged: move your main to origin/main the way Straight to main moves it (build main if there is an
-    [app] build, fast-forward, carry your uncommitted changes over), then dev takes main in. True once done; False
-    when it waits (a deploy, or something only you can clear) or stopped."""
-    upd(tid, state="merging", phase=f"moving {p.main} to origin/{p.main}")
+    """After a PR merged: a PR into another branch than main_branch moves nothing of main (pr_other_base). One into
+    main moves your main to origin/main in the repos it merged in, the way Straight to main moves it (build main if
+    there is an [app] build, fast-forward, carry your uncommitted changes over), then dev takes main in. True once
+    done; False when it waits (a deploy, or something only you can clear) or stopped."""
+    upd(tid, state="merging", phase="reading the merged PRs")
     fetch_origin(p, tid)  # the merge commit GitHub just made, whether the queue merged it in this step or you did
+    pr_other_base(p, tid)
+    subs = main_merged(p, tid)
+    if not subs:
+        return True
+    upd(tid, phase=f"moving {p.main} to origin/{p.main}")
     with p.main_lock:
         if stopped(tid):
             return False
@@ -3476,7 +3780,7 @@ def pr_main(p, tid):
             upd(tid, state="queued", phase="")
             ev(tid, f"waiting for deploy #{deploy['id']}: it moves {p.main} too")
             return False
-        commit, why = pr_main_target(p)
+        commit, why = pr_main_target(p, subs)
         if why:
             upd(tid, state="needs_input", phase=PR_MAIN, question=why)
             ev(tid, "needs you: " + why)
@@ -3508,15 +3812,12 @@ def pr_main(p, tid):
     return True
 
 
-def merge_all_on(tid):
-    return setting(f"prmergeall:{tid}") == "1"
-
-
 def pr_step(p, tid):
     """Open PR and every step after it, in the task's pipeline (start_at 'pr'): push and open the PRs that are due,
     push new commits to open ones, Merge all's next merge, read every PR, move main after a merge, then settle the
     task: done, needs you, or watching (state 'pr')."""
     upd(tid, next_prompt=None, error=None, question=None, phase="checking the pull requests")
+    set_setting(f"prreadystep:{tid}", "")
     with pr_lock(tid):
         return _pr_step(p, tid)
 
@@ -3574,18 +3875,24 @@ def _pr_step(p, tid):
             if x["state"] == "OPEN" and x["number"] and x["id"] not in fresh:
                 pr_view(p, t, x)
         rows = pr_rows(tid)
-        if merge_all_on(tid):
+        if ready_on(tid):  # Merge when ready: the next PR in order that is green, approved, with nothing to address
             for x in rows:
-                if not pr_mergeable(x, rows):
+                if not ready_wait(p, x, rows) and not ready_left(p, x):
                     upd(tid, phase=f"merging {pr_words(p, x)}")
-                    if pr_merge_one(p, tid, x):
-                        set_setting(f"prmergeall:{tid}", "")
+                    ev(tid, f"Merge when ready: merging {pr_words(p, x)}, green and approved")
+                    if err := pr_merge_one(p, tid, x):
+                        return pr_needs(p, tid, PR_NO_MERGE, f"Merge when ready couldn't merge {pr_words(p, x)} "
+                                        f"({x['url']}): {err}\nFix it on GitHub, then Retry.")
                     changed = True
                     break
         if not changed:
             break
     if stopped(tid):
         return
+    rows = pr_rows(tid)
+    for x in rows:  # merged before the queue kept a PR's base: read where it went from GitHub
+        if x["state"] == "MERGED" and not x["synced"] and not x["base"] and x["number"]:
+            pr_view(p, t, x)
     rows = pr_rows(tid)
     if any(x["state"] == "MERGED" and not x["synced"] for x in rows):
         if not pr_main(p, tid):
@@ -3605,7 +3912,7 @@ def pr_settle(p, tid):
     """Where the task's PRs leave it: done once all merged, needs you if one closed or has red CI, else watching."""
     rows, t = pr_rows(tid), task(tid)
     if rows and all(x["state"] == "MERGED" for x in rows):
-        set_setting(f"prmergeall:{tid}", "")
+        set_setting(f"prready:{tid}", "")
         upd(tid, start_at="claude")
         return finish(p, tid, merged=" ".join(x["merge_commit"] for x in rows if x["merge_commit"]) or None,
                       note="every PR merged: " + ", ".join(f"{pr_words(p, x)} {x['url']}" for x in rows))
@@ -3614,19 +3921,31 @@ def pr_settle(p, tid):
                                                      + " was closed without merging" for x in closed)
                         + ". Retry opens it again; Cancel leaves it closed.")
     if red := [x for x in rows if x["state"] == "OPEN" and x["ci"] == "red"]:
-        set_setting(f"prmergeall:{tid}", "")
+        gave = ""
+        if ready_on(tid):  # Merge when ready: Fix CI by itself, READY_ROUNDS times per PR
+            if all((x["auto_fixes"] or 0) < READY_ROUNDS for x in red):
+                n = max(x["auto_fixes"] or 0 for x in red) + 1
+                for x in red:
+                    q("UPDATE prs SET auto_fixes=IFNULL(auto_fixes,0)+1 WHERE id=?", (x["id"],))
+                ready_step(tid, f"fixing CI on {', '.join(pr_words(p, x) for x in red)} (round {n} of {READY_ROUNDS})")
+                return fix_ci_now(p, tid, "Fix CI by itself (Merge when ready): the worker gets the failed logs")
+            gave = f"Merge when ready gave up: CI still red after {READY_ROUNDS} fixes. "
         checks = [f"{pr_words(p, x)}: " + ", ".join(f["name"] for f in json.loads(x["failing"] or "[]"))
                   for x in red]
         later = [x for x in rows if not x["number"]]
-        return pr_needs(p, tid, PR_RED, "CI failed on " + "; ".join(checks) + "."
+        return pr_needs(p, tid, PR_RED, gave + "CI failed on " + "; ".join(checks) + "."
                         + (f" {', '.join(pr_name(p, x) for x in later)} won't open until it is green." if later else "")
                         + " Fix CI has the worker fix it from the failed logs; or send the task a message.")
     if pending_steers(tid):  # a message came in while the queue pushed: the worker takes it next
         upd(tid, state="queued", phase="", start_at="claude", next_prompt=steered_prompt("while the queue pushed"))
         return
+    if pr_review_step(p, tid):
+        return
+    rows = pr_rows(tid)
     waiting = [x for x in rows if x["state"] == "OPEN" and x["ci"] == "pending"]
     ready = [x for x in rows if not pr_mergeable(x, rows)]
-    phase = ("CI running on " + ", ".join(pr_words(p, x) for x in waiting)) if waiting else \
+    phase = ("Merge when ready: " + ready_where(p, rows)) if ready_on(tid) else \
+        ("CI running on " + ", ".join(pr_words(p, x) for x in waiting)) if waiting else \
         ("ready to merge: " + ", ".join(pr_words(p, x) for x in ready)) if ready else "PRs open"
     upd(tid, state="pr", phase=phase, question=None, start_at="pr")
     if phase != t["phase"] or t["state"] != "pr":
@@ -3640,8 +3959,8 @@ def pr_poll():
         return
     try:
         for t in q("SELECT * FROM tasks WHERE id IN (SELECT task_id FROM prs WHERE state IN ('OPEN','CLOSED') AND "
-                   "number IS NOT NULL) AND (state='pr' OR (state='needs_input' AND phase IN (?,?)))",
-                   (PR_RED, PR_CLOSED)):
+                   "number IS NOT NULL) AND (state='pr' OR (state='needs_input' AND phase IN (?,?,?,?,?)))",
+                   (PR_RED, PR_CLOSED, PR_PICK_PHASE, PR_LEFT, PR_NO_MERGE)):
             p = PROJECTS.get(t["project"])
             if not p or t["id"] in THREADS or STOPPING.is_set():
                 continue
@@ -3654,14 +3973,22 @@ def pr_poll():
 
 
 def pr_poll_task(p, t):
-    before = {x["id"]: (x["state"], x["ci"]) for x in pr_rows(t["id"])}
+    before = {x["id"]: (x["state"], x["ci"], x["decision"] or "") for x in pr_rows(t["id"])}
     for x in pr_rows(t["id"]):
         if x["number"] and x["state"] in ("OPEN", "CLOSED"):
             pr_view(p, t, x)
     rows = pr_rows(t["id"])
-    moved = any(before.get(x["id"]) != (x["state"], x["ci"]) for x in rows)
-    due = any(pr_due(x, rows) for x in rows) or (merge_all_on(t["id"]) and any(not pr_mergeable(x, rows)
-                                                                                for x in rows))
+    moved = any(before.get(x["id"]) != (x["state"], x["ci"], x["decision"] or "") for x in rows)
+    due = any(pr_due(x, rows) for x in rows)
+    if ready_on(t["id"]) and t["state"] == "pr":  # Merge when ready: a PR may merge, or new comments came
+        due = due or any(not ready_wait(p, x, rows) for x in rows) or \
+            any(x["state"] == "OPEN" and x["review"] in (PR_HUMAN, None) and ready_left(p, x, False) for x in rows)
+    elif ready_on(t["id"]) and t["phase"] == PR_LEFT:  # it gave up on comments, and they are gone now
+        due = not any(x["state"] == "OPEN" and ready_left(p, x) for x in rows)
+    # the review round moves on: the bot review came or the wait is over; or reviewers were requested on GitHub
+    due = due or (t["state"] == "pr" and any(review_due(p, x) for x in rows)) or \
+        (t["phase"] == PR_PICK_PHASE and any(x["review"] == PR_PICK and json.loads(x["requested"] or "[]")
+                                             for x in rows))
     if (moved or due) and q("UPDATE tasks SET state='queued', phase='', question=NULL, start_at='pr' WHERE id=? AND "
                             "state=? AND IFNULL(phase,'')=? RETURNING id", (t["id"], t["state"], t["phase"] or "")):
         ev(t["id"], "the PRs moved on GitHub; checking them")
@@ -3685,8 +4012,13 @@ def pr_action(p, t, action, b):
     if not p:
         raise ValueError("its project is not loaded")
     rows = pr_rows(tid)
+    if action == "pr-merge-all":  # Merge all became Merge when ready
+        action, b = "pr-ready", {"on": 1}
+    if action == "pr-ready":
+        return pr_ready(p, t, bool(b.get("on")))
     if action == "pr-open":  # Open PR, or Retry after what was missing is fixed
-        if st not in ("on_branch",) and not (st == "needs_input" and t["phase"] in (PR_SETUP, PR_MAIN)):
+        if st not in ("on_branch",) and not (st == "needs_input" and t["phase"] in (PR_SETUP, PR_MAIN, PR_PICK_PHASE,
+                                                                                     PR_LEFT, PR_NO_MERGE)):
             raise ValueError(f"task is {STATE_WORDS.get(st, st)}: Open PR is for a task on its branch")
         return pr_queue(tid, "Open PR")
     if action == "pr-retry":  # a PR was closed without merging: open it again
@@ -3700,22 +4032,16 @@ def pr_action(p, t, action, b):
                 q("UPDATE prs SET state='OPEN', ci='pending', error=NULL WHERE id=?", (x["id"],))
                 ev(tid, f"reopened {pr_words(p, x)}")
         return pr_queue(tid, "retried: PRs reopened")
+    if action == "pr-address":
+        return pr_address(p, t)
     if action == "fix-ci":
         if not (st == "needs_input" and t["phase"] == PR_RED):
             raise ValueError("no PR of this task has failed CI")
-        upd(tid, state="queued", phase="", question=None, start_at="claude", rounds=0,
-            next_prompt=fix_ci_prompt(p, t))
-        ev(tid, "Fix CI: the worker gets the failed logs")
-        return
+        return fix_ci_now(p, tid, "Fix CI: the worker gets the failed logs")
     if st not in ("pr", "needs_input"):
         raise ValueError(f"task is {STATE_WORDS.get(st, st)}: nothing to merge now")
     if tid in THREADS:
         raise ValueError("the queue is working on its PRs right now: try again in a moment")
-    if action == "pr-merge-all":
-        if not [x for x in rows if x["state"] == "OPEN"]:
-            raise ValueError("no PR of this task is open")
-        set_setting(f"prmergeall:{tid}", "1")
-        return pr_queue(tid, "Merge all: the PRs merge in order, each once its CI is green")
     row = next((x for x in rows if str(x["id"]) == str(b.get("pr")) or x["repo"] == b.get("repo")), None)
     if not row and len([x for x in rows if x["state"] == "OPEN"]) == 1:
         row = next(x for x in rows if x["state"] == "OPEN")
@@ -3729,6 +4055,24 @@ def pr_action(p, t, action, b):
     pr_queue(tid, f"merged {pr_words(p, row)}; moving {p.main}")
 
 
+def pr_ready(p, t, on):
+    """The Merge when ready switch (README: Merge when ready). On: allowed before any PR is open; each PR gets its
+    automatic rounds afresh. Off: no further automatic step; one already running finishes. Either way a task
+    watching its PRs (or, turning it on, stuck where the switch helps) takes a PR step now."""
+    tid, st = t["id"], t["state"]
+    if st in ENDED:
+        raise ValueError(f"task is {STATE_WORDS.get(st, st)}")
+    if on == ready_on(tid):
+        return
+    set_setting(f"prready:{tid}", "1" if on else "")
+    if on:
+        q("UPDATE prs SET auto_fixes=0, auto_addresses=0 WHERE task_id=?", (tid,))
+    ev(tid, "Merge when ready on: the queue fixes CI, addresses comments and merges each PR once green and approved"
+       if on else "Merge when ready off: no more automatic steps (one already running finishes)")
+    if tid not in THREADS and (st == "pr" or (on and st == "needs_input" and t["phase"] in (PR_RED, PR_PICK_PHASE))):
+        pr_queue(tid, "Merge when ready " + ("on" if on else "off") + ": checking the PRs")
+
+
 def pr_view_rows(t, rows):
     """A branch task's PRs for the dashboard: repo, number, link, CI and state, and whether Merge may go."""
     p = PROJECTS.get(t["project"])
@@ -3736,11 +4080,251 @@ def pr_view_rows(t, rows):
     for x in rows or []:
         why = pr_mergeable(x, rows)
         out.append({"id": x["id"], "repo": x["repo"], "name": (pr_name(p, x) if p else x["repo"]) or "",
-                    "number": x["number"], "url": x["url"], "state": x["state"], "ci": x["ci"],
+                    "number": x["number"], "url": x["url"], "state": x["state"], "ci": x["ci"], "base": x["base"],
                     "failing": json.loads(x["failing"] or "[]"), "checked_at": x["checked_at"],
                     "merged_at": x["merged_at"], "error": x["error"], "warning": x["warning"],
+                    "review": PR_REVIEW_WORDS.get(x["review"]) if x["state"] == "OPEN" else None,
                     "merge": not why and t["state"] in ("pr", "needs_input"), "merge_why": why})
     return out
+
+
+def login_key(s):
+    """A GitHub login to compare: gh's GraphQL reads drop the [bot] that REST and the web show."""
+    return str(s or "").strip().lstrip("@").lower().removesuffix("[bot]")
+
+
+def bot_review(p, row, d):
+    """Who gave the review row's PR waits for, from gh pr view's reviews, or None: one by a pr_bot_reviewers login
+    or, with pr_review_comment set, by anyone but the PR's author, submitted after the queue pushed it."""
+    since = (row["review_since"] or 0) - REVIEW_SLACK
+    bots = {login_key(x) for x in p.pr_bot_reviewers}
+    me = login_key((d.get("author") or {}).get("login"))
+    for rv in d.get("reviews") or []:
+        who = (rv.get("author") or {}).get("login") if isinstance(rv, dict) else None
+        if who and (iso_epoch(rv.get("submittedAt")) or 0) >= since and \
+                (login_key(who) in bots or (p.pr_review_comment and login_key(who) != me)):
+            return who
+    return None
+
+
+def review_due(p, row):
+    """Whether row's wait for the bot review is over: it came, there is no bot to wait for, or the time is up."""
+    if row["review"] != PR_BOT or row["state"] != "OPEN" or not row["number"]:
+        return False
+    return bool(row["reviewed_at"]) or not (p.pr_bot_reviewers or p.pr_review_comment) or \
+        time.time() - (row["review_since"] or 0) >= p.pr_bot_review_timeout * 60
+
+
+def gh_where(r):
+    """(gh api's --hostname args, owner, name) of repo r's origin on GitHub."""
+    *host, owner, name = gh_repo(r).split("/")
+    return (("--hostname", host[0]) if host else ()), owner, name
+
+
+def review_work(p, row, any_body):
+    """What on row's PR the worker should address: (unresolved threads, review bodies, None), or (.., .., gh's
+    error). A thread whose last comment is the PR author's (the queue's own reply) waits for the reviewer; review
+    bodies count from after the last round, every one when any_body (you asked), else only Changes requested."""
+    r = part_of(p, row["repo"])
+    host, owner, name = gh_where(r)
+    query = ("query { repository(owner: %s, name: %s) { pullRequest(number: %d) { author { login } "
+             "reviewThreads(first: 100) { nodes { id isResolved isOutdated path line comments(first: 50) { nodes { "
+             "databaseId author { login } body url } } } } reviews(last: 50) { nodes { author { login } state body "
+             "submittedAt url } } } } }") % (json.dumps(owner), json.dumps(name), row["number"])
+    rc, out, err = gh(r, "api", "graphql", *host, "-f", f"query={query}", by_r=False)
+    try:
+        pr = json.loads(out)["data"]["repository"]["pullRequest"] if rc == 0 else None
+    except (ValueError, KeyError, TypeError):
+        pr = None
+    if not isinstance(pr, dict):
+        return [], [], (err or out).strip()[-300:] or f"gh api graphql exited {rc}"
+    me = login_key((pr.get("author") or {}).get("login"))
+    who = lambda c: login_key((c.get("author") or {}).get("login"))
+    threads = []
+    for th in (pr.get("reviewThreads") or {}).get("nodes") or []:
+        cs = (th.get("comments") or {}).get("nodes") or []
+        if not th.get("isResolved") and cs and who(cs[-1]) != me:
+            threads.append(th)
+    since = (row["addressed_at"] or row["review_since"] or 0) - REVIEW_SLACK
+    bodies = [rv for rv in (pr.get("reviews") or {}).get("nodes") or []
+              if (rv.get("body") or "").strip() and who(rv) != me and (iso_epoch(rv.get("submittedAt")) or 0) >= since
+              and (any_body or rv.get("state") == "CHANGES_REQUESTED")]
+    return threads, bodies, None
+
+
+def address_prompt(p, t, work):
+    """Address comments: each PR's unresolved threads and review bodies, and how to reply and resolve, for the
+    worker. work is [(row, threads, bodies)]."""
+    clip = lambda s: (s or "").strip()[:3000]
+    parts = []
+    for row, threads, bodies in work:
+        r = part_of(p, row["repo"])
+        host, owner, name = gh_where(r)
+        h = f" --hostname {host[1]}" if host else ""
+        out = [f"### {pr_words(p, row)} ({row['url']})", "",
+               f"- reply: `gh api{h} repos/{owner}/{name}/pulls/{row['number']}/comments/COMMENT_ID/replies "
+               f"-f body='...'`",
+               f"- resolve: `gh api graphql{h} -f query='mutation {{ resolveReviewThread(input: {{threadId: "
+               f"\"THREAD_ID\"}}) {{ thread {{ isResolved }} }} }}'`"]
+        for th in threads:
+            cs = (th.get("comments") or {}).get("nodes") or []
+            where = f"{th.get('path') or 'the PR'}" + (f":{th['line']}" if th.get("line") else "")
+            out += ["", f"Thread `{th['id']}` on `{where}`{' (outdated: the code moved since)' * bool(th.get('isOutdated'))}"
+                        f", reply to comment {cs[-1].get('databaseId')}:"]
+            out += [f"> **{(c.get('author') or {}).get('login') or 'someone'}:** " + clip(c.get("body")).replace(
+                "\n", "\n> ") for c in cs]
+        for rv in bodies:
+            out += ["", f"Review by {(rv.get('author') or {}).get('login') or 'someone'} "
+                        f"({str(rv.get('state') or '').lower().replace('_', ' ')}), no thread to reply on:",
+                    "> " + clip(rv.get("body")).replace("\n", "\n> ")]
+        parts.append("\n".join(out))
+    where = f"`{t['branch']}`" + (" in each repo" if p.repos else "")
+    return (f"Review comments came in on the pull request{'s' * (len(work) > 1)} for branch {where}. Address them "
+            f"yourself; don't ask the owner. For each comment:\n\n"
+            f"1. Decide whether it is right. Where it is, change the code. Where it isn't (it is wrong, out of scope, "
+            f"or the code already settles it), leave the code as it is.\n"
+            f"2. Commit the fixes as new commits on top. The branch is pushed, so don't rebase, amend or force-push, "
+            f"and don't push: the queue runs the merge check, then pushes.\n"
+            f"3. Reply on each thread, once you have committed: what you changed (name the commit), or why you left "
+            f"it. Resolve each thread you fixed; leave the ones you declined open for the reviewer.\n"
+            f"4. A review's own text has no thread: address it in the code, and say what you did in your summary.\n\n"
+            f"Then write $OPS_RESULT again, saying what you changed and what you declined, and why.\n\n"
+            + "\n\n".join(parts))
+
+
+def pr_reviewers_of(p, tid):
+    """Who reviews the task's PRs once their comments are addressed: your answer to Pick reviewers, else
+    pr_reviewers."""
+    try:
+        mine = json.loads(setting(f"prreviewers:{tid}") or "[]")
+    except ValueError:
+        mine = []
+    return mine or p.pr_reviewers
+
+
+def pr_ask_reviewers(p, tid, x):
+    """Stage 3, awaiting human review: gh pr edit --add-reviewer. None once asked (or GitHub has reviewers
+    requested already), else why you are needed: nobody to ask, or gh's error."""
+    who = pr_reviewers_of(p, tid)
+    if who:
+        rc, out, err = gh(part_of(p, x["repo"]), "pr", "edit", str(x["number"]), "--add-reviewer", ",".join(who))
+        if rc:
+            q("UPDATE prs SET review=? WHERE id=?", (PR_PICK, x["id"]))
+            return (f"gh pr edit {x['number']} --add-reviewer {','.join(who)} failed on {pr_words(p, x)} "
+                    f"({x['url']}): {(err or out).strip()[-500:]}")
+        q("UPDATE prs SET review=? WHERE id=?", (PR_HUMAN, x["id"]))
+        ev(tid, f"{pr_words(p, x)}: asked {', '.join(who)} to review it")
+        return None
+    asked = json.loads(x["requested"] or "[]")
+    if asked:
+        q("UPDATE prs SET review=? WHERE id=?", (PR_HUMAN, x["id"]))
+        ev(tid, f"{pr_words(p, x)}: awaiting review by {', '.join(asked)}, requested on GitHub")
+        return None
+    if ready_on(tid) and (x["decision"] or "") in ("", "APPROVED"):  # Merge when ready: no review to wait for
+        q("UPDATE prs SET review=? WHERE id=?", (PR_HUMAN, x["id"]))
+        ev(tid, f"Merge when ready: {pr_words(p, x)} " + ("is approved" if x["decision"] else
+                                                          "needs no review on GitHub") + ": no reviewers to ask")
+        return None
+    q("UPDATE prs SET review=? WHERE id=?", (PR_PICK, x["id"]))
+    return f"Pick reviewers for PR #{x['number']}" + (f" ({pr_name(p, x)})" if x["repo"] else "") + f": {x['url']}"
+
+
+def pr_address_now(p, tid, work, why):
+    """Stage 2, addressing comments: resume the worker on the branch with them (the gate and push follow, as for
+    Fix CI)."""
+    t = task(tid)
+    for row, _, _ in work:
+        q("UPDATE prs SET review=?, addressed_at=? WHERE id=?", (PR_ADDRESSING, time.time(), row["id"]))
+    upd(tid, state="queued", phase="", question=None, start_at="claude", rounds=0,
+        next_prompt=address_prompt(p, t, work))
+    n = sum(len(th) + len(b) for _, th, b in work)
+    ev(tid, f"{why}: the worker addresses {n} review comment{'s' * (n != 1)} on "
+            + ", ".join(pr_words(p, row) for row, _, _ in work))
+
+
+def pr_review_step(p, tid):
+    """The review round of each open PR, after its CI is not red: once the bot review came (or the wait is over),
+    the worker addresses the unresolved comments, if any; then the queue asks pr_reviewers to review. True when
+    the task now waits for the worker or for you."""
+    rows = [x for x in pr_rows(tid) if x["state"] == "OPEN" and x["number"]]
+    asks, work, auto, left = [], [], [], []
+    for x in rows:
+        if x["review"] in (PR_ADDRESSING, PR_PICK):  # the worker addressed it (or you were to pick): ask humans
+            if why := pr_ask_reviewers(p, tid, x):
+                asks.append(why)
+        elif x["review"] in (PR_HUMAN, None) and ready_on(tid):  # Merge when ready: comments after the round
+            threads, bodies, _ = review_work(p, x, False)
+            if threads or bodies:
+                (left if (x["auto_addresses"] or 0) >= READY_ROUNDS else auto).append((x, threads, bodies))
+        elif review_due(p, x):
+            if not x["reviewed_at"] and (p.pr_bot_reviewers or p.pr_review_comment):
+                ev(tid, f"{pr_words(p, x)}: no bot review came within {p.pr_bot_review_timeout:g} min; going on")
+            threads, bodies, err = review_work(p, x, False)
+            q("UPDATE prs SET addressed_at=? WHERE id=?", (time.time(), x["id"]))
+            if err:
+                ev(tid, f"{pr_words(p, x)}: couldn't read its review comments ({err}); going on")
+            if threads or bodies:
+                work.append((x, threads, bodies))
+                continue
+            if not err:
+                ev(tid, f"{pr_words(p, x)}: no unresolved review comments")
+            if why := pr_ask_reviewers(p, tid, task_pr(x["id"])):
+                asks.append(why)
+    if auto:
+        n = max(x["auto_addresses"] or 0 for x, _, _ in auto) + 1
+        for x, _, _ in auto:
+            q("UPDATE prs SET auto_addresses=IFNULL(auto_addresses,0)+1 WHERE id=?", (x["id"],))
+        ready_step(tid, f"addressing comments on {', '.join(pr_words(p, x) for x, _, _ in auto)} "
+                        f"(round {n} of {READY_ROUNDS})")
+    if work or auto:
+        pr_address_now(p, tid, work + auto, "review round" if work else "Address comments by itself (Merge when ready)")
+        return True
+    if asks:
+        pr_needs(p, tid, PR_PICK_PHASE, "; ".join(asks) + ". Answer with GitHub logins or org/team names (comma-"
+                 "separated), or set pr_reviewers in the project's toml and Retry, or request reviewers on GitHub: "
+                 "the queue sees them at its next poll.")
+        return True
+    if left:
+        pr_needs(p, tid, PR_LEFT, f"Merge when ready gave up: comments left after {READY_ROUNDS} rounds on "
+                 + ", ".join(f"{pr_words(p, x)} ({x['url']})" for x, _, _ in left)
+                 + ". Address comments has the worker take them again; or answer, or resolve them on GitHub.")
+        return True
+    return False
+
+
+def task_pr(pid):
+    return q("SELECT * FROM prs WHERE id=?", (pid,), one=True)
+
+
+def pr_address(p, t):
+    """Address comments (the button, opsd.py pr address): stage 2 again, on demand, for comments that came later."""
+    tid = t["id"]
+    if not (t["state"] == "pr" or (t["state"] == "needs_input" and t["phase"] in (PR_PICK_PHASE, PR_LEFT))):
+        raise ValueError(f"task is {STATE_WORDS.get(t['state'], t['state'])}"
+                         + (f" ({t['phase']})" if t["state"] == "needs_input" and t["phase"] else "")
+                         + ": Address comments is for a task watching its open PRs")
+    if tid in THREADS:
+        raise ValueError("the queue is working on its PRs right now: try again in a moment")
+    rows = [x for x in pr_rows(tid) if x["state"] == "OPEN" and x["number"]]
+    if not rows:
+        raise ValueError("no PR of this task is open")
+    work, errs = [], []
+    for x in rows:
+        threads, bodies, err = review_work(p, x, True)
+        if err:
+            errs.append(f"{pr_words(p, x)}: {err}")
+        elif threads or bodies:
+            work.append((x, threads, bodies))
+    if not work:
+        raise ValueError("couldn't read the review comments: " + "; ".join(errs) if errs else
+                         "no unresolved review comments on " + ", ".join(pr_words(p, x) for x in rows))
+    pr_address_now(p, tid, work, "Address comments")
+
+
+def fix_ci_now(p, tid, why):
+    """Fix CI: resume the worker with the failed logs (the gate and push follow)."""
+    upd(tid, state="queued", phase="", question=None, start_at="claude", rounds=0, next_prompt=fix_ci_prompt(p, task(tid)))
+    ev(tid, why)
 
 
 def fix_ci_prompt(p, t):
@@ -4062,7 +4646,11 @@ def split(p, tid, res):
 
 def queue_release(p):
     """The Promote button: queue a release check of dev, ahead of ordinary tasks. It never refuses: with a release
-    already open it returns that one, and whatever is in the way of moving main the release waits for."""
+    already open it returns that one, and whatever is in the way of moving main the release waits for. A flow "pr"
+    project has no Promote: ValueError."""
+    if getattr(p, "flow", "dev") == "pr":
+        raise ValueError(f"{p.title} sends every task through a branch and PR (flow = \"pr\"), so there is no "
+                         f"Promote: {p.main} moves when a PR merges.")
     open_ = q("SELECT id FROM tasks WHERE project=? AND kind='release' AND state NOT IN ('done','failed','cancelled')",
               (p.name,), one=True)
     if open_:
@@ -4092,7 +4680,7 @@ def auto_release(p):
     the last of them merges."""
     with RELEASE_LOCK:
         TRAIN.pop(p.name, None)
-        if p.direct_main:  # its merges move main themselves (land_on_main)
+        if p.direct_main or getattr(p, "flow", "dev") == "pr":  # its merges move main themselves (land_on_main, pr_main)
             return None
         if q("SELECT id FROM tasks WHERE project=? AND kind='release' AND state NOT IN (?,?,?)",
              (p.name, *ENDED), one=True):
@@ -4193,7 +4781,7 @@ def unblock_releases():
                (WAIT, WAIT_CHANGES)):  # a branch task moving main to origin/main after a PR merged
         p = PROJECTS.get(t["project"])
         try:
-            commit = pr_main_target(p)[0] if p else None
+            commit = pr_main_target(p, main_merged(p, t["id"]))[0] if p else None
             if not commit or promote_blocker(p, commit) or (t["phase"] == WAIT_CHANGES and clashing(p, commit)):
                 continue
         except Exception as e:
@@ -4414,14 +5002,18 @@ def restart_self(tid):
     spawn_restart(RUNS / str(tid) / "restart.log", OPS_RESTART_TASK=str(tid))
 
 
-def restart_now():
-    """The Restart button in Settings' Danger zone: `opsctl restart` at once, like typing it. It doesn't wait for
-    deploys or idle tasks: running tasks pause and resume, and a running deploy is cut off and fails."""
+def restart_now(src=""):
+    """The Restart button in Settings' Danger zone, or `opsd.py restart` from a chat (src, its OPS_FROM): `opsctl
+    restart` at once, like typing it. It doesn't wait for deploys or idle tasks: running tasks pause and resume, and
+    a running deploy is cut off and fails. A chat that asked is told so when the new daemon resumes it."""
     if not is_service():
         raise ValueError("not the launchd service; opsctl restart would restart that one")
     deploys = running_deploys()
-    print("restarting claude-ops: you clicked Restart in Settings' Danger zone"
+    chat = int(src[5:]) if re.fullmatch(r"chat:\d+", src or "") else None
+    print("restarting claude-ops: " + (f"chat #{chat} ran opsd.py restart" if chat else
+                                       "you clicked Restart in Settings' Danger zone")
           + (f"; {deploy_words(deploys)} will fail" if deploys else ""), flush=True)
+    set_setting("restarted_by", json.dumps(chat))
     spawn_restart(DATA / "restart.log")
     return {"ok": True}
 
@@ -4802,7 +5394,8 @@ def exclusive_blocker(t):
     and a deploy waits for a merge that is moving main. Check and start a deploy with p.main_lock held (schedule_once),
     as land_on_main checks with it held, so the two never both go."""
     p = PROJECTS.get(t["project"])
-    if t.get("start_at") == "pr" and q("SELECT 1 FROM prs WHERE task_id=? AND state='MERGED' AND synced=0", (t["id"],)):
+    if t.get("start_at") == "pr" and q("SELECT 1 FROM prs WHERE task_id=? AND state='MERGED' AND synced=0 AND "
+                                       "IFNULL(base, ?)=?", (t["id"], *[getattr(p, "main", "main")] * 2)):
         return q("SELECT id,kind,state,priority FROM tasks WHERE project=? AND kind='deploy' AND state NOT IN "
                  "(?,?,?,'queued') ORDER BY id", (t["project"], *ENDED), one=True)  # a merged PR moves main next
     if getattr(p, "direct_main", False) and t["kind"] in MERGES and t.get("start_at") == "main":
@@ -5713,6 +6306,15 @@ def settings_now():
     return {r["key"]: r["value"] for r in q("SELECT key, value FROM settings")}
 
 
+def branch_open(p):
+    """The project's branch tasks that haven't ended, and their open PRs: {"tasks", "prs"}."""
+    t = q("SELECT COUNT(*) AS n FROM tasks WHERE project=? AND (jira IS NOT NULL OR target IS NOT NULL) AND "
+          "state NOT IN (?,?,?)", (p.name, *ENDED), one=True)
+    r = q("SELECT COUNT(*) AS n FROM prs JOIN tasks ON tasks.id=prs.task_id WHERE tasks.project=? AND "
+          "prs.state='OPEN' AND prs.number IS NOT NULL AND tasks.state NOT IN (?,?,?)", (p.name, *ENDED), one=True)
+    return {"tasks": t["n"], "prs": r["n"]}
+
+
 def main_info(p, s=None):
     s = settings_now() if s is None else s
     f = facts(p)
@@ -5727,6 +6329,7 @@ def main_info(p, s=None):
     deploys = [dict(x, open=next((o["id"] for o in opens if json.loads(o["deploy"] or "{}").get("target") == x["name"]),
                                  None), log=x.get("log") and titled(p, x["log"])) for x in f.get("deploys") or []]
     return {"name": p.name, "title": p.title, "main_branch": p.main, "dev_branch": p.dev, "direct_main": p.direct_main,
+            "flow": p.flow, "branch_open": branch_open(p),  # flow "pr": the header's count instead of Promote
             # where its files live on disk, so a chat's absolute path to one links as a repo file (Links in chats)
             "roots": [str(x).replace(str(HOME), "~", 1) if v else str(x) for x in (p.repo, p.wt) for v in (0, 1)],
             "main": p.show(f["main"]), "built": p.show(built), "dev": p.show(f["dev"]), "ahead": f["ahead"],
@@ -6442,7 +7045,8 @@ def queue_senddev(p):
                           "files": [f for _, f in diff_status(r, head, wip)]})
         if not repos:
             raise ValueError("Your checkout has no uncommitted changes to send.")
-        tid = add_task(p.name, senddev_body(p, repos), f"Send uncommitted changes in {senddev_where(p, repos)} to {p.dev}",
+        to = "a PR" if getattr(p, "flow", "dev") == "pr" else p.dev
+        tid = add_task(p.name, senddev_body(p, repos), f"Send uncommitted changes in {senddev_where(p, repos)} to {to}",
                        kind="senddev", senddev={"repos": repos})
         when = task(tid)["created"]
         for x in repos:
@@ -6463,16 +7067,24 @@ def senddev_where(p, repos):
 
 
 def senddev_body(p, repos):
+    pr = getattr(p, "flow", "dev") == "pr"
     lines = [f"Send to dev, from the banner on the project card. Your checkout's uncommitted work, as it was at the "
-             f"click, lands on {p.dev} as a normal change:", ""]
+             f"click, lands " + (f"on a branch for a PR against {pr_against(p, None)}" if pr else f"on {p.dev}") + " as a normal change:",
+             ""]
     for x in repos:
         n = len(x["files"])
         lines.append(f"{x['repo']}" + (f" (on {x['branch']})" if x["branch"] else "") + f": {n} {files(n)}")
         lines += [f"- {f}" for f in x["files"][:50]] + ([f"- …and {n - 50} more"] if n > 50 else []) + [""]
-    lines.append(f"A copy is kept at refs/ops/senddev-<this task's id>. The queue applies it onto a branch made from "
-                 f"{p.dev} (a worker resolves any conflicts), runs the gate and merges it into {p.dev}, as for any task. "
-                 "Only then are the files that still match the snapshot cleared from your checkout. Stopping or "
-                 "cancelling before the merge leaves your checkout as it is.")
+    if pr:  # flow "pr": a branch task like any other there
+        lines.append(f"A copy is kept at refs/ops/senddev-<this task's id>. The queue applies it onto this task's "
+                     f"branch, made from {pr_against(p, None, origin=True)} (a worker resolves any conflicts), and runs the gate. Then the "
+                     f"branch waits for Open PR, as any branch task does. Once the PR merges and {p.main} moves in "
+                     "your checkout, your copy there matches it. Nothing is cleared from your checkout before that.")
+    else:
+        lines.append(f"A copy is kept at refs/ops/senddev-<this task's id>. The queue applies it onto a branch made from "
+                     f"{p.dev} (a worker resolves any conflicts), runs the gate and merges it into {p.dev}, as for any "
+                     "task. Only then are the files that still match the snapshot cleared from your checkout. Stopping "
+                     "or cancelling before the merge leaves your checkout as it is.")
     return "\n".join(lines)
 
 
@@ -6488,25 +7100,34 @@ def senddev_start(p, tid, prompt):
     return senddev_apply(p, tid)
 
 
+def senddev_onto(p, t, r=None):
+    """What a Send to dev task applies your changes onto: dev, or for a branch task (flow "pr") origin/main (main with
+    no origin) of repo r, or the words for it with no r."""
+    if not is_branch_task(t):
+        return p.dev
+    return base_ref(p, r, t) if r else pr_against(p, t, origin=True)
+
+
 def senddev_apply(p, tid):
     """Apply the snapshot onto the task's branch, reset to the latest dev, in each repo it changes, as merge_wip does
     for a release. A repo that applies cleanly is committed at once. Returns "" when every repo is, the prompt for a
     worker to resolve the conflicts, or None if git can't apply it at all (the task then needs you)."""
     t = task(tid)
     d = senddev_of(t)
-    upd(tid, phase=f"applying your changes onto {p.dev}")
+    onto = senddev_onto(p, t)
+    upd(tid, phase=f"applying your changes onto {onto}")
     conflicts, made = [], 0
     for x in d["repos"]:
         r = part_of(p, x["sub"])
         wt = r.at(t["worktree"])
         x["keep"] = x.get("keep") or senddev_keep(r, tid, x, t["created"])
-        for a in (("cherry-pick", "--quit"), ("reset", "--hard", "-q", p.dev), ("clean", "-fdq")):
+        for a in (("cherry-pick", "--quit"), ("reset", "--hard", "-q", senddev_onto(p, t, r)), ("clean", "-fdq")):
             subprocess.run(["git", *a], cwd=wt, capture_output=True)
         m = subprocess.run(["git", "cherry-pick", "--no-commit", x["keep"]], cwd=wt, capture_output=True, text=True)
         x["conflicts"] = paths_of(r, "diff", "--name-only", "--diff-filter=U", cwd=wt) if m.returncode else []
         if m.returncode and not x["conflicts"]:
             senddev_save(tid, d)
-            ask_owner(p, tid, f"git could not apply your uncommitted changes in {x['repo']} onto {p.dev}: "
+            ask_owner(p, tid, f"git could not apply your uncommitted changes in {x['repo']} onto {onto}: "
                               + (m.stderr or m.stdout).strip()[-1500:])
             return None
         if x["conflicts"]:
@@ -6516,11 +7137,11 @@ def senddev_apply(p, tid):
     d["applied"] = not conflicts
     senddev_save(tid, d)
     if not conflicts:
-        ev(tid, f"applied your changes onto {p.dev} and committed them" if made else
-                f"applied your changes onto {p.dev}: it has them already, so there is nothing to commit")
+        ev(tid, f"applied your changes onto {onto} and committed them" if made else
+                f"applied your changes onto {onto}: it has them already, so there is nothing to commit")
         return ""
     n = sum(len(x["conflicts"]) for x in conflicts)
-    ev(tid, f"your changes conflict with {p.dev} in {n} {files(n)}; a worker is merging them")
+    ev(tid, f"your changes conflict with {onto} in {n} {files(n)}; a worker is merging them")
     upd(tid, session_id=None)
     return senddev_conflict_prompt(p, task(tid), conflicts)
 
@@ -6556,16 +7177,16 @@ def senddev_commit(p, tid):
         left = paths_of(r, "diff", "--name-only", "--diff-filter=U", cwd=wt) or [
             f for f in x["conflicts"] if (wt / f).is_file() and CONFLICT_MARK.search((wt / f).read_text(errors="replace"))]
         if left:
-            return (f"The worker said it merged your changes in {x['repo']} with {p.dev}, but conflicts are left in "
-                    f"{name_list(left)}. Say how to combine them and the worker tries again, or cancel to keep them "
+            return (f"The worker said it merged your changes in {x['repo']} with {senddev_onto(p, t)}, but "
+                    f"conflicts are left in {name_list(left)}. Say how to combine them and the worker tries again, or cancel to keep them "
                     "only in your checkout.")
-        if not int(r.git("rev-list", "--count", f"{p.dev}..HEAD", cwd=wt) or 0):  # it resolved but didn't commit
+        if not int(r.git("rev-list", "--count", f"{senddev_onto(p, t, r)}..HEAD", cwd=wt) or 0):  # resolved, no commit
             r.git("add", "-A", "--", *x["conflicts"], cwd=wt, check=False)
             senddev_commit_repo(r, wt, x)
         subprocess.run(["git", "cherry-pick", "--quit"], cwd=wt, capture_output=True)
     d["applied"] = True
     senddev_save(tid, d)
-    ev(tid, f"your changes are merged with {p.dev} and committed")
+    ev(tid, f"your changes are merged with {senddev_onto(p, t)} and committed")
     return None
 
 
@@ -6576,16 +7197,24 @@ def senddev_brief(p, t):
     notes = workspace_note(p, t["branch"]) + (f"## Notes for {p.title}\n\n{p.worker_notes}\n\n" if p.worker_notes else "")
     sent = "".join(f"- {x['repo']}: {len(x['files'])} {files(len(x['files']))}, kept as commit {x['keep'][:12]} "
                    f"(`refs/ops/senddev-{t['id']}`) on the user's HEAD {x['head'][:12]}\n" for x in d["repos"])
+    onto = senddev_onto(p, t)
+    if is_branch_task(t):  # flow "pr": the branch ends in a PR, not a merge into dev
+        lands = f"on branch `{t['branch']}` for a pull request against `{pr_against(p, t)}`"
+        after = (f"After you, it rebases the branch onto the latest `{onto}` and runs the merge check ({checks}). Then "
+                 f"the branch waits for the user to open its PR. Once the PR merges and `{p.main}` moves in the user's "
+                 "checkout, their copy matches it.")
+    else:
+        lands = f"on `{p.dev}`"
+        after = (f"After you, it rebases the branch onto the latest `{p.dev}`, runs the merge check ({checks}) and "
+                 f"merges it into `{p.dev}`. Then it clears the sent files from the user's checkout.")
     return (f"You are an unattended worker on the {p.title} project, {SENDDEV_HEAD} (task #{t['id']}). Nobody "
             f"watches this session and nobody can answer you mid-run.\n\n"
             f"The user's checkout had uncommitted changes: unfinished work on no branch, so workers didn't see it and "
-            f"no release shipped it. The user clicked Send to dev, which lands that work on `{p.dev}` as a normal "
+            f"no release shipped it. The user clicked Send to dev, which lands that work {lands} as a normal "
             f"change:\n\n{sent}\n"
-            f"This worktree ({t['worktree']}) is on branch `{t['branch']}`, made from `{p.dev}`. The queue applied "
+            f"This worktree ({t['worktree']}) is on branch `{t['branch']}`, made from `{onto}`. The queue applied "
             f"the user's changes here with `git cherry-pick --no-commit` of that commit, and commits them per repo as "
-            f"`Your uncommitted changes from <repo>`, with the files listed. After you, it rebases the branch onto the "
-            f"latest `{p.dev}`, runs the merge check ({checks}) and merges it into `{p.dev}`. Then it clears the sent "
-            f"files from the user's checkout.\n\n"
+            f"`Your uncommitted changes from <repo>`, with the files listed. {after}\n\n"
             f"Rules: edit and commit only in this worktree. Never touch {p.repo} (the user's checkout), another "
             f"worktree, or the `{p.dev}` and `{p.main}` branches, and never push. `OPS_PORT` is {p.port_for(t['id'])}; "
             f"use it for anything that listens. Never post mouse or keyboard events or take focus: the user is using "
@@ -6606,13 +7235,14 @@ def senddev_conflict_prompt(p, t, conflicts):
         parts.append(
             f"In {where} ({x['repo']}), `git cherry-pick --no-commit {x['keep'][:12]}` stopped on conflicts in:\n\n"
             + "".join(f"- {f}\n" for f in x["conflicts"]) +
-            f"\nThe `{p.dev}` side is checked work that passed the gate: `git diff {x['head'][:12]} HEAD -- <file>` "
+            f"\nThe `{senddev_onto(p, t)}` side is checked work that passed the gate: `git diff {x['head'][:12]} HEAD -- <file>` "
             f"shows what it changed since the user's base. The user's side is their unfinished work being landed: "
             f"`git diff {x['head'][:12]} {x['keep'][:12]} -- <file>`. Once resolved, `git add` those files and commit "
             f"everything staged with exactly:\n\n    git commit -m {shlex.quote(subject)} -m {shlex.quote(body)}\n")
-    return (senddev_brief(p, t) + "\n\n## Now: merge the user's changes with " + p.dev + "\n\n" + "\n".join(parts) +
+    return (senddev_brief(p, t) + "\n\n## Now: merge the user's changes with " + senddev_onto(p, t) + "\n\n" +
+            "\n".join(parts) +
             f"\nResolve every conflict so both sides survive. Where they truly contradict, keep what the user meant and "
-            f"fit it to `{p.dev}`'s code. Don't abort the cherry-pick, reset, rebase or stash. Then run the checks "
+            f"fit it to `{senddev_onto(p, t)}`'s code. Don't abort the cherry-pick, reset, rebase or stash. Then run the checks "
             f"({checks}). The user's work is unfinished, so they may fail: you may fix what they find, with the "
             f"smallest change that keeps the user's intent, in a further commit. If you can't merge the two sides "
             f"without the user, report needs_input and ask them how.")
@@ -7452,16 +8082,24 @@ def file_section(text, sec):
     return max((h for h in heads if h and (sec == h or sec.startswith(h + " "))), key=len, default=None)
 
 
-def link_check(project, refs, heads=None):
-    """{ref: None if its target exists, else why not} for refs of the forms task:<id>, file:<repo path>[:<line>]
-    [§<heading>], spec:[<sub>/]<change>, image:<name> and design:<chat id>/<name>. heads gets, for each file ref
-    with a § that exists, the heading it found, so the page can end the link there."""
+def link_check(project, refs, heads=None, chats=None):
+    """{ref: None if its target exists, else why not} for refs of the forms task:<id>, chat:<id>, file:<repo
+    path>[:<line>][§<heading>], spec:[<sub>/]<change>, image:<name> and design:<chat id>/<name>. heads gets, for each
+    file ref with a § that exists, the heading it found, so the page can end the link there; chats gets each chat
+    ref's {title, project}, for its tooltip and to open it."""
     p = PROJECTS.get(project or "")
     out, heads = {}, {} if heads is None else heads
+    chats = {} if chats is None else chats
     for ref in list(dict.fromkeys(refs or []))[:500]:
         kind, _, val = str(ref).partition(":")
         if kind == "task":
             out[ref] = None if val.isdigit() and task(int(val)) else f"No task #{val}"
+        elif kind == "chat":  # any project's chat, as a task: not the message's project
+            d = q("SELECT title,project FROM designs WHERE id=?", (int(val),), one=True) if val.isdigit() else None
+            out[ref] = None if d and d["project"] in PROJECTS else \
+                f"Chat {val} is in {d['project']}, which is archived" if d else f"No chat {val}"
+            if d:
+                chats[ref] = {"title": d["title"] or "Untitled", "project": d["project"]}
         elif kind == "image":
             ok = re.fullmatch(r"[\w-]+\.\w+", val) and (IMAGES / val).is_file()
             out[ref] = None if ok else f"Picture not found: {val}"
@@ -7551,9 +8189,9 @@ def send_queued(did):
     threading.Thread(target=design_turn, args=(did, "\n\n".join(waiting[:n])), daemon=True).start()
 
 
-def ops_note(p, did, extra=""):
-    """Context the dashboard adds to each user message: the queue, and what happened since the last one
-    (what the last queue block did, edits saved to dev, tasks queued with the buttons)."""
+def ops_note(p, did, extra="", text=""):
+    """Context the dashboard adds to each user message: the queue, what happened since the last one
+    (what the last queue block did, edits saved to dev, tasks queued with the buttons), and the chats text names."""
     live = q("SELECT id,state,title FROM tasks WHERE project=? AND state NOT IN ('done','cancelled') ORDER BY id",
              (p.name,))
     parts = ["queue: " + ("; ".join(f"#{t['id']} {t['state']} {t['title']}" for t in live[:25]) or "empty"),
@@ -7564,8 +8202,81 @@ def ops_note(p, did, extra=""):
         parts.append("checkout: " + "; ".join(
             f"{u['count']} uncommitted {files(u['count'])} in {u['repo']} (not on {p.dev}"
             + (f"; oldest {day(u['oldest'])}" if u["oldest"] else "") + ")" for u in dirty))
-    parts += news(did) + agree_open(did) + ([extra] if extra else [])
+    parts += news(did) + agree_open(did) + ([extra] if extra else []) + chat_mentions(text)
     return "[ops: " + " | ".join(parts) + "]\n\n"
+
+
+def chat_said(did, text):
+    """The [ops: ...] items a project chat's message gets: word from a project it sent something to, and the chats
+    text names (a design chat gets these in ops_note)."""
+    return news(did) + agree_open(did) + chat_mentions(text)
+
+
+CHAT_REF = re.compile(r"(?<![\w/:.#&-])chat:(\d+)(?![\w-])")  # chat:42 as a word of its own (README: LINK-8)
+
+
+def chat_kind(d):
+    return "OpenSpec change" if d["spec"] or d["spec_draft"] else \
+        "project chat" if d["kind"] == "project" else "design chat"
+
+
+def chat_mentions(text):
+    """One [ops: ...] item per chat:N in the owner's message, outside fenced code and URLs: what that chat is and
+    how to read it. Its transcript is never pasted."""
+    keep, fence = [], None
+    for line in (text or "").split("\n"):
+        m = re.match(r" {0,3}(`{3,}|~{3,})", line)
+        if fence is None and m:
+            fence = m[1]
+        elif fence is not None:
+            if re.fullmatch(rf" {{0,3}}{re.escape(fence[0])}{{{len(fence)},}}\s*", line):
+                fence = None
+        else:
+            keep.append(re.sub(r"https?://\S+", " ", line))
+    out = []
+    for n in dict.fromkeys(CHAT_REF.findall("\n".join(keep))):
+        d = q("SELECT id,project,title,kind,spec,spec_draft,updated,(SELECT COUNT(*) FROM design_msgs m "
+              "WHERE m.design_id=designs.id) AS n FROM designs WHERE id=?", (int(n),), one=True)
+        out.append(f"chat:{n}: no such chat" if not d else
+                   f"chat:{n} is \"{d['title'] or 'Untitled'}\" ({d['project']}, {chat_kind(d)}, {d['n']} message"
+                   f"{'' if d['n'] == 1 else 's'}, last active {day(d['updated'] or 0)}): read it with "
+                   f"`{OPSD_CMD} chat show {n}`")
+    return out
+
+
+def topic_search(text="", project="", exclude=None, limit=10):
+    """GET /api/topics/search: the chats of every project that isn't archived whose title has each word of text, or
+    whose id starts with it, for the message box's @ picker: project's first, open before ended, then newest
+    activity, at most limit."""
+    text = (text or "").strip().lower()
+    words, num = text.split(), text.removeprefix("chat:")
+    out = []
+    for d in q("SELECT id,project,title,kind,spec,spec_draft,updated,ended FROM designs "
+               "ORDER BY updated DESC, id DESC"):
+        title = (d["title"] or "Untitled").lower()
+        if d["project"] in PROJECTS and d["id"] != exclude and (
+                all(w in title for w in words) or (num.isdigit() and str(d["id"]).startswith(num))):
+            out.append({"id": d["id"], "title": d["title"] or "Untitled", "project": d["project"],
+                        "kind": chat_kind(d), "ended": d["ended"], "last": d["updated"] or 0})
+    out.sort(key=lambda t: (t["project"] != project, bool(t["ended"]), -t["last"]))
+    return out[:max(0, min(limit, 50))]
+
+
+def chat_show(did, last=None):
+    """opsd.py chat show: a chat's header line, then its messages oldest first (only the last `last` with it), each
+    labelled and dated, in full. None when there is no such chat."""
+    d = q("SELECT * FROM designs WHERE id=?", (did,), one=True)
+    if not d:
+        return None
+    msgs = q("SELECT role,text,ts FROM design_msgs WHERE design_id=? ORDER BY id", (did,))
+    if last is not None:
+        msgs = msgs[len(msgs) - last:] if last < len(msgs) else msgs
+    when = lambda ts: time.strftime("%Y-%m-%d %H:%M", time.localtime(ts or 0))  # noqa: E731
+    who = {"user": "The owner", "assistant": "Claude", "ops": "The dashboard"}
+    head = (f"chat:{did} · {d['project']} · {chat_kind(d)} · \"{d['title'] or 'Untitled'}\" · {d['state']} · "
+            + (f"ended {when(d['ended'])}" if d["ended"] else "open") + f" · created {when(d['created'])}")
+    return "\n\n".join([head] + [f"--- {who.get(m['role'], m['role'])} · {when(m['ts'])}\n{m['text'] or ''}"
+                                 for m in msgs]) + "\n"
 
 
 def news(did):
@@ -7584,6 +8295,7 @@ def design_system_prompt(p, d=None, cwd=None):
                                                          files=CHAT_FILES / str(did), did=did, checkout=p.repo,
                                                          research=f"{OPSD_CMD} add -p {shlex.quote(p.name)} --research",
                                                          schedule_edit=f"{OPSD_CMD} schedule edit",
+                                                         chat_show=f"{OPSD_CMD} chat show",
                                                          notes=notes + peer_brief(p, "design"))
     if d and d["spec"]:
         out += "\n" + (CODE / "spec_prompt.md").read_text().format(change=d["spec"], path=SPEC_DIR / d["spec"],
@@ -8100,8 +8812,8 @@ def topic_from_reply(reply, did):
 
 
 def mcp_servers(p):
-    """The MCP servers p's project chats load: the chat_mcp names, defined in your local, project (.mcp.json) or
-    user scope, in Claude's order. Returns (the --mcp-config JSON, names not found). claude.ai connectors can't be
+    """The MCP servers a chat with a stopped task of p loads: the chat_mcp names, defined in your local, project
+    (.mcp.json) or user scope, in Claude's order. Returns (the --mcp-config JSON, names not found). claude.ai connectors can't be
     listed: --strict-mcp-config drops them and only claude.ai can define them."""
     found = {}
     try:
@@ -8118,6 +8830,100 @@ def mcp_servers(p):
             if name not in found and isinstance(scope.get(name), dict):
                 found[name] = scope[name]
     return json.dumps({"mcpServers": found}), [n for n in p.chat_mcp if n not in found]
+
+
+# A project chat runs like the CLI: auto mode, and what would still prompt goes to you. claude -p hands each such
+# prompt to its --permission-prompt-tool, an MCP tool; the daemon serves it over HTTP (POST /mcp/permit/<chat id>)
+# and holds the call until you click Approve or Deny in the chat, or the turn ends. The tool gets {tool_name, input,
+# tool_use_id} and answers {"behavior": "allow", "updatedInput": ...} or {"behavior": "deny", "message": ...}.
+
+PERMIT_SERVER = "claude-ops"
+PERMIT_TOOL = f"mcp__{PERMIT_SERVER}__permit"
+PERMIT_WAIT = 3600  # seconds a prompt waits for you before it counts as denied
+PERMITS = {}  # request id: {id, did, tool, input, ts, done (an Event), allow (None until answered), why}
+PERMIT_LOCK = threading.Lock()
+DENIED = "you clicked Deny"
+PERMIT_SPEC = {"name": "permit", "description": "Ask the owner, on the claude-ops dashboard, to allow a tool call.",
+               "inputSchema": {"type": "object", "required": ["tool_name", "input"], "properties": {
+                   "tool_name": {"type": "string"}, "input": {"type": "object"}, "tool_use_id": {"type": "string"}}}}
+
+
+def permit_mcp(did):
+    """The --mcp-config JSON that gives chat did the daemon's permission-prompt server."""
+    return json.dumps({"mcpServers": {PERMIT_SERVER: {"type": "http", "url": f"{DAEMON_URL}/mcp/permit/{did}",
+                                                      "headers": {"X-Ops": "1"}}}})
+
+
+def permit_rpc(did, m):
+    """Chat did's permission server: the JSON-RPC response to message m, or None for a notification."""
+    if not isinstance(m, dict) or "id" not in m:
+        return None
+    meth, params = m.get("method"), m.get("params") or {}
+    if meth == "initialize":
+        r = {"protocolVersion": params.get("protocolVersion") or "2025-06-18", "capabilities": {"tools": {}},
+             "serverInfo": {"name": PERMIT_SERVER, "version": "1"}}
+    elif meth == "tools/list":
+        r = {"tools": [PERMIT_SPEC]}
+    elif meth == "tools/call" and params.get("name") == "permit":
+        a = params.get("arguments") or {}
+        r = {"content": [{"type": "text", "text": json.dumps(permit_ask(did, str(a.get("tool_name") or "?"),
+                                                                        a.get("input") or {}))}]}
+    elif meth == "ping":
+        r = {}
+    else:
+        return {"jsonrpc": "2.0", "id": m["id"], "error": {"code": -32601, "message": f"no method {meth}"}}
+    return {"jsonrpc": "2.0", "id": m["id"], "result": r}
+
+
+def permit_ask(did, tool, inp, wait=PERMIT_WAIT):
+    """Hold one permission prompt of chat did until you answer it, the turn ends or wait runs out: the tool's
+    answer. The chat view lists it (permits_of) with Approve and Deny."""
+    req = {"id": secrets.token_hex(6), "did": did, "tool": tool, "input": inp, "ts": time.time(),
+           "done": threading.Event(), "allow": None, "why": f"no answer in {wait // 60} min"}
+    with PERMIT_LOCK:
+        PERMITS[req["id"]] = req
+    state_changed()
+    try:
+        req["done"].wait(wait)
+    finally:
+        with PERMIT_LOCK:
+            PERMITS.pop(req["id"], None)
+        state_changed()
+    word = "allowed" if req["allow"] else f"denied ({req['why']})"
+    if did in DESIGN_LIVE:
+        DESIGN_LIVE[did].append(f"{tool}: {word} on the dashboard")
+    if req["allow"]:
+        return {"behavior": "allow", "updatedInput": inp}
+    said = "The owner denied it" if req["why"] == DENIED else f"Not allowed: {req['why']}"
+    return {"behavior": "deny", "message": f"{said} on the claude-ops dashboard. Don't try it another way: say what "
+                                           "you wanted to do and why."}
+
+
+def permit_answer(did, rid, allow):
+    """Approve or Deny in the chat view: answer chat did's prompt rid."""
+    with PERMIT_LOCK:
+        req = PERMITS.get(rid)
+        if not req or req["did"] != did or req["done"].is_set():
+            raise ValueError("that permission request is gone: the turn ended or it was already answered")
+        req["allow"], req["why"] = bool(allow), DENIED
+        req["done"].set()
+    return {"ok": True}
+
+
+def permits_drop(did, why):
+    """Deny chat did's open prompts: its turn ended, so nothing waits for them."""
+    with PERMIT_LOCK:
+        for req in PERMITS.values():
+            if req["did"] == did and not req["done"].is_set():
+                req["allow"], req["why"] = False, why
+                req["done"].set()
+
+
+def permits_of(did):
+    """Chat did's open permission prompts, oldest first, for the chat view."""
+    with PERMIT_LOCK:
+        return [{"id": r["id"], "tool": r["tool"], "input": r["input"], "ts": r["ts"]}
+                for r in sorted(PERMITS.values(), key=lambda r: r["ts"]) if r["did"] == did and not r["done"].is_set()]
 
 
 def design_turn(did, text, fresh_why=None):
@@ -8164,27 +8970,24 @@ def design_turn(did, text, fresh_why=None):
     slash = text.strip().startswith("/")  # the CLI runs a slash command only from the start of the prompt
     if handoff and not slash:
         text = handoff + "\n\n## Now\n\n" + text
-    if chat:  # your own settings apply, like the CLI; auto mode stands in for prompts
-        said = news(did) + agree_open(did)  # word from a project it sent something to; a design chat gets it in ops_note
-        mcp, missing = mcp_servers(p)
-        if missing and not d["session_id"]:  # once per session, as that is when servers load
-            q("INSERT INTO design_msgs (design_id, role, text, ts) VALUES (?,?,?,?)",
-              (did, "ops", f"chat_mcp in {p.name}.toml names MCP servers Claude has no definition for, so this "
-                           f"chat runs without them: {', '.join(missing)}.", time.time()))
+    env = dict(os.environ, OPS_FROM=f"chat:{did}", OPS_DAEMON=DAEMON_URL)
+    if chat:  # like the CLI: your own settings, MCP servers and Claude in Chrome; auto mode, and prompts come to you
+        said = chat_said(did, orig)  # word from a project it sent something to; a design chat gets it in ops_note
         system = PROJECT_CHAT_PROMPT + "\n\n" + peer_brief(p, "chat")
         system += (f"\n\nTo queue a task in {p.name} itself, for an unattended worker in its own worktree, run "
                    f"`{SEND_CMD} {p.name} --title \"...\" \"<a brief that stands alone>\"`. Do it when the owner "
                    "asks or agrees.")
+        system += CHAT_REF_RULE
         if handoff and slash:
             system += "\n\n" + handoff
         cmd = [CLAUDE, "-p", ("[ops: " + " | ".join(said) + "]\n\n" if said else "") + with_images(text),
                "--output-format", "stream-json", "--verbose",
-               "--permission-mode", "auto", "--permission-prompts", "none", "--no-chrome", *PLUGIN_ARGS,
-               "--mcp-config", mcp, "--strict-mcp-config",  # only chat_mcp: every tool rides on every call
-               "--name", f"{p.name} chat #{did}", "--settings", guard_settings(None, p, chat=True),
+               "--permission-mode", "auto", "--permission-prompt-tool", PERMIT_TOOL, "--mcp-config", permit_mcp(did),
+               *PLUGIN_ARGS, "--name", f"{p.name} chat #{did}", "--settings", guard_settings(None, p, chat=True, guard=False),
                "--append-system-prompt", system]
+        env["MCP_TOOL_TIMEOUT"] = str((PERMIT_WAIT + 60) * 1000)  # a prompt waits for you, not the 60 s default
     else:
-        note, system = ops_note(p, did, extra), design_system_prompt(p, d, cwd)
+        note, system = ops_note(p, did, extra, orig), design_system_prompt(p, d, cwd)
         if slash:
             system = system.rstrip() + "\n\n## Dashboard note for this turn\n\n" + note.strip()
             system += "\n\n" + handoff if handoff else ""
@@ -8216,8 +9019,7 @@ def design_turn(did, text, fresh_why=None):
     cost, retry = 0.0, False
     try:
         reply, cost = stream_claude(cmd, cwd, RUNS / f"design-{did}", DESIGN_LIVE[did], DESIGN_PROCS, did,
-                                    on_session, env=dict(os.environ, OPS_FROM=f"chat:{did}", OPS_DAEMON=DAEMON_URL),
-                                    on_model=on_model, on_call=lambda ctx: q(
+                                    on_session, env=env, on_model=on_model, on_call=lambda ctx: q(
                                         "UPDATE designs SET last_call=?, ctx_tokens=? WHERE id=?",
                                         (time.time(), ctx, did)))
         if STOPPING.is_set():  # the restart stopped it: the chat stays replying, and resume_chats picks it up
@@ -8254,6 +9056,7 @@ def design_turn(did, text, fresh_why=None):
             q("INSERT INTO design_msgs (design_id, role, text, ts) VALUES (?,?,?,?)",
               (did, "assistant", f"(chat error: {e})", time.time()))
     finally:
+        permits_drop(did, "the reply ended first")
         DESIGN_PROCS.pop(did, None)
         DESIGN_LIVE.pop(did, None)
         # A chat ended mid-reply stays read: what the stopped turn wrote last isn't a new reply when you reopen it.
@@ -8272,17 +9075,25 @@ LOST_SESSION = "No conversation found with session ID"  # claude's error when --
 RESUME_NOTE = ("[ops: claude-ops restarted while you were replying to the message below, which stopped your reply and "
                "any command it was running. Check what you had already done, then pick up where you left off and "
                "answer it. The owner did not resend it.]\n\n")
+RESTARTED_NOTE = ("[ops: claude-ops restarted because you ran `opsd.py restart`, which stopped your reply. The restart "
+                  "is done and this is the new daemon: don't run it again. Finish answering the message below. The "
+                  "owner did not resend it.]\n\n")
 
 
-def resumed(text):
+def resumed(text, mine=False):
     """The message of a turn a restart cut off, to send again: with a note, unless it is a slash command, which the
-    CLI runs only from the start of the prompt."""
-    return text if text.strip().startswith("/") else RESUME_NOTE + text
+    CLI runs only from the start of the prompt. mine: the chat itself ran opsd.py restart."""
+    return text if text.strip().startswith("/") else (RESTARTED_NOTE if mine else RESUME_NOTE) + text
 
 
 def resume_chats():
     """On start: answer the messages the last daemon was replying to when it stopped (a release restarts it), so
     you don't have to send them again. Chats it left replying, and the task chats shutdown listed in cut_task_chats."""
+    try:
+        by = json.loads(setting("restarted_by") or "null")  # the chat that ran opsd.py restart, if one did
+    except ValueError:
+        by = None
+    set_setting("restarted_by", "null")
     for d in q("SELECT id, project, ended FROM designs WHERE state='thinking'"):
         # the turn's message: the user's messages since the last answer (queued ones go as one turn)
         msgs = q("SELECT text FROM design_msgs WHERE design_id=? AND role='user' AND id>(SELECT COALESCE(MAX(id),0) "
@@ -8291,11 +9102,13 @@ def resume_chats():
         if d["ended"] or not msgs or d["project"] not in PROJECTS:
             q("UPDATE designs SET state='idle' WHERE id=?", (d["id"],))
             continue
+        mine = by == d["id"]
         q("INSERT INTO design_msgs (design_id, role, text, ts) VALUES (?,?,?,?)",
-          (d["id"], "ops", "claude-ops restarted while Claude was replying, which stopped the reply. Claude is picking "
-                           "it up again; you don't need to resend your message.", time.time()))
+          (d["id"], "ops", ("Claude restarted claude-ops (opsd.py restart)" if mine else
+                            "claude-ops restarted while Claude was replying") + ", which stopped the reply. Claude is "
+                           "picking it up again; you don't need to resend your message.", time.time()))
         text = "\n\n".join(m["text"] for m in msgs)
-        threading.Thread(target=design_turn, args=(d["id"], resumed(text)), daemon=True).start()
+        threading.Thread(target=design_turn, args=(d["id"], resumed(text, mine)), daemon=True).start()
     for d in q("SELECT id, project FROM designs WHERE state!='thinking' AND ended IS NULL AND queued NOT IN ('[]', '')"):
         if d["project"] in PROJECTS:
             send_queued(d["id"])  # stopped between a reply and the queued messages after it
@@ -8873,43 +9686,57 @@ def spec_queue(did, plan, hold=False, release=None):
 
 TASK_CHAT_PROCS = {}  # task id -> Popen
 TASK_CHAT_LIVE = {}  # task id -> tool lines of the reply in progress; a key here means a reply is running
-PROJECT_CHAT_PROMPT = ("You are talking with the owner through the claude-ops dashboard, not a terminal. "
-                       "Nobody can answer permission prompts here: actions that would prompt are denied. "
-                       "When one is denied, say what you tried, and that they can run it themselves or "
-                       "continue this session in a terminal with `claude --resume`. " + GUARD_RULE + " "
-                       "Reading code: search first (`grep -n`, Grep, Glob), then read only the range you need "
-                       "(Read with offset and limit, or `sed -n 'a,bp'`), 150 lines or fewer at a time. Never Read a "
-                       "file over about 500 lines without a range, and never `cat` one. Don't reread what is already "
-                       "in your context. Keep command output short: pipe it through `tail` or `grep`, and use quiet "
-                       "flags for tests and builds. "
-                       f"To show the owner a picture, such as a screenshot, copy it into {IMAGES} under a name of "
-                       "letters, digits, - and _ with a .png, .jpg, .gif or .webp ending, then embed it with "
-                       "`![what it shows](/api/images/<name>)`. The dashboard can't show a picture from anywhere else "
-                       "on disk, such as /tmp or the repo. "
-                       "A to-do is only for something that truly needs the owner: a password or sudo, a macOS "
-                       "permission grant (Full Disk Access and the like), an API key or account they must create, or "
-                       "a decision (you proposed something and wait for their yes). Add one to their to-do list with "
-                       "a fenced block in the language `todo` holding a JSON list of "
-                       '{"verb": "Do" or "Agree", "title", "why", "wait"?}; wait, {"tasks": [283], "until": '
-                       '"merged" or "released", "at": "tue 09:00"} (tasks, at, or both; at is local time as '
-                       "Start later takes it), keeps it out of their list until those tasks get there and that time comes, or "
-                       'until a task fails or stops. A step that a command or code change can do is '
-                       "never a to-do, even setup that must wait for a task to merge: do it, or queue it as a task. "
-                       'Close an '
-                       'item that is settled with {"close": "todo:<id>"} in a `todo` block. #N means a task and '
-                       'todo:N means a to-do; the ids the dashboard reports, and the owner pastes, come as todo:N. '
-                       "When the owner's reply settles one of your Agree items (a yes, a no, or a changed plan), close "
-                       "it that way; leave it open while it is still pending. The [ops: ...] line at the start of a "
-                       "message lists this chat's open Agree items with their todo:N ids. "
-                       "When the owner asks for work that repeats (\"every Monday, check the dependencies\"), add a "
-                       "fenced block with the language `schedule` holding a JSON list of {project, title, body, every, "
-                       "hold?, model?, effort?, after_schedule?}; after_schedule is another schedule's id whose current "
-                       "task each run waits on; every is local time: 'day HH:MM', 'weekday HH:MM', 'mon HH:MM' (any of "
-                       "mon..sun, or 'mon,thu HH:MM') or 'hour'. Each slot queues a task with that body for an "
-                       "unattended worker, so the body must stand alone. "
-                       "This chat is one topic of the project's conversation on the dashboard, titled from its first "
-                       "message. When the subject clearly changes (not every reply), retitle it with a fenced block in "
-                       'the language `topic` holding {"title": "a few words"}; it is taken out of the reply.')
+# The opening of a chat's system prompt. A project chat is the owner's own session, like the CLI: their prompts
+# come to the dashboard. A chat with a stopped task keeps the worker's limits: nothing can answer a prompt.
+PROJECT_CHAT_HEAD = ("You are talking with the owner through the claude-ops dashboard, not a terminal. This chat is "
+                     "their own attended session, like the Claude Code CLI: auto mode, their settings, MCP servers "
+                     "and Claude in Chrome. When an action needs their permission, the dashboard shows them the "
+                     "request with Approve and Deny, and your turn waits for the answer. When they deny one, say what "
+                     "you wanted to do and why; don't try it another way. " + GUARD_RULE + " "
+                     "You run as a child of the claude-ops daemon, so `opsctl restart`, `opsctl stop` or stopping its "
+                     "launchd job stops you mid-command and leaves the restart half done. To restart claude-ops (to "
+                     f"load new code, say), run `{CODE / 'opsd.py'} restart`: it restarts in a process of its own, as "
+                     "the Restart button in Settings does. Running tasks pause and resume, and this chat stops and "
+                     "picks up again in the new daemon; run it once, last in your turn, and only when the owner asks. ")
+TASK_CHAT_HEAD = ("You are talking with the owner through the claude-ops dashboard, not a terminal. "
+                  "Nobody can answer permission prompts here: actions that would prompt are denied. "
+                  "When one is denied, say what you tried, and that they can run it themselves or "
+                  "continue this session in a terminal with `claude --resume`. " + GUARD_RULE + " ")
+CHAT_PROMPT = ("Reading code: search first (`grep -n`, Grep, Glob), then read only the range you need "
+               "(Read with offset and limit, or `sed -n 'a,bp'`), 150 lines or fewer at a time. Never Read a "
+               "file over about 500 lines without a range, and never `cat` one. Don't reread what is already "
+               "in your context. Keep command output short: pipe it through `tail` or `grep`, and use quiet "
+               "flags for tests and builds. "
+               f"To show the owner a picture, such as a screenshot, copy it into {IMAGES} under a name of "
+               "letters, digits, - and _ with a .png, .jpg, .gif or .webp ending, then embed it with "
+               "`![what it shows](/api/images/<name>)`. The dashboard can't show a picture from anywhere else "
+               "on disk, such as /tmp or the repo. "
+               "A to-do is only for something that truly needs the owner: a password or sudo, a macOS "
+               "permission grant (Full Disk Access and the like), an API key or account they must create, or "
+               "a decision (you proposed something and wait for their yes). Add one to their to-do list with "
+               "a fenced block in the language `todo` holding a JSON list of "
+               '{"verb": "Do" or "Agree", "title", "why", "wait"?}; wait, {"tasks": [283], "until": '
+               '"merged" or "released", "at": "tue 09:00"} (tasks, at, or both; at is local time as '
+               "Start later takes it), keeps it out of their list until those tasks get there and that time comes, or "
+               'until a task fails or stops. A step that a command or code change can do is '
+               "never a to-do, even setup that must wait for a task to merge: do it, or queue it as a task. "
+               'Close an '
+               'item that is settled with {"close": "todo:<id>"} in a `todo` block. #N means a task and '
+               'todo:N means a to-do; the ids the dashboard reports, and the owner pastes, come as todo:N. '
+               "When the owner's reply settles one of your Agree items (a yes, a no, or a changed plan), close "
+               "it that way; leave it open while it is still pending. The [ops: ...] line at the start of a "
+               "message lists this chat's open Agree items with their todo:N ids. "
+               "When the owner asks for work that repeats (\"every Monday, check the dependencies\"), add a "
+               "fenced block with the language `schedule` holding a JSON list of {project, title, body, every, "
+               "hold?, model?, effort?, after_schedule?}; after_schedule is another schedule's id whose current "
+               "task each run waits on; every is local time: 'day HH:MM', 'weekday HH:MM', 'mon HH:MM' (any of "
+               "mon..sun, or 'mon,thu HH:MM') or 'hour'. Each slot queues a task with that body for an "
+               "unattended worker, so the body must stand alone. "
+               "This chat is one topic of the project's conversation on the dashboard, titled from its first "
+               "message. When the subject clearly changes (not every reply), retitle it with a fenced block in "
+               'the language `topic` holding {"title": "a few words"}; it is taken out of the reply.')
+PROJECT_CHAT_PROMPT = PROJECT_CHAT_HEAD + CHAT_PROMPT
+TASK_CHAT_PROMPT = TASK_CHAT_HEAD + CHAT_PROMPT
 CHAT_STATES = ("review", "needs_input", "failed", "done", "cancelled", "paused")  # the worker is not running
 CHAT_NEXT = {"review": "Approve merges the branch with your commits (the gate runs again first); Send back with "
                        "feedback sends the worker back to work",
@@ -8962,7 +9789,7 @@ def task_chat_turn(tid, text):
         cmd = [CLAUDE, "-p", note + with_images(text), "--output-format", "stream-json", "--verbose",
                "--permission-mode", "auto", "--permission-prompts", "none", "--no-chrome", *PLUGIN_ARGS,
                "--mcp-config", mcp, "--strict-mcp-config", "--settings", guard_settings(str(cwd), p, chat=True),
-               "--append-system-prompt", PROJECT_CHAT_PROMPT]
+               "--append-system-prompt", TASK_CHAT_PROMPT]
     else:  # merged: its edits would land nowhere, so it reads, and a change goes to a follow-up task
         note = (f"[ops: the user is asking about this task on the dashboard; its state is {t['state']}. Answer them. "
                 "This turn is read-only: do not change files and do not write $OPS_RESULT. "
@@ -9019,6 +9846,9 @@ def task_chat_turn(tid, text):
 
 OPSD_CMD = f"{shlex.quote(sys.executable)} {shlex.quote(str(CODE / 'opsd.py'))}"
 SEND_CMD = f"{OPSD_CMD} send"
+CHAT_REF_RULE = (f"\n\nA `chat:N` in the owner's message is another chat, of any project; the `[ops: ...]` line says "
+                 f"what it is. Read it with `{OPSD_CMD} chat show N` when the request needs it, and cite chats as "
+                 "`chat:N`.")
 PEER_KINDS = {"task": "task", "design": "design chat", "chat": "chat"}  # what `send` starts -> words
 PEER_HOPS = 3  # a send passed on this many times is refused, so two projects can't keep each other busy
 PEER_MAX = 10  # sends one task or chat may make
@@ -9125,12 +9955,13 @@ def retry_after(tid, after):
 
 
 def send_peer(ref, project, kind, text, title="", hold=False, model=None, effort=None, after=None, not_before=None,
-              jira=None, branch=None):
+              jira=None, branch=None, base=None):
     """Start a task or chat in project for the session ref names. Returns {kind, id, project, said}.
     model, effort: the task's, as add_task takes them; a chat starts on its kind's model, at the effort setting.
     after: a task id (12 or "#12"), in any project, the new task waits on until it merges (its depends_on).
     not_before: when the task may start, as add_task takes it (--at, --after-reset).
-    jira, branch: a branch task's Jira key or named branch (--jira, --branch; README: Branches and pull requests)."""
+    jira, branch: a branch task's Jira key or named branch (--jira, --branch; README: Branches and pull requests).
+    base: the branch its PRs go against (--base)."""
     p, text = proj(project), (text or "").strip()
     if kind not in PEER_KINDS:
         raise ValueError(f"kind is one of {', '.join(PEER_KINDS)}")
@@ -9151,8 +9982,8 @@ def send_peer(ref, project, kind, text, title="", hold=False, model=None, effort
         if kind != "task":
             raise ValueError("--at and --after-reset are for tasks; a chat starts at once")
         start_time(not_before)  # refused here, before anything is made
-    if (jira or branch) and kind != "task":
-        raise ValueError("--branch and --jira are for tasks; a chat works on no branch")
+    if (jira or branch or base) and kind != "task":
+        raise ValueError("--branch, --jira and --base are for tasks; a chat works on no branch")
     if not text:
         raise ValueError("say what the other project should do")
     o = origin_of(ref)
@@ -9173,7 +10004,7 @@ def send_peer(ref, project, kind, text, title="", hold=False, model=None, effort
                 f"{place + '. ' if place else ''}You may read its files; change only your own worktree. "
                 "When this task ends, the queue tells the sender how it went.]")
         tid = add_task(p.name, f"{head}\n\n{text}", title, hold=hold, depends_on=after, origin=o, model=model,
-                       effort=effort, not_before=not_before, jira=jira, target=branch)
+                       effort=effort, not_before=not_before, jira=jira, target=branch, pr_base=base)
         ev(tid, f"sent by {who}" + (f", after #{after}" if after else ""))
         if o:
             tell_origin(o, f"Sent task #{tid} to {p.title}: {task(tid)['title']}", [tid])
@@ -9760,16 +10591,18 @@ def suggestions(rows, a):
 # build from what the tasks, chats and project facts already say; only Do and Agree, which Claude adds, are stored.
 
 TODO_GROUP = {"Answer": "unblock", "Fix": "unblock", "Promote": "ship", "Ship": "ship", "Commit": "ship",
-              "Try": "review", "Review": "review", "Agree": "review", "Read": "review", "Do": "only_me"}
-TODO_ORDER = ("unblock", "ship", "review", "only_me")
+              "Try": "review", "Review": "review", "Agree": "review", "Read": "review", "Do": "only_me",
+              "In review": "in_review"}
+TODO_ORDER = ("unblock", "ship", "review", "only_me", "in_review")
 TODO_MIN = {"Answer": 2, "Fix": 5, "Try": 5, "Review": 3, "Agree": 2, "Read": 3, "Promote": 1, "Ship": 2,
-            "Commit": 2, "Do": 5}  # a guess at the minutes each takes you
+            "Commit": 2, "Do": 5, "In review": 1}  # a guess at the minutes each takes you
 TODO_CLOSES = {"Answer": "Closes when you answer.", "Fix": "Closes when it is retried or cancelled.",
                "Try": "Closes when you approve or send it back.", "Review": "Closes when you approve or send it back.",
                "Promote": "Closes when dev is promoted to main.", "Ship": "Closes when you deploy.",
                "Commit": "Closes when the files are committed or gone.",
                "Agree": "Closes when Claude records your answer, or you click Done.",
-               "Do": "Closes when you click Done."}  # how each item leaves the list, shown under its why
+               "Do": "Closes when you click Done.",
+               "In review": "Closes when every PR has merged or closed."}  # how each item leaves the list, shown under its why
 TODO_BLOCK = re.compile(r"```todo[ \t]*\n(.*?)^[ \t]*```[ \t]*$", re.S | re.M)
 
 
@@ -10326,6 +11159,22 @@ def todo_bond(key, ref):
     return bond
 
 
+# A branch task whose PRs are open and that waits on nobody: watching them, or a worker or PR step under way for them
+PR_WATCHING = ("pr", "queued", "running", "gating", "paused")
+
+
+def open_prs(t):
+    """The task's open PRs, as /api/state shows them (its prs, or read now when the caller's tasks lack them)."""
+    prs = t["prs"] if "prs" in t else pr_view_rows(t, pr_rows(t["id"]))
+    return [x for x in prs or [] if x["state"] == "OPEN" and x["number"]]
+
+
+def in_review_why(prs):
+    """One line per open PR: its name and number, CI and where its review round is."""
+    return "\n".join(f"{x['name'] + ' ' if x['name'] else ''}PR #{x['number']}: CI {x['ci'] or 'pending'}"
+                     f"{', ' + x['review'] if x['review'] else ''}" for x in prs)
+
+
 def todos_list(tasks, projects, last, now=None, notes=True):
     """The to-do list for /api/state, from what state_payload already read: its tasks (with last, their latest
     events), its projects (main_info, so no git call here), and two small queries for chats and stored items.
@@ -10356,8 +11205,11 @@ def todos_list(tasks, projects, last, now=None, notes=True):
                                 if proof_files(t["id"])[0].is_file() else "Play it, then approve or send it back"))
             else:
                 out.append(item(f"task:{t['id']}:review", "Review", why="Read the diff and summary, then approve"))
+        if is_branch_task(t) and st in PR_WATCHING and (prs := open_prs(t)):
+            out.append({**item(f"task:{t['id']}:inreview", "In review", why=in_review_why(prs)), "prs": prs})
         if st == "done" and t["merged"]:  # the reports it listed (RES-10), next to RES-5's own
-            dev = getattr(PROJECTS.get(t["project"]), "dev", "dev")
+            pj = PROJECTS.get(t["project"])
+            dev = getattr(pj, "main" if is_branch_task(t) else "dev", "dev")  # a branch task's PR merged into main
             out += [{**item(f"task:{t['id']}:report:{x['path']}", "Read", why=f"Report {x['path']} merged into {dev}"),
                      "report": {"path": x["path"]}} for x in reports_of(t) if not x.get("read")]
     for f in projects:
@@ -10365,7 +11217,8 @@ def todos_list(tasks, projects, last, now=None, notes=True):
             continue
         name = f["name"]
         rel = f.get("release")
-        if f.get("ahead") and not f.get("auto_release") and not (rel and rel["state"] not in ENDED):
+        if f.get("ahead") and not f.get("auto_release") and not (rel and rel["state"] not in ENDED) and \
+                f.get("flow") != "pr":  # flow "pr": no Promote; dev follows main
             n = len(f["ahead"])
             out.append(todo_item(f"project:{name}:promote", "Promote", name, f"Promote {f['title']}",
                                  f"{f['dev_branch']} is {n}{'+' if n >= 30 else ''} change{'s' if n != 1 else ''} "
@@ -10439,6 +11292,12 @@ def state_payload():
         t["step"] = last_step(t["id"]) if t["state"] == "running" and t["phase"] == "claude working" else None
         t["wait"] = waits.get(t["id"])
         t["prs"] = pr_view_rows(t, prs.get(t["id"])) if is_branch_task(t) else None
+        if t["prs"] is not None:
+            t["pr_ready"] = ready_on(t["id"])
+            t["pr_ready_words"] = ready_words(PROJECTS[t["project"]], t, prs.get(t["id"]) or []) \
+                if t["pr_ready"] and t["project"] in PROJECTS else None
+        t["pr_against"] = pr_against(PROJECTS[t["project"]], t) if t["prs"] is not None and \
+            t["project"] in PROJECTS else None
         t["start_words"] = start_words(t) if t["state"] == "queued" else None
         t["origin"] = origin_view(t["origin"])
         t["research"] = research_of(t)
@@ -10598,6 +11457,8 @@ class H(BaseHTTPRequestHandler):
         path = urlparse(self.path).path
         if path == "/":
             return self.send(200, (CODE / "dashboard.html").read_bytes(), "text/html; charset=utf-8")
+        if path.startswith("/mcp/"):  # the permission server answers POSTs only: no event stream
+            return self.send(405, {"error": "POST only"})
         if path == "/api/state" and not READY.is_set():  # the dashboard shows "starting up" until this goes
             return self.send(200, {"starting": True, "now": time.time(), "data_dir": str(DATA)})
         if path == "/api/state":
@@ -10697,6 +11558,10 @@ class H(BaseHTTPRequestHandler):
         if path == "/api/designs/quick":  # the quick chat's Recent list (README: TODAY-6)
             limit = parse_qs(urlparse(self.path).query).get("limit", ["10"])[0]
             return self.send(200, quick_topics(int(limit) if limit.isdigit() else 10))
+        if path == "/api/topics/search":  # the message box's @ picker (README: LINK-8)
+            a = {k: v[0] for k, v in parse_qs(urlparse(self.path).query).items()}
+            ex = a.get("exclude", "")
+            return self.send(200, topic_search(a.get("q", ""), a.get("project", ""), int(ex) if ex.isdigit() else None))
         if path == "/api/openspec":  # open changes, the repos that use OpenSpec and those that don't, and drafts
             out = {"changes": [], "repos": [], "bare": [], "cli": bool(shutil.which("openspec")),
                    "drafts": q("SELECT id,project,title,spec_sub AS sub,state FROM designs WHERE spec_draft=1 "
@@ -10729,6 +11594,7 @@ class H(BaseHTTPRequestHandler):
                 msg["tasks"] = [{"id": i, "title": t.get("title"), "state": t.get("state")}
                                 for i in ids for t in [task(i) or {}]]
             d["live"] = DESIGN_LIVE.get(did, [])[-12:]
+            d["permits"] = permits_of(did)
             d["queued"] = queued_of(d)
             d["files"] = chat_files(did) if d["kind"] != "project" else []
             return self.send(200, d)
@@ -10747,6 +11613,9 @@ class H(BaseHTTPRequestHandler):
         path = urlparse(self.path).path
         if not READY.is_set():  # PROJECTS is half loaded and tasks not yet recovered
             return self.send(503, {"error": STARTING, "starting": True})
+        if m := re.fullmatch(r"/mcp/permit/(\d+)", path):  # a project chat's permission prompts (permit_rpc)
+            out = permit_rpc(int(m.group(1)), body)
+            return self.send(200, out) if out else self.send(202, b"")
         if path.startswith("/api/research/"):  # its own status codes: 404 while off, 409 while read-only
             return self.send(*research.post(path, body))
         try:
@@ -10778,8 +11647,8 @@ class H(BaseHTTPRequestHandler):
         if path == "/api/todos/unpark":
             return todo_unpark(b["key"])
         if path == "/api/links/check":  # which of a chat message's link targets exist (README: Links in chats)
-            heads = {}
-            return {"refs": link_check(b.get("project"), b.get("refs"), heads), "heads": heads}
+            heads, chats = {}, {}
+            return {"refs": link_check(b.get("project"), b.get("refs"), heads, chats), "heads": heads, "chats": chats}
         if path == "/api/tasks":
             if not (b.get("body") or "").strip():
                 raise ValueError("describe the task")
@@ -10788,7 +11657,8 @@ class H(BaseHTTPRequestHandler):
                 (b.get("jira"), b.get("branch"))  # the form's one field, or opsd.py add --jira / --branch
             tid = add_task(b["project"], b["body"], b.get("title", ""), b.get("priority", 0),
                            b.get("hold", 0), dep, auto_release=b.get("release"), model=b.get("model"),
-                           effort=b.get("effort"), not_before=b.get("not_before"), jira=jira, target=target)
+                           effort=b.get("effort"), not_before=b.get("not_before"), jira=jira, target=target,
+                           pr_base=b.get("base"))
             p = PROJECTS.get(b["project"])
             return {"id": tid, **({"warning": w} if p and (w := uncommitted_warning(p)) else {})}
         if path == "/api/schedules":
@@ -10823,7 +11693,7 @@ class H(BaseHTTPRequestHandler):
         if path == "/api/send":  # opsd.py send, from a session the queue started
             return send_peer(b.get("from"), b["project"], b.get("kind") or "task", b.get("text"), b.get("title") or "",
                              bool(b.get("hold")), b.get("model"), b.get("effort"), b.get("after"),
-                             b.get("not_before"), b.get("jira"), b.get("branch"))
+                             b.get("not_before"), b.get("jira"), b.get("branch"), b.get("base"))
         if path == "/api/settings":
             if "usage_brake" in b:
                 b["usage_brake"] = min(100, max(0, int(float(b["usage_brake"] or 0))))
@@ -10858,8 +11728,8 @@ class H(BaseHTTPRequestHandler):
             return pause_all()
         if path == "/api/resume-all":
             return resume_all()
-        if path == "/api/restart":  # Settings' Danger zone: restart at once
-            return restart_now()
+        if path == "/api/restart":  # Settings' Danger zone, or opsd.py restart: restart at once
+            return restart_now(str(b.get("from") or ""))
         if path == "/api/limit/clear":  # Try now: stop waiting out the usage limit
             return limit_clear("you clicked Try now")
         if path == "/api/projects/reload":
@@ -10916,7 +11786,7 @@ class H(BaseHTTPRequestHandler):
                     (b["project"], title_of(text)[:80], time.time(), time.time(), kind, int(bool(b.get("quick")))))
             design_say(did, text)
             return {"id": did}
-        m = re.fullmatch(r"/api/designs/(\d+)/(say|unqueue|stop|rename|queue|seen|end|reopen)", path)
+        m = re.fullmatch(r"/api/designs/(\d+)/(say|unqueue|stop|rename|queue|seen|end|reopen|permit)", path)
         if m:
             did = int(m.group(1))
             d = design(did)
@@ -10924,6 +11794,8 @@ class H(BaseHTTPRequestHandler):
                 raise ValueError("no such chat")
             if d["quick"] and m.group(2) in ("say", "reopen"):  # it never becomes the topic Today shows (TODAY-6)
                 conv_pin(d["project"])
+            if m.group(2) == "permit":  # Approve or Deny on a permission prompt the chat's turn waits on
+                return permit_answer(did, str(b["id"]), b.get("allow") is True)
             if m.group(2) == "say":
                 return {"queued": design_say(did, b["text"].strip())}
             elif m.group(2) == "unqueue":  # take back a queued message, by its place in the queue
@@ -11007,7 +11879,11 @@ class H(BaseHTTPRequestHandler):
         elif action == "answer":
             if st != "needs_input":
                 raise ValueError(f"task is {st}")
-            back = {"start_at": "claude"} if t["phase"] in (PR_RED, PR_CLOSED) else {}  # the worker takes it
+            if t["phase"] == PR_PICK_PHASE and is_branch_task(t):  # Pick reviewers: the answer names them
+                who = [x.lstrip("@") for x in re.split(r"[\s,;]+", b["answer"]) if x.strip("@")]
+                set_setting(f"prreviewers:{tid}", json.dumps(who))
+                return pr_queue(tid, "reviewers picked: " + ", ".join(who))
+            back = {"start_at": "claude"} if t["phase"] in (PR_RED, PR_CLOSED, PR_LEFT, PR_NO_MERGE) else {}  # the worker takes it
             upd(tid, state="queued", question=None, next_prompt=answer_prompt(t["question"], b["answer"]), **back)
             ev(tid, "answered: " + b["answer"][:200])
         elif action == "approve":
@@ -11026,7 +11902,7 @@ class H(BaseHTTPRequestHandler):
                             "Update the work, re-run the checks, commit, and write $OPS_RESULT (with an updated "
                             "`review`).")
             ev(tid, "changes requested: " + b["feedback"][:200])
-        elif action in ("pr-open", "pr-merge", "pr-merge-all", "fix-ci", "pr-retry"):
+        elif action in ("pr-open", "pr-merge", "pr-merge-all", "fix-ci", "pr-retry", "pr-address", "pr-ready"):
             return pr_action(p, t, action, b)
         elif action == "play":
             if not p or not t["worktree"]:
@@ -11119,8 +11995,8 @@ def post(path, body):
 
 def send_cli(argv):
     """opsd.py send PROJECT [--design|--chat] [--title T] [--hold] [--model M] [--effort E] [--after TASK]
-    [--at TIME | --after-reset] [--branch NAME | --jira KEY] [TEXT...]; TEXT from stdin when not given. --after takes
-    12 or #12."""
+    [--at TIME | --after-reset] [--branch NAME | --jira KEY] [--base BRANCH] [TEXT...]; TEXT from stdin when not
+    given. --after takes 12 or #12."""
     body, words, it = {"project": argv[0], "kind": "task", "from": os.environ.get("OPS_FROM", "")}, [], iter(argv[1:])
     for a in it:
         if a in ("--task", "--design", "--chat"):
@@ -11136,7 +12012,7 @@ def send_cli(argv):
             body["after"] = int(v) if v.isdigit() else v
         elif a == "--at":
             body["not_before"] = next(it, "")
-        elif a in ("--branch", "--jira"):
+        elif a in ("--branch", "--jira", "--base"):
             body[a[2:]] = next(it, "")
         elif a == "--after-reset":
             body["not_before"] = "reset"
@@ -11154,20 +12030,36 @@ def send_cli(argv):
         sys.exit(f"not sent: the claude-ops daemon at {url} did not answer ({e.reason})")
 
 
+def restart_cli():
+    """opsd.py restart: the daemon that started this session (OPS_DAEMON) runs opsctl restart detached, as Settings'
+    Restart button does, so a chat, the daemon's child, isn't stopped before the restart is under way."""
+    url = os.environ.get("OPS_DAEMON") or DAEMON_URL
+    req = Request(f"{url}/api/restart", data=json.dumps({"from": os.environ.get("OPS_FROM", "")}).encode(),
+                  headers={"Content-Type": "application/json", "X-Ops": "1"})
+    try:
+        urlopen(req, timeout=30).read()
+    except HTTPError as e:
+        sys.exit(f"not restarted: {json.loads(e.read() or b'{}').get('error', e)}")
+    except URLError as e:
+        sys.exit(f"not restarted: the claude-ops daemon at {url} did not answer ({e.reason})")
+    print("claude-ops is restarting: running tasks pause and resume, and a chat that ran this picks up again in the "
+          f"new daemon. Log: {DATA / 'restart.log'}")
+
+
 def add_request(project, words):
     """opsd.py add -p PROJECT [--model M] [--effort E] [--research T0|T1|T2] [--at TIME | --after-reset]
-    [--branch NAME | --jira KEY] TEXT: (path,
+    [--branch NAME | --jira KEY] [--base BRANCH] TEXT: (path,
     body) to post. With --research it queues a one-off research run whose question is TEXT (RES-2), else a task.
     --at and --after-reset set its not_before (README: Start later). TEXT from stdin when not given."""
     opts, words = {}, list(words)
-    while (words[:1] in (["--model"], ["--effort"], ["--research"], ["--at"], ["--branch"], ["--jira"])
+    while (words[:1] in (["--model"], ["--effort"], ["--research"], ["--at"], ["--branch"], ["--jira"], ["--base"])
            and len(words) >= 2) or words[:1] == ["--after-reset"]:
         if words[0] == "--after-reset":
             opts["not_before"], words = "reset", words[1:]
         else:
             opts["not_before" if words[0] == "--at" else words[0][2:]], words = words[1], words[2:]
-    if "research" in opts and ("branch" in opts or "jira" in opts):
-        raise ValueError("--branch and --jira are for tasks, not research runs")
+    if "research" in opts and ("branch" in opts or "jira" in opts or "base" in opts):
+        raise ValueError("--branch, --jira and --base are for tasks, not research runs")
     text = " ".join(words) or sys.stdin.read()
     if "research" in opts:
         return (f"/api/projects/{quote(project, safe='')}/research",
@@ -11224,8 +12116,17 @@ if __name__ == "__main__":
         guard(args)
     elif cmd == "event" and len(args) == 2 and args[0].isdigit():  # straight into the db: the daemon may be down
         q("INSERT INTO events (task_id, ts, text) VALUES (?,?,?)", (int(args[0]), time.time(), args[1]))
+    elif cmd == "chat" and args[:1] == ["show"] and len(args) in (2, 4) and args[1].isdigit() and (
+            len(args) == 2 or (args[2] == "--last" and args[3].isdigit())):  # straight from the db, as event
+        out = chat_show(int(args[1]), int(args[3]) if len(args) == 4 else None)
+        if out is None:
+            print(f"no chat {args[1]}", file=sys.stderr)
+            sys.exit(1)
+        sys.stdout.write(out)
     elif cmd in ("pause-all", "resume-all"):
         post(f"/api/{cmd}", {})
+    elif cmd == "restart" and not args:
+        restart_cli()
     elif cmd == "add-project" and args:
         PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
         out = detect_project(str(Path(args[0]).expanduser().absolute()), args[1] if len(args) > 1 else None)
@@ -11265,9 +12166,18 @@ if __name__ == "__main__":
             sys.exit(f"the claude-ops daemon on port {PORT} did not answer ({e.reason})")
         except (ValueError, OSError) as e:  # a bad command line, or a --body-file it can't read
             sys.exit(str(e))
-    elif cmd == "pr" and len(args) == 2 and args[0] in ("open", "merge") and args[1].lstrip("#").isdigit():
+    elif cmd == "pr" and len(args) == 3 and args[0] == "ready" and args[1].lstrip("#").isdigit() and \
+            args[2] in ("on", "off"):
+        try:  # README: Merge when ready
+            post(f"/api/tasks/{args[1].lstrip('#')}/pr-ready", {"on": 1 if args[2] == "on" else 0})
+        except HTTPError as e:
+            sys.exit(json.loads(e.read() or b"{}").get("error") or str(e))
+        except URLError as e:
+            sys.exit(f"the claude-ops daemon on port {PORT} did not answer ({e.reason})")
+    elif cmd == "pr" and len(args) == 2 and args[0] in ("open", "merge", "address") and args[1].lstrip("#").isdigit():
         try:  # README: Branches and pull requests
-            post(f"/api/tasks/{args[1].lstrip('#')}/" + {"open": "pr-open", "merge": "pr-merge-all"}[args[0]], {})
+            post(f"/api/tasks/{args[1].lstrip('#')}/" + {"open": "pr-open", "merge": "pr-merge-all",
+                                                         "address": "pr-address"}[args[0]], {})
         except HTTPError as e:
             sys.exit(json.loads(e.read() or b"{}").get("error") or str(e))
         except URLError as e:

@@ -184,6 +184,9 @@ ul.clog { max-height: 220px; }
 .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
 .chip { font-size: 12px; padding: 4px 10px; border-radius: 99px; border: 1px solid var(--accent); color: var(--accent); cursor: pointer; background: none; }
 .live { color: var(--muted); font: 12px var(--mono); margin: 0 0 14px; }
+.permit { border: 1px solid var(--warn); border-radius: 8px; padding: 10px 12px; margin: 0 0 14px; }
+.permit pre { font: 12px var(--mono); white-space: pre-wrap; word-break: break-word; margin: 6px 0; max-height: 240px; overflow: auto; }
+.permit .row { display: flex; gap: 8px; align-items: center; margin-top: 8px; }
 .composer { position: sticky; bottom: 0; background: var(--bg); padding-top: 10px; }
 .composer textarea { min-height: 80px; }
 /* / in a change's message box: its commands, just above the box */
@@ -194,6 +197,20 @@ ul.clog { max-height: 220px; }
 #slash .sl.on { background: var(--chip); }
 #slash .sl code { font: 12px var(--mono); color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 #slash .muted { padding: 4px 8px; font-size: 12px; }
+/* @ in a message box: chats to reference, beside the box */
+#atpick { position: fixed; max-height: 40vh; overflow: auto; z-index: 50; background: var(--panel); border: 1px solid var(--line);
+          border-radius: 8px; padding: 4px; box-shadow: 0 6px 20px rgba(0, 0, 0, .15); font-size: 13px; }
+#atpick .sl { display: flex; gap: 8px; align-items: baseline; padding: 6px 8px; border-radius: 6px; cursor: pointer; }
+#atpick .sl.on { background: var(--chip); }
+#atpick .sl b { font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; flex: 1; }
+#atpick .sl.ended b { color: var(--muted); }
+#atpick .sl .muted { font-size: 12px; white-space: nowrap; }
+#atpick .sl code { font: 12px var(--mono); color: var(--muted); white-space: nowrap; }
+#toast { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); z-index: 60; padding: 6px 14px; border-radius: 99px;
+         background: var(--accent); color: var(--on-accent); font-size: 13px; opacity: 0; pointer-events: none; transition: opacity .2s; }
+#toast.on { opacity: 1; }
+#toast.link { pointer-events: auto; } #toast.err { background: var(--bad); white-space: pre-wrap; max-width: min(640px, 90vw); border-radius: 10px; }
+#toast a { color: inherit; text-decoration: underline; }
 .mdimg, .mdvideo { display: block; max-width: 100%; max-height: 480px; margin: 6px 0; border-radius: 6px; border: 1px solid var(--line); }
 .ref.bad { color: var(--muted); cursor: help; }
 .fdhead { position: sticky; top: -16px; margin: -16px -16px 12px; padding: 12px 16px; background: var(--panel); border-bottom: 1px solid var(--line); z-index: 1; }
@@ -577,7 +594,8 @@ body:not(.td) #tdfull { display: none; }
           padding: 8px 10px; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; box-shadow: 0 6px 20px rgba(0, 0, 0, .3); }
 #tdmenu .k { font-size: 12px; color: var(--muted); margin-bottom: 4px; }
 #tdmenu .tdend { display: grid; grid-template-columns: 1fr auto; gap: 0 8px; align-items: center; padding: 4px 0; border-bottom: 1px solid var(--line); }
-#tdmenu .tdend a { cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#tdmenu .tdend a, #tdmenu .tdend .tt { cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#tdmenu .tdend .tt { cursor: default; } #tdmenu .tdend + .k { margin-top: 8px; }
 #tdmenu .tdend .sub { grid-row: 2; font-size: 11px; color: var(--muted); }
 #tdmenu .tdend .acts { grid-row: 1 / 3; grid-column: 2; display: flex; gap: 4px; align-items: center; }
 #tdmenu .tdend button { font-size: 11px; padding: 1px 8px; } #tdmenu .tdend .onlist { font-size: 11px; color: var(--muted); }
@@ -653,7 +671,7 @@ details.tdparked .tditem { opacity: .8; }
 .proof figcaption, .proof.none { color: var(--muted); font-size: 13px; margin-top: 4px; }
 .stepcard .closes { color: var(--muted); font-size: 13px; margin: 4px 0; }
 .verb { font-size: 11px; font-weight: 600; padding: 1px 8px; border-radius: 99px; white-space: nowrap; border: 1px solid; }
-.verb.g-unblock { color: var(--bad); } .verb.g-ship { color: var(--ok); } .verb.g-review { color: var(--warn); } .verb.g-only_me { color: var(--accent); }
+.verb.g-unblock { color: var(--bad); } .verb.g-ship { color: var(--ok); } .verb.g-review { color: var(--warn); } .verb.g-only_me { color: var(--accent); } .verb.g-in_review { color: var(--muted); }
 .stepcard { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px; margin-bottom: 16px; }
 .stepcard .k { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
 .stepcard h2 { font-size: 18px; margin: 6px 0; display: flex; gap: 10px; align-items: baseline; }
@@ -1084,6 +1102,7 @@ details.tdparked .tditem { opacity: .8; }
         <label>Priority <select id="prio"><option value="0">normal</option><option value="1">high</option><option value="-1">low</option></select></label>
         <label>After # <input id="after" style="width:60px" placeholder="—"></label>
         <label title="Optional. Work on this branch and end in GitHub pull requests against main, not a merge into dev. A Jira key (BALL-123) names the branch from the key and the title; anything else is the branch name (README: Branches and pull requests)">Branch or Jira key <input id="tbranch" style="width:200px" placeholder="BALL-123 or feature/login" autocomplete="off" spellcheck="false"></label>
+        <label title="Optional, for a branch task. The branch its pull requests go against, in place of the project's pr_base (default: main). The queue makes the branch from it, rebases onto it before the first push, and opens each PR against it">PRs against <input id="tbase" style="width:170px" placeholder="main" autocomplete="off" spellcheck="false"></label>
         <label title="The model its worker starts on. Default: the Tasks model setting (per kind, on the Settings tab)">Model <select id="tmodel"><option value="">Default</option><option value="opus">Opus</option><option value="sonnet">Sonnet</option><option value="haiku">Haiku</option></select></label>
         <label title="How hard its worker thinks (--effort). Default: the Effort setting on the Settings tab">Effort <select id="teffort"><option value="">Default</option><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option><option value="xhigh">Extra high</option><option value="max">Max</option></select></label>
         <label title="When it may start. It waits in the queue until then, and others can queue after it. After next reset: a minute after the usage window resets (README: Start later)">Start <select id="tstart"><option value="">now</option><option value="at">at…</option><option value="reset">after next reset</option></select> <input type="datetime-local" id="tstartat" class="hidden"></label>
@@ -1268,29 +1287,102 @@ const LABEL = {queued:"queued", running:"working", gating:"checking", merging:"m
 // (committed, nothing pushed); Open PR pushes it and opens its PRs, which the queue then watches until they merge.
 const isBranchTask = t => !!(t && (t.jira || t.target));
 const PR_FIX = {"CI failed": ["fix-ci", "Fix CI"], "PR closed": ["pr-retry", "Retry"],
-                "can't open PRs": ["pr-open", "Retry"], "main can't follow origin": ["pr-open", "Retry"]};
+                "can't open PRs": ["pr-open", "Retry"], "main can't follow origin": ["pr-open", "Retry"],
+                "pick reviewers": ["pr-open", "Retry"], "comments left": ["pr-address", "Address comments"],
+                "can't merge": ["pr-open", "Retry"]};
 // The task's next PR step as [action, label]: Open PR on its branch, or what a PR problem that needs you asks for
 const prStep = t => t.state === "on_branch" ? ["pr-open", "Open PR"]
   : t.state === "needs_input" && isBranchTask(t) ? PR_FIX[t.phase] || null : null;
 const PR_STEP_TIP = {"pr-open": "Push the branch and open a pull request against main in each repo it commits to",
                      "fix-ci": "Resume the worker with the failed CI logs; it commits a fix, the gate runs, then the queue pushes",
-                     "pr-retry": "Reopen the closed pull request and keep watching it"};
+                     "pr-retry": "Reopen the closed pull request and keep watching it",
+                     "pr-address": "Resume the worker with the PRs' unresolved review comments; it fixes what is right, replies on each thread, the gate runs, the queue pushes and asks the reviewers again"};
+// Address comments: the review round's addressing again, for comments that came after it
+const prAddress = t => isBranchTask(t) && (t.state === "pr" || (t.state === "needs_input" && ["pick reviewers", "comments left"].includes(t.phase)))
+  && (prsOf(t) || []).some(x => x.state === "OPEN" && x.number);
 // A message to the task resumes its worker on the branch; the gate runs and the queue pushes to its open PRs
 const prMsg = t => isBranchTask(t) && (["on_branch", "pr"].includes(t.state)
-  || (t.state === "needs_input" && ["CI failed", "PR closed"].includes(t.phase)));
+  || (t.state === "needs_input" && ["CI failed", "PR closed", "comments left", "can't merge"].includes(t.phase)));
 // GET /api/tasks/<id> has no prs: the list's copy of the task has them
 const prsOf = t => t.prs !== undefined ? t.prs : ((state && state.tasks.find(x => x.id === t.id)) || {}).prs || null;
+// ---- the PR news's pure helper
+// What a new /api/state says about pull requests. seen: task id -> the PR links shown already (null for the first
+// state: its PRs are not news); wait: ids of tasks you clicked Open PR on that had no PR yet. first: a waited task's
+// first PR, now open; fail: a waited task that stopped without one, and why; news: every other PR opened since.
+const PR_STOPPED = ["needs_input", "failed", "cancelled", "done"];
+function prNews(seen, wait, tasks) {
+  const out = {first: [], fail: [], news: [], seen: {}};
+  for (const t of tasks) {
+    const prs = (t.prs || []).filter(x => x.number && x.url), had = (seen && seen[t.id]) || [];
+    out.seen[t.id] = prs.map(x => x.url);
+    let fresh = seen ? prs.filter(x => !had.includes(x.url)) : [];
+    if (wait.includes(t.id)) {
+      if (prs.length) { out.first.push({id: t.id, pr: prs[0]}); fresh = fresh.filter(x => x !== prs[0]); }
+      else if (PR_STOPPED.includes(t.state))
+        out.fail.push({id: t.id, text: t.question || t.error || (t.last_event && t.last_event.text) || "No pull request opened."});
+    }
+    fresh.forEach(pr => out.news.push({id: t.id, pr}));
+  }
+  return out;
+}
+const prWords = pr => `${pr.name ? pr.name + " " : ""}PR #${pr.number}`;
+// ---- end of the PR news's pure helper
+// Open PR opens the first PR in a new tab. The tab opens blank on the click (so popup blockers allow it) and goes to
+// the PR once the queue has opened it; PRs that open later in pr_order only get a toast, as does a failure.
+const PR_WAIT = new Map();  // task id -> {w: the blank tab or null, at}
+let prKnown = null;
+function prOpenStart(id) {
+  const t = state && state.tasks.find(x => x.id === id);
+  if (t && (t.prs || []).some(x => x.number)) return;  // a Retry after the first PR opened: no new tab
+  let w = null;
+  try {
+    w = window.open("", "_blank");
+    if (w) { w.document.title = "Opening the pull request…"; w.document.body.textContent = "Opening the pull request… This tab goes to it once GitHub has it."; }
+  } catch {}
+  PR_WAIT.set(id, {w, at: Date.now()});
+}
+function prOpenEnd(id, pr, err, always) {
+  const x = PR_WAIT.get(id); PR_WAIT.delete(id);
+  const w = x && x.w && !x.w.closed ? x.w : null;
+  if (pr) {
+    if (w) { w.opener = null; w.location.href = pr.url; }
+    toast("", {links: [{text: "Opened " + prWords(pr), url: pr.url}], ms: 8000});
+  } else {
+    if (w) w.close();
+    if (x || always) toast(`#${id}: Open PR failed: ${err}`, {err: true, ms: 15000});
+  }
+}
+async function prOpenCall(id) {
+  prOpenStart(id);
+  try { return await api(`/api/tasks/${id}/pr-open`, {}); }
+  catch (e) { prOpenEnd(id, null, e.message, true); throw e; }
+}
+function prNewsApply(s) {
+  for (const [id, x] of PR_WAIT) if (Date.now() - x.at > 30 * 60000) prOpenEnd(id, null, "no pull request after 30 minutes; see the task");
+  const r = prNews(prKnown, [...PR_WAIT.keys()], s.tasks || []);
+  prKnown = r.seen;
+  r.first.forEach(f => prOpenEnd(f.id, f.pr));
+  r.fail.forEach(f => prOpenEnd(f.id, null, f.text));
+  if (r.news.length) toast("", {links: r.news.map(n => ({text: "Opened " + prWords(n.pr), url: n.pr.url})), ms: 8000});
+}
+// The branch a branch task's PRs go against (pr_base, the task's own, or what GitHub shows): the list's copy has it
+const prAgainst = t => t.pr_against || ((state && state.tasks.find(x => x.id === t.id)) || {}).pr_against
+  || (P(t.project) || {}).main_branch || "main";
 // The branch (and the Jira key, when the branch name doesn't already carry it), small, for the list and the page
-const branchTag = t => isBranchTask(t) ? `<span class="btag" title="Works on this branch and ends in pull requests against main, not a merge into dev">⎇ ${esc(t.branch || t.target || "")}${
+const branchTag = t => isBranchTask(t) ? `<span class="btag" title="Works on this branch and ends in pull requests against ${esc(prAgainst(t))}, not a merge into dev">⎇ ${esc(t.branch || t.target || "")}${
   t.jira && !String(t.branch || "").includes(t.jira) ? ` · ${esc(t.jira)}` : ""}</span>` : "";
-// One line of words for the list: each PR's number (or waiting), then its CI while open, else its state
+// One line of words for the list: each PR's number (or waiting), then its CI and review stage while open, else its state
 const prsShort = prs => (prs || []).map(x => `${x.name ? x.name + " " : ""}${x.number ? "#" + x.number : "waiting"}${
-  x.state === "OPEN" ? ` CI ${x.ci}` : x.state === "waiting" ? "" : " " + String(x.state).toLowerCase()}`).join(" · ");
+  x.state === "OPEN" ? ` CI ${x.ci}${x.review ? ", " + x.review : ""}` : x.state === "waiting" ? "" : " " + String(x.state).toLowerCase()}`).join(" · ");
 // The PR list on the task page: one row per PR, with its Merge button (enabled when the daemon says it may go),
-// gh's last merge error and any warning under it, and Merge all when two or more haven't merged.
+// gh's last merge error and any warning under it, and the Merge when ready switch with where it stands. With
+// buttons, a branch task with no PR yet shows the switch alone: it applies as the PRs open.
 function prsHtml(t, prs, buttons) {
-  if (!prs || !prs.length) return "";
-  const can = ["pr", "needs_input"].includes(t.state), left = prs.filter(x => x.state !== "MERGED");
+  const lt = (state && t.id && state.tasks.find(x => x.id === t.id)) || t;  // the list's copy has pr_ready
+  const ended = ["done", "failed", "cancelled"].includes(t.state);
+  const ready = lt.pr_ready ? `<div class="prnote">Merge when ready: ${esc(lt.pr_ready_words || "on")}</div>` : "";
+  const sw = buttons && !ended ? `<div class="row"><label title="Fix red CI, address new review comments and merge each PR in pr_order once its CI is green and it is approved, with nothing from you"><input type="checkbox" data-act="pr-ready" ${lt.pr_ready ? "checked" : ""}> Merge when ready</label></div>` : "";
+  if (!prs || !prs.length) return buttons && isBranchTask(t) && !ended ? `<div class="prs">${sw}${ready}</div>` : "";
   const stCls = {MERGED: "s-done", CLOSED: "err", OPEN: ""};
   const rows = prs.map(x => {
     const opened = x.state !== "waiting" && x.number;
@@ -1298,14 +1390,14 @@ function prsHtml(t, prs, buttons) {
       : x.url ? `<a href="${esc(x.url)}" target="_blank" rel="noopener">#${x.number}</a>` : `#${x.number}`;
     const failing = x.ci === "red" && (x.failing || []).length ? ` <span class="ci-red">(failing: ${x.failing.map(f =>
       f.url ? `<a href="${esc(f.url)}" target="_blank" rel="noopener">${esc(f.name)}</a>` : esc(f.name)).join(", ")})</span>` : "";
-    const ci = opened && x.state === "OPEN" ? `<span class="ci-${esc(x.ci || "pending")}">CI ${esc(x.ci || "pending")}</span>${failing}` : "";
+    const ci = opened && x.state === "OPEN" ? `<span class="ci-${esc(x.ci || "pending")}">CI ${esc(x.ci || "pending")}</span>${failing}`
+      + (x.review ? `<span class="muted" title="Its review round: the bot review, the worker addressing its comments, then human reviewers">${esc(x.review)}</span>` : "") : "";
     const when = x.merged_at ? `merged ${ago(x.merged_at, state.now)} ago` : x.checked_at && x.state === "OPEN" ? `checked ${ago(x.checked_at, state.now)} ago` : "";
     const merge = buttons && x.state === "OPEN" ? `<span title="${esc(x.merge ? "Merge it on GitHub (gh pr merge)" : x.merge_why || "Can't merge yet")}"><button data-act="pr-merge" data-pr="${x.id}" ${x.merge ? "" : "disabled"}>Merge</button></span>` : "";
-    return `<div class="prrow">${x.name ? `<b>${esc(x.name)}</b>` : ""}${num}${ci}${opened ? `<span class="${stCls[x.state] || ""}">${esc(x.state)}</span>` : ""}<span class="grow muted">${when}</span>${merge}</div>`
+    return `<div class="prrow">${x.name ? `<b>${esc(x.name)}</b>` : ""}${num}${x.base ? `<span class="muted mono" title="The branch this PR goes against on GitHub">→ ${esc(x.base)}</span>` : ""}${ci}${opened ? `<span class="${stCls[x.state] || ""}">${esc(x.state)}</span>` : ""}<span class="grow muted">${when}</span>${merge}</div>`
       + (x.error ? `<div class="prnote err">${esc(x.error)}</div>` : "") + (x.warning ? `<div class="prnote s-review">⚠ ${esc(x.warning)}</div>` : "");
   }).join("");
-  const all = buttons && left.length >= 2 ? `<div class="row"><button data-act="pr-merge-all" ${can && prs.some(x => x.state === "OPEN") ? "" : "disabled"} title="Merge them in order, each once the one before it has landed and its own CI is green">Merge all</button></div>` : "";
-  return `<div class="prs"><div class="muted">Pull request${prs.length === 1 ? "" : "s"}</div>${rows}${all}</div>`;
+  return `<div class="prs"><div class="muted">Pull request${prs.length === 1 ? "" : "s"}</div>${rows}${sw}${ready}</div>`;
 }
 
 async function api(path, body) {
@@ -1366,6 +1458,7 @@ async function loadState() {
     RESTART.at = 0; RESTART.ok = Date.now(); setTimeout(renderRestart, 5100);
   }
   state = s;
+  prNewsApply(s);
   tdAddOpenPR(s);
   tdDropGone(s);
   render();
@@ -1459,10 +1552,10 @@ function renderProjects() {
 function syncRelease() {
   const name = pf || $("#tproj").value, on = !!P(name).auto_release, k = `${name}:${on}`, el = $("#autorel");
   if (el.dataset.k !== k) { el.checked = on; el.dataset.k = k; }
-  el.parentElement.classList.toggle("hidden", !!P(name).direct_main);  // its merges move main themselves
+  el.parentElement.classList.toggle("hidden", !!P(name).direct_main || prFlow(P(name)));  // main moves by itself
   // Warn, don't block: work only in your checkout is not in what a worker starts from.
   const n = dirtyCount(P(name)), w = $("#dirtywarn");
-  w.textContent = n ? `Workers start from dev and won't see your ${n} uncommitted ${n === 1 ? "file" : "files"}.` : "";
+  w.textContent = n ? `Workers start from ${prFlow(P(name)) ? "origin/" + (P(name).main_branch || "main") : "dev"} and won't see your ${n} uncommitted ${n === 1 ? "file" : "files"}.` : "";
   w.classList.toggle("hidden", !n);
 }
 $("#tproj").addEventListener("change", syncRelease);
@@ -1617,18 +1710,28 @@ function projStats(g) {
     n(["merging"]) ? `<span class="s-running">${n(["merging"])} merging</span>` : "",
     qd ? `${qd} queued` : "",
     g.deploy_open ? `<span class="s-running">deploy #${g.deploy_open}</span>` : "",
-    g.senddev_open ? `<span class="s-running">sending to ${esc(g.dev_branch)} #${g.senddev_open}</span>` : "",
+    g.senddev_open ? `<span class="s-running">sending to ${prFlow(g) ? "a PR" : esc(g.dev_branch)} #${g.senddev_open}</span>` : "",
     (g.senddev_pending || []).length ? `<span class="s-review" title="Sent to ${esc(g.dev_branch)} from your checkout; Promote brings it back">sent work to promote</span>` : "",
     busy ? `<span class="s-running">release #${r.id}</span>` : r && r.state === "failed" ? `<span class="err">release failed</span>` : "",
-    !g.error && g.ahead.length ? `${g.ahead.length} to promote` : "",
+    prFlow(g) ? (branchOpenWords(g) ? `<span title="flow = &quot;pr&quot;: every task goes through a branch and PR">${branchOpenWords(g)}</span>` : "")
+      : !g.error && g.ahead.length ? `${g.ahead.length} to promote` : "",
     !g.error && g.has_app && (!g.has_build || (g.stale && g.built)) ? `<span class="s-review">needs build</span>` : "",
     g.running ? `<span class="s-running">running: ${esc(g.main_branch)}</span>` : "",
     g.dev_running ? `<span class="s-running">running: ${esc(g.dev_branch)}</span>` : "",
     g.play && g.play.phase ? `<span class="s-running">${esc(g.play.phase)}</span>` : "",
-    g.direct_main ? `<span title="direct_main is on: a task that passes its gate moves ${esc(g.main_branch)} at once, with no release">straight to ${esc(g.main_branch)}</span>`
+    prFlow(g) ? `<span title="flow = &quot;pr&quot;: every task goes through a branch and PR; no Promote">PRs only</span>`
+      : g.direct_main ? `<span title="direct_main is on: a task that passes its gate moves ${esc(g.main_branch)} at once, with no release">straight to ${esc(g.main_branch)}</span>`
       : g.auto_release ? `<span title="New tasks are promoted after they merge">auto promote</span>` : "",
     dirtyCount(g) ? `<span class="s-review" title="Files in your checkout that are not on ${esc(g.dev_branch)}">${files(dirtyCount(g))} uncommitted</span>` : "",
   ].filter(Boolean).join(" · ") || (g.error ? "" : "idle");
+}
+// flow = "pr": every task is a branch task, so there is no dev → main and no Promote; the header counts open ones.
+function prFlow(g) { return !!g && g.flow === "pr"; }
+function branchOpenWords(g) {
+  const b = g.branch_open || {}, out = [];
+  if (b.tasks) out.push(`${b.tasks} open branch task${b.tasks === 1 ? "" : "s"}`);
+  if (b.prs) out.push(`${b.prs} PR${b.prs === 1 ? "" : "s"} open`);
+  return out.join(" · ");
 }
 function projBody(g) {
   if (g.error) return `<div class="err">${esc(g.error)}</div><div class="row">${archiveBtn(g)}</div>${archiveAskHtml(g)}`;
@@ -1638,22 +1741,26 @@ function projBody(g) {
     : r.state === "failed" ? `<span class="err">Release #${r.id} failed: ${esc((r.error || "").split("\n")[0])}</span>` : "");
   const promotable = g.ahead.length || (g.has_app && (!g.has_build || g.stale));
   const where = (b, sha, run) => `<span class="nw">${esc(b)} <span class="mono">${esc(sha)}</span>${run ? ' · <span class="s-running">running</span>' : ""}</span>`;
-  // Release: main and dev, what Promote would bring, and the buttons that act on them.
+  const pr = prFlow(g);
+  // Release: main and dev, what Promote would bring, and the buttons that act on them. flow = "pr": main and the
+  // open branch tasks instead, with no Promote.
   return configHtml(g) + dirtyHtml(g) + sentHtml(g) + `<div class="sect"><h3>Release</h3>` +
-    `<div>${where(g.main_branch + " (golden)", g.main, g.running)} · ${where(g.dev_branch, g.dev, g.dev_running)} · ${g.ahead.length ? `<span class="s-review nw">${nCommits(g.ahead.length)} to promote</span>` : `<span class="nw">nothing to promote</span>`}</div>` +
-    (g.has_app && g.stale && g.built ? `<div class="s-review">The build is of ${esc(g.built)}, older than ${esc(g.main_branch)}. Promote to rebuild.</div>` : "") +
-    (g.has_app && !g.has_build ? `<div class="s-review">Not built yet. Promote to build it.</div>` : "") +
+    (pr ? `<div>${where(g.main_branch + " (golden)", g.main, g.running)} · <span class="nw">${branchOpenWords(g) || "no open branch tasks"}</span></div>`
+      + `<div class="muted">Every task goes through a branch and a PR against ${esc(g.main_branch)} (flow = "pr"). ${esc(g.main_branch)} moves when a PR merges; ${esc(g.dev_branch)} follows it.</div>`
+      : `<div>${where(g.main_branch + " (golden)", g.main, g.running)} · ${where(g.dev_branch, g.dev, g.dev_running)} · ${g.ahead.length ? `<span class="s-review nw">${nCommits(g.ahead.length)} to promote</span>` : `<span class="nw">nothing to promote</span>`}</div>`) +
+    (!pr && g.has_app && g.stale && g.built ? `<div class="s-review">The build is of ${esc(g.built)}, older than ${esc(g.main_branch)}. Promote to rebuild.</div>` : "") +
+    (!pr && g.has_app && !g.has_build ? `<div class="s-review">Not built yet. Promote to build it.</div>` : "") +
     (g.can_launch && g.dev_stale ? `<div class="s-review">${esc(g.dev_branch)} needs build: it moved since its last build. Play ${esc(g.dev_branch)} builds it first.</div>` : "") +
     (g.train ? `<div class="s-review">Promote after merge: ${g.train.ids.map(taskLink).join(", ")} ${trainWords(g.train)}.</div>` : "") +
-    devLogHtml(g) + (g.deploys.length ? "" : mainLogHtml(g)) +
+    (pr ? "" : devLogHtml(g)) + (g.deploys.length ? "" : mainLogHtml(g)) +
     `<div class="row">
       ${g.can_launch ? `<button class="primary" data-p="${g.name}" data-a="play" ${g.has_build && !playing ? "" : "disabled"}>Play ${esc(g.main_branch)}</button>` : ""}
       ${g.can_launch ? `<button data-p="${g.name}" data-a="play" data-where="dev" title="Run ${esc(g.dev_branch)} in its worktree, to try it before you promote${g.has_app ? `. Builds it first if it moved since its last build` : ""}" ${playing ? "disabled" : ""}>Play ${esc(g.dev_branch)}</button>` : ""}
       ${g.running ? `<button data-p="${g.name}" data-a="stop" title="Quit ${esc(g.title)} running from ${esc(g.main_branch)}" ${playing ? "disabled" : ""}>■ Stop ${esc(g.main_branch)}</button>` : ""}
       ${g.dev_running ? `<button data-p="${g.name}" data-a="stop" data-where="dev" title="Quit ${esc(g.title)} running from ${esc(g.dev_branch)}" ${playing ? "disabled" : ""}>■ Stop ${esc(g.dev_branch)}</button>` : ""}
-      ${!g.direct_main || busy || promotable ? `<button data-p="${g.name}" data-a="promote" title="Queues a release: if the gate (${g.gate.length ? esc(g.gate.join(", ")) : "none configured"}) passes on ${esc(g.dev_branch)}, ${esc(g.main_branch)} moves to it" ${busy || !promotable ? "disabled" : ""}>${busy ? `Release #${r.id} in progress` : `Promote ${esc(g.dev_branch)} → ${esc(g.main_branch)}`}</button>` : ""}
+      ${!pr && (!g.direct_main || busy || promotable) ? `<button data-p="${g.name}" data-a="promote" title="Queues a release: if the gate (${g.gate.length ? esc(g.gate.join(", ")) : "none configured"}) passes on ${esc(g.dev_branch)}, ${esc(g.main_branch)} moves to it" ${busy || !promotable ? "disabled" : ""}>${busy ? `Release #${r.id} in progress` : `Promote ${esc(g.dev_branch)} → ${esc(g.main_branch)}`}</button>` : ""}
       <button data-p="${g.name}" data-a="${g.paused ? "resume" : "pause"}" title="Pause or resume this project's tasks">${g.paused ? "▶ Resume" : "❚❚ Pause"}</button>
-      ${g.direct_main ? `<span class="muted" title="Set by direct_main = true in the project's toml">Merges go straight to ${esc(g.main_branch)}</span>` : `<label title="New tasks start with &quot;Promote after merge&quot; ticked: once one merges into dev, the queue promotes dev to main, as the Promote button does. You can still untick it on a task. Tasks already queued keep theirs."><input type="checkbox" data-rel="${g.name}" ${g.auto_release ? "checked" : ""}> Promote after merge by default</label>`}
+      ${pr ? `<span class="muted" title="Set by flow = &quot;pr&quot; in the project's toml">Every task ends in a PR</span>` : g.direct_main ? `<span class="muted" title="Set by direct_main = true in the project's toml">Merges go straight to ${esc(g.main_branch)}</span>` : `<label title="New tasks start with &quot;Promote after merge&quot; ticked: once one merges into dev, the queue promotes dev to main, as the Promote button does. You can still untick it on a task. Tasks already queued keep theirs."><input type="checkbox" data-rel="${g.name}" ${g.auto_release ? "checked" : ""}> Promote after merge by default</label>`}
       <span style="flex:1"></span>${archiveBtn(g)}
     </div><div class="muted" style="font-size:12px">gate: ${g.gate.length ? esc(g.gate.join(", ")) : "none configured"}</div>` + archiveAskHtml(g) + (msg ? `<div class="muted" style="margin-top:8px;white-space:pre-wrap">${msg}</div>` : "") +
     `</div>` + deploysHtml(g) + projTasksHtml(g);
@@ -1719,15 +1826,21 @@ function dirtyHtml(g) {
   const us = g.uncommitted || [], dev = esc(g.dev_branch), open = g.senddev_open;
   if (!us.length) return "";
   // Send to dev lands this work on dev as a queued change, then clears it here. One at a time: an open one is linked.
+  if (prFlow(g)) {  // flow = "pr": they go onto a branch of their own, for a PR, like every task here
+    const btn = open ? `<a class="btn" data-task="${open}" title="Your changes are on their way to a PR. Open the task">Sending… #${open}</a>`
+      : `<button data-p="${esc(g.name)}" data-a="senddev" title="Queue a task that commits these changes onto a branch of its own from origin/${esc(g.main_branch)} and runs the gate. Then Open PR, as any branch task. Nothing is cleared here: once the PR merges and ${esc(g.main_branch)} moves, your copy matches it. A copy is kept at refs/ops/senddev-&lt;id&gt;.">Send uncommitted changes</button>`;
+    return dirtyLines(g, us) + `${btn}</div>`;
+  }
   const btn = open ? `<a class="btn" data-task="${open}" title="Your changes are being sent to ${dev}. Open the task">Sending to ${dev}… #${open}</a>`
     : `<button data-p="${esc(g.name)}" data-a="senddev" title="Queue a task that lands these changes on ${dev} through the gate, as any task. Once it has merged, the files that still match what was sent are cleared from your checkout. A copy is kept at refs/ops/senddev-&lt;id&gt;.">Send to ${dev}</button>`;
-  return `<div class="callout dirty"><div class="lines">` + us.map(u => {
+  return dirtyLines(g, us) + `${btn}</div>`;
+}
+const dirtyLines = (g, us) => `<div class="callout dirty"><div class="lines">` + us.map(u => {
     const more = u.count - u.paths.length, list = u.paths.join("\n") + (more > 0 ? `\n…and ${more} more` : "");
     return `<details data-k="dirty:${esc(u.repo)}"><summary title="${esc(list)}">${files(u.count)} changed in <span class="mono">${esc(u.repo)}</span>
-      ${u.count === 1 ? "is" : "are"} not on ${esc(g.dev_branch)} and won't be in any release${u.oldest ? ` (oldest change: ${day(u.oldest * 1000)})` : ""}</summary>
+      ${u.count === 1 ? "is" : "are"} not on ${esc(prFlow(g) ? g.main_branch : g.dev_branch)} and won't be in any ${prFlow(g) ? "PR" : "release"}${u.oldest ? ` (oldest change: ${day(u.oldest * 1000)})` : ""}</summary>
       <ul class="ahead mono">${u.paths.map(x => `<li>${esc(x)}</li>`).join("")}${more > 0 ? `<li class="muted">…and ${more} more</li>` : ""}</ul></details>`;
-  }).join("") + `</div>${btn}</div>`;
-}
+  }).join("") + `</div>`;
 // Work Send to dev took out of your checkout that is on dev but not yet in main: Promote brings it back.
 const sentHtml = g => { const ids = g.senddev_pending || [];
   return ids.length ? `<div class="callout">Sent from your checkout by ${ids.map(taskLink).join(", ")}: On ${esc(g.dev_branch)}, not released yet. Promote to get ${ids.length === 1 ? "it" : "them"} back here.</div>` : ""; };
@@ -1880,15 +1993,29 @@ document.addEventListener("click", e => {
   const el = e.target.closest && e.target.closest("[data-copyid]");
   if (!el) return;
   e.preventDefault(); e.stopPropagation();
-  const text = el.dataset.copyid;
-  const done = () => { el.classList.add("copied"); clearTimeout(el._copied); el._copied = setTimeout(() => el.classList.remove("copied"), 1200); };
+  copyText(el.dataset.copyid, () => { el.classList.add("copied"); clearTimeout(el._copied); el._copied = setTimeout(() => el.classList.remove("copied"), 1200); });
+}, true);
+function copyText(text, done) {
   const fallback = () => {  // no async clipboard on plain http from another machine
     const ta = document.createElement("textarea"); ta.value = text; ta.style.position = "fixed"; ta.style.opacity = "0";
     document.body.append(ta); ta.select();
     try { if (document.execCommand("copy")) done(); } finally { ta.remove(); }
   };
   if (navigator.clipboard && window.isSecureContext) navigator.clipboard.writeText(text).then(done, fallback); else fallback();
-}, true);
+}
+// A short note at the bottom of the window, such as "Copied", gone after a moment. o.links: [{text, url}] shown
+// as links after the text, o.err: in red, o.ms: how long it stays.
+let toastT = 0;
+function toast(text, o = {}) {
+  let el = $("#toast");
+  if (!el) { el = Object.assign(document.createElement("div"), {id: "toast"}); el.setAttribute("role", "status"); document.body.append(el); }
+  const links = o.links || [];
+  el.innerHTML = [text ? esc(text) : "", ...links.map(l => `<a href="${esc(l.url)}" target="_blank" rel="noopener">${esc(l.text)}</a>`)].filter(Boolean).join(" · ");
+  el.classList.toggle("link", !!links.length); el.classList.toggle("err", !!o.err); el.classList.add("on");
+  clearTimeout(toastT); toastT = setTimeout(() => el.classList.remove("on"), o.ms || 1500);
+}
+// Copy reference: what you paste in another chat to point at a topic (README: LINK-8)
+const chatRefText = t => `chat:${t.id} (${t.title || "Untitled"})`;
 // A task link (a deploy's #id) anywhere on the page opens that task on the Tasks tab; in the dialog it closes the dialog first.
 document.addEventListener("click", e => {
   const a = e.target.closest && e.target.closest("a[data-task], .ptask[data-task]");
@@ -1903,6 +2030,75 @@ function openTask(id) {
 }
 // Chat boxes send on Enter, like the Claude Code CLI. Shift or Alt+Enter adds a line; Cmd/Ctrl+Enter always sends.
 // Never mid-IME-composition. On touch screens (no Shift on the keyboard) Enter adds a line and the ↑/Send button sends.
+// ---- @ in a message box (README: LINK-8): a list of chats, and picking one puts its chat:N in the box.
+// The @ word the caret is at the end of: {start (the @), q (what follows it)}, or null. @ starts a word, and a space
+// ends it, so "a@b" and "@ " open nothing.
+function atWord(v, caret) {
+  const m = v.slice(0, caret).match(/(^|[\s([{"'“‘])@([^\s@]*)$/);
+  return m ? {start: caret - m[2].length - 1, q: m[2]} : null;
+}
+// The box's text with that @ word replaced by chat:N and a space, and where the caret goes
+function atInsert(v, caret, w, id) {
+  const put = `chat:${id} `;
+  return {value: v.slice(0, w.start) + put + v.slice(caret), caret: w.start + put.length};
+}
+// The boxes it serves, each with the project whose chats come first and the chat it writes to (left out of the list)
+const AT_BOXES = {
+  say: () => ({project: convProject(), exclude: TD.cv ? TD.cv.topic : null}),
+  qcsay: () => { const t = qcTab() || {}; return {project: t.project || "", exclude: t.did}; },
+  ask: () => ({project: ((state && state.tasks.find(x => x.id === sel)) || {}).project || "", exclude: null}),
+};
+const AT = {ta: null, word: null, items: [], k: 0, seq: 0, timer: 0};
+function atEl() {
+  let el = $("#atpick");
+  if (!el) { el = Object.assign(document.createElement("div"), {id: "atpick", className: "hidden"}); el.setAttribute("role", "listbox"); document.body.append(el); }
+  return el;
+}
+function atClose() { AT.ta = AT.word = null; AT.items = []; clearTimeout(AT.timer); AT.seq++; atEl().classList.add("hidden"); }
+// After each keystroke in a box: the @ word at the caret, and the chats matching it from /api/topics/search
+function atUpdate(ta) {
+  const w = ta.selectionStart === ta.selectionEnd ? atWord(ta.value, ta.selectionStart) : null;
+  if (!w) return atClose();
+  AT.ta = ta; AT.word = w;
+  clearTimeout(AT.timer);
+  const seq = ++AT.seq, {project, exclude} = AT_BOXES[ta.id]();
+  AT.timer = setTimeout(async () => {
+    let items;
+    try { items = await api(`/api/topics/search?q=${encodeURIComponent(w.q)}&project=${encodeURIComponent(project || "")}`
+                            + (typeof exclude === "number" ? `&exclude=${exclude}` : "")); } catch { items = []; }
+    if (seq !== AT.seq || AT.ta !== ta) return;  // typed on since
+    AT.items = items; AT.k = 0; atRender();
+  }, 100);
+}
+function atRender() {
+  const el = atEl(), ta = AT.ta;
+  if (!ta || !AT.items.length || !ta.isConnected) { el.classList.add("hidden"); return; }  // no match: the text stays as typed
+  el.innerHTML = AT.items.map((t, k) => `<div class="sl${k === AT.k ? " on" : ""}${t.ended ? " ended" : ""}" role="option" data-k="${k}">`
+    + `<b>${esc(t.title)}</b><span class="muted">${esc(P(t.project).title)}${t.ended ? " · ended" : ""}</span><code>chat:${t.id}</code></div>`).join("");
+  el.querySelectorAll("[data-k]").forEach(r => { r.onmousedown = e => e.preventDefault(); r.onclick = () => atPick(+r.dataset.k); });
+  const b = ta.getBoundingClientRect(), up = b.top > window.innerHeight - b.bottom;
+  Object.assign(el.style, {left: `${Math.max(4, b.left)}px`, width: `${Math.min(b.width, 520)}px`,
+    top: up ? "" : `${b.bottom + 4}px`, bottom: up ? `${window.innerHeight - b.top + 4}px` : ""});
+  el.classList.remove("hidden");
+  el.querySelector(".on")?.scrollIntoView({block: "nearest"});
+}
+function atPick(k) {
+  const t = AT.items[k], ta = AT.ta, w = AT.word; if (!t || !ta || !w) return;
+  const r = atInsert(ta.value, ta.selectionStart, w, t.id);
+  ta.value = r.value; ta.focus(); ta.setSelectionRange(r.caret, r.caret);
+  atClose();
+  ta.dispatchEvent(new Event("input", {bubbles: true}));  // its draft and size follow, as when you type
+}
+document.addEventListener("input", e => { if (e.target.id in AT_BOXES) atUpdate(e.target); });
+document.addEventListener("focusout", e => { if (e.target === AT.ta) setTimeout(() => { if (document.activeElement !== AT.ta) atClose(); }, 150); });
+// Capture phase: the list's keys never reach the box's own Enter-sends
+document.addEventListener("keydown", e => {
+  if (!AT.ta || e.target !== AT.ta || atEl().classList.contains("hidden") || e.metaKey || e.ctrlKey || e.altKey || e.isComposing) return;
+  const n = AT.items.length, stop = () => { e.preventDefault(); e.stopImmediatePropagation(); };
+  if (e.key === "ArrowDown" || e.key === "ArrowUp") { stop(); AT.k = (AT.k + (e.key === "ArrowDown" ? 1 : n - 1)) % n; atRender(); }
+  else if ((e.key === "Enter" && !e.shiftKey) || e.key === "Tab") { stop(); atPick(AT.k); }
+  else if (e.key === "Escape") { stop(); atClose(); }
+}, true);
 function sendKey(e) {
   if (e.key !== "Enter" || e.isComposing || e.keyCode === 229) return false;
   if (e.metaKey || e.ctrlKey) return true;
@@ -2052,7 +2248,8 @@ function renderList() {
     e.stopPropagation(); api(`/api/tasks/${b.dataset.start}/start-now`, {}).then(refresh, err => alert(err.message)); });
   document.querySelectorAll(".task [data-prstep]").forEach(b => b.onclick = e => {
     e.stopPropagation(); b.disabled = true;
-    api(`/api/tasks/${b.dataset.prstep}/${b.dataset.a}`, {}).then(refresh, err => { b.disabled = false; alert(err.message); }); });
+    (b.dataset.a === "pr-open" ? prOpenCall(+b.dataset.prstep) : api(`/api/tasks/${b.dataset.prstep}/${b.dataset.a}`, {}))
+      .then(refresh, err => { b.disabled = false; if (b.dataset.a !== "pr-open") alert(err.message); }); });
 }
 
 // A small tag when the task runs, or will run, on something other than Opus: so a trial of Sonnet tasks stands out.
@@ -2111,6 +2308,7 @@ async function loadDetail(id, fresh) {
     + (t.proof_report ? btn("proofreport", "Open report") : "");
   const ps = prStep(t), pm = prMsg(t);
   if (ps) actions += `<button class="primary" data-act="${ps[0]}" title="${esc(PR_STEP_TIP[ps[0]] || "")}">${ps[1]}</button>`;
+  if (prAddress(t)) actions += `<button data-act="pr-address" title="${esc(PR_STEP_TIP["pr-address"])}">Address comments</button>`;
   if (t.start_words) actions += btn("start-now", "▶ Start now", "primary");
   if (["queued", "running", "gating"].includes(t.state)) actions += btn("pause", "❚❚ Pause");
   if (t.state === "paused") actions += btn("resume", "▶ Resume", "primary");
@@ -2127,7 +2325,7 @@ async function loadDetail(id, fresh) {
     ${timeLine(t, live)}
     ${t.start_words ? `<div class="muted" style="margin:4px 0">${esc(t.start_words)}</div>` : ""}
     ${t.state === "queued" && (archivedP(t.project) || t.wait) ? `<div class="muted" style="margin:4px 0">${esc(archivedP(t.project) ? "archived project: restore it to run this" : t.wait)}</div>` : ""}
-    <div class="muted mono" style="margin:4px 0">${esc(P(t.project).title)} · ${esc(t.branch || "")}${t.jira && !String(t.branch || "").includes(t.jira) ? ` · ${esc(t.jira)}` : ""}${isBranchTask(t) ? " · PRs against " + esc(P(t.project).main_branch || "main") : ""}${t.merged ? ` → ${esc(t.kind === "release" || P(t.project).direct_main || isBranchTask(t) ? P(t.project).main_branch || "main" : P(t.project).dev_branch || "dev")} ${esc(t.merged_show || shas(t.merged))}` : ""}${t.kind === "release" && t.base && !t.merged ? `checking ${esc(t.base_show || shas(t.base))}` : ""}${t.kind === "deploy" && t.base ? `deploying ${esc(t.base_show || shas(t.base))}` : ""}${t.rounds ? ` · fix rounds: ${t.rounds}` : ""}${t.session_model ? ` · model: ${esc(t.session_model)}` : t.model ? ` · model: ${esc(t.model)} (not started)` : ""}${t.effort ? ` · effort: ${esc(t.effort)}` : ""}</div>
+    <div class="muted mono" style="margin:4px 0">${esc(P(t.project).title)} · ${esc(t.branch || "")}${t.jira && !String(t.branch || "").includes(t.jira) ? ` · ${esc(t.jira)}` : ""}${isBranchTask(t) ? " · PRs against " + esc(prAgainst(t)) : ""}${t.merged ? ` → ${esc(isBranchTask(t) ? prAgainst(t) : t.kind === "release" || P(t.project).direct_main ? P(t.project).main_branch || "main" : P(t.project).dev_branch || "dev")} ${esc(t.merged_show || shas(t.merged))}` : ""}${t.kind === "release" && t.base && !t.merged ? `checking ${esc(t.base_show || shas(t.base))}` : ""}${t.kind === "deploy" && t.base ? `deploying ${esc(t.base_show || shas(t.base))}` : ""}${t.rounds ? ` · fix rounds: ${t.rounds}` : ""}${t.session_model ? ` · model: ${esc(t.session_model)}` : t.model ? ` · model: ${esc(t.model)} (not started)` : ""}${t.effort ? ` · effort: ${esc(t.effort)}` : ""}</div>
     ${t.question ? `<div class="callout"><b>Question:</b> ${esc(t.question)}</div>
       <textarea id="answer" placeholder="Your answer (drop or paste screenshots to attach them)" style="min-height:70px"></textarea>
       <div class="row">${btn("answer", "Send answer", "primary")}</div>` : ""}
@@ -2244,12 +2442,13 @@ async function act(id, a, pr) {
   if (a === "answer") { body.answer = $("#answer").value.trim(); if (!body.answer) return; }
   if (a === "reject") { body.feedback = $("#feedback").value.trim(); if (!body.feedback) return; }
   if (a === "release") body.on = $("#detail [data-act=release]").checked ? 1 : 0;
+  if (a === "pr-ready") body.on = $("#detail [data-act=pr-ready]").checked ? 1 : 0;
   if (a === "ask" || a === "steer") { body.text = $("#ask").value.trim(); if (!body.text) return; }
   if (a === "pr-merge") body.pr = +pr;
   if (a === "cancel" && !document.getElementById("actmsg").dataset.armed) {
     const m = document.getElementById("actmsg"); m.dataset.armed = 1; m.textContent = "Click Cancel again to stop this task."; return;
   }
-  try { await api(`/api/tasks/${id}/${a}`, body); typing = false; refresh(); }
+  try { await (a === "pr-open" ? prOpenCall(id) : api(`/api/tasks/${id}/${a}`, body)); typing = false; refresh(); }
   catch (e) { $("#actmsg").textContent = e.message; }
 }
 
@@ -2261,9 +2460,9 @@ async function submit() {
     if (!project) throw new Error("pick a project");
     const start = $("#tstart").value, not_before = start === "at" ? $("#tstartat").value : start;
     if (start === "at" && !not_before) throw new Error("pick when it starts");
-    const branch_or_jira = $("#tbranch").value.trim();
-    const r = await api("/api/tasks", {project, body, priority: +$("#prio").value, hold: $("#hold").checked ? 1 : 0, release: $("#autorel").checked ? 1 : 0, depends_on: $("#after").value.trim(), model: $("#tmodel").value, effort: $("#teffort").value, ...(not_before ? {not_before} : {}), ...(branch_or_jira ? {branch_or_jira} : {})});
-    $("#body").value = ""; $("#after").value = ""; $("#tbranch").value = ""; $("#tmodel").value = ""; $("#teffort").value = ""; $("#tstart").value = ""; $("#tstartat").value = ""; $("#tstartat").classList.add("hidden"); $("#formmsg").textContent = ""; delete $("#autorel").dataset.k; sel = r.id; setFocus(project); refresh();
+    const branch_or_jira = $("#tbranch").value.trim(), base = $("#tbase").value.trim();
+    const r = await api("/api/tasks", {project, body, priority: +$("#prio").value, hold: $("#hold").checked ? 1 : 0, release: $("#autorel").checked ? 1 : 0, depends_on: $("#after").value.trim(), model: $("#tmodel").value, effort: $("#teffort").value, ...(not_before ? {not_before} : {}), ...(branch_or_jira ? {branch_or_jira} : {}), ...(base ? {base} : {})});
+    $("#body").value = ""; $("#after").value = ""; $("#tbranch").value = ""; $("#tbase").value = ""; $("#tmodel").value = ""; $("#teffort").value = ""; $("#tstart").value = ""; $("#tstartat").value = ""; $("#tstartat").classList.add("hidden"); $("#formmsg").textContent = ""; delete $("#autorel").dataset.k; sel = r.id; setFocus(project); refresh();
   } catch (e) { $("#formmsg").textContent = e.message; }
 }
 $("#submit").onclick = submit;
@@ -2614,12 +2813,13 @@ function inline(s, ctx = {}) {
        });
   if (L) s = s.replace(lnPathRe(), (m, pre, p) => (r = lnRef(p, L, "text")) ? pre + ref(r, p) : m)
     .replace(/(^|[^\w&#/])#(\d+)(?![\w-])/g, (m, pre, n) => pre + ref({ref: `task:${n}`, href: "#tasks"}, `#${n}`))
+    .replace(/(^|[^\w&#/:.-])chat:(\d+)(?![\w-])/g, (m, pre, n) => pre + ref({ref: `chat:${n}`, href: "#today"}, `chat:${n}`))
     .replace(lnPlaceRe(), (m, pre, k) => pre + put(`<a href="${APP_PLACES[k]}" data-place>${k}</a>`));
   s = mdEmph(s);
   while (s.includes("\u0000")) s = s.replace(/\u0000(\d+)\u0000/g, (m, n) => keep[n]);
   return s;
 }
-// ---- Links in chats (README: Links in chats, LINK-1..7). A chat message's references become links once the daemon
+// ---- Links in chats (README: Links in chats, LINK-1..8). A chat message's references become links once the daemon
 // says their target exists: inline() wraps each in <span class="ref" data-ref>, and chatLinks checks them all in one
 // request and turns each into a link, or greys it with ⚠ and the reason. A reference is never a link that fails.
 // Places in the app a message may name, and the route each opens. Longer names win over shorter ones.
@@ -2642,6 +2842,7 @@ const lnPathRe = () => new RegExp(`(^|[\\s(\\[{,;*>'“‘]|&quot;)((?:~\\/|\\/)
 // (so state.tasks stays code), and when there is no such file it stays as written (Node.js) rather than ⚠.
 function lnRef(p, L, mode) {
   let m, u = mdLocal(p);
+  if ((m = p.match(/^chat:(\d+)$/))) return {ref: `chat:${m[1]}`, href: "#today"};
   if ((m = u.match(/^\/api\/images\/([\w-]+\.\w+)$/))) return {ref: `image:${m[1]}`, href: u, img: LN_IMG.test(u) ? "mdimg" : ""};
   if ((m = u.match(/^\/api\/designs\/(\d+)\/files\/([\w.-]+)$/) || p.match(/^(?:\S*\/)?designs\/(\d+)\/([\w.-]+)$/)
       || (L.files && L.files.includes(p) && [p, L.did, p])))
@@ -2788,7 +2989,8 @@ function chatLinks(el, project) {
   const need = [...new Set(els.map(e => e.dataset.ref))].filter(r => !known(LN_SEEN.get(key(r))));
   if (need.length) {
     const ask = api("/api/links/check", {project, refs: need}).then(j => {
-      for (const r of need) LN_SEEN.set(key(r), {why: r in j.refs ? j.refs[r] : "Not checked", head: (j.heads || {})[r], at: Date.now()}); })
+      for (const r of need) LN_SEEN.set(key(r), {why: r in j.refs ? j.refs[r] : "Not checked", head: (j.heads || {})[r],
+                                                 chat: (j.chats || {})[r], at: Date.now()}); })
       .catch(() => { for (const r of need) LN_SEEN.delete(key(r)); });  // daemon away: they stay plain text
     for (const r of need) LN_SEEN.set(key(r), ask);
   }
@@ -2796,7 +2998,7 @@ function chatLinks(el, project) {
     for (const e of els) { const v = LN_SEEN.get(key(e.dataset.ref)); if (v && !(v instanceof Promise) && e.isConnected) lnApply(e, v, project); }
   });
 }
-function lnApply(e, {why, head}, project) {
+function lnApply(e, {why, head, chat}, project) {
   const d = e.dataset;
   // "README.md § Design mode for details": the link ends with the heading the daemon found, the rest is the sentence's
   const run = head && e.childNodes.length === 1 && e.firstChild.nodeType === 3 && e.textContent.match(/^([^§]*§\s*)(.*)$/);
@@ -2806,12 +3008,14 @@ function lnApply(e, {why, head}, project) {
   if (why) { e.className = "ref bad"; e.title = why; delete d.ref; e.prepend("⚠ "); return; }
   const a = Object.assign(document.createElement("a"), {href: d.href, className: "ref"});
   a.dataset.ref = d.ref; a.dataset.project = project;
-  if (!/^(task|spec):/.test(d.ref)) { a.target = "_blank"; a.rel = "noopener"; }
+  // A chat opens in its own project, and its tooltip is its title and project
+  if (chat) { a.dataset.project = chat.project; a.title = `${chat.title} · ${P(chat.project).title}`; }
+  if (!/^(task|spec|chat):/.test(d.ref)) { a.target = "_blank"; a.rel = "noopener"; }
   if (d.img) a.append(Object.assign(document.createElement("img"), {className: d.img, src: d.href, alt: e.textContent, title: e.textContent}));
   else a.append(...e.childNodes);
   e.replaceWith(a);
 }
-// A click on a checked reference: a task opens its details, a repo file the file drawer, an OpenSpec path its change,
+// A click on a checked reference: a task opens its details, a chat (chat:N) its topic, a repo file the file drawer, an OpenSpec path its change,
 // and a place its tab. Pictures and design documents open in a new tab, as does any link with ⌘ or Ctrl held.
 document.addEventListener("click", e => {
   const a = e.target.closest && e.target.closest("a[data-ref], a[data-place]");
@@ -2820,6 +3024,7 @@ document.addEventListener("click", e => {
   if ("place" in a.dataset) { e.preventDefault(); rsCloseDoc(); goPlace(a.getAttribute("href")); }
   else if (r.startsWith("task:")) { e.preventDefault(); rsCloseDoc(); openTask(+val); }
   else if (r.startsWith("spec:")) { e.preventDefault(); rsCloseDoc(); openSpecLink(a.dataset.project, val); }
+  else if (r.startsWith("chat:")) { e.preventDefault(); rsCloseDoc(); openTopic(a.dataset.project, +val); }
   else if (r.startsWith("file:") && !a.querySelector("img")) { e.preventDefault(); openRepoFile(a.dataset.project, val); }
 });
 function goPlace(route) {
@@ -3095,7 +3300,7 @@ function renderChat() {
   const d = chatData && chatSel === chatData.id ? chatData : null;
   const thinking = d && d.state === "thinking";
   // Looking at a topic doesn't mark it read: only Mark read does, so a Read item doesn't vanish while you read it.
-  const key = d ? `${d.id}:${d.title}:${d.msgs.length}:${JSON.stringify(d.queued || [])}:${d.state}:${d.ended}:${d.live.length}:${JSON.stringify(d.msgs.map(m => m.tasks.map(t => t.state)))}:${d.spec_view ? hash(JSON.stringify(d.spec_view)) : ""}:${(d.files || []).map(f => f.name + f.mtime).join()}` : "none";
+  const key = d ? `${d.id}:${d.title}:${d.msgs.length}:${JSON.stringify(d.queued || [])}:${d.state}:${d.ended}:${d.live.length}:${permitKey(d)}:${JSON.stringify(d.msgs.map(m => m.tasks.map(t => t.state)))}:${d.spec_view ? hash(JSON.stringify(d.spec_view)) : ""}:${(d.files || []).map(f => f.name + f.mtime).join()}` : "none";
   $("#stopchat").classList.toggle("hidden", !thinking);
   // While Claude replies, a message waits in the chat's queue and goes when the reply ends
   $("#send").textContent = thinking ? "Queue" : "Send";
@@ -3125,6 +3330,7 @@ function renderChat() {
   const links = chatCtx(d.project, d.id, (d.files || []).map(f => f.name));
   box.innerHTML = topicDivider() + msgsHtml(d, links);
   box.querySelectorAll("[data-unq]").forEach(b => b.onclick = () => unqueue(d.id, +b.dataset.unq));
+  permitButtons(box, d.id, () => { chatKey = ""; refreshDesign(); });
   box.querySelectorAll("[data-task]").forEach(b => b.onclick = () => openTask(+b.dataset.task));
   const bottom = () => {
     if (!(stick || thinking)) return;
@@ -3142,7 +3348,30 @@ function msgsHtml(d, links) {
       ? `<div class="msg user">${userMd(m.text.replace(/^\[ops:[^\n]*\]\n\n/, ""), links)}</div>`
       : `<div class="msg ${m.role === "ops" ? "ops" : ""}">${md(m.text, undefined, links)}${m.tasks.length ? `<div class="chips">${m.tasks.map(t => `<button class="chip" data-task="${t.id}">${tid(t.id)}${esc(t.title || "")} · ${LABEL[t.state] || t.state}</button>`).join("")}</div>` : ""}</div>`).join("")
     + (thinking ? `<div class="live"><span class="pulse s-running">Claude is thinking</span>${d.live.map(l => `<div>  ${esc(l)}</div>`).join("")}</div>` : "")
+    + permitsHtml(d)
     + (d.queued || []).map((t, k) => `<div class="msg user queued">${userMd(t, links)}<div class="qbar">Queued: sent ${thinking ? "when this reply ends" : "next"} · <button data-unq="${k}" title="Take it off the queue and put it back in the message box">Edit</button></div></div>`).join("");
+}
+// A project chat's permission prompts: its turn waits until you click Approve or Deny (README: Permission prompts).
+// The main field of the input (a command, a file, a URL) shows; the rest is under Full input.
+function permitsHtml(d) {
+  return (d.permits || []).map(r => {
+    const i = r.input || {}, main = i.command || i.file_path || i.notebook_path || i.url || i.path || "";
+    return `<div class="permit"><b>Claude asks to use ${esc(r.tool)}</b>${i.description ? ` <span class="muted">${esc(i.description)}</span>` : ""}`
+      + (main ? `<pre>${esc(String(main))}</pre>` : "")
+      + `<details><summary class="muted">Full input</summary><pre>${esc(JSON.stringify(i, null, 2))}</pre></details>`
+      + `<div class="row"><button class="primary" data-permit="${esc(r.id)}" data-allow="1">Approve</button>`
+      + `<button data-permit="${esc(r.id)}">Deny</button><span class="err"></span></div></div>`;
+  }).join("");
+}
+const permitKey = d => (d.permits || []).map(r => r.id).join();
+function permitButtons(box, did, again) {
+  box.querySelectorAll("[data-permit]").forEach(b => b.onclick = async () => {
+    const row = b.closest(".row");
+    row.querySelectorAll("button").forEach(x => x.disabled = true);
+    try { await api(`/api/designs/${did}/permit`, {id: b.dataset.permit, allow: !!b.dataset.allow}); }
+    catch (e) { row.querySelector(".err").textContent = e.message; return; }
+    again();
+  });
 }
 // What lnRef needs to know about a chat: its project, where that project is on disk, and a design chat's documents.
 const chatCtx = (project, did, files) => ({project, roots: P(project).roots || [], did, files: files || []});
@@ -3271,7 +3500,7 @@ try {
   TD.proj = localStorage.getItem("ops-td-proj") || null;
   TD.recapFold = tdFoldRead(localStorage.getItem("ops-td-recap"));
 } catch {}
-const TD_FILTERS = [["all", "All"], ["review", "Review"], ["unblock", "Unblock"], ["ship", "Ship"], ["only_me", "Only me"]];
+const TD_FILTERS = [["all", "All"], ["review", "Review"], ["unblock", "Unblock"], ["ship", "Ship"], ["only_me", "Only me"], ["in_review", "In review"]];
 const SEND_WORDS = {answer: "Send answer", reject: "Send back", retry: "Retry", queue: "Queue task"};
 const STAGES = ["Queued", "Working", "Gate", "Review", "Merged", "Promoted"];
 const midnight = () => { const d = new Date(); d.setHours(0, 0, 0, 0); return d.getTime() / 1000; };
@@ -3567,6 +3796,12 @@ function tdActions(it) {
       return (ps ? [A(ps[0], ps[1], {primary: 1, title: PR_STEP_TIP[ps[0]] || ""})] : [])
         .concat([A("answer", "Answer", {primary: !ps, title: "Type your answer in the message box below"}), A("details", "Details")]);
     }
+    // Its open PRs: a link to each, Address comments when there are comments to take in, and Details
+    case "In review": {
+      const t = s.kind === "task" && state.tasks.find(x => x.id === s.id);
+      return (it.prs || []).map((x, i) => A("prlink:" + i, `Open ${prWords(x)} ↗`, {primary: !i, title: x.url}))
+        .concat(t && prAddress(t) ? [A("pr-address", "Address comments", {title: PR_STEP_TIP["pr-address"]})] : [], [A("details", "Details")]);
+    }
     case "Open PR": return [A("pr-open", "Open PR", {primary: 1, title: PR_STEP_TIP["pr-open"]}), A("details", "Details", {title: "Its summary, commits and the files it changed"})];
     case "Fix": return [A("retry", "Retry", {primary: 1}), A("retrynote", "Retry with a note…"), A("retryafter", "Retry after…", {title: "Retry it once another task merges"}), A("details", "Details")];
     case "Promote":
@@ -3578,6 +3813,7 @@ function tdActions(it) {
       .concat(g.deploys && g.deploys.length ? tdPlay(g, "main") : [A("projects", "Open in Projects", {primary: 1})]);
     // Send to dev underneath. It reaches main by itself when its task promotes after merge (the project's default)
     case "Commit": return [g.senddev_open ? A("details:" + g.senddev_open, `Sending… #${g.senddev_open}`, {primary: 1, title: "Open the task sending these files"})
+      : prFlow(g) ? A("senddev", "Commit these", {primary: 1, title: `Commits these files onto a branch of their own for a PR against ${g.main_branch}, through the gate`})
       : A("senddev", "Commit these", {primary: 1, title: `Lands these files on ${g.direct_main || g.auto_release ? g.main_branch : g.dev_branch} through the gate, then clears them from your checkout`})];
     case "Read": return it.report ? [A("markreport", "Mark read", {primary: 1, title: "Done with it: take it off your list"}),
         A("report", "Open report", {title: `Read ${it.report.path} as on ${g.dev_branch || "dev"}. It stays on your list until you mark it read`}), A("details", "Details")]
@@ -3676,6 +3912,7 @@ function tdStep(it, shown) {
     ${it.parked && tdWaiting(it.parked) ? `<div class="tdwaiting">${tdWaiting(it.parked)}<button data-wclear title="Forget the wait and put it back in the list">Clear</button></div>` : ""}
     <div class="dets">${it.why ? `<div class="why">${esc(it.why)}</div>` : ""}
     ${facts ? `<div class="facts">${facts}</div>` : ""}${it.verb === "Commit" ? tdUncommitted() : ""}${rv}</div>
+    ${it.verb === "In review" ? prsHtml({state: "pr"}, it.prs, false) : ""}
     ${it.closes ? `<div class="closes">${esc(it.closes)}</div>` : ""}
     ${it.verb === "Ship" && P(it.project).deploys && P(it.project).deploys.length ? tdShipLog(P(it.project)) : ""}
     <div class="row">${acts.map(b => `<button data-ta="${esc(b.a)}" class="${b.primary ? "primary" : ""}" ${busy || b.disabled ? "disabled" : ""} title="${esc(b.title || "")}">${esc(b.label)}</button>`).join("")}
@@ -3872,7 +4109,10 @@ function depStage(d) {
 function tdPipeline(g, busy, compact) {
   const r = g.release, rbusy = r && !["done", "failed", "cancelled"].includes(r.state), n = (g.ahead || []).length;
   const play = tdPlay(g, "dev").map(b => `<button class="pplay" data-ha="${esc(b.a)}" ${busy || b.disabled ? "disabled" : ""} title="${esc(b.title || "")}">${esc(b.label)}</button>`);
-  const promote = g.direct_main ? "" : `<span class="stg main"><b class="sn">${esc(g.dev_branch)} → ${esc(g.main_branch)}</b>${
+  const bw = branchOpenWords(g);
+  const promote = prFlow(g) ? `<span class="stg main" title="flow = &quot;pr&quot;: every task goes through a branch and a PR against ${esc(g.main_branch)}; no Promote"><b class="sn">PRs → ${esc(g.main_branch)}</b>${
+    bw ? `<span class="ss todo">${esc(bw)}</span>` : `<span class="ss ok">none open</span>`}</span>`
+    : g.direct_main ? "" : `<span class="stg main"><b class="sn">${esc(g.dev_branch)} → ${esc(g.main_branch)}</b>${
     rbusy ? `<a class="ss todo pulse" data-task="${r.id}" title="Open the release">Release #${r.id} in progress</a>`
     : n ? `<span class="ss todo">${n} ahead</span><button class="primary" data-ha="promote" ${busy ? "disabled" : ""} title="If the gate passes on ${esc(g.dev_branch)}, ${esc(g.main_branch)} moves to it">Promote</button>`
     : `<span class="ss ok">✓ in sync</span>`}</span>`;
@@ -4306,7 +4546,9 @@ async function tdDo(a) {
   if (a === "projects") { setFocus(it.project); return showTab("projects"); }
   if (a === "play") return run(() => api(`/api/tasks/${s.id}/play`, {}), "Starting the build. Approve it, or send it back, when you have tried it.");
   if (a === "approve" || a === "retry") return run(() => api(`/api/tasks/${s.id}/${a}`, {}));
-  if (a === "pr-open") return run(() => api(`/api/tasks/${s.id}/pr-open`, {}), "Opening its pull requests: the task shows each one, its CI and a Merge button.");
+  if (a === "pr-open") return run(() => prOpenCall(s.id), "Opening its pull requests: the first opens in a new tab, and the task stays here, In review, until they merge.");
+  if (a.startsWith("prlink:")) { const pr = (it.prs || [])[+a.slice(7)]; if (pr) window.open(pr.url, "_blank", "noopener"); return; }
+  if (a === "pr-address") return run(() => api(`/api/tasks/${s.id}/pr-address`, {}));
   if (a === "fix-ci" || a === "pr-retry") return run(() => api(`/api/tasks/${s.id}/${a}`, {}));
   if (/^(play|stop):/.test(a)) { const [act, where] = a.split(":");
     return run(() => api(`/api/projects/${encodeURIComponent(it.project)}/${act}`, where === "dev" ? {where} : {}), act === "play" ? `Starting ${where}.` : `Stopped ${where}.`); }
@@ -4522,17 +4764,22 @@ function tdStrip() {
       + `</div>`;
   };
   const plainPending = !!cv && cv.topic === null && !cv.title && !cv.subject;
-  const menu = !TD.menu ? "" : `<div id="tdmenu"><div class="k">Ended (${ended.length})</div>${ended.map(t =>
+  // Copy reference, for each chat (not a research thread): its tab's row here, and its Ended row
+  const copyB = t => typeof t.id === "number" ? `<button data-copyref="${id(t)}" title="Copy ${esc(chatRefText(t))}, to point at it from another chat">Copy reference</button>` : "";
+  const opened = cv ? tabs.filter(t => !t.pending && typeof t.id === "number") : [];
+  const menu = !TD.menu ? "" : `<div id="tdmenu">${opened.length ? `<div class="k">Topics (${opened.length})</div>${opened.map(t =>
+      `<div class="tdend"><span class="tt">${esc(t.title || "Untitled")}</span><span class="sub">chat:${id(t)}</span><span class="acts">${copyB(t)}</span></div>`).join("")}` : ""}
+    <div class="k">Ended (${ended.length})</div>${ended.map(t =>
       `<div class="tdend"><a data-reopento="${id(t)}" title="Reopen it and show it">${esc(t.title || "Untitled")}</a><span class="sub">${esc(modeWord(t.mode))} · ended ${ago(t.ended, now)} ago</span>
         <span class="acts">${tdReminded(project, t.id) ? `<span class="onlist" title="A reminder of it is on your to-do list">On your list</span>`
           : `<button data-remind="${id(t)}" title="Put it on your to-do list as a reminder; it stays ended until you pick the item">Remind me</button>`}
-        <button data-reopen="${id(t)}" title="Put it back in the strip">Reopen</button></span></div>`).join("") || `<div class="muted">No ended topics.</div>`}
+        <button data-reopen="${id(t)}" title="Put it back in the strip">Reopen</button>${copyB(t)}</span></div>`).join("") || `<div class="muted">No ended topics.</div>`}
     <div class="row endread"><button id="endread" title="Ends every topic here you have read, that Claude isn't replying in, other than the one shown, whose last activity is older than that">End read topics older than</button>
       <select id="enddays">${[1, 7, 30, 90].map(n => `<option value="${n}" ${n === days ? "selected" : ""}>${n} day${n === 1 ? "" : "s"}</option>`).join("")}</select></div></div>`;
   const html = `<div class="tdstripin"><div class="tdscroll"><div class="tdtabs">${tabs.map(tab).join("")}
       <button class="tdplus" id="tdnew" ${!cv || plainPending ? "disabled" : ""} title="New topic: your next message starts it">+</button></div>
     <div class="tdpins">${TD_SECS.map(([k, l]) => `<button class="tdpin${TD.sec === k ? " on" : ""}" data-sec="${k}">${l}</button>`).join("")}</div></div>
-    <button id="tdmenub" class="tdpin" aria-haspopup="true" aria-expanded="${TD.menu}" title="Ended topics, and End read topics">▾${ended.length ? ` ${ended.length}` : ""}</button></div>${menu}`;
+    <button id="tdmenub" class="tdpin" aria-haspopup="true" aria-expanded="${TD.menu}" title="Copy a topic's reference, Ended topics, and End read topics">▾${ended.length ? ` ${ended.length}` : ""}</button></div>${menu}`;
   const sc = el.querySelector(".tdtabs"), ph = el.querySelector(".tdscroll"), x = sc ? sc.scrollLeft : 0, px = ph ? ph.scrollLeft : 0;
   if (!put(el, html)) return;
   el.querySelector(".tdtabs").scrollLeft = x; el.querySelector(".tdscroll").scrollLeft = px;
@@ -4552,6 +4799,11 @@ function tdStrip() {
   act("[data-tabx]", "end", b => ({ref: ref(b.dataset.tabx)}));
   act("[data-reopen]", "reopen", b => ({ref: ref(b.dataset.reopen)}));
   act("#endread", "end-read", () => ({days: +$("#enddays").value}));
+  el.querySelectorAll("[data-copyref]").forEach(b => b.onclick = e => {  // the menu stays open, to copy another
+    e.stopPropagation();
+    const t = cv && cv.topics.find(x => String(x.id) === b.dataset.copyref);
+    if (t) copyText(chatRefText(t), () => toast("Copied"));
+  });
   el.querySelectorAll("[data-remind]").forEach(b => b.onclick = async e => {  // the menu stays open: the row turns On your list
     e.stopPropagation(); if (!mine()) return;
     b.disabled = true;
@@ -4780,7 +5032,7 @@ const TD_GONE = new Map(), TD_GONE_MS = 20000;
 function tdAddOpenPR(s) {
   if (!s.todos || !s.tasks) return;
   const have = new Set(s.todos.filter(x => x.source && x.source.kind === "task").map(x => +x.source.id));
-  const ORDER = ["unblock", "ship", "review", "only_me"], rank = x => ORDER.indexOf(x.group);
+  const ORDER = ["unblock", "ship", "review", "only_me", "in_review"], rank = x => ORDER.indexOf(x.group);
   for (const t of s.tasks.filter(t => t.state === "on_branch" && !have.has(t.id))) {
     const x = {key: `task:${t.id}:openpr`, subject: `task:${t.id}`, verb: "Open PR", group: "ship", project: t.project,
       title: t.title, why: String(t.summary || "").trim() || `Its work is committed on ${t.branch}; nothing is pushed yet.`,
@@ -5251,7 +5503,7 @@ function qcRender() {
   $("#qcsend").title = thinking ? "Claude is replying: this message goes as soon as the reply ends" : "";
   if (!QC_PHONE.matches) qcPlace();
   const box = $("#qcmsgs");
-  const key = d ? `${d.id}:${d.title}:${d.msgs.length}:${JSON.stringify(d.queued || [])}:${d.state}:${d.live.length}:${JSON.stringify(d.msgs.map(m => m.tasks.map(t => t.state)))}:${(d.files || []).map(f => f.name + f.mtime).join()}`
+  const key = d ? `${d.id}:${d.title}:${d.msgs.length}:${JSON.stringify(d.queued || [])}:${d.state}:${d.live.length}:${permitKey(d)}:${JSON.stringify(d.msgs.map(m => m.tasks.map(t => t.state)))}:${(d.files || []).map(f => f.name + f.mtime).join()}`
     : t.did ? "loading" : `new:${t.project}:${JSON.stringify(qcRecent(QC.recent, QC.tabs))}`;
   if (key === QC.key) return;
   const stick = box.scrollTop + box.clientHeight >= box.scrollHeight - 40 || !QC.key.startsWith(`${d && d.id}:`);
@@ -5270,6 +5522,7 @@ function qcRender() {
   const links = chatCtx(d.project, d.id, (d.files || []).map(f => f.name));
   box.innerHTML = msgsHtml(d, links);
   box.querySelectorAll("[data-unq]").forEach(b => b.onclick = () => qcUnqueue(+b.dataset.unq));
+  permitButtons(box, d.id, () => { QC.key = ""; qcLoad(); });
   box.querySelectorAll("[data-task]").forEach(b => b.onclick = () => openTask(+b.dataset.task));
   const bottom = () => {
     if (!(stick || thinking)) return;

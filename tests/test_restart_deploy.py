@@ -1,12 +1,15 @@
 """A restart of claude-ops that loads new code (a Promote, or a direct_main merge) never cuts off a running deploy, in
 any project, and no new deploy starts while it waits. Stdlib only.
 Run from the repo root: /opt/homebrew/bin/python3 -m unittest discover -s tests -q"""
+import io
+import json
 import os
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 DATA = tempfile.mkdtemp()
 os.environ["OPS_DATA"] = DATA
@@ -223,7 +226,8 @@ class RestartButton(unittest.TestCase):
         opsd.init_db()
         self.spawned = []
         popen, service = subprocess.Popen, opsd.is_service
-        subprocess.Popen = lambda *a, **k: self.spawned.append((a, k))
+        # only opsctl calls: other tests' leftover threads may spawn while this patch is in place
+        subprocess.Popen = lambda *a, **k: str(a[0][0]).endswith("opsctl") and self.spawned.append((a, k))
         self.addCleanup(lambda: (setattr(subprocess, "Popen", popen), setattr(opsd, "is_service", service)))
 
     def route(self, path, body=None):
@@ -246,6 +250,40 @@ class RestartButton(unittest.TestCase):
         self.assertEqual(k["env"]["OPS_DATA"], str(opsd.DATA))
         self.assertNotIn("OPS_RESTART_TASK", k["env"])
         k["stdout"].close()
+
+    def test_a_chat_that_restarts_is_remembered(self):  # so the new daemon tells it not to restart again
+        opsd.is_service = lambda: True
+        self.route("/api/restart", {"from": "chat:12"})
+        self.assertEqual(opsd.setting("restarted_by"), "12")
+        self.spawned[0][1]["stdout"].close()
+        self.spawned.clear()
+        self.route("/api/restart")  # the button
+        self.assertEqual(opsd.setting("restarted_by"), "null")
+        self.spawned[0][1]["stdout"].close()
+
+    def test_cli_posts_to_the_daemon_that_started_it(self):
+        sent = []
+
+        class Answer:
+            def read(self):
+                return b'{"ok": true}'
+        urlopen = opsd.urlopen
+        opsd.urlopen = lambda req, timeout=None: sent.append(req) or Answer()
+        self.addCleanup(lambda: setattr(opsd, "urlopen", urlopen))
+        env = {"OPS_DAEMON": "http://127.0.0.1:1234", "OPS_FROM": "chat:7"}
+        with mock.patch.dict(os.environ, env), mock.patch("sys.stdout", io.StringIO()) as out:
+            opsd.restart_cli()
+        req, = sent
+        self.assertEqual(req.full_url, "http://127.0.0.1:1234/api/restart")
+        self.assertEqual(json.loads(req.data), {"from": "chat:7"})
+        self.assertEqual(req.get_header("X-ops"), "1")
+        self.assertIn("restarting", out.getvalue())
+
+    def test_guard_keeps_workers_off_it(self):
+        for cmd in ("opsd.py restart", f"/opt/homebrew/bin/python3 {opsd.CODE / 'opsd.py'} restart",
+                    "cd x && ./opsd.py restart"):
+            self.assertIn("restarts the live claude-ops service", opsd.guard_check(cmd, port=8788) or "", cmd)
+        self.assertIsNone(opsd.guard_check("opsd.py send demo restart the build", port=8788))
 
     def test_restart_self_keeps_its_task_log(self):
         opsd.is_service = lambda: True

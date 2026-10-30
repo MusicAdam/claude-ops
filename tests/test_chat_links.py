@@ -1,4 +1,4 @@
-"""Links in chats (README: Links in chats, LINK-1..7). The page side runs dashboard.html's own markdown code in node
+"""Links in chats (README: Links in chats, LINK-1..8). The page side runs dashboard.html's own markdown code in node
 (skipped without node) and checks what each kind of reference becomes; the daemon side checks link_check, which says
 which targets exist, and /api/files, which serves a repo file from dev and nothing outside it.
 Run from the repo root: /opt/homebrew/bin/python3 -m unittest discover -s tests -q"""
@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 import urllib.error
 import urllib.request
@@ -67,6 +68,19 @@ class LinkKinds(unittest.TestCase):
         self.assertNotIn("task:227", url)
         self.assertNotIn("data-ref", word)
 
+    def test_chat(self):
+        html, = self.md("Review chat:42, then (chat:7) and `chat:43`.")
+        self.assertIn('data-ref="chat:42" data-href="#today">chat:42</span>', html)
+        self.assertIn('data-ref="chat:7"', html)
+        self.assertIn('data-ref="chat:43" data-href="#today"><code>chat:43</code></span>', html)  # a code span of only it
+        code, url, word = self.md("```\nchat:45\n```\n\n`see chat:46`", "https://x.org/chat:47 and x.org/chat:48",
+                                  "mychat:49 chat:50x")
+        self.assertNotIn("data-ref", code)
+        self.assertNotIn("data-ref", url)
+        self.assertNotIn("data-ref", word)
+        mine, = self.md("look at chat:51", user=True)
+        self.assertIn('data-ref="chat:51"', mine)
+
     def test_repo_file(self):
         html, = self.md("Edit opsd.py:5914 and `docs/design.md`, or /srv/demo-wt/t3/tests/x.py.")
         self.assertIn('data-ref="file:opsd.py:5914" data-href="/api/files?project=demo&path=opsd.py"', html)
@@ -109,6 +123,35 @@ class LinkKinds(unittest.TestCase):
         html, = self.md("[log](/tmp/x.log)")
         self.assertIn('class="ref bad"', html)
         self.assertNotIn("<a ", html)
+
+
+# The @ picker's pure parts, from the page: which @ word the caret ends, and the text once a chat is picked
+AT_RUN = r"""
+const h = require("fs").readFileSync(process.argv[1], "utf8");
+eval(h.slice(h.indexOf("function atWord"), h.indexOf("// The boxes it serves")));
+const cases = JSON.parse(process.argv[2]);
+console.log(JSON.stringify(cases.map(([v, c, id]) => { const w = atWord(v, c); return [w, w && id ? atInsert(v, c, w, id) : null]; })));
+"""
+
+
+@unittest.skipUnless(shutil.which("node"), "needs node")
+class AtPicker(unittest.TestCase):
+    def run_at(self, *cases):
+        out = subprocess.run(["node", "-e", AT_RUN, str(PAGE), json.dumps(cases)], capture_output=True, text=True,
+                             check=True).stdout
+        return json.loads(out)
+
+    def test_word_and_insert(self):
+        (w1, r1), (w2, r2), (w3, _), (w4, _), (w5, _), (w6, r6) = self.run_at(
+            ["review @des", 11, 42], ["@", 1, 7], ["mail a@b", 8, None], ["@ x", 2, None], ["@abc def", 8, None],
+            ["see (@lo and more", 8, 3])
+        self.assertEqual(w1, {"start": 7, "q": "des"})
+        self.assertEqual(r1, {"value": "review chat:42 ", "caret": 15})
+        self.assertEqual((w2, r2), ({"start": 0, "q": ""}, {"value": "chat:7 ", "caret": 7}))
+        self.assertIsNone(w3)  # not the start of a word
+        self.assertIsNone(w4)  # a space after @ ends it: nothing to pick
+        self.assertIsNone(w5)
+        self.assertEqual(r6, {"value": "see (chat:3  and more", "caret": 12})
 
 
 class LinkTargets(unittest.TestCase):
@@ -170,6 +213,67 @@ class LinkTargets(unittest.TestCase):
         self.assertIn("gone", why["spec:/gone"])
         self.assertTrue(why["image:none.png"] and why["design:7/none.html"])
         self.assertEqual(why["file:secret.txt"], "Ignored by git: secret.txt")
+
+    def chat(self, project, title, msgs=(), **cols):
+        now = time.time()
+        did = opsd.q("INSERT INTO designs (project, title, created, updated, kind, ended) VALUES (?,?,?,?,?,?)",
+                     (project, title, now - 3600, cols.get("updated", now), cols.get("kind", "design"),
+                      cols.get("ended")))
+        for k, (role, text) in enumerate(msgs):
+            opsd.q("INSERT INTO design_msgs (design_id, role, text, ts) VALUES (?,?,?,?)", (did, role, text, now + k))
+        self.addCleanup(opsd.q, "DELETE FROM designs WHERE id=?", (did,))
+        self.addCleanup(opsd.q, "DELETE FROM design_msgs WHERE design_id=?", (did,))
+        return did
+
+    def test_chat_found_with_title_and_project(self):
+        did = self.chat("links", "Save format")
+        chats = {}
+        why = opsd.link_check("other", [f"chat:{did}", "chat:99999"], None, chats)  # not the message's project
+        self.assertEqual(why, {f"chat:{did}": None, "chat:99999": "No chat 99999"})
+        self.assertEqual(chats, {f"chat:{did}": {"title": "Save format", "project": "links"}})
+
+    def test_ops_note_names_referenced_chats(self):
+        did = self.chat("links", "Save format", [("user", "hi"), ("assistant", "hello")], kind="project")
+        here = self.chat("links", "Here")
+        line = (f'chat:{did} is "Save format" (links, project chat, 2 messages, last active {opsd.day(time.time())}): '
+                f"read it with `{opsd.OPSD_CMD} chat show {did}`")
+        text = f"review chat:{did} and chat:99999, not `x` in\n```\nchat:{here}\n```\nor https://x.org/chat:{here}"
+        self.assertEqual(opsd.chat_mentions(text), [line, "chat:99999: no such chat"])
+        note = opsd.ops_note(self.p, here, "", text)
+        self.assertIn(" | " + line + " | chat:99999: no such chat]", note)
+        self.assertEqual(opsd.chat_said(here, text), [line, "chat:99999: no such chat"])
+        self.assertNotIn("chat:", opsd.ops_note(self.p, here, "", "nothing to see"))
+        self.assertEqual(opsd.chat_said(here, "nothing to see"), [])
+
+    def test_topic_search(self):
+        old = self.chat("links", "Save format old", updated=time.time() - 100)
+        new = self.chat("links", "Save format new")
+        done = self.chat("links", "Save format done", ended=time.time())
+        gone = self.chat("nowhere", "Save format archived")  # a project that isn't loaded
+        ids = [t["id"] for t in opsd.topic_search("save FORMAT", "links", exclude=new)]
+        self.assertEqual(ids[:2], [old, done])  # open before ended, and not the one you type in
+        self.assertNotIn(gone, ids)
+        self.assertEqual([t["id"] for t in opsd.topic_search(str(new), "links")][:1], [new])
+        self.assertEqual(opsd.topic_search("no such words", "links"), [])
+
+    def test_chat_show(self):
+        did = self.chat("links", "Save format", [("user", "first"), ("assistant", "line one\nline two " + "x" * 5000),
+                                                 ("ops", "a note"), ("user", "last")])
+        env = {**os.environ, "OPS_DATA": str(opsd.DATA)}  # the db this module's opsd uses
+        run = lambda *a: subprocess.run([sys.executable, str(PAGE.parent / "opsd.py"), "chat", "show", *a],  # noqa: E731
+                                        capture_output=True, text=True, env=env)
+        out = run(str(did))
+        self.assertEqual(out.returncode, 0, out.stderr)
+        head, *msgs = out.stdout.split("\n\n--- ")
+        self.assertTrue(head.startswith(f'chat:{did} · links · design chat · "Save format" · idle · open · created '),
+                        head)
+        self.assertEqual([m.split(" · ")[0] for m in msgs], ["The owner", "Claude", "The dashboard", "The owner"])
+        self.assertIn("line one\nline two " + "x" * 5000 + "\n", out.stdout)  # in full
+        self.assertEqual(msgs[0].split("\n", 1)[1], "first")
+        last = run(str(did), "--last", "2").stdout.split("\n\n--- ")
+        self.assertEqual([m.split("\n", 1)[1].strip() for m in last[1:]], ["a note", "last"])
+        gone = run("99999")
+        self.assertEqual((gone.returncode, gone.stdout, gone.stderr), (1, "", "no chat 99999\n"))
 
     def get(self, path):
         url = f"http://127.0.0.1:{self.srv.server_port}/api/files?project=links&path={urllib.request.quote(path)}"

@@ -38,6 +38,7 @@ phone](#today-on-a-phone)).
 ./opsd.py schedule add -p myrepo --every 'mon 09:00' "Check dependencies"   # a recurring job (see Recurring jobs)
 ./opsd.py deploy -p myrepo "store test" --version patch --note "Fixes the crash"   # see Deploys
 ./opsd.py send myrepo --design "How does the save format work?"   # what a worker or chat runs to ask a peer project
+./opsd.py chat show 42 [--last K]    # print chat 42 (any project's) from the db, daemon or not: a header, then each message in full
 ./opsd.py archive-project myrepo     # take it off the queue; unarchive-project brings it back (see Archiving)
 ```
 
@@ -113,6 +114,7 @@ in each repo (see [OpenSpec changes](#openspec-changes)).
       a branch task (named branch or Jira key)? ── yes ─▶ on branch, nothing pushed ─▶ you click Open PR
                                   │ no                  ─▶ push, gh pr create in pr_order ─▶ CI green, merge
                                   ▼                     ─▶ your main fast-forwards to origin/main (Branches and PRs)
+                                  │                        (flow = "pr": every task takes this path)
                             merge --no-ff into dev   (<worktrees>/dev)
                                   │
                                   ├─ Straight to main (the default): main moves to dev at once, no release
@@ -199,6 +201,8 @@ build, the queue first records a short video of what the task changed, and the T
 ## main is the golden version
 
 By default a project goes **Straight to main** (below): each merge moves main at once, and dev stays equal to it.
+A project with `flow = "pr"` has neither: every task ends in a PR, and main moves when one merges (see
+[Every task as a PR](#every-task-as-a-pr-flow--pr)).
 The release, Promote and Promote after merge described here are for a project that opted out with
 `direct_main = false`. `[[deploy]]` targets don't turn Straight to main off: a deploy and a merge take turns moving
 main (see below).
@@ -346,8 +350,8 @@ main (see below).
 ## Branches and pull requests
 
 A task can work on a named branch instead of merging into dev, and turn it into a GitHub pull request against
-main when you choose. It is for work that lands on GitHub as PRs (say, from a Jira ticket), not as local merges.
-A task with no branch and no Jira key works exactly as before.
+main (or the PR base you set, below) when you choose. It is for work that lands on GitHub as PRs (say, from a Jira ticket), not as local merges.
+A task with no branch and no Jira key works exactly as before, unless the project sets `flow = "pr"` (below).
 
 ### Naming the branch
 
@@ -364,6 +368,12 @@ A task with no branch and no Jira key works exactly as before.
   - `opsd.py add -p NAME --branch BRANCH ...` or `--jira KEY`, and `opsd.py send PROJECT --branch/--jira ...`
     (tasks only);
   - `"branch"` or `"jira"` in a design chat's `queue` block.
+- **PR base.** The branch its PRs go against. The repo-level toml key `pr_base` sets it: a branch name for every
+  repo (`pr_base = "feat/admin-console-on-main"`), or a table per repo folder
+  (`pr_base = {"evertrue-web" = "feat/admin-console-on-main"}`; a repo it leaves out uses `main_branch`). Default:
+  `main_branch`. A task can override it for all its repos: the New task form's **PRs against** field,
+  `opsd.py add --base BRANCH` or `opsd.py send --base BRANCH` (a branch task only). The task card shows
+  `PRs against <base>`.
 - With a Jira key, the worker is asked to start each commit message with it, and the PR title is
   `KEY: <task title>`. Without one, the PR title is the task title.
 - A branch task never promotes after merge: it doesn't merge into dev, so main doesn't move by a release.
@@ -371,7 +381,7 @@ A task with no branch and no Jira key works exactly as before.
 ### Working on the branch
 
 ```
- worker on <branch> ─▶ fetch origin ─▶ never pushed? rebase onto origin/main ─▶ gate (fix rounds as usual)
+ worker on <branch> ─▶ fetch origin ─▶ never pushed? rebase onto origin/<base> ─▶ gate (fix rounds as usual)
                                         pushed already? no rebase, gate as it is
                                   ▼ pass
         hold for review? ─ yes ─▶ Try / Approve / Send back, as for any task
@@ -380,12 +390,16 @@ A task with no branch and no Jira key works exactly as before.
                                                                                              ▼
                          PRs open: poll every 2 min ─ CI red ─▶ needs you: Fix CI resumes the worker,
                                   │                              gate, push
+                                  │ per PR: awaiting bot review ─▶ addressing comments (worker, gate, push)
+                                  │         ─▶ awaiting human review (gh pr edit --add-reviewer)
                                   ▼ merged (on GitHub, or Merge here)
-                         fetch, fast-forward your main to origin/main, dev takes it in ─▶ done once all merged
+                         into main: fast-forward your main to origin/main, dev takes it in
+                         into another base: fetch and record it  ─▶ done once all merged
 ```
 
 1. **Fetch.** At the start, and again before each rebase, the queue runs `git fetch origin` in each repo that has
-   an `origin`. The base is `origin/main` (your local `main` for a repo with no `origin`).
+   an `origin`. The base is `origin/<PR base>` (that local branch for a repo with no `origin`; `main` when the
+   base is on neither).
 2. **The worktree checks out the branch itself**, not `task/<id>-...`, in every repo of a workspace:
    - it exists locally: that branch (fast-forwarded first to `origin/<branch>` when that is ahead of it);
    - it exists only on origin: a new local branch tracking `origin/<branch>`;
@@ -398,7 +412,7 @@ A task with no branch and no Jira key works exactly as before.
    continues the branch. Its `after`/`depends_on` on that earlier task waits only until it is `on branch`.
 4. **Rebase and gate.** In a repo where the branch has never been pushed (no `origin/<branch>`), the queue rebases
    it onto the latest base and runs the normal [[gate]] with the usual fix rounds; the conflict and gate-failure
-   prompts name `main`, not dev. Once it has been pushed (it was on origin already, or its PR is open), the queue
+   prompts name the base, not dev. Once it has been pushed (it was on origin already, or its PR is open), the queue
    **never rebases and never force-pushes**: it gates the branch as it is, and new commits go on top.
 5. **Hold / Try** works as for any task, before the next step.
 6. **On branch.** The task ends in the state `on branch`: the work is committed and nothing is pushed. Its
@@ -412,6 +426,12 @@ tasks. A repo the task doesn't commit to gets nothing pushed and no PR.
 ### Open PR
 
 You click **Open PR** on the task (or run `opsd.py pr open <id>`).
+
+- **In the browser:** the click opens a blank tab at once (so a popup blocker allows it). Once the queue has
+  opened the first PR, or adopted one already open, the tab goes to it and a toast says `Opened evertrue-web PR
+  #999`, with the link. PRs that open later in `pr_order` open no tab: their links are on the card and in a toast.
+  If opening fails (a pre-check, a push, `gh pr create`), the tab closes and the toast shows the error; the task
+  needs you with the same words. A Retry after the first PR is open opens no tab.
 
 - **Pre-checks:** `gh` is on PATH, `gh auth status` passes, and each repo with commits on the branch has an `origin`
   on GitHub. Otherwise the task needs you, naming what is missing; answer or Retry once it is fixed.
@@ -434,27 +454,70 @@ You click **Open PR** on the task (or run `opsd.py pr open <id>`).
 - **CI:** `green` once every check succeeded or was skipped (no checks counts as green), `red` on any failure,
   else `pending`. A PR the queue just opened or pushed to stays `pending` until the next poll: GitHub registers
   its checks a little after the push, and reading at once would see none (green) or the last push's.
-- **CI red:** the task needs you, listing the failing checks, and later PRs in the order don't open. **Fix CI**
+- **CI red:** the task needs you, listing the failing checks, and later PRs in the order don't open (with
+  [Merge when ready](#merge-when-ready) on, Fix CI runs by itself instead). **Fix CI**
   resumes the worker with the failed logs (`gh run view <run> --log-failed`, the last 200 lines). It commits, the
   gate runs, then the queue pushes (no rebase, no force). If CI turns green again by itself (a re-run, a push from
   GitHub), the task goes back to watching.
-- **A message sent to the task** works the same way: the worker resumes, the gate runs, the queue pushes. This is how
-  you pass on review comments by hand. On an `on branch` task it resumes the worker and ends `on branch` again.
-- The task card shows each PR: repo, `#number` as a link, CI and state, and its Merge button.
+- **A message sent to the task** works the same way: the worker resumes, the gate runs, the queue pushes. On an
+  `on branch` task it resumes the worker and ends `on branch` again.
+- The task card shows each PR: repo, `#number` as a link, CI, its review stage and state, and its Merge button.
+  The task list and Today show the same words (`#12 CI green, awaiting human review`).
+
+### Review round
+
+Each PR goes through one review round after it opens: the bot review, the worker addressing its comments, then
+human reviewers. In a workspace each PR runs its own round as it opens in `pr_order`. CI red still comes first:
+while a PR's CI is red the task needs you (Fix CI), and the round goes on once it isn't.
+
+1. **Awaiting bot review.** The 2-minute poll reads the PR's reviews (`gh pr view --json reviews,...`). It waits for
+   a review by any login in the repo-level toml key `pr_bot_reviewers` (default
+   `["copilot-pull-request-reviewer[bot]"]`; the `[bot]` ending is optional) submitted after the queue pushed the
+   PR. When Copilot is in `pr_bot_reviewers`, the queue requests its review itself right after opening the PR
+   (`gh api -X POST repos/{owner}/{repo}/pulls/{n}/requested_reviewers`), so repos without automatic Copilot
+   review get one too. It asks once per PR, not after later pushes, and skips an adopted PR Copilot already
+   reviewed or was asked to review. A failed request only logs `couldn't ask Copilot to review #12: ...`;
+   the timeout still applies. A requested bot never counts as a human reviewer. With `pr_review_comment` set (say `"@claude /pr-review"`), the queue posts it as a PR comment right after
+   opening, and a review by anyone but the PR's author counts too. It has to be a review, not a plain comment.
+   After `pr_bot_review_timeout` minutes (default 30) the queue goes on and logs
+   `#12: no bot review came within 30 min; going on`. With no bot reviewers and no comment it goes on at once.
+2. **Addressing comments.** The queue reads the PR's review threads and reviews (`gh api graphql`, reviewThreads
+   and reviews). Work is each unresolved thread whose last comment isn't the PR author's (yours: the queue's own
+   reply), and the text of each Changes requested review. With none, this stage is skipped. Else the worker
+   resumes on its branch, as for Fix CI, with each thread, its id and comments, and the commands to reply
+   (`gh api repos/<owner>/<name>/pulls/<n>/comments/<id>/replies`) and resolve (`resolveReviewThread`). It decides
+   each comment itself, without asking you: it changes the code where the comment is right, replies on each
+   thread with what it did or why not, and resolves the threads it fixed. Then the gate runs and the queue pushes
+   (no rebase, no force-push).
+3. **Awaiting human review.** The queue runs `gh pr edit <n> --add-reviewer` with the repo-level toml key
+   `pr_reviewers` (logins or `org/team`). There is no second bot round. If `pr_reviewers` is empty and GitHub has
+   nobody requested, the task needs you (`Pick reviewers for PR #12: <url>`): answer with the logins (comma
+   separated) and the queue asks them; or request reviewers on GitHub and the poll sees them; or set
+   `pr_reviewers` and Retry.
+4. **Later comments.** **Address comments** on the task (and `opsd.py pr address <id>`) runs stage 2 again on
+   demand, for the comments that came after the last round: unresolved threads, and every review's text (not only
+   Changes requested). Then the queue asks the reviewers again. Merging stays as it is.
+
+A PR opened before the review round existed skips it. A message to the task still passes on comments by hand.
+With **Merge when ready** on (below), stage 3 doesn't stop on nobody to ask when GitHub requires no review, and
+later comments are addressed by themselves.
 
 ### Merging
 
 Both ways work:
 
 - **On GitHub:** the poll sees `MERGED` and records it.
-- **Merge** (a button per PR, and `opsd.py pr merge <id>`): shown when the PR's CI is green and every earlier PR in
-  `pr_order` has merged. It runs `gh pr merge <n> --<method> --delete-branch`, `method` from the repo-level toml
-  key `pr_merge` (`squash`, `merge` or `rebase`; default `squash`). **Merge all** merges them in order, each once
-  the one before it has landed and its own CI is green. A failed merge (review required, conflicts) shows gh's
-  message on the card.
+- **Merge** (a button per PR): shown when the PR's CI is green and every earlier PR in `pr_order` has merged. It
+  runs `gh pr merge <n> --<method> --delete-branch`, `method` from the repo-level toml key `pr_merge` (`squash`,
+  `merge` or `rebase`; default `squash`). A failed merge (review required, conflicts) shows gh's message on the card.
 - A PR merged out of order on GitHub is recorded, with a warning on the card.
-- **After each merge** the queue fetches origin, then moves your local main to `origin/main` the way Straight to main
-  does: fast-forward, your uncommitted changes carried over, needs you if something is in the way (the main build
+- **Retargeted on GitHub.** Each poll reads the PR's `baseRefName`. If you change a PR's base on GitHub, the queue
+  records the new base, logs it, and uses it from then on (the card's `PRs against`, the after-merge step).
+- **After a merge into another base than `main_branch`**, the queue fetches origin, records it and marks the PR
+  merged. Main and dev don't move, and nothing needs you. If your checkout of that repo has the base branch checked
+  out and it can fast-forward cleanly to `origin/<base>`, it does; else it stays as it is.
+- **After a merge into `main_branch`** the queue fetches origin, then moves your local main to `origin/main`, in the
+  repos whose PR merged into main only, the way Straight to main does: fast-forward, your uncommitted changes carried over, needs you if something is in the way (the main build
   running, main checked out elsewhere, or a main with local commits `origin/main` lacks). Then dev takes main in
   (a fast-forward, else a merge; a conflict is logged and left to the next release). This works with
   `direct_main = false` too.
@@ -464,8 +527,61 @@ Both ways work:
 - `after`/`depends_on` on a branch task waits until all its PRs have merged (the task is done). The one exception is
   a task on the same branch, which waits only until the earlier one is `on branch`.
 
-Out of scope: reading or updating Jira tickets, reading review comments by itself, auto-merge, PRs others open,
-and any force-push or rebase after the first push.
+#### Merge when ready
+
+A switch per branch task, off by default: the **Merge when ready** checkbox on the task page's PR list, or
+`opsd.py pr ready <id> on|off` (`opsd.py pr merge <id>` is `pr ready <id> on`). It takes the task's PRs to merged
+with nothing from you. You may turn it on before any PR is open: it applies as they open. It replaces Merge all.
+
+- **The loop is the 2-minute poll.** No Claude process waits. Each step that needs the worker resumes the task's
+  own session, so it keeps its context across fixes. While the switch is on, a session whose cache expired or whose
+  context grew large is resumed anyway (not started fresh); the event log says what a fresh one would have saved.
+- **CI red:** Fix CI runs by itself, as if you clicked it. At most 3 rounds per PR; then the task needs you with
+  `Merge when ready gave up: CI still red after 3 fixes`.
+- **Review round:** the bot stage and the addressing stage run as above. After them, while the PR is open, each new
+  unresolved review thread or Changes requested review starts Address comments by itself. At most 3 such rounds per
+  PR; then the task needs you (`Merge when ready gave up: comments left after 3 rounds`); Address comments or an
+  answer goes on.
+- **Nobody to ask for a review** (stage 3 with no `pr_reviewers` and nobody requested on GitHub): when the PR's
+  `reviewDecision` is empty (GitHub requires no review), the human stage is skipped. When GitHub requires a review,
+  the task needs you, as without the switch.
+- **A PR merges** (`gh pr merge`, as the Merge button) once all of these hold: it is open; its CI is green; every
+  earlier PR in `pr_order` has merged; its review round is past the bot and addressing stages, with nothing left to
+  address; and it is approved. Approved means `reviewDecision` is `APPROVED`, or it is empty and no requested reviewer
+  is still pending. `REVIEW_REQUIRED` and `CHANGES_REQUESTED` never merge.
+- **A failed merge** (a conflict, branch protection) needs you with gh's message (phase `can't merge`): fix it on
+  GitHub, then Retry. The queue never rebases or force-pushes.
+- **Unticking** stops further automatic steps. Work already running (a Fix CI turn, say) finishes.
+- **In words:** while it is on, the PR list says where it stands: `Merge when ready: waiting for CI on #12`,
+  `fixing CI on #12 (round 1 of 3)`, `addressing comments on #12 (round 2 of 3)`, `waiting for approval on #12`,
+  `merging #12`. The task's phase says the same, and each automatic step logs an event.
+
+Out of scope: reading or updating Jira tickets, a second bot review round after addressing, PRs others open, and any
+force-push or rebase after the first push.
+
+### Every task as a PR (`flow = "pr"`)
+
+For a project whose work must all land on GitHub as PRs, put `flow = "pr"` in its home toml (default `"dev"`, the
+flow above). Then:
+
+- **Every task is a branch task**: the New task form, `opsd.py add` and `send`, a design chat's `queue` block,
+  follow-ups, split parts, schedules and research runs. A task given a branch or Jira key works on that one. One
+  given neither gets a branch named by the repo-level key `default_branch_pattern` (default `"ops/{id}-{slug}"`:
+  `{id}` is the task id, `{slug}` as for `branch_pattern`; it must contain `{id}`, so no two tasks share a
+  branch). The name is fixed when the task is queued and kept as its `target` and `branch`. A pattern that makes
+  no name git accepts falls back to the default.
+- **Send uncommitted changes** (the banner about your checkout's uncommitted files, and the to-do's Commit these)
+  commits your changes onto a branch of its own made from `origin/main`, not onto dev. Then it waits for Open PR
+  like any branch task. Nothing is cleared from your checkout: once the PR merges and your main moves to
+  `origin/main`, your copy there matches it. One is open per project at a time, until its PRs merge.
+- **No Promote and no Straight to main.** `direct_main` is ignored (off), Promote and `opsd.py promote` refuse,
+  the promote train and the Promote to-do are gone, and Promote after merge is hidden. The project's header shows
+  `PRs → main` with its open branch tasks and open PRs (`2 open branch tasks · 1 PR open`) instead of
+  `dev → main N ahead / Promote`; its card says **PRs only**.
+- Everything after that is the branch-task flow above: Open PR, `pr_order`, CI watch, Merge. After a merge your
+  main fast-forwards to `origin/main` and dev takes it in, so dev just follows main.
+- Tasks queued before you set it keep their old flow. Commits already on dev that main lacks stay there; nothing
+  promotes them.
 
 ## Deploys
 
@@ -598,6 +714,11 @@ When it has read the code a task touches, the brief ends with **Where to look**:
 `file:line` pointers and facts it found, so the worker skips the search. It puts the work in one task by
 default and uses several only when order or release truly needs them (see Parallelism). A worker that splits
 its task writes the same section.
+
+When your message names another chat as `chat:N` (see [LINK-8](#links-in-chats)), its `[ops: ...]` line (a
+project chat's too) gets one item per chat: `chat:42 is "<title>" (<project>, <kind>, <n> messages, last active
+<day>): read it with `<python> <opsd.py> chat show 42``, or `chat:42: no such chat`. The chat's transcript is
+never pasted; Claude reads it with `chat show` when your request needs it, and cites chats as `chat:N`.
 
 ### OpenSpec changes
 
@@ -777,6 +898,12 @@ the uncommitted-files banner, Deploy. `/api/state` gathers them into one list, `
   - **Read**: a design or project chat with a reply you haven't opened, as ● on its tab marks it. A chat with an
     open reminder (TODO-2, **Remind me**) shows no Read item: it is on the list once, as that **Do**. Once the
     reminder closes, the Read item shows as it normally would.
+  - **In review**: a branch task with open PRs that waits on nobody: watching them (`pr`), or queued, working
+    or checking for them (a fix round, addressing comments). Why: one line per PR, `evertrue-web PR #999: CI
+    green, awaiting human review`; `prs` holds each one's link, CI and review stage, and the card shows them with
+    a link to each and **Address comments**. It stays until every PR has merged or closed. When a PR needs you
+    (CI red, pick reviewers, closed without merging) the task is in needs_input and shows as **Answer** instead,
+    and the header's **need you** counts it as before; In review never counts there.
   - **Read** (a report): a research task merged into `dev` whose report you haven't marked read, or a report any
     merged task listed in its result (see [Research](#research), RES-5 and RES-10). Opening the report leaves it on
     the list: a report you looked at may still need a decision. Only **Mark read** closes it.
@@ -827,7 +954,8 @@ the uncommitted-files banner, Deploy. `/api/state` gathers them into one list, `
   items, with their `todo:N` ids, in its `[ops: ...]` line (a research topic, in its `(Dashboard: ...)` line).
   Closed items stay in the table.
 - **TODO-4 Order and groups.** Each item has a group: `unblock` (Answer, Fix), `ship` (Promote, Ship, Commit),
-  `review` (Try, Review, Agree, Read), `only_me` (Do). The list runs unblock, ship, review, only_me, oldest first
+  `review` (Try, Review, Agree, Read), `only_me` (Do), `in_review` (In review). The list runs unblock, ship, review,
+  only_me, in_review, oldest first
   within a group.
 - **TODO-5 Follow-up tasks.** A worker's result is `{"status": "done" | "needs_input" | "failed" | "split",
   "summary", "question"?, "tasks"?, "todos"?, "followups"?, "reports"?, "review"?}` (`review`: see *Proof video*, the review report). `followups` is a list of `{title, body}`, the
@@ -970,9 +1098,26 @@ link. A reference whose target is missing is never a link that fails on click. T
   `Not on dev: docs/x.md` or `No task #9999`, and is not clickable. A plain word that only looks like a file
   name (Node.js) stays plain text when there is no such file. For `README.md § Design mode for details` the
   daemon also returns the heading it found, so the link ends at "Design mode".
-- **LINK-7 Tests.** `tests/test_chat_links.py` has one test per kind (image, task, repo file, file with `§`,
+- **LINK-7 Tests.** `tests/test_chat_links.py` has one test per kind (image, task, chat, repo file, file with `§`,
   OpenSpec path, design file, app place, URL with trailing punctuation), one for a missing target, and one for
-  `/api/files` refusing a path outside the worktree.
+  `/api/files` refusing a path outside the worktree. For chats it also checks that link_check returns the title
+  and project, the `[ops: ...]` items for a referenced and a missing chat (none without a reference), the @
+  picker's word and insert logic (run in node), `/api/topics/search`'s order, and `opsd.py chat show` (header,
+  messages oldest first, `--last`, exit 1 for an unknown id).
+- **LINK-8 Chats.** `chat:42` (`chat:` and digits, as a word of its own, not in fenced code or a URL; a code span
+  of only `chat:42` too) is a chat of any kind (design, project, OpenSpec change) in any project. The link text
+  stays `chat:42`, its tooltip is the chat's title and project, and a click opens it as the current topic in the
+  Today view, adding its project to the project filter when it is out of view. link_check's `chat:<id>` kind
+  doesn't depend on the message's project, and returns `{title, project}` in a `chats` side map; a missing one
+  greys as `No chat 42`. Research threads are not covered.
+  - **Copy reference.** The strip's ▾ menu lists the open topics, and each, like each row under Ended, has
+    **Copy reference**: it copies `chat:42 (<title>)` and shows a short "Copied" note.
+  - **@ picker.** In the Today message box, the quick chat's and a task's chat box, `@` at the start of a word
+    opens a list of chats from `GET /api/topics/search?q=&project=&exclude=`: the current project's first, open
+    before ended, newest activity first, at most 10, without the chat you are typing in. Each row shows the
+    title, the project and `chat:N`. What you type after `@` filters by title words or id, case-insensitive.
+    ↑/↓ move, Enter or Tab inserts, Esc closes, a click or tap inserts. Inserting replaces `@<typed>` with
+    `chat:N ` (with a space). `@` followed by a space, or no match, inserts nothing.
 
 Text in fenced code and inside a longer code span is never linked. A code span that is only a file path (as
 Claude usually writes one) links as that file.
@@ -1003,7 +1148,7 @@ stay on the right of the header.
 
 - **TODAY-1 Left: To-do.** The `todos` list from `/api/state`, nothing else.
   - Filter chips, each with its count: **All**, **Review** (Try, Review, Agree, Read), **Unblock** (Answer, Fix),
-    **Ship** (Promote, Ship, Commit), **Only me** (Do).
+    **Ship** (Promote, Ship, Commit), **Only me** (Do), **In review** (In review: open PRs, nothing to do yet).
   - Each item shows its verb, title, project (unless one project is ticked in the switcher) and age.
   - The selection is the item's `key`, so it survives polls and reloads. When the selected item leaves the list
     (you acted on it, or its state changed), the item after it is selected.
@@ -1376,8 +1521,9 @@ stay on the right of the header.
     `new`, `mode`; `title` names a pending `subject` or `new` topic.
 
     To queue a task, ask Claude. The Tasks page's own **Queue task** form still queues one without Claude.
-  - **What a topic may run.** Plan & design and edit my checkout both run any shell command you could at the CLI,
-    past the guard (`guard_settings()`). Plan & design's prompt (`design_prompt.md`) sets its limits:
+  - **What a topic may run.** Plan & design and edit my checkout both run any shell command you could at the CLI:
+    plan & design past the guard (`guard_settings()`), edit my checkout without it and with its prompts sent to
+    you (see [Chat mode](#chat-mode)). Plan & design's prompt (`design_prompt.md`) sets its limits:
     - By default it reads `dev`, writes only its documents folder and, for an OpenSpec change, `openspec/`, and
       queues tasks for code.
     - When you ask for research, it runs `opsd.py add -p <project> --research T0|T1|T2 "question"`, which queues a
@@ -1589,16 +1735,34 @@ checkout (`repo`), not a worktree, so it can read, edit, commit and run commands
 settings and `CLAUDE.md`. Each chat keeps one Claude session across messages, until its context grows too big
 (see **Fresh sessions in chats** below).
 
-- **MCP servers.** A project chat loads only the MCP servers named in the project's `chat_mcp` list, none by
-  default. Every server's tool definitions ride on every call, so each one you add makes every reply dearer.
-  Name servers you defined with `claude mcp add` in any scope (user, local, or the repo's `.mcp.json`):
-  `chat_mcp = ["shop-app"]` in `~/.claude-ops/projects/<name>.toml`. claude.ai connectors (Gmail, Google
-  Sheets, Docs …) never load in a project chat: the chat runs with `--strict-mcp-config`, which drops them, and
-  only claude.ai can define them. A name with no definition is skipped, and the chat says so.
+A project chat is an attended replica of the CLI, not an unattended worker. Design chats, spec chats and chats
+with a stopped task keep their own limits.
 
-- Nobody can answer permission prompts on the dashboard, so it runs in auto mode: actions that would
-  prompt are denied, and Claude tells you what it couldn't do. claude-ops adds its own auto-mode rules for the
-  project, as workers get (see **Auto-mode rules** under **Workers**): the project's checkout is the trusted repo.
+- **Tools.** It loads every MCP server you configured (user, local and the repo's `.mcp.json`, plus claude.ai
+  connectors) and Claude in Chrome, as `claude` does: no `--strict-mcp-config`, no `--no-chrome`. Every server's
+  tool definitions ride on every call, so each chat call carries more tool definitions than a worker's, and
+  costs more. `chat_mcp` in the project's config no longer applies to project chats; chats with a stopped task
+  still load only the servers it names.
+- **Permission prompts.** It runs in auto mode, like the CLI. What would still prompt (an `ask` rule of yours,
+  or a step the auto-mode classifier sends to you) comes to the dashboard: the chat shows **Claude asks to use
+  <tool>** with the command, file or URL, the full input under **Full input**, and **Approve** / **Deny**. The
+  turn waits for your answer, up to an hour; then, or when the turn ends or is stopped, the prompt counts as
+  denied. How: the chat runs with `--permission-prompt-tool mcp__claude-ops__permit` and `--mcp-config` naming
+  an HTTP MCP server the daemon serves at `POST /mcp/permit/<chat id>` (`permit_rpc`). The tool gets
+  `{tool_name, input, tool_use_id}` and answers `{"behavior": "allow", "updatedInput": …}` or
+  `{"behavior": "deny", "message": …}`. The buttons post `POST /api/designs/<id>/permit {id, allow}`, and
+  `GET /api/designs/<id>` lists the open prompts as `permits`. The chat gets `MCP_TOOL_TIMEOUT` of just over an
+  hour, as Claude Code gives up on an MCP call after 60 s by default. It never runs with
+  `bypassPermissions` or `--dangerously-skip-permissions`.
+- **No guard.** It runs without the Bash guard (see [Process safety](#process-safety)), so it can run what you
+  could at the CLI, `opsctl` and the dashboard's API included. Its brief still tells it to stop only processes it
+  started. claude-ops adds its own auto-mode rules for the project, as workers get (see **Auto-mode rules**
+  under **Workers**): the project's checkout is the trusted repo.
+- **Restarting claude-ops.** A chat is the daemon's child, so `opsctl restart` would stop it mid-command, with
+  the restart half done. Its brief names `opsd.py restart` instead: it asks the daemon to run `opsctl restart`
+  in a session of its own, as Settings' **Restart** button does (`POST /api/restart`). Running tasks pause and
+  resume, and the new daemon picks the chat's reply up again with a note that the restart it asked for is done,
+  so it doesn't restart again. Workers' guard refuses `opsd.py restart`.
 - **Fresh sessions in chats.** Design and project chats track the context of each call. When the last call of a
   chat's session was over 90k tokens, your next message starts a fresh session on the same model, and the chat
   shows "Started a fresh session: this chat's context reached 95k tokens …". The new session gets a handoff
@@ -1606,8 +1770,8 @@ settings and `CLAUDE.md`. Each chat keeps one Claude session across messages, un
   all with the oldest cut. Files and the change's folder are as they were. The old session id stops working in
   the header's `claude --resume` line; the new one replaces it. Unlike a task, a chat does not start over just
   because its cache expired.
-- The chat header shows `cd <repo> && claude --resume <id>`. Run it to carry on in a terminal, where
-  you can answer prompts. Don't send from both places at once.
+- The chat header shows `cd <repo> && claude --resume <id>`. Run it to carry on in a terminal. Don't send
+  from both places at once.
 - Edits land in your checkout and nothing else. Uncommitted ones survive a release: it merges them onto the
   new main and puts them back.
 - Those edits are not on dev, so they don't ship and workers don't see them until you commit them to dev. The
@@ -1983,9 +2147,11 @@ and history like any other change. Put `claude-ops.toml` at the root of the proj
 plain project, the root repo (`"."` in `repos`) for a workspace. A workspace without `"."` can't have one.
 
 - **What goes where.** The home toml (`~/.claude-ops/projects/<name>.toml`) keeps identity and machine
-  settings: `title`, `repo`, `main_branch`, `dev_branch`, `worktrees`, `max_parallel`, `direct_main`,
+  settings: `title`, `repo`, `main_branch`, `dev_branch`, `worktrees`, `max_parallel`, `direct_main`, `flow`,
   `chat_mcp` and `[worker] env` (and `port_base`). The repo file may hold `repos`, `[worktree]` (`clone`, `setup`,
-  `setup_timeout`), `[[gate]]`, `[app]`, `[[deploy]]`, `branch_pattern`, `pr_order`, `pr_merge`, `[worker] notes`
+  `setup_timeout`), `[[gate]]`, `[app]`, `[[deploy]]`, `branch_pattern`, `default_branch_pattern`, `pr_order`,
+  `pr_merge`, `pr_base`, `pr_bot_reviewers`, `pr_review_comment`, `pr_bot_review_timeout`, `pr_reviewers`,
+  `[worker] notes`
   and `[design] notes`. A home-only key in
   the repo file is ignored with a warning, on the project's card and in the daemon log.
 - **Which wins.** A key in the repo file replaces the home toml's whole: two `[[gate]]` lists are not merged,
@@ -2045,12 +2211,20 @@ worktrees = "/Users/you/dev/mygame-wt"   # default: <repo>-wt
 max_parallel = 0                   # per-project cap; 0 = only the global "Parallel" limit
 # direct_main = false              # default true: a merge moves main at once, no release (see Straight to main);
                                    # [[deploy]] targets keep it on: a deploy and a merge take turns moving main
-chat_mcp = []                      # MCP servers a project chat loads, by name (see Chat mode); default none
+# flow = "pr"                      # default "dev": every task is a branch task and ends in a PR; no Promote and
+                                   # no Straight to main (see Every task as a PR)
+chat_mcp = []                      # MCP servers a chat with a stopped task loads, by name; default none
 
 # --- repo: the rest may also live in claude-ops.toml (repos too; it must list "." there)
 branch_pattern = "{key}-{slug}"     # a Jira-key task's branch (see Branches and pull requests)
+default_branch_pattern = "ops/{id}-{slug}"  # flow = "pr": the branch of a task given none; must have {id}
 pr_order = ["backend", "app"]      # a workspace's PRs open, and merge, in this order; default: all at once
 pr_merge = "squash"                # how Merge merges a PR: squash, merge or rebase
+pr_base = "feat/next"              # the branch PRs go against; or {"web" = "feat/next"} per repo; default main_branch
+pr_bot_reviewers = ["copilot-pull-request-reviewer[bot]"]   # whose review a new PR waits for; Copilot here is also asked to review (see Review round)
+pr_review_comment = "@claude /pr-review"   # optional: posted on a new PR to ask a review workflow for its review
+pr_bot_review_timeout = 30         # minutes to wait for the bot review, then go on
+pr_reviewers = ["alice", "org/team"]   # asked to review once the comments are addressed; empty: you pick
 
 [worktree]
 clone = ["Library"]                # APFS-cloned into each new worktree. A folder (a warm cache) is cloned once;
@@ -2165,9 +2339,10 @@ folder under a project's `<worktrees>/` that no longer exists. A worktree itself
   survive: rebuilding it on the first click fired blur on the removed button, which undid the confirm at once.
   `restartView()` in `dashboard.html` picks the state; `tests/test_restart_button.py` checks it.
   The daemon logs `restarting claude-ops: you clicked Restart in Settings' Danger zone` to `opsd.log` and runs
-  `opsctl restart` in a session of its own, logging to `DATA/restart.log`. Only the launchd service restarts: a scratch daemon (a test's or a worker's) refuses with "not the
-  launchd service; opsctl restart would restart that one". Sessions can't click it: the guard blocks the live
-  port, and `opsctl restart` itself.
+  `opsctl restart` in a session of its own, logging to `DATA/restart.log`. Only the launchd service restarts: a
+  scratch daemon (a test's or a worker's) refuses with "not the launchd service; opsctl restart would restart that
+  one". `opsd.py restart` does the same from the command line, and is how a project chat restarts claude-ops (see
+  [Chat mode](#chat-mode)). Workers can't: the guard blocks the live port, `opsctl restart` and `opsd.py restart`.
 - **Analyze tab.** Run times and costs of the tasks created in the last day, 7 days, 30 days or all time, for
   the projects ticked in the header or every project (`GET /api/analyze?period=1|7|30|all&project=<name>[,<name>…]`,
   a comma-separated list; empty means every project). The scope line reads `· A, B only`, and the per-project
@@ -2429,7 +2604,7 @@ folder under a project's `<worktrees>/` that no longer exists. A worktree itself
   don't touch your checkout, dev or main. A step outside it (your checkout, `~/.claude-ops`, a commit on main)
   is allowed when the brief asks for it or you approved it in an answer.
 - **Auto-mode rules.** The `--settings` that workers and project chats get (from `guard_settings`) carry an
-  `autoMode` object. Claude Code appends its lists to your own `autoMode` lists in `~/.claude/settings.json`;
+  `autoMode` object; a project chat's carry only that, without the guard hook. Claude Code appends its lists to your own `autoMode` lists in `~/.claude/settings.json`;
   it replaces nothing and removes no default rule. `claude --settings '<json>' auto-mode config` shows the merge.
   - `environment`: this session is a claude-ops worker (or chat) for project `<name>`. The trusted repos are
     your checkout, every repo of its workspace, its worktrees folder, and their origin remotes. `main` and `dev`
@@ -2445,7 +2620,8 @@ folder under a project's `<worktrees>/` that no longer exists. A worktree itself
   approval for the action it asked about, steps outside its worktree included. A bare "Do it" then names its
   action and target, which the auto-mode classifier needs before it allows a step such as a commit in your
   checkout.
-  None of the daemon's Claude sessions (workers, design, chat) connect to Claude in Chrome (`--no-chrome`).
+  Workers, design chats and chats with a stopped task don't connect to Claude in Chrome (`--no-chrome`); project
+  chats do, as the CLI does.
 - **Reading rules.** Worker, release and chat briefs tell Claude to search before reading, read big files in
   ranges of 150 lines or fewer, not reread what is already in context, and keep command output short. Everything
   read stays in context and is paid for again on every later call.
@@ -2461,13 +2637,15 @@ Nothing claude-ops runs may stop, signal or quit a process it did not start.
   executable lies in that worktree's `[app] process` path. It matches the path exactly, never as a pattern,
   so a terminal or editor that merely names the path is spared. With `[app] stop` set, it runs that command
   in the worktree instead, and your script decides what to stop.
-- **Workers and project chats** run each Bash command past `opsd.py guard` first (a
-  `PreToolUse` hook passed with `--settings`). It refuses:
+- **Workers, design chats and chats with a stopped task** run each Bash command past `opsd.py guard` first (a
+  `PreToolUse` hook passed with `--settings`). Project chats don't: they are your attended session, like the CLI,
+  and their brief states the rule instead. It refuses:
   - `pkill`, `killall`, `xargs kill`, and `kill` of pids found by `pgrep`, `lsof`, `ps` or `pidof`
   - `kill` of a pid the session did not start (not its descendant, and not running from its worktree),
     of `0`, `-1` or a process group
   - `launchctl` other than `print`/`list`, `sudo`, `shutdown`, `reboot`, `osascript` that quits apps or
-    drives System Events, `opsctl start|stop|restart|pause|resume`, and requests to the live dashboard's port
+    drives System Events, `opsctl start|stop|restart|pause|resume`, `opsd.py restart`, and requests to the live
+    dashboard's port
 
   `kill $!` and `kill "$(cat pidfile)"` still work. The briefs state the same rule. The guard catches slips;
   it is not a sandbox: a program can still call `kill()` itself.
